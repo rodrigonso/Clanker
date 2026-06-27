@@ -16,6 +16,9 @@ enum class AgentEventKind : u8 {
   ToolStart,
   ToolUpdate,
   ToolEnd,
+  RetryStart,
+  RetryEnd,
+  QueueUpdate,
 };
 
 struct AgentEvent {
@@ -27,6 +30,15 @@ struct AgentEvent {
   StrView ToolArgsJson;      // tool_start
   const ToolResult* Result;  // tool_end
   bool IsError;              // tool_end
+  // retry_start / retry_end (transient provider error backoff)
+  u32 RetryAttempt;        // 1-based attempt number
+  u32 RetryMaxAttempts;    // configured max retries
+  u32 RetryDelayMs;        // backoff before this attempt
+  StrView RetryError;      // error text that triggered the retry
+  // queue_update: current depth of the agent's message queues
+  u32 SteerCount;
+  u32 FollowUpCount;
+  u32 NextTurnCount;
 };
 
 struct AgentSink {

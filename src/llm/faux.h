@@ -3,13 +3,24 @@
 #include "llm/types.h"
 
 // Scripted provider for tests (port of pi's faux provider). Each step produces
-// one assistant message: optional text, then an optional tool call. Drive a
+// one assistant message: optional text, then zero or more tool calls. Drive a
 // multi-turn run by sequencing steps (e.g. step 0 calls a tool, step 1 replies).
+struct FauxToolCall {
+  StrView Name;
+  StrView Id;
+  StrView ArgsJson;
+};
+
 struct FauxStep {
   StrView Text;
+  // Legacy single tool call (used only when Tools/ToolCount are unset).
   StrView ToolName;  // non-empty => emit a tool call
   StrView ToolId;
   StrView ToolArgsJson;
+  // Multiple tool calls in one assistant message (takes precedence when set).
+  const FauxToolCall* Tools;
+  u32 ToolCount;
+  StrView Error;    // non-empty => emit an error result (Stop=Error, ErrorMessage=Error)
   StopReason Stop;  // used when no tool call
 };
 
@@ -39,6 +50,19 @@ inline bool Faux_Stream(void* ctx, Arena* arena, const Model* model, const LlmCo
   m.Model = SVL("faux");
   m.Provider = SVL("faux");
 
+  // Simulate a provider error (e.g. to exercise auto-retry). Mirrors a real
+  // provider: emit an Error stream event, set Stop=Error + ErrorMessage, and
+  // return false with no content.
+  if (step.Error.Length) {
+    m.Stop = StopReason::Error;
+    m.ErrorMessage = StrView_Dup(arena, step.Error);
+    StreamEvent ee = {};
+    ee.Kind = StreamEventKind::Error;
+    StreamSink_Emit(sink, ee);
+    *out = m;
+    return false;
+  }
+
   if (step.Text.Length) {
     u32 idx = m.Content.Count;
     StreamEvent ts = {};
@@ -57,19 +81,31 @@ inline bool Faux_Stream(void* ctx, Arena* arena, const Model* model, const LlmCo
     Array_Push(&m.Content, Content_Text(StrView_Dup(arena, step.Text)));
   }
 
-  if (step.ToolName.Length) {
-    u32 idx = m.Content.Count;
-    StreamEvent cs = {};
-    cs.Kind = StreamEventKind::ToolCallStart;
-    cs.ContentIndex = idx;
-    StreamSink_Emit(sink, cs);
-    StreamEvent ce = {};
-    ce.Kind = StreamEventKind::ToolCallEnd;
-    ce.ContentIndex = idx;
-    StreamSink_Emit(sink, ce);
-    Array_Push(&m.Content, Content_ToolCall(StrView_Dup(arena, step.ToolId),
-                                            StrView_Dup(arena, step.ToolName),
-                                            StrView_Dup(arena, step.ToolArgsJson)));
+  if (step.ToolName.Length || step.ToolCount) {
+    const FauxToolCall* tools = step.Tools;
+    u32 toolCount = step.ToolCount;
+    FauxToolCall legacy = {};
+    if (toolCount == 0) {
+      legacy.Name = step.ToolName;
+      legacy.Id = step.ToolId;
+      legacy.ArgsJson = step.ToolArgsJson;
+      tools = &legacy;
+      toolCount = 1;
+    }
+    for (u32 i = 0; i < toolCount; i++) {
+      u32 idx = m.Content.Count;
+      StreamEvent cs = {};
+      cs.Kind = StreamEventKind::ToolCallStart;
+      cs.ContentIndex = idx;
+      StreamSink_Emit(sink, cs);
+      StreamEvent ce = {};
+      ce.Kind = StreamEventKind::ToolCallEnd;
+      ce.ContentIndex = idx;
+      StreamSink_Emit(sink, ce);
+      Array_Push(&m.Content, Content_ToolCall(StrView_Dup(arena, tools[i].Id),
+                                              StrView_Dup(arena, tools[i].Name),
+                                              StrView_Dup(arena, tools[i].ArgsJson)));
+    }
     m.Stop = StopReason::ToolUse;
   } else {
     m.Stop = step.Stop;

@@ -14,6 +14,8 @@
 #include "llm/faux.h"
 #include "net/browser.h"
 #include "net/http.h"
+#include "term/term.h"
+#include "term/tui.h"
 #include "tools/tools.h"
 
 #if defined(_WIN32)
@@ -176,6 +178,53 @@ static void PrintHelp() {
       "Interactive mode: Ctrl+C interrupts, /exit quits.\n");
 }
 
+// Plain line REPL (non-TTY / fallback): the original fgets loop.
+static void RunPlainRepl(Agent* ag, bool faux, Faux* fauxState, const char* modelId) {
+  printf("mini-agent (%s%s). Ctrl+C interrupts a turn, /exit quits.\n", faux ? "faux demo" : "model: ",
+         faux ? "" : modelId);
+  char line[8192];
+  for (;;) {
+    fputs("\n\x1b[1m\xe2\x80\xba \x1b[0m", stdout);
+    fflush(stdout);
+    if (!fgets(line, sizeof(line), stdin)) break;
+    size_t L = strlen(line);
+    while (L && (line[L - 1] == '\n' || line[L - 1] == '\r')) line[--L] = 0;
+    if (L == 0) continue;
+    if (strcmp(line, "/exit") == 0 || strcmp(line, "/quit") == 0) break;
+    g_abort = 0;
+    if (faux) fauxState->Index = 0;
+    Agent_Prompt(ag, SV(line));
+    ReportOutcome(ag);
+  }
+}
+
+// Full-screen TUI REPL. Falls back to the plain REPL if not a TTY.
+static void RunTuiRepl(Arena* arena, Agent* ag, bool faux, Faux* fauxState, const char* modelId) {
+  TuiOpts opts;
+  opts.ModelName = faux ? SVL("faux") : SV(modelId);
+  opts.Color = (getenv("NO_COLOR") == nullptr);
+
+  Tui tui;
+  if (!Tui_Start(&tui, arena, opts)) {
+    RunPlainRepl(ag, faux, fauxState, modelId);
+    return;
+  }
+  ag->Sink.User = &tui;
+  ag->Sink.OnEvent = Tui_AgentEvent;
+  ag->User = &tui;
+  tui.Ag = ag;
+  ag->Stream.Abort = Tui_Abort(&tui);
+
+  for (;;) {
+    StrView line;
+    if (!Tui_WaitForSubmit(&tui, &line)) break;
+    *Tui_Abort(&tui) = 0;
+    if (faux) fauxState->Index = 0;
+    Agent_Prompt(ag, line);
+  }
+  Tui_Stop(&tui);
+}
+
 int main(int argc, char** argv) {
   const char* modelId = "claude-sonnet-4-6";
   const char* onePrompt = nullptr;
@@ -240,6 +289,7 @@ int main(int argc, char** argv) {
   Agent ag = Agent_Make(&arena, model,
                         SV("You are mini-agent, a concise coding assistant. Use the read and bash "
                            "tools when they help answer the user."));
+  Agent_InitQueues(&ag);
   Agent_AddTool(&ag, ReadTool());
   Agent_AddTool(&ag, BashTool());
   ag.Stream.Abort = &g_abort;
@@ -276,23 +326,10 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-  printf("mini-agent (%s%s). Ctrl+C interrupts a turn, /exit quits.\n", faux ? "faux demo" : "model: ",
-         faux ? "" : modelId);
-  char line[8192];
-  for (;;) {
-    fputs("\n\x1b[1m\xe2\x80\xba \x1b[0m", stdout);
-    fflush(stdout);
-    if (!fgets(line, sizeof(line), stdin)) break;
-    size_t L = strlen(line);
-    while (L && (line[L - 1] == '\n' || line[L - 1] == '\r')) line[--L] = 0;
-    if (L == 0) continue;
-    if (strcmp(line, "/exit") == 0 || strcmp(line, "/quit") == 0) break;
-
-    g_abort = 0;
-    if (faux) fauxState.Index = 0;
-    Agent_Prompt(&ag, SV(line));
-    ReportOutcome(&ag);
-  }
+  if (Term_IsInteractive())
+    RunTuiRepl(&arena, &ag, faux, &fauxState, modelId);
+  else
+    RunPlainRepl(&ag, faux, &fauxState, modelId);
 
   MaybeReportMem();
   Http_GlobalShutdown();

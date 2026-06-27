@@ -25,12 +25,20 @@ endif()
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # ---- base ----------------------------------------------------------------
+if(WIN32)
+  set(MA_THREAD_SRC src/base/thread_win.cpp)
+else()
+  set(MA_THREAD_SRC src/base/thread_posix.cpp)
+endif()
 add_library(ma_base STATIC
   src/base/arena.cpp
-  src/base/sysinfo.cpp)
+  src/base/sysinfo.cpp
+  ${MA_THREAD_SRC})
 target_include_directories(ma_base PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 if(WIN32)
   target_link_libraries(ma_base PUBLIC psapi)
+else()
+  target_link_libraries(ma_base PUBLIC pthread)
 endif()
 
 # ---- json ----------------------------------------------------------------
@@ -49,7 +57,8 @@ endif()
 
 # ---- agent ---------------------------------------------------------------
 add_library(ma_agent STATIC
-  src/agent/agent.cpp)
+  src/agent/agent.cpp
+  src/llm/retry.cpp)
 target_link_libraries(ma_agent PUBLIC ma_base)
 
 # ---- libcurl (vendored via FetchContent) ---------------------------------
@@ -90,6 +99,24 @@ if(WIN32)
   target_link_libraries(ma_loopback PUBLIC ws2_32 shell32)
 endif()
 
+# ---- term (full-screen TUI) ----------------------------------------------
+if(WIN32)
+  set(MA_TERM_PLATFORM src/term/term_win.cpp)
+else()
+  set(MA_TERM_PLATFORM src/term/term_posix.cpp)
+endif()
+add_library(ma_term STATIC
+  src/term/term.cpp
+  src/term/keys.cpp
+  src/term/cell.cpp
+  src/term/screen.cpp
+  src/term/markdown.cpp
+  src/term/linemodel.cpp
+  src/term/lineedit.cpp
+  src/term/tui.cpp
+  ${MA_TERM_PLATFORM})
+target_link_libraries(ma_term PUBLIC ma_base ma_agent)
+
 # ---- llm providers -------------------------------------------------------
 add_library(ma_proto STATIC src/llm/anthropic_proto.cpp)
 target_link_libraries(ma_proto PUBLIC ma_json)
@@ -113,7 +140,7 @@ target_link_libraries(ma_tools PUBLIC ma_json ma_agent)
 
 # ---- executables ---------------------------------------------------------
 add_executable(mini-agent src/app/main.cpp)
-target_link_libraries(mini-agent PRIVATE ma_anthropic ma_tools ma_agent ma_auth)
+target_link_libraries(mini-agent PRIVATE ma_anthropic ma_tools ma_agent ma_auth ma_term)
 
 add_executable(ma_http_smoke src/app/http_smoke.cpp)
 target_link_libraries(ma_http_smoke PRIVATE ma_http)
@@ -130,6 +157,13 @@ add_executable(ma_tests
   tests/test_tools.cpp
   tests/test_crypto.cpp
   tests/test_auth.cpp
-  tests/test_loopback.cpp)
-target_link_libraries(ma_tests PRIVATE ma_proto ma_agent ma_tools ma_crypto ma_auth ma_loopback)
+  tests/test_loopback.cpp
+  tests/test_thread.cpp
+  tests/test_keys.cpp
+  tests/test_screen.cpp
+  tests/test_markdown.cpp
+  tests/test_linemodel.cpp
+  tests/test_lineedit.cpp
+  tests/test_tui.cpp)
+target_link_libraries(ma_tests PRIVATE ma_proto ma_agent ma_tools ma_crypto ma_auth ma_loopback ma_term)
 add_test(NAME unit COMMAND ma_tests)

@@ -1,0 +1,485 @@
+#include "term/tui.h"
+
+#include <string.h>
+
+#include "agent/agent.h"
+#include "term/cell.h"
+
+namespace {
+
+const char* kSpinner[10] = {"\xe2\xa0\x8b", "\xe2\xa0\x99", "\xe2\xa0\xb9", "\xe2\xa0\xb8",
+                            "\xe2\xa0\xbc", "\xe2\xa0\xb4", "\xe2\xa0\xa6", "\xe2\xa0\xa7",
+                            "\xe2\xa0\x87", "\xe2\xa0\x8f"};
+
+bool g_color = true;
+Style St(u8 fg, u8 attr) { return Style{g_color ? fg : COL_DEFAULT, COL_DEFAULT, attr}; }
+
+// Append a C-string to a bounded buffer.
+void Put(char* buf, u32 cap, u32* len, const char* s) {
+  while (*s && *len < cap - 1) buf[(*len)++] = *s++;
+}
+void PutNum(char* buf, u32 cap, u32* len, u32 v) {
+  char tmp[16];
+  u32 n = 0;
+  if (v == 0) tmp[n++] = '0';
+  while (v) {
+    tmp[n++] = (char)('0' + v % 10);
+    v /= 10;
+  }
+  while (n && *len < cap - 1) buf[(*len)++] = tmp[--n];
+}
+
+// ---- queue ----
+void QPush(Tui* t, StrView line) {
+  if (t->QCount >= 64) return;
+  t->Queue[t->QTail] = line;
+  t->QTail = (t->QTail + 1) % 64;
+  t->QCount++;
+}
+bool QPop(Tui* t, StrView* out) {
+  if (t->QCount == 0) return false;
+  *out = t->Queue[t->QHead];
+  t->QHead = (t->QHead + 1) % 64;
+  t->QCount--;
+  return true;
+}
+
+void Wake(Tui* t) {
+  t->Dirty = true;
+  Cond_Signal(&t->RenderCv);
+}
+
+void FlushPending(Tui* t) {
+  if (t->Pending.Length) {
+    LineModel_Append(&t->Model, StrBuf_View(&t->Pending));
+    StrBuf_Clear(&t->Pending);
+  }
+}
+
+StrView Truncate(StrView s, u32 maxBytes) {
+  if (s.Length <= maxBytes) return s;
+  u32 n = maxBytes;
+  while (n > 0 && ((unsigned char)s.Data[n] & 0xC0) == 0x80) n--;
+  return StrView{s.Data, n};
+}
+
+// ---- input layout ----
+struct InputLayout {
+  StrView Rows[256];
+  u32 RowCount;
+  u32 CurRow;
+  u16 CurCol;
+};
+
+void LayoutInput(StrView text, u32 cursor, u16 width, InputLayout* out) {
+  out->RowCount = 0;
+  out->CurRow = 0;
+  out->CurCol = 0;
+  if (width < 1) width = 1;
+  u32 rowStart = 0;
+  u16 col = 0;
+  u32 i = 0;
+  while (true) {
+    if (i == cursor) {
+      out->CurRow = out->RowCount;
+      out->CurCol = col;
+    }
+    if (i >= text.Length) break;
+    if (text.Data[i] == '\n') {
+      if (out->RowCount < 256) out->Rows[out->RowCount++] = StrView{text.Data + rowStart, i - rowStart};
+      i++;
+      rowStart = i;
+      col = 0;
+      continue;
+    }
+    u32 jj = i;
+    u32 cp = Utf8Decode(text, &jj);
+    u32 cw = CharWidth(cp);
+    if (cw < 1) cw = 1;
+    if ((u32)col + cw > width) {
+      if (out->RowCount < 256) out->Rows[out->RowCount++] = StrView{text.Data + rowStart, i - rowStart};
+      rowStart = i;
+      col = 0;
+      if (i == cursor) {
+        out->CurRow = out->RowCount;
+        out->CurCol = 0;
+      }
+    }
+    col = (u16)(col + cw);
+    i = jj;
+  }
+  if (out->RowCount < 256) out->Rows[out->RowCount++] = StrView{text.Data + rowStart, text.Length - rowStart};
+}
+
+void RenderSpanLine(Screen* s, u16 y, const SpanLine* ln, u16 cols) {
+  u16 x = 0;
+  for (u32 i = 0; i < ln->Spans.Count && x < cols; i++)
+    x = Screen_PutText(s, x, y, ln->Spans.Data[i].Text, ln->Spans.Data[i].St, cols);
+}
+
+void ComposeStatus(Tui* t, u16 statusY, u16 cols) {
+  Style bg = St(COL_DEFAULT, ATTR_NONE);
+  bg.Bg = g_color ? 236 : COL_DEFAULT;
+  Screen_Fill(&t->Scr, 0, statusY, (u16)(cols ? cols - 1 : 0), statusY, bg);
+
+  char buf[1024];
+  u32 len = 0;
+  Style st = bg;
+  st.Fg = g_color ? 250 : COL_DEFAULT;
+
+  if (t->State == TuiState::Idle) {
+    Put(buf, sizeof(buf), &len, "ready");
+  } else {
+    Put(buf, sizeof(buf), &len, kSpinner[t->Spinner % 10]);
+    Put(buf, sizeof(buf), &len, " ");
+    if (t->State == TuiState::Tool) {
+      Put(buf, sizeof(buf), &len, "running ");
+      char tn[64];
+      u32 k = 0;
+      for (u32 i = 0; i < t->StateTool.Length && k < sizeof(tn) - 1; i++) tn[k++] = t->StateTool.Data[i];
+      tn[k] = 0;
+      Put(buf, sizeof(buf), &len, tn);
+    } else if (t->State == TuiState::Streaming) {
+      Put(buf, sizeof(buf), &len, "responding");
+    } else {
+      Put(buf, sizeof(buf), &len, "thinking");
+    }
+    u64 elapsed = (NowMillis() - t->TurnStartMs) / 1000;
+    Put(buf, sizeof(buf), &len, "  ");
+    PutNum(buf, sizeof(buf), &len, (u32)elapsed);
+    Put(buf, sizeof(buf), &len, "s");
+    if (t->Use.Input || t->Use.Output) {
+      Put(buf, sizeof(buf), &len, "  \xe2\x86\x91");
+      PutNum(buf, sizeof(buf), &len, t->Use.Input);
+      Put(buf, sizeof(buf), &len, " \xe2\x86\x93");
+      PutNum(buf, sizeof(buf), &len, t->Use.Output);
+    }
+  }
+  Put(buf, sizeof(buf), &len, "  \xc2\xb7  ");
+  for (u32 i = 0; i < t->ModelName.Length && len < sizeof(buf) - 1; i++) buf[len++] = t->ModelName.Data[i];
+  Put(buf, sizeof(buf), &len, "   Enter send  ^J newline  ^C stop  ^D quit");
+
+  Screen_PutText(&t->Scr, 0, statusY, StrView{buf, len}, st, cols);
+}
+
+void Compose(Tui* t) {
+  u16 cols = 0, rows = 0;
+  Term_Size(&t->Trm, &cols, &rows);
+  if (cols != t->Scr.Cols || rows != t->Scr.Rows) {
+    Screen_Resize(&t->Scr, cols, rows);
+    LineModel_SetWidth(&t->Model, cols);
+  }
+  if (cols < 4 || rows < 4) {
+    Screen_BeginFrame(&t->Scr);
+    return;
+  }
+
+  FlushPending(t);
+  if (t->State != TuiState::Idle) t->Spinner++;
+
+  // Input box layout.
+  u16 textW = (u16)(cols > 2 ? cols - 2 : 1);
+  InputLayout il;
+  LayoutInput(LineEdit_Text(&t->Edit), LineEdit_Cursor(&t->Edit), textW, &il);
+  u16 maxInputH = (u16)(rows / 2);
+  if (maxInputH < 1) maxInputH = 1;
+  if (maxInputH > 10) maxInputH = 10;
+  u16 inputH = (u16)(il.RowCount < maxInputH ? il.RowCount : maxInputH);
+  if (inputH < 1) inputH = 1;
+
+  u16 inputTop = (u16)(rows - inputH);
+  u16 statusY = (u16)(inputTop - 1);
+  u16 paneH = statusY;  // rows [0, statusY)
+  t->LastPaneH = paneH;
+
+  Screen_BeginFrame(&t->Scr);
+
+  // Transcript.
+  u32 count = LineModel_Count(&t->Model);
+  u32 top;
+  if (t->Follow) {
+    top = count > paneH ? count - paneH : 0;
+  } else {
+    u32 maxTop = count > paneH ? count - paneH : 0;
+    top = t->Top > maxTop ? maxTop : t->Top;
+  }
+  for (u16 r = 0; r < paneH; r++) {
+    u32 idx = top + r;
+    if (idx >= count) break;
+    RenderSpanLine(&t->Scr, r, LineModel_At(&t->Model, idx), cols);
+  }
+
+  // Status.
+  ComposeStatus(t, statusY, cols);
+
+  // Input box (scroll within if taller than the box).
+  u32 firstRow = il.CurRow >= inputH ? il.CurRow - inputH + 1 : 0;
+  for (u16 i = 0; i < inputH; i++) {
+    u32 rr = firstRow + i;
+    if (rr >= il.RowCount) break;
+    StrView prefix = (rr == 0) ? SVL("\xe2\x9d\xaf ") : SVL("  ");
+    u16 x = Screen_PutText(&t->Scr, 0, (u16)(inputTop + i), prefix, St(39, ATTR_BOLD), cols);
+    Screen_PutText(&t->Scr, x, (u16)(inputTop + i), il.Rows[rr], StyleDefault(), cols);
+  }
+  u16 curScreenRow = (u16)(inputTop + (il.CurRow - firstRow));
+  u16 curScreenCol = (u16)(2 + il.CurCol);
+  if (curScreenCol >= cols) curScreenCol = (u16)(cols - 1);
+  Screen_SetCursor(&t->Scr, true, curScreenCol, curScreenRow);
+}
+
+// ---- key handling (lock held) ----
+void DoSubmit(Tui* t) {
+  StrView line = LineEdit_Submit(&t->Edit);
+  if (line.Length == 0) return;
+  LineModel_AddSimple(&t->Model, EntryKind::User, StrView{nullptr, 0}, line);
+  t->Follow = true;
+  if (t->State != TuiState::Idle && t->Ag) {
+    Agent_Steer(t->Ag, line);  // mid-turn submit -> steer the running agent
+  } else {
+    QPush(t, line);  // idle -> next prompt for Tui_WaitForSubmit
+    Cond_Signal(&t->SubmitCv);
+  }
+}
+
+const i32 kWheelStep = 3;  // transcript rows per mouse-wheel notch
+
+void ScrollBy(Tui* t, i32 delta) {
+  u32 count = LineModel_Count(&t->Model);
+  u32 maxTop = count > t->LastPaneH ? count - t->LastPaneH : 0;
+  u32 cur = t->Follow ? maxTop : t->Top;
+  i64 nv = (i64)cur + delta;
+  if (nv < 0) nv = 0;
+  if (nv > (i64)maxTop) nv = maxTop;
+  t->Top = (u32)nv;
+  t->Follow = (t->Top >= maxTop);
+}
+
+void HandleKey(Tui* t, const Key& k) {
+  switch (k.Kind) {
+    case KeyKind::Char:
+      if (!k.Alt && k.Codepoint >= 0x20) LineEdit_InsertChar(&t->Edit, k.Codepoint);
+      break;
+    case KeyKind::Enter: DoSubmit(t); break;
+    case KeyKind::Newline: LineEdit_Newline(&t->Edit); break;
+    case KeyKind::Backspace: LineEdit_Backspace(&t->Edit); break;
+    case KeyKind::Delete: LineEdit_Delete(&t->Edit); break;
+    case KeyKind::Left: LineEdit_Left(&t->Edit); break;
+    case KeyKind::Right: LineEdit_Right(&t->Edit); break;
+    case KeyKind::Up:
+      if (LineEdit_OnFirstLine(&t->Edit) || !LineEdit_Up(&t->Edit))
+        LineEdit_HistoryPrev(&t->Edit);
+      break;
+    case KeyKind::Down:
+      if (LineEdit_OnLastLine(&t->Edit) || !LineEdit_Down(&t->Edit))
+        LineEdit_HistoryNext(&t->Edit);
+      break;
+    case KeyKind::Home: LineEdit_Home(&t->Edit); break;
+    case KeyKind::End: LineEdit_End(&t->Edit); break;
+    case KeyKind::WordLeft: LineEdit_WordLeft(&t->Edit); break;
+    case KeyKind::WordRight: LineEdit_WordRight(&t->Edit); break;
+    case KeyKind::CtrlW: LineEdit_DeleteWordBack(&t->Edit); break;
+    case KeyKind::CtrlU: LineEdit_KillToStart(&t->Edit); break;
+    case KeyKind::CtrlK: LineEdit_KillToEnd(&t->Edit); break;
+    case KeyKind::CtrlL: t->Scr.ForceRepaint = true; break;
+    case KeyKind::ScrollUp: ScrollBy(t, -kWheelStep); break;
+    case KeyKind::ScrollDown: ScrollBy(t, kWheelStep); break;
+    case KeyKind::CtrlC:
+      if (t->State != TuiState::Idle)
+        t->AbortFlag = 1;
+      else if (!LineEdit_Empty(&t->Edit))
+        LineEdit_Clear(&t->Edit);
+      else {
+        t->Quit = true;
+        t->Stop = true;
+        Cond_Signal(&t->SubmitCv);
+      }
+      break;
+    case KeyKind::CtrlD:
+      t->AbortFlag = 1;
+      t->Quit = true;
+      t->Stop = true;
+      Cond_Signal(&t->SubmitCv);
+      break;
+    default: break;
+  }
+}
+
+// ---- threads ----
+void InputLoop(void* arg) {
+  Tui* t = (Tui*)arg;
+  char buf[1024];
+  for (;;) {
+    u32 n = Term_ReadInput(&t->Trm, buf, sizeof(buf));
+    if (n == 0) {
+      Mutex_Lock(&t->Lock);
+      t->Quit = true;
+      t->Stop = true;
+      Cond_Signal(&t->SubmitCv);
+      Wake(t);
+      Mutex_Unlock(&t->Lock);
+      break;
+    }
+    Tui_FeedInput(t, buf, n);
+    Mutex_Lock(&t->Lock);
+    bool stop = t->Stop;
+    Mutex_Unlock(&t->Lock);
+    if (stop) break;
+  }
+}
+
+void RenderLoop(void* arg) {
+  Tui* t = (Tui*)arg;
+  for (;;) {
+    Mutex_Lock(&t->Lock);
+    if (t->Stop) {
+      Mutex_Unlock(&t->Lock);
+      break;
+    }
+    Compose(t);
+    Mutex_Unlock(&t->Lock);
+    Screen_Flush(&t->Scr);
+
+    Mutex_Lock(&t->Lock);
+    u32 interval = (t->State != TuiState::Idle) ? 60 : 200;
+    if (!t->Dirty && !t->Stop) Cond_WaitTimeout(&t->RenderCv, &t->Lock, interval);
+    t->Dirty = false;
+    Mutex_Unlock(&t->Lock);
+  }
+}
+
+}  // namespace
+
+bool Tui_Start(Tui* t, Arena* mem, TuiOpts opts) {
+  if (!Term_IsInteractive()) return false;
+  Tui_InitModel(t, mem, opts);
+  if (!Term_Enter(&t->Trm)) return false;
+
+  u16 cols = 80, rows = 24;
+  Term_Size(&t->Trm, &cols, &rows);
+  Screen_Init(&t->Scr, mem, [](void* u, const char* d, u32 n) { (void)u; Term_Write(d, n); }, nullptr);
+  Screen_Resize(&t->Scr, cols, rows);
+  LineModel_SetWidth(&t->Model, cols);
+
+  LineModel_AddSimple(&t->Model, EntryKind::Info, StrView{nullptr, 0},
+                      SVL("mini-agent \xe2\x80\x94 Enter sends, Ctrl+J for a newline, Ctrl+C interrupts, "
+                          "Ctrl+D quits. Scroll with the mouse wheel."));
+
+  Thread_Start(&t->RenderThread, RenderLoop, t);
+  Thread_Start(&t->InputThread, InputLoop, t);
+  t->ThreadsUp = true;
+  return true;
+}
+
+void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts) {
+  memset(t, 0, sizeof(*t));
+  t->Mem = mem;
+  g_color = opts.Color;
+  LineModel_SetColorEnabled(opts.Color);
+  t->ModelName = opts.ModelName;
+  LineModel_Init(&t->Model, mem, 80, 5000);
+  LineEdit_Init(&t->Edit, mem);
+  KeyDecoder_Init(&t->Dec);
+  t->Pending = StrBuf_Make(mem, 256);
+  Mutex_Init(&t->Lock);
+  Cond_Init(&t->SubmitCv);
+  Cond_Init(&t->RenderCv);
+  t->Follow = true;
+  t->State = TuiState::Idle;
+}
+
+void Tui_Stop(Tui* t) {
+  if (!t->ThreadsUp) return;
+  Mutex_Lock(&t->Lock);
+  t->Stop = true;
+  Cond_Signal(&t->SubmitCv);
+  Cond_Signal(&t->RenderCv);
+  Mutex_Unlock(&t->Lock);
+  Thread_Join(&t->RenderThread);
+  Thread_Join(&t->InputThread);
+  t->ThreadsUp = false;
+  Term_Exit(&t->Trm);
+}
+
+bool Tui_WaitForSubmit(Tui* t, StrView* out) {
+  Mutex_Lock(&t->Lock);
+  for (;;) {
+    if (QPop(t, out)) {
+      Mutex_Unlock(&t->Lock);
+      return true;
+    }
+    if (t->Quit || t->Stop) {
+      Mutex_Unlock(&t->Lock);
+      return false;
+    }
+    Cond_Wait(&t->SubmitCv, &t->Lock);
+  }
+}
+
+volatile i32* Tui_Abort(Tui* t) { return &t->AbortFlag; }
+
+void Tui_FeedInput(Tui* t, const char* data, u32 n) {
+  KeyDecoder_Push(&t->Dec, data, n);
+  Mutex_Lock(&t->Lock);
+  Key k;
+  while (KeyDecoder_Next(&t->Dec, &k)) HandleKey(t, k);
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+}
+
+void Tui_AgentEvent(void* user, const AgentEvent& ev) {
+  Tui* t = (Tui*)user;
+  Mutex_Lock(&t->Lock);
+  switch (ev.Kind) {
+    case AgentEventKind::AgentStart:
+      t->State = TuiState::Thinking;
+      t->TurnStartMs = NowMillis();
+      t->Spinner = 0;
+      break;
+    case AgentEventKind::MessageStart:
+      if (ev.Msg && ev.Msg->Kind == Role::Assistant)
+        LineModel_Begin(&t->Model, EntryKind::Assistant, StrView{nullptr, 0}, true);
+      break;
+    case AgentEventKind::MessageUpdate:
+      if (ev.Stream.Kind == StreamEventKind::TextDelta) {
+        StrBuf_Append(&t->Pending, ev.Stream.Delta);
+        t->State = TuiState::Streaming;
+      }
+      break;
+    case AgentEventKind::MessageEnd:
+      FlushPending(t);
+      if (t->Model.HasCur) LineModel_End(&t->Model);
+      if (ev.Msg) {
+        t->Use = ev.Msg->Use;
+        if (ev.Msg->Stop == StopReason::Error)
+          LineModel_AddSimple(&t->Model, EntryKind::Error, StrView{nullptr, 0}, ev.Msg->ErrorMessage);
+        else if (ev.Msg->Stop == StopReason::Aborted)
+          LineModel_AddSimple(&t->Model, EntryKind::Info, StrView{nullptr, 0}, SVL("[interrupted]"));
+      }
+      break;
+    case AgentEventKind::ToolStart:
+      FlushPending(t);
+      if (t->Model.HasCur) LineModel_End(&t->Model);
+      LineModel_AddSimple(&t->Model, EntryKind::ToolCall, ev.ToolName, Truncate(ev.ToolArgsJson, 200));
+      t->State = TuiState::Tool;
+      t->StateTool = ev.ToolName;
+      break;
+    case AgentEventKind::ToolEnd: {
+      StrView preview = StrView{nullptr, 0};
+      if (ev.Result && ev.Result->Content.Count > 0) preview = ev.Result->Content.Data[0].Text;
+      LineModel_AddSimple(&t->Model, EntryKind::ToolResult, StrView{nullptr, 0}, Truncate(preview, 1500));
+      t->State = TuiState::Thinking;
+      break;
+    }
+    case AgentEventKind::AgentEnd:
+      FlushPending(t);
+      if (t->Model.HasCur) LineModel_End(&t->Model);
+      t->State = TuiState::Idle;
+          break;
+        case AgentEventKind::QueueUpdate:
+          t->QueuedCount = ev.SteerCount + ev.FollowUpCount + ev.NextTurnCount;
+          break;
+        default: break;
+      }
+      Wake(t);
+      Mutex_Unlock(&t->Lock);
+}

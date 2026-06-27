@@ -30,7 +30,9 @@ src/
            refresh, resolve)
   agent/   the synchronous turn/tool/steering loop + Agent state
   tools/   read, bash, cross-platform process exec
-  app/     CLI entry + REPL renderer + --login flow
+  term/    full-screen TUI: raw-mode terminal, key decoder, differential
+           renderer, markdown, transcript model, multi-line editor, controller
+  app/     CLI entry + TUI/plain REPL + --login flow
 tests/     offline unit tests (no network, no API key)
 ```
 
@@ -43,10 +45,16 @@ tests/     offline unit tests (no network, no API key)
   `StrView` (non-owning UTF-8 slice) into the arena. There is no per-turn
   `convertToLlm` duplication (identity conversion) and streaming deltas are
   forwarded as zero-copy slices rather than whole-message clones.
-- **Synchronous, single-threaded loop.** A pluggable `Provider` streams one
-  assistant turn; tools execute in order; events are pushed to an `AgentSink`.
+- **Single-threaded loop, parallel tool batches.** A pluggable `Provider`
+  streams one assistant turn (auto-retrying transient errors with capped
+  exponential backoff); a turn's tool calls run **concurrently by default** (each
+  on a small worker pool, isolated in its own arena), matching pi, with results
+  appended to the transcript in original call order; set the agent to sequential
+  — or mark a tool sequential — to serialize. A `beforeTool` gate and an
+  `afterToolCall` hook bracket each call. Events are pushed to an `AgentSink`.
   Mirrors pi's event sequence (`agent_start → turn_start → message_* → tool_* →
-  turn_end → agent_end`) and keeps its steering/follow-up seams.
+  turn_end → agent_end`) plus its agent-owned steer / follow-up / next-turn
+  message queues (`queue_update` events).
 - **Providers are reimplemented wire protocols**, not vendor SDKs. The Anthropic
   request builder and SSE parser are ~400 lines and unit-tested against a
   recorded fixture (offline).
@@ -67,14 +75,33 @@ use the VS-bundled CMake/Ninja).
 ## Run
 
 ```sh
-# Offline demo (no API key, scripted provider) — exercises loop + tools + REPL:
+# Offline demo (no API key, scripted provider) — exercises loop + tools + TUI:
 ./build/mini-agent --faux
 
 # Live:
 ./build/mini-agent --login anthropic     # OAuth (Claude Pro/Max), or set ANTHROPIC_API_KEY
-./build/mini-agent                        # interactive REPL
+./build/mini-agent                        # full-screen TUI (interactive)
 ./build/mini-agent -m claude-sonnet-4-6 -p "summarize README.md"
 ```
+
+## TUI
+
+Running interactively on a real terminal launches a full-screen TUI: an
+alternate-screen, double-buffered **differential renderer** (own cell grid +
+scrollback), markdown-rendered assistant output, a live status line (spinner,
+state, elapsed, token usage, model), and a **multi-line input editor**. It runs
+three threads — the agent loop, a key-input thread, and a render thread (~20fps)
+so the spinner stays live while a turn waits on the network.
+
+Keys: **Enter** sends · **Ctrl+J** / Alt+Enter inserts a newline · arrows move
+(↑/↓ across lines, then through history at the edges) · **Ctrl+←/→** word jump ·
+Home/End · **Ctrl+W/U/K** delete word / to start / to end · **mouse wheel**
+scrolls the transcript · type during a turn to **steer** · **Ctrl+C** interrupts a
+turn (or quits when idle) · **Ctrl+D** quits · **Ctrl+L** repaints. Honors
+`NO_COLOR`. Pasted multi-line text is inserted literally (bracketed paste).
+
+When stdin/stdout isn't a TTY (pipes, redirected) or with `-p`, it falls back to
+a plain line renderer.
 
 Interactive: Ctrl+C interrupts the current turn, `/exit` quits.
 Set `MA_PRINT_MEM=1` to print peak RSS at exit.
@@ -103,15 +130,18 @@ Resolution priority: stored api_key → stored OAuth (refresh) → env var.
 ## Test
 
 ```sh
-./build/ma_tests          # unit tests (base, json, loop, anthropic, tools, crypto, auth, loopback)
+./build/ma_tests          # unit tests: base, json, loop, anthropic, tools, crypto,
+                          #   auth, loopback, threads, keys, screen, markdown,
+                          #   linemodel, lineedit, tui
 ./build/ma_http_smoke     # TLS/HTTP smoke against https://example.com
 ```
 
 The unit suite is network-free and key-free: the loop runs against a faux
 provider, the Anthropic SSE parser against a recorded fixture, the OAuth module
-against fixtures (PKCE vectors, URL/body building, response parsing, credential
-round-trips), and the callback server against an in-process loopback socket
-(request parse, code/state capture, state-mismatch rejection).
+against fixtures, the callback server against an in-process loopback socket, and
+the TUI via pure units (key decoder, differential-renderer diff, markdown,
+line-wrapping, the multi-line editor) plus a headless controller test driving the
+event→transcript mapping. Live full-screen rendering is verified manually.
 
 ## Scope / deferred
 
@@ -121,11 +151,9 @@ leaves seams for them):
 - Additional providers (OpenAI-compatible shape). OAuth is generic; each new
   provider is a config row + a small token-application branch.
 - Device-code OAuth (e.g. GitHub Copilot) — the loopback callback flow is done.
-- Raw-mode terminal line editing and a steering input thread (the REPL uses
-  simple line input + signal-based abort; the loop already supports steering
-  via its poll seams).
-- Parallel tool execution, compaction, on-disk sessions, skills, slash commands,
-  and extensions.
+- TUI niceties: mouse, visual-row (vs logical-line) Up/Down, syntax highlighting,
+  images, undo. The full-screen differential TUI itself is done.
+- Compaction, on-disk sessions, skills, slash commands, and extensions.
 
 ## License
 
