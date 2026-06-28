@@ -8,6 +8,7 @@ void TestJson();
 void TestAgent();
 void TestAnthropic();
 void TestTools();
+void TestInfra();
 void TestCrypto();
 void TestAuth();
 void TestLoopback();

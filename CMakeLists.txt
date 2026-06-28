@@ -134,7 +134,18 @@ target_link_libraries(ma_auth PUBLIC ma_json ma_crypto ma_http ma_loopback)
 # ---- tools ---------------------------------------------------------------
 add_library(ma_tools STATIC
   src/tools/exec.cpp
+  src/tools/fs.cpp
+  src/tools/truncate.cpp
+  src/tools/glob.cpp
+  src/tools/regex.cpp
+  src/tools/diff.cpp
+  src/tools/filelock.cpp
   src/tools/read.cpp
+  src/tools/write.cpp
+  src/tools/edit.cpp
+  src/tools/ls.cpp
+  src/tools/find.cpp
+  src/tools/grep.cpp
   src/tools/bash.cpp)
 target_link_libraries(ma_tools PUBLIC ma_json ma_agent)
 
@@ -155,6 +166,7 @@ add_executable(ma_tests
   tests/test_agent.cpp
   tests/test_anthropic.cpp
   tests/test_tools.cpp
+  tests/test_infra.cpp
   tests/test_crypto.cpp
   tests/test_auth.cpp
   tests/test_loopback.cpp

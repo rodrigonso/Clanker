@@ -17,6 +17,7 @@
 #include "term/term.h"
 #include "term/tui.h"
 #include "tools/tools.h"
+#include "tools/filelock.h"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -287,10 +288,17 @@ int main(int argc, char** argv) {
 
   Model model = Anthropic_Model(SV(modelId));
   Agent ag = Agent_Make(&arena, model,
-                        SV("You are mini-agent, a concise coding assistant. Use the read and bash "
-                           "tools when they help answer the user."));
+                        SV("You are mini-agent, a concise coding assistant. You have these tools: "
+                           "read, write, edit, ls, find, grep, and bash. Use them when they help "
+                           "answer the user."));
   Agent_InitQueues(&ag);
+  FileLock_Init();
   Agent_AddTool(&ag, ReadTool());
+  Agent_AddTool(&ag, WriteTool());
+  Agent_AddTool(&ag, EditTool());
+  Agent_AddTool(&ag, LsTool());
+  Agent_AddTool(&ag, FindTool());
+  Agent_AddTool(&ag, GrepTool());
   Agent_AddTool(&ag, BashTool());
   ag.Stream.Abort = &g_abort;
 

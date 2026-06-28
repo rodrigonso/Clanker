@@ -4,3 +4,8 @@
 // Built-in tool factories.
 Tool ReadTool();
 Tool BashTool();
+Tool WriteTool();
+Tool EditTool();
+Tool LsTool();
+Tool FindTool();
+Tool GrepTool();

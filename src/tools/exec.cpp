@@ -21,6 +21,23 @@ ExecResult Exec_Run(Arena* arena, StrView command, u32 timeoutMs, volatile i32* 
   StrBuf_AppendCStr(&cmd, "cmd.exe /c ");
   StrBuf_Append(&cmd, command);
 
+  HANDLE job = CreateJobObjectA(nullptr, nullptr);
+  if (!job) {
+    CloseHandle(rd);
+    CloseHandle(wr);
+    res.Output = SV("failed to create job object");
+    return res;
+  }
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {};
+  limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+  if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
+    CloseHandle(job);
+    CloseHandle(rd);
+    CloseHandle(wr);
+    res.Output = SV("failed to configure job object");
+    return res;
+  }
+
   STARTUPINFOA si = {};
   si.cb = sizeof(si);
   si.dwFlags = STARTF_USESTDHANDLES;
@@ -29,12 +46,22 @@ ExecResult Exec_Run(Arena* arena, StrView command, u32 timeoutMs, volatile i32* 
   si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
 
   PROCESS_INFORMATION pinfo = {};
-  BOOL ok = CreateProcessA(nullptr, (LPSTR)StrBuf_CStr(&cmd), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
-                           nullptr, nullptr, &si, &pinfo);
+  BOOL ok = CreateProcessA(nullptr, (LPSTR)StrBuf_CStr(&cmd), nullptr, nullptr, TRUE,
+                           CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pinfo);
   CloseHandle(wr);
   if (!ok) {
+    CloseHandle(job);
     CloseHandle(rd);
     res.Output = SV("failed to start process");
+    return res;
+  }
+  if (!AssignProcessToJobObject(job, pinfo.hProcess) || ResumeThread(pinfo.hThread) == (DWORD)-1) {
+    TerminateProcess(pinfo.hProcess, 1);
+    CloseHandle(pinfo.hProcess);
+    CloseHandle(pinfo.hThread);
+    CloseHandle(job);
+    CloseHandle(rd);
+    res.Output = SV("failed to start process in job object");
     return res;
   }
   res.Spawned = true;
@@ -44,7 +71,7 @@ ExecResult Exec_Run(Arena* arena, StrView command, u32 timeoutMs, volatile i32* 
   char buf[4096];
   for (;;) {
     if ((abort && *abort) || (timeoutMs && (GetTickCount() - start) > timeoutMs)) {
-      TerminateProcess(pinfo.hProcess, 1);
+      TerminateJobObject(job, 1);
       res.TimedOut = !(abort && *abort);
       break;
     }
@@ -71,12 +98,14 @@ ExecResult Exec_Run(Arena* arena, StrView command, u32 timeoutMs, volatile i32* 
     }
   }
 
+  WaitForSingleObject(pinfo.hProcess, INFINITE);
   DWORD code = 0;
   GetExitCodeProcess(pinfo.hProcess, &code);
   res.ExitCode = (i32)code;
   CloseHandle(rd);
   CloseHandle(pinfo.hProcess);
   CloseHandle(pinfo.hThread);
+  CloseHandle(job);
   res.Output = StrBuf_View(&out);
   return res;
 }
@@ -109,6 +138,7 @@ ExecResult Exec_Run(Arena* arena, StrView command, u32 timeoutMs, volatile i32* 
     return res;
   }
   if (pid == 0) {
+    setpgid(0, 0);
     dup2(fds[1], STDOUT_FILENO);
     dup2(fds[1], STDERR_FILENO);
     close(fds[0]);
@@ -117,6 +147,7 @@ ExecResult Exec_Run(Arena* arena, StrView command, u32 timeoutMs, volatile i32* 
     _exit(127);
   }
   close(fds[1]);
+  setpgid(pid, pid);
   res.Spawned = true;
 
   StrBuf out = StrBuf_Make(arena, 4096);
@@ -137,7 +168,7 @@ ExecResult Exec_Run(Arena* arena, StrView command, u32 timeoutMs, volatile i32* 
     clock_gettime(CLOCK_MONOTONIC, &t1);
     u64 elapsed = (u64)(t1.tv_sec - t0.tv_sec) * 1000 + (u64)(t1.tv_nsec - t0.tv_nsec) / 1000000;
     if ((abort && *abort) || (timeoutMs && elapsed > timeoutMs)) {
-      kill(pid, SIGKILL);
+      kill(-pid, SIGKILL);
       res.TimedOut = !(abort && *abort);
       break;
     }

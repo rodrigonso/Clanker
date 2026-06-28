@@ -56,13 +56,13 @@ its module tree; the orchestrator has no equivalent.
 
 | pi tool | mini-agent | notes |
 |---|---|---|
-| `read` | 🟡 | no `offset` / `limit`, no image support; 64KB cap vs pi's 50KB / 2000-line truncation |
-| `bash` | 🟡 | no live output streaming, no full-output temp file, no process-tree kill; `timeout` in **ms** vs pi's **seconds** |
-| `write` | ❌ | |
-| `edit` | ❌ | exact-string + fuzzy multi-edit, file-mutation-queue, diff/patch |
-| `grep` | ❌ | ripgrep-backed |
-| `find` | ❌ | `fd`-backed glob |
-| `ls` | ❌ | |
+| `read` | ✅ | `offset` / `limit`, verbatim text, pi-style head truncation, image content blocks; no image auto-resize |
+| `bash` | ✅ | `timeout` in **seconds**, process-tree kill, tail truncation with full-output temp log; no live UI streaming yet |
+| `write` | ✅ | creates parent dirs, overwrites, serialized per-file |
+| `edit` | ✅ | exact + whitespace-tolerant fuzzy multi-edit, mutation lock, unified diff; NFKC omitted |
+| `grep` | ✅ | native regex engine (not `rg`), context / literal / ignore-case, gitignore-lite |
+| `find` | ✅ | native glob walk (not `fd`), gitignore-lite |
+| `ls` | ✅ | case-insensitive sorted listings, dotfiles included |
 | Tool allow/deny lists · read-only bundle | ❌ | |
 
 ## Auth
@@ -112,11 +112,10 @@ its module tree; the orchestrator has no equivalent.
 ## Bottom line
 
 At parity on the **memory-first core**: data model, loop semantics, Anthropic
-SSE, OAuth, and a real full-screen differential TUI. The open gaps are (a)
-**breadth** — providers, wire protocols, the `write`/`edit`/`grep`/`find`/`ls`
-tools, and CLI surface — and (b) the **coding-agent layer** — sessions,
-compaction, skills, slash-commands, extensions, trust, and rich system-prompt
-context assembly.
+SSE, OAuth, a real full-screen differential TUI, and the seven-tool coding
+suite. The open gaps are (a) **breadth** — providers, wire protocols, and CLI
+surface — and (b) the **coding-agent layer** — sessions, compaction, skills,
+slash-commands, extensions, trust, and rich system-prompt context assembly.
 
 ## Refreshing this report
 

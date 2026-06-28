@@ -15,7 +15,8 @@ peaks at **~6 MB RSS** (`MA_PRINT_MEM=1`).
 ## What it is
 
 A runnable mini-agent: the agent loop + the Anthropic Messages provider
-(HTTP/SSE) + `read` and `bash` tools + a streaming REPL.
+(HTTP/SSE) + `read`, `write`, `edit`, `ls`, `find`, `grep`, and `bash` tools +
+a streaming REPL.
 
 ```
 src/
@@ -29,7 +30,8 @@ src/
   auth/    credentials + generic OAuth (PKCE flow, callback capture, store,
            refresh, resolve)
   agent/   the synchronous turn/tool/steering loop + Agent state
-  tools/   read, bash, cross-platform process exec
+  tools/   read/write/edit/ls/find/grep/bash, process exec, fs/glob/regex/
+           diff/truncate/filelock infra
   term/    full-screen TUI: raw-mode terminal, key decoder, differential
            renderer, markdown, transcript model, multi-line editor, controller
   app/     CLI entry + TUI/plain REPL + --login flow

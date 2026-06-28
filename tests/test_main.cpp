@@ -14,6 +14,7 @@ int main() {
   TestAgent();
   TestAnthropic();
   TestTools();
+  TestInfra();
   TestCrypto();
   TestAuth();
   TestLoopback();
