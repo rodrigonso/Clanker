@@ -7,7 +7,7 @@ agent harness `mini-agent` currently reimplements.
 |---|---|
 | Comparison date | 2026-06-27 |
 | pi ref | `f2e9d75` (pi-coding-agent `0.80.2`) |
-| mini-agent ref | `99346b6` |
+| mini-agent ref | `69e8680` |
 
 `mini-agent` deliberately reimplements only the **memory-first core**. This
 document is the running gap list — it is not a roadmap commitment.
