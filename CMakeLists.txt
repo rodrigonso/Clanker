@@ -111,6 +111,7 @@ add_library(ma_term STATIC
   src/term/cell.cpp
   src/term/screen.cpp
   src/term/markdown.cpp
+  src/term/sanitize.cpp
   src/term/linemodel.cpp
   src/term/lineedit.cpp
   src/term/tui.cpp
@@ -174,6 +175,7 @@ add_executable(ma_tests
   tests/test_keys.cpp
   tests/test_screen.cpp
   tests/test_markdown.cpp
+  tests/test_sanitize.cpp
   tests/test_linemodel.cpp
   tests/test_lineedit.cpp
   tests/test_tui.cpp)

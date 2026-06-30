@@ -4,6 +4,7 @@
 
 #include "agent/agent.h"
 #include "term/cell.h"
+#include "term/sanitize.h"
 
 namespace {
 
@@ -380,6 +381,7 @@ void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts) {
   LineEdit_Init(&t->Edit, mem);
   KeyDecoder_Init(&t->Dec);
   t->Pending = StrBuf_Make(mem, 256);
+  t->ToolText = StrBuf_Make(mem, 256);
   Mutex_Init(&t->Lock);
   Cond_Init(&t->SubmitCv);
   Cond_Init(&t->RenderCv);
@@ -436,11 +438,17 @@ void Tui_AgentEvent(void* user, const AgentEvent& ev) {
       t->Spinner = 0;
       break;
     case AgentEventKind::MessageStart:
-      if (ev.Msg && ev.Msg->Kind == Role::Assistant)
-        LineModel_Begin(&t->Model, EntryKind::Assistant, StrView{nullptr, 0}, true);
+      // The agent emits message_start for the assistant turn before any content
+      // exists (ev.Msg is the not-yet-built message, often null), so there is
+      // nothing to render yet. The assistant entry is begun lazily on its first
+      // text delta below. This mirrors pi, where the assistant block stays empty
+      // (invisible) until content streams, so tool-only turns show no header.
+      // User / tool-result messages are rendered via their own events.
       break;
     case AgentEventKind::MessageUpdate:
       if (ev.Stream.Kind == StreamEventKind::TextDelta) {
+        if (!t->Model.HasCur)
+          LineModel_Begin(&t->Model, EntryKind::Assistant, StrView{nullptr, 0}, true);
         StrBuf_Append(&t->Pending, ev.Stream.Delta);
         t->State = TuiState::Streaming;
       }
@@ -466,7 +474,10 @@ void Tui_AgentEvent(void* user, const AgentEvent& ev) {
     case AgentEventKind::ToolEnd: {
       StrView preview = StrView{nullptr, 0};
       if (ev.Result && ev.Result->Content.Count > 0) preview = ev.Result->Content.Data[0].Text;
-      LineModel_AddSimple(&t->Model, EntryKind::ToolResult, StrView{nullptr, 0}, Truncate(preview, 1500));
+      StrBuf_Clear(&t->ToolText);
+      Sanitize_Display(&t->ToolText, preview);  // strip \r / ANSI / control bytes from tool output
+      LineModel_AddSimple(&t->Model, EntryKind::ToolResult, StrView{nullptr, 0},
+                          Truncate(StrBuf_View(&t->ToolText), 1500));
       t->State = TuiState::Thinking;
       break;
     }

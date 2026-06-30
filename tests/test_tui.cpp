@@ -3,6 +3,7 @@
 #include "base/arena.h"
 #include "base/array.h"
 #include "check.h"
+#include "llm/faux.h"
 #include "term/tui.h"
 
 namespace {
@@ -43,9 +44,13 @@ void TestTui() {
   Tui_AgentEvent(&t, ev);
   CHECK(t.State == TuiState::Thinking);
 
+  // Mirror the real agent loop: message_start for the assistant turn carries a
+  // not-yet-built message (null), so the entry must be begun lazily on the first
+  // text delta. (Passing &m here previously masked that the streamed assistant
+  // text was being dropped in the TUI.)
   ev = {};
   ev.Kind = AgentEventKind::MessageStart;
-  ev.Msg = &m;
+  ev.Msg = nullptr;
   Tui_AgentEvent(&t, ev);
 
   ev = {};
@@ -142,6 +147,42 @@ void TestTui() {
     CHECK(ag.Steer.Count == 1);  // unchanged
 
     ArenaRelease(&a2);
+  }
+
+  // End-to-end: a real agent turn (faux provider) must surface the assistant's
+  // streamed text in the transcript. Regression for the agent emitting
+  // MessageStart with the assistant role so the entry is opened and streamed
+  // deltas are not silently dropped by FlushPending.
+  {
+    Arena a3 = ArenaCreate();
+    Model model = {};
+    Agent ag = Agent_Make(&a3, model, SV("sys"));
+    Agent_InitQueues(&ag);
+
+    FauxStep step = {};
+    step.Text = SVL("Here is the explanation");
+    step.Stop = StopReason::Stop;
+    Faux* f = ArenaPushStruct(&a3, Faux);
+    *f = Faux{};
+    f->Steps = &step;
+    f->Count = 1;
+    ag.Prov = Faux_Provider(f);
+
+    TuiOpts o3;
+    o3.ModelName = SVL("m");
+    o3.Color = false;
+    Tui t3;
+    Tui_InitModel(&t3, &a3, o3);
+    ag.Sink.User = &t3;
+    ag.Sink.OnEvent = Tui_AgentEvent;
+
+    Agent_Prompt(&ag, SV("ask"));
+
+    CHECK(AnyRow(&a3, &t3, "assistant"));
+    CHECK(AnyRow(&a3, &t3, "Here is the explanation"));
+    CHECK(t3.State == TuiState::Idle);
+
+    ArenaRelease(&a3);
   }
 
   ArenaRelease(&a);

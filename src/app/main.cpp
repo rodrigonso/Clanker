@@ -16,6 +16,7 @@
 #include "net/http.h"
 #include "term/term.h"
 #include "term/tui.h"
+#include "term/sanitize.h"
 #include "tools/tools.h"
 #include "tools/filelock.h"
 
@@ -59,13 +60,19 @@ static bool AppResolveAuth(void* user, Arena* arena, StrView provider, StrView* 
 // ---- REPL renderer -------------------------------------------------------
 
 static void PrintPreview(StrView t) {
-  u32 n = t.Length > 200 ? 200 : t.Length;
+  // Reused scratch (REPL events are emitted on a single thread).
+  static Arena sa = ArenaCreate((usize)16 << 20);
+  static StrBuf sb = StrBuf_Make(&sa, 256);
+  StrBuf_Clear(&sb);
+  Sanitize_Display(&sb, t);  // strip \r / ANSI / control bytes from tool output
+  StrView s = StrBuf_View(&sb);
+  u32 n = s.Length > 200 ? 200 : s.Length;
   fputs("\x1b[90m", stdout);
   for (u32 i = 0; i < n; i++) {
-    char c = t.Data[i];
+    char c = s.Data[i];
     putchar(c == '\n' ? ' ' : c);
   }
-  if (t.Length > 200) fputs("\xe2\x80\xa6", stdout);
+  if (s.Length > 200) fputs("\xe2\x80\xa6", stdout);
   fputs("\x1b[0m\n", stdout);
 }
 

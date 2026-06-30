@@ -22,6 +22,7 @@ int main() {
   TestKeys();
   TestScreen();
   TestMarkdown();
+  TestSanitize();
   TestLineModel();
   TestLineEdit();
   TestTui();

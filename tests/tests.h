@@ -16,6 +16,7 @@ void TestThread();
 void TestKeys();
 void TestScreen();
 void TestMarkdown();
+void TestSanitize();
 void TestLineModel();
 void TestLineEdit();
 void TestTui();

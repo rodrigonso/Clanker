@@ -63,6 +63,8 @@ struct Tui {
 
   // Streamed text staged for one re-render per frame.
   StrBuf Pending;
+  // Reused scratch for sanitizing tool output before it enters the transcript.
+  StrBuf ToolText;
 };
 
 // Enter the alt screen and start threads. Returns false if not a TTY (caller
