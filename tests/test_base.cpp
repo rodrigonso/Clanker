@@ -3,6 +3,7 @@
 #include "base/arena.h"
 #include "base/array.h"
 #include "base/str.h"
+#include "base/sysinfo.h"
 #include "check.h"
 
 void TestArena() {
@@ -56,5 +57,45 @@ void TestStr() {
 
   StrView dup = StrView_Dup(&a, SV("copy me"));
   CHECK(StrView_EqCStr(dup, "copy me"));
+  ArenaRelease(&a);
+}
+
+void TestHostInfo() {
+  Arena a = ArenaCreate();
+
+  // Pure HEAD parsing: "ref: refs/heads/<branch>" -> <branch> (slashes kept).
+  CHECK(StrView_EqCStr(Git_BranchFromHead(SVL("ref: refs/heads/main\n")), "main"));
+  CHECK(StrView_EqCStr(Git_BranchFromHead(SVL("ref: refs/heads/worktree/swift-mortar-e0e4\n")),
+                       "worktree/swift-mortar-e0e4"));
+  CHECK(StrView_EqCStr(Git_BranchFromHead(SVL("ref: refs/heads/feature/x")), "feature/x"));
+  // Detached HEAD (raw SHA) -> empty.
+  CHECK(Git_BranchFromHead(SVL("0123456789abcdef0123456789abcdef01234567\n")).Length == 0);
+
+  // Pure gitdir-file parsing (worktree/submodule indirection), trailing sep stripped.
+  CHECK(StrView_EqCStr(Git_GitdirFromFile(SVL("gitdir: C:/repo/.git/worktrees/wt/\n")),
+                       "C:/repo/.git/worktrees/wt"));
+  CHECK(StrView_EqCStr(Git_GitdirFromFile(SVL("gitdir: ../.git/modules/sub")), "../.git/modules/sub"));
+  CHECK(Git_GitdirFromFile(SVL("not a gitdir file")).Length == 0);
+
+  // Home abbreviation.
+  StrView home = SVL("C:\\Users\\rodri");
+  CHECK(StrView_EqCStr(Sys_AbbreviatePath(&a, SVL("C:\\Users\\rodri\\.briq\\wt"), home), "~\\.briq\\wt"));
+  CHECK(StrView_EqCStr(Sys_AbbreviatePath(&a, home, home), "~"));
+  // A path that only shares a partial final segment must NOT be abbreviated.
+  CHECK(StrView_EqCStr(Sys_AbbreviatePath(&a, SVL("C:\\Users\\rodrigo\\x"), home), "C:\\Users\\rodrigo\\x"));
+  // Empty home -> unchanged copy.
+  CHECK(StrView_EqCStr(Sys_AbbreviatePath(&a, SVL("D:\\proj"), StrView{nullptr, 0}), "D:\\proj"));
+
+  // Live queries: cwd is a non-empty path; the branch lookup must not crash and,
+  // when it resolves, returns a clean single-line name (may be empty off-repo).
+  StrView cwd = Sys_CurrentDir(&a);
+  CHECK(cwd.Length > 0);
+  bool hasSep = false;
+  for (u32 i = 0; i < cwd.Length; i++)
+    if (cwd.Data[i] == '/' || cwd.Data[i] == '\\') hasSep = true;
+  CHECK(hasSep);
+  StrView branch = Sys_GitBranch(&a, cwd);
+  for (u32 i = 0; i < branch.Length; i++) CHECK(branch.Data[i] != '\n' && branch.Data[i] != '\r');
+
   ArenaRelease(&a);
 }

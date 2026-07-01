@@ -56,6 +56,10 @@ struct Tui {
   StrView ModelName;
   u32 QueuedCount;  // messages queued (steer/followUp/nextTurn) per last queue_update
 
+  // Startup context shown on the sticky line below the prompt.
+  StrView Cwd;     // working directory, home-abbreviated for display
+  StrView Branch;  // git branch, or empty when not in a repo / detached
+
   // Scroll.
   bool Follow;
   u32 Top;

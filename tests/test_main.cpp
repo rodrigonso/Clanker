@@ -9,6 +9,7 @@ int main() {
   TestArena();
   TestArray();
   TestStr();
+  TestHostInfo();
   TestTypes();
   TestJson();
   TestAgent();

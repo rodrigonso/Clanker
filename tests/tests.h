@@ -3,6 +3,7 @@
 void TestArena();
 void TestArray();
 void TestStr();
+void TestHostInfo();
 void TestTypes();
 void TestJson();
 void TestAgent();

@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "agent/agent.h"
+#include "base/sysinfo.h"
 #include "term/cell.h"
 #include "term/sanitize.h"
 
@@ -123,44 +124,58 @@ void ComposeStatus(Tui* t, u16 statusY, u16 cols) {
   bg.Bg = g_color ? 236 : COL_DEFAULT;
   Screen_Fill(&t->Scr, 0, statusY, (u16)(cols ? cols - 1 : 0), statusY, bg);
 
-  char buf[1024];
-  u32 len = 0;
   Style st = bg;
   st.Fg = g_color ? 250 : COL_DEFAULT;
 
+  // Left: agent state.
+  char left[256];
+  u32 ll = 0;
   if (t->State == TuiState::Idle) {
-    Put(buf, sizeof(buf), &len, "ready");
+    Put(left, sizeof(left), &ll, "ready");
   } else {
-    Put(buf, sizeof(buf), &len, kSpinner[t->Spinner % 10]);
-    Put(buf, sizeof(buf), &len, " ");
+    Put(left, sizeof(left), &ll, kSpinner[t->Spinner % 10]);
+    Put(left, sizeof(left), &ll, " ");
     if (t->State == TuiState::Tool) {
-      Put(buf, sizeof(buf), &len, "running ");
-      char tn[64];
-      u32 k = 0;
-      for (u32 i = 0; i < t->StateTool.Length && k < sizeof(tn) - 1; i++) tn[k++] = t->StateTool.Data[i];
-      tn[k] = 0;
-      Put(buf, sizeof(buf), &len, tn);
+      Put(left, sizeof(left), &ll, "running ");
+      for (u32 i = 0; i < t->StateTool.Length && ll < sizeof(left) - 1; i++) left[ll++] = t->StateTool.Data[i];
     } else if (t->State == TuiState::Streaming) {
-      Put(buf, sizeof(buf), &len, "responding");
+      Put(left, sizeof(left), &ll, "responding");
     } else {
-      Put(buf, sizeof(buf), &len, "thinking");
-    }
-    u64 elapsed = (NowMillis() - t->TurnStartMs) / 1000;
-    Put(buf, sizeof(buf), &len, "  ");
-    PutNum(buf, sizeof(buf), &len, (u32)elapsed);
-    Put(buf, sizeof(buf), &len, "s");
-    if (t->Use.Input || t->Use.Output) {
-      Put(buf, sizeof(buf), &len, "  \xe2\x86\x91");
-      PutNum(buf, sizeof(buf), &len, t->Use.Input);
-      Put(buf, sizeof(buf), &len, " \xe2\x86\x93");
-      PutNum(buf, sizeof(buf), &len, t->Use.Output);
+      Put(left, sizeof(left), &ll, "thinking");
     }
   }
-  Put(buf, sizeof(buf), &len, "  \xc2\xb7  ");
-  for (u32 i = 0; i < t->ModelName.Length && len < sizeof(buf) - 1; i++) buf[len++] = t->ModelName.Data[i];
-  Put(buf, sizeof(buf), &len, "   Enter send  ^J newline  ^C stop  ^D quit");
 
-  Screen_PutText(&t->Scr, 0, statusY, StrView{buf, len}, st, cols);
+  // Right (right-aligned): model name + token usage.
+  char right[256];
+  u32 rl = 0;
+  for (u32 i = 0; i < t->ModelName.Length && rl < sizeof(right) - 1; i++) right[rl++] = t->ModelName.Data[i];
+  if (t->Use.Input || t->Use.Output) {
+    Put(right, sizeof(right), &rl, "  \xe2\x86\x91");
+    PutNum(right, sizeof(right), &rl, t->Use.Input);
+    Put(right, sizeof(right), &rl, " \xe2\x86\x93");
+    PutNum(right, sizeof(right), &rl, t->Use.Output);
+  }
+
+  StrView rightView{right, rl};
+  u32 rightW = TextWidth(rightView);
+  u16 rightX = (u32)cols > rightW ? (u16)(cols - rightW) : 0;
+
+  // Draw the state on the left, clipped so it never overruns the right block.
+  Screen_PutText(&t->Scr, 0, statusY, StrView{left, ll}, st, rightX ? rightX : cols);
+  Screen_PutText(&t->Scr, rightX, statusY, rightView, st, cols);
+}
+
+// Sticky working-directory + git-branch line, drawn on the row just above the
+// prompt. Muted so it reads as ambient context, not transcript content.
+void ComposeCwd(Tui* t, u16 cwdY, u16 cols) {
+  if (t->Cwd.Length == 0) return;
+  Style st = St(g_color ? 244 : COL_DEFAULT, ATTR_NONE);
+  u16 x = Screen_PutText(&t->Scr, 0, cwdY, t->Cwd, st, cols);
+  if (t->Branch.Length) {
+    x = Screen_PutText(&t->Scr, x, cwdY, SVL("  ("), st, cols);
+    x = Screen_PutText(&t->Scr, x, cwdY, t->Branch, st, cols);
+    Screen_PutText(&t->Scr, x, cwdY, SVL(")"), st, cols);
+  }
 }
 
 void Compose(Tui* t) {
@@ -188,9 +203,16 @@ void Compose(Tui* t) {
   u16 inputH = (u16)(il.RowCount < maxInputH ? il.RowCount : maxInputH);
   if (inputH < 1) inputH = 1;
 
-  u16 inputTop = (u16)(rows - inputH);
-  u16 statusY = (u16)(inputTop - 1);
-  u16 paneH = statusY;  // rows [0, statusY)
+  // Reserve the bottom row for the status bar and the row just above the prompt
+  // for the sticky cwd/branch line; keep at least one transcript row (rows >= 4
+  // is guaranteed above).
+  u16 statusY = (u16)(rows - 1);
+  u16 maxInput = (u16)(rows - 3);
+  if (inputH > maxInput) inputH = maxInput;
+  if (inputH < 1) inputH = 1;
+  u16 inputTop = (u16)(statusY - inputH);
+  u16 cwdY = (u16)(inputTop - 1);
+  u16 paneH = cwdY;  // rows [0, cwdY)
   t->LastPaneH = paneH;
 
   Screen_BeginFrame(&t->Scr);
@@ -226,6 +248,9 @@ void Compose(Tui* t) {
   u16 curScreenCol = (u16)(2 + il.CurCol);
   if (curScreenCol >= cols) curScreenCol = (u16)(cols - 1);
   Screen_SetCursor(&t->Scr, true, curScreenCol, curScreenRow);
+
+  // Sticky context line above the prompt.
+  ComposeCwd(t, cwdY, cols);
 }
 
 // ---- key handling (lock held) ----
@@ -361,9 +386,9 @@ bool Tui_Start(Tui* t, Arena* mem, TuiOpts opts) {
   Screen_Resize(&t->Scr, cols, rows);
   LineModel_SetWidth(&t->Model, cols);
 
-  LineModel_AddSimple(&t->Model, EntryKind::Info, StrView{nullptr, 0},
-                      SVL("mini-agent \xe2\x80\x94 Enter sends, Ctrl+J for a newline, Ctrl+C interrupts, "
-                          "Ctrl+D quits. Scroll with the mouse wheel."));
+  StrView raw = Sys_CurrentDir(mem);
+  t->Cwd = Sys_AbbreviatePath(mem, raw, Sys_HomeDir(mem));
+  t->Branch = Sys_GitBranch(mem, raw);
 
   Thread_Start(&t->RenderThread, RenderLoop, t);
   Thread_Start(&t->InputThread, InputLoop, t);

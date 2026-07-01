@@ -90,10 +90,12 @@ use the VS-bundled CMake/Ninja).
 
 Running interactively on a real terminal launches a full-screen TUI: an
 alternate-screen, double-buffered **differential renderer** (own cell grid +
-scrollback), markdown-rendered assistant output, a live status line (spinner,
-state, elapsed, token usage, model), and a **multi-line input editor**. It runs
-three threads — the agent loop, a key-input thread, and a render thread (~20fps)
-so the spinner stays live while a turn waits on the network.
+scrollback), markdown-rendered assistant output, a **sticky working-directory +
+git-branch line** just above the prompt, a minimal status line along the bottom
+(spinner and state on the left; model and token usage right-aligned), and a
+**multi-line input editor**. It runs three threads — the agent loop, a key-input
+thread, and a render thread (~20fps) so the spinner stays live while a turn waits
+on the network.
 
 Keys: **Enter** sends · **Ctrl+J** / Alt+Enter inserts a newline · arrows move
 (↑/↓ across lines, then through history at the edges) · **Ctrl+←/→** word jump ·
