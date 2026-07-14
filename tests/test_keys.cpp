@@ -48,6 +48,8 @@ void TestKeys() {
   CHECK(Next(&d).Kind == KeyKind::CtrlC);
   Push(&d, "\x17");
   CHECK(Next(&d).Kind == KeyKind::CtrlW);
+  Push(&d, "\x0f");
+  CHECK(Next(&d).Kind == KeyKind::CtrlO);
 
   // Arrows + Home/End + Delete.
   KeyDecoder_Init(&d);
@@ -117,22 +119,45 @@ void TestKeys() {
   // SGR mouse: wheel up/down map to ScrollUp/ScrollDown.
   KeyDecoder_Init(&d);
   Push(&d, "\x1b[<64;10;5M");
-  CHECK(Next(&d).Kind == KeyKind::ScrollUp);
+  Key wheelUp = Next(&d);
+  CHECK(wheelUp.Kind == KeyKind::ScrollUp);
+  CHECK(wheelUp.MouseX == 9 && wheelUp.MouseY == 4);
   Push(&d, "\x1b[<65;10;5M");
   CHECK(Next(&d).Kind == KeyKind::ScrollDown);
 
   // Modifiers on a wheel event still scroll (Shift+wheel-up: Cb = 64 + 4).
   KeyDecoder_Init(&d);
   Push(&d, "\x1b[<68;1;1M");
-  CHECK(Next(&d).Kind == KeyKind::ScrollUp);
+  Key shiftedWheel = Next(&d);
+  CHECK(shiftedWheel.Kind == KeyKind::ScrollUp && shiftedWheel.Shift);
 
-  // Non-wheel mouse events (button press, then release) are consumed and
-  // ignored, and never block the keys that follow.
+  // Left press/release preserve zero-based coordinates.
   KeyDecoder_Init(&d);
   Push(&d, "\x1b[<0;3;4M\x1b[<0;3;4m");
-  CHECK(Next(&d).Kind == KeyKind::None);  // left button press
-  CHECK(Next(&d).Kind == KeyKind::None);  // release
-  CHECK(!KeyDecoder_Next(&d, &k));         // drained
+  Key mouseDown = Next(&d);
+  CHECK(mouseDown.Kind == KeyKind::MouseLeftDown);
+  CHECK(mouseDown.MouseX == 2 && mouseDown.MouseY == 3);
+  Key mouseUp = Next(&d);
+  CHECK(mouseUp.Kind == KeyKind::MouseLeftUp);
+  CHECK(mouseUp.MouseX == 2 && mouseUp.MouseY == 3);
+  CHECK(!KeyDecoder_Next(&d, &k));  // drained
+
+  // All-motion tracking reports hover movement, including button drags.
+  KeyDecoder_Init(&d);
+  Push(&d, "\x1b[<35;8;6M\x1b[<32;9;7M");
+  Key move = Next(&d);
+  CHECK(move.Kind == KeyKind::MouseMove);
+  CHECK(move.MouseX == 7 && move.MouseY == 5);
+  Key drag = Next(&d);
+  CHECK(drag.Kind == KeyKind::MouseMove);
+  CHECK(drag.MouseX == 8 && drag.MouseY == 6);
+
+  // Unsupported buttons and malformed zero coordinates are consumed.
+  KeyDecoder_Init(&d);
+  Push(&d, "\x1b[<2;1;1M\x1b[<2;1;1m\x1b[<0;0;0M");
+  CHECK(Next(&d).Kind == KeyKind::None);
+  CHECK(Next(&d).Kind == KeyKind::None);
+  CHECK(Next(&d).Kind == KeyKind::None);
 
   // Horizontal wheel (Cb 66/67) is recognised but ignored.
   KeyDecoder_Init(&d);

@@ -43,8 +43,7 @@ u32 LeadingSpaces(StrView s) {
 
 void Markdown_SetColorEnabled(bool on) { g_color = on; }
 
-void Markdown_Inline(Arena* a, StrView line, Style base, Array<Span>* out) {
-  (void)a;
+void Markdown_Inline(StrView line, Style base, Array<Span>* out) {
   u32 i = 0;
   u32 plain = 0;
   while (i < line.Length) {
@@ -102,9 +101,8 @@ void Markdown_Inline(Arena* a, StrView line, Style base, Array<Span>* out) {
   PushPlain(out, line, plain, line.Length, base);
 }
 
-static void PushLine(Arena* a, Array<SpanLine>* out, Array<Span> spans) {
-  (void)a;
-  SpanLine sl;
+static void PushLine(Array<SpanLine>* out, Array<Span> spans) {
+  SpanLine sl = {};
   sl.Spans = spans;
   Array_Push(out, sl);
 }
@@ -135,7 +133,7 @@ void Markdown_Render(Arena* a, StrView md, Array<SpanLine>* out) {
     if (inFence) {
       Array<Span> sp = Array_Make<Span>(a, 1);
       if (ln.Length) Array_Push(&sp, Span{ln, CodeStyle()});
-      PushLine(a, out, sp);
+      PushLine(out, sp);
       if (atEnd) break;
       continue;
     }
@@ -147,8 +145,8 @@ void Markdown_Render(Arena* a, StrView md, Array<SpanLine>* out) {
       if (h >= 1 && h <= 6 && h < ln.Length && ln.Data[h] == ' ') {
         StrView text = StrView{ln.Data + h + 1, ln.Length - h - 1};
         Array<Span> sp = Array_Make<Span>(a, 4);
-        Markdown_Inline(a, text, HeadingStyle(), &sp);
-        PushLine(a, out, sp);
+        Markdown_Inline(text, HeadingStyle(), &sp);
+        PushLine(out, sp);
         if (atEnd) break;
         continue;
       }
@@ -160,8 +158,8 @@ void Markdown_Render(Arena* a, StrView md, Array<SpanLine>* out) {
       Array<Span> sp = Array_Make<Span>(a, 4);
       if (lead) Array_Push(&sp, Span{StrView{ln.Data, lead}, def});
       Array_Push(&sp, Span{SVL("\xe2\x80\xa2 "), BulletStyle()});
-      Markdown_Inline(a, StrView{trimmed.Data + 2, trimmed.Length - 2}, def, &sp);
-      PushLine(a, out, sp);
+      Markdown_Inline(StrView{trimmed.Data + 2, trimmed.Length - 2}, def, &sp);
+      PushLine(out, sp);
       if (atEnd) break;
       continue;
     }
@@ -174,8 +172,8 @@ void Markdown_Render(Arena* a, StrView md, Array<SpanLine>* out) {
           ln.Data[d + 1] == ' ') {
         Array<Span> sp = Array_Make<Span>(a, 4);
         Array_Push(&sp, Span{StrView{ln.Data, d + 2}, BulletStyle()});  // "  N. "
-        Markdown_Inline(a, StrView{ln.Data + d + 2, ln.Length - d - 2}, def, &sp);
-        PushLine(a, out, sp);
+        Markdown_Inline(StrView{ln.Data + d + 2, ln.Length - d - 2}, def, &sp);
+        PushLine(out, sp);
         if (atEnd) break;
         continue;
       }
@@ -187,16 +185,16 @@ void Markdown_Render(Arena* a, StrView md, Array<SpanLine>* out) {
       if (off < trimmed.Length && trimmed.Data[off] == ' ') off++;
       Array<Span> sp = Array_Make<Span>(a, 4);
       Array_Push(&sp, Span{SVL("\xe2\x94\x82 "), QuoteStyle()});
-      Markdown_Inline(a, StrView{trimmed.Data + off, trimmed.Length - off}, QuoteStyle(), &sp);
-      PushLine(a, out, sp);
+      Markdown_Inline(StrView{trimmed.Data + off, trimmed.Length - off}, QuoteStyle(), &sp);
+      PushLine(out, sp);
       if (atEnd) break;
       continue;
     }
 
     // Paragraph / blank line.
     Array<Span> sp = Array_Make<Span>(a, 4);
-    Markdown_Inline(a, ln, def, &sp);
-    PushLine(a, out, sp);
+    Markdown_Inline(ln, def, &sp);
+    PushLine(out, sp);
     if (atEnd) break;
   }
 }

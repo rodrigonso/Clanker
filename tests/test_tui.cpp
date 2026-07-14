@@ -72,6 +72,7 @@ void TestTui() {
 
   ev = {};
   ev.Kind = AgentEventKind::ToolStart;
+  ev.ToolCallId = SVL("bash-1");
   ev.ToolName = SVL("bash");
   ev.ToolArgsJson = SVL("{\"command\":\"ls\"}");
   Tui_AgentEvent(&t, ev);
@@ -82,6 +83,7 @@ void TestTui() {
   Array_Push(&tr.Content, Content_Text(SVL("hello-from-bash")));
   ev = {};
   ev.Kind = AgentEventKind::ToolEnd;
+  ev.ToolCallId = SVL("bash-1");
   ev.Result = &tr;
   Tui_AgentEvent(&t, ev);
 
@@ -89,14 +91,55 @@ void TestTui() {
   ev.Kind = AgentEventKind::AgentEnd;
   Tui_AgentEvent(&t, ev);
 
-  // The transcript captured the assistant text (markdown stripped), the tool
-  // call, and the tool result.
-  CHECK(AnyRow(&a, &t, "assistant"));
+  // The transcript captured the unlabeled assistant text and compact tool row.
+  CHECK(!AnyRow(&a, &t, "assistant"));
   CHECK(AnyRow(&a, &t, "Hello world"));
-  CHECK(AnyRow(&a, &t, "bash"));
-  CHECK(AnyRow(&a, &t, "hello-from-bash"));
+  CHECK(AnyRow(&a, &t, "$  ls"));
+  CHECK(!AnyRow(&a, &t, "hello-from-bash"));
   CHECK(t.State == TuiState::Idle);
   CHECK(t.Use.Output == 7);
+
+  u64 assistantEntryId = t.Model.Entries.Data[0].Id;
+  u64 toolEntryId = t.Model.Entries.Data[1].Id;
+  CHECK(LineModel_IsEntryCollapsed(&t.Model, toolEntryId));
+
+  // Hover maps screen rows through the last rendered viewport. Separator and
+  // non-transcript rows are not interactive.
+  t.LastTop = 0;
+  t.LastPaneH = 3;
+  Feed(&t, "\x1b[<35;50;1M");  // assistant row; x does not limit the button
+  CHECK(t.HoveredEntryId == assistantEntryId);
+  Feed(&t, "\x1b[<35;2;2M");  // separator
+  CHECK(t.HoveredEntryId == 0);
+  Feed(&t, "\x1b[<35;2;3M");  // tool summary
+  CHECK(t.HoveredEntryId == toolEntryId);
+  Feed(&t, "\x1b[<35;2;4M");  // below transcript pane
+  CHECK(t.HoveredEntryId == 0);
+
+  // Press/release on the same logical turn toggles it. Releasing on another
+  // turn cancels activation.
+  Feed(&t, "\x1b[<0;2;3M\x1b[<0;2;3m");
+  CHECK(!LineModel_IsEntryCollapsed(&t.Model, toolEntryId));
+  CHECK(AnyRow(&a, &t, "hello-from-bash"));
+  t.LastPaneH = 4;
+  Feed(&t, "\x1b[<35;2;4M");  // expanded preview row is content, not a button
+  CHECK(t.HoveredEntryId == 0);
+  Feed(&t, "\x1b[<0;2;4M\x1b[<0;2;4m");
+  CHECK(!LineModel_IsEntryCollapsed(&t.Model, toolEntryId));
+  Feed(&t, "\x1b[<0;2;3M\x1b[<0;2;1m");
+  CHECK(!LineModel_IsEntryCollapsed(&t.Model, toolEntryId));
+  Feed(&t, "\x1b[<0;2;3M\x1b[<0;2;3m");
+  CHECK(LineModel_IsEntryCollapsed(&t.Model, toolEntryId));
+  CHECK(!AnyRow(&a, &t, "hello-from-bash"));
+
+  // Ctrl+O expands all when any tool is collapsed, then collapses an
+  // all-expanded tool set.
+  Feed(&t, "\x0f");
+  CHECK(!LineModel_IsEntryCollapsed(&t.Model, toolEntryId));
+  CHECK(AnyRow(&a, &t, "hello-from-bash"));
+  Feed(&t, "\x0f");
+  CHECK(LineModel_IsEntryCollapsed(&t.Model, toolEntryId));
+  CHECK(!AnyRow(&a, &t, "hello-from-bash"));
 
   // No queued prompt input pending.
   CHECK(t.QCount == 0);
@@ -105,7 +148,21 @@ void TestTui() {
   // through the input path. Wheel-up detaches follow and moves the viewport up;
   // enough wheel-down returns to the bottom and re-enables follow.
   for (u32 i = 0; i < 40; i++)
-    LineModel_AddSimple(&t.Model, EntryKind::Info, StrView{nullptr, 0}, SVL("filler"));
+    LineModel_AddNotice(&t.Model, EntryKind::Info, SVL("filler"));
+
+  // Global expansion above the viewport keeps the same logical top anchor.
+  u64 anchorId = t.Model.Entries.Data[10].Id;
+  u32 anchorRow = 0;
+  CHECK(LineModel_FindEntryRows(&t.Model, anchorId, &anchorRow, nullptr));
+  t.LastPaneH = 10;
+  t.Top = anchorRow;
+  t.LastTop = anchorRow;
+  t.Follow = false;
+  Feed(&t, "\x0f");
+  CHECK(LineModel_RowEntryId(&t.Model, t.Top) == anchorId);
+  Feed(&t, "\x0f");
+  CHECK(LineModel_RowEntryId(&t.Model, t.Top) == anchorId);
+
   t.LastPaneH = 10;
   t.Follow = true;
   Feed(&t, "\x1b[<64;1;1M");  // wheel up
@@ -114,11 +171,6 @@ void TestTui() {
   Feed(&t, "\x1b[<64;1;1M");  // wheel up again
   CHECK(t.Top < afterUp);
   for (u32 i = 0; i < 20; i++) Feed(&t, "\x1b[<65;1;1M");  // wheel down to the bottom
-  CHECK(t.Follow);
-
-  // A non-wheel mouse event (click) is ignored and does not change scroll state.
-  t.Follow = true;
-  Feed(&t, "\x1b[<0;2;3M");
   CHECK(t.Follow);
 
   // Submit routing: while a turn is running, a submitted line steers the agent;
@@ -140,12 +192,16 @@ void TestTui() {
     Feed(&t2, "steer me\r");
     CHECK(ag.Steer.Count == 1);
     CHECK(t2.QCount == 0);  // did not land in the idle prompt queue
+    CHECK(!AnyRow(&a2, &t2, "you"));
+    CHECK(AnyRow(&a2, &t2, "steer me"));
+    CHECK(t2.Model.Entries.Data[t2.Model.Entries.Count - 1].Text.Timestamp.Length == 5);
 
     t2.State = TuiState::Idle;  // between turns
     Feed(&t2, "next prompt\r");
     CHECK(t2.QCount == 1);
     CHECK(ag.Steer.Count == 1);  // unchanged
 
+    Tui_Stop(&t2);
     ArenaRelease(&a2);
   }
 
@@ -178,12 +234,115 @@ void TestTui() {
 
     Agent_Prompt(&ag, SV("ask"));
 
-    CHECK(AnyRow(&a3, &t3, "assistant"));
+    CHECK(!AnyRow(&a3, &t3, "assistant"));
     CHECK(AnyRow(&a3, &t3, "Here is the explanation"));
     CHECK(t3.State == TuiState::Idle);
 
+    Tui_Stop(&t3);
     ArenaRelease(&a3);
   }
 
+  // Tool output entering the TUI remains sanitized and capped at 1,500 bytes.
+  {
+    Arena a4 = ArenaCreate();
+    TuiOpts o4;
+    o4.ModelName = SVL("m");
+    o4.Color = true;
+    Tui t4;
+    Tui_InitModel(&t4, &a4, o4);
+
+    AgentEvent start = {};
+    start.Kind = AgentEventKind::ToolStart;
+    start.ToolCallId = SVL("long");
+    start.ToolName = SVL("bash");
+    start.ToolArgsJson = SVL("{\"command\":\"long-output\"}");
+    Tui_AgentEvent(&t4, start);
+
+    char output[1700];
+    for (u32 i = 0; i < sizeof(output); i++) output[i] = (i == 20) ? '\x1b' : 'x';
+    ToolResult longResult = {};
+    longResult.Content = Array_Make<Content>(&a4, 1);
+    Array_Push(&longResult.Content, Content_Text(StrView{output, (u32)sizeof(output)}));
+
+    AgentEvent end = {};
+    end.Kind = AgentEventKind::ToolEnd;
+    end.ToolCallId = SVL("long");
+    end.Result = &longResult;
+    Tui_AgentEvent(&t4, end);
+
+    CHECK(t4.Model.Entries.Count == 1);
+    CHECK(t4.Model.Entries.Data[0].Tool.Preview.Length == 1500);
+    CHECK(!StrView_Contains(StrBuf_View(&t4.Model.Entries.Data[0].Tool.Preview), "\x1b"));
+
+    Tui_Stop(&t4);
+    ArenaRelease(&a4);
+  }
+
+  // Only the first visual row of a turn is a button. Continuation content does
+  // not hover or click, and dragging off the first row cancels activation.
+  {
+    Arena a5 = ArenaCreate();
+    TuiOpts o5;
+    o5.ModelName = SVL("m");
+    o5.Color = true;
+    Tui t5;
+    Tui_InitModel(&t5, &a5, o5);
+    LineModel_AddNotice(&t5.Model, EntryKind::Info, SVL("first row\ncontent row"));
+    u64 noticeId = t5.Model.Entries.Data[0].Id;
+    t5.LastTop = 0;
+    t5.LastPaneH = 2;
+
+    Feed(&t5, "\x1b[<35;2;1M");
+    CHECK(t5.HoveredEntryId == noticeId);
+    Feed(&t5, "\x1b[<35;2;2M");
+    CHECK(t5.HoveredEntryId == 0);
+
+    Feed(&t5, "\x1b[<0;2;1M\x1b[<32;2;2M\x1b[<32;2;1M\x1b[<0;2;1m");
+    CHECK(!LineModel_IsEntryCollapsed(&t5.Model, noticeId));
+    Feed(&t5, "\x1b[<0;2;1M\x1b[<0;2;1m");
+    CHECK(LineModel_IsEntryCollapsed(&t5.Model, noticeId));
+
+    Tui_Stop(&t5);
+    ArenaRelease(&a5);
+  }
+
+  // Tool completion can insert an expanded preview above a detached viewport;
+  // the logical top entry remains anchored.
+  {
+    Arena a6 = ArenaCreate();
+    TuiOpts o6;
+    o6.ModelName = SVL("m");
+    o6.Color = true;
+    Tui t6;
+    Tui_InitModel(&t6, &a6, o6);
+    LineModel_AddTool(&t6.Model, SVL("early"), SVL("bash"), SVL("{\"command\":\"echo\"}"));
+    u64 toolId = t6.Model.Entries.Data[0].Id;
+    CHECK(LineModel_ToggleEntry(&t6.Model, toolId));
+    for (u32 i = 0; i < 12; i++)
+      LineModel_AddNotice(&t6.Model, EntryKind::Info, SVL("later"));
+    u64 completionAnchorId = t6.Model.Entries.Data[6].Id;
+    u32 completionAnchorRow = 0;
+    CHECK(
+        LineModel_FindEntryRows(&t6.Model, completionAnchorId, &completionAnchorRow, nullptr));
+    t6.Top = completionAnchorRow;
+    t6.LastTop = completionAnchorRow;
+    t6.LastPaneH = 4;
+    t6.Follow = false;
+
+    ToolResult inserted = {};
+    inserted.Content = Array_Make<Content>(&a6, 1);
+    Array_Push(&inserted.Content, Content_Text(SVL("preview one\npreview two")));
+    AgentEvent finish = {};
+    finish.Kind = AgentEventKind::ToolEnd;
+    finish.ToolCallId = SVL("early");
+    finish.Result = &inserted;
+    Tui_AgentEvent(&t6, finish);
+    CHECK(LineModel_RowEntryId(&t6.Model, t6.Top) == completionAnchorId);
+
+    Tui_Stop(&t6);
+    ArenaRelease(&a6);
+  }
+
+  Tui_Stop(&t);
   ArenaRelease(&a);
 }

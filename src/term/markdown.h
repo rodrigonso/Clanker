@@ -8,4 +8,4 @@ void Markdown_SetColorEnabled(bool on);
 void Markdown_Render(Arena* a, StrView md, Array<SpanLine>* out);
 
 // Inline-only render of one line (no block handling); exposed for tests/reuse.
-void Markdown_Inline(Arena* a, StrView line, Style base, Array<Span>* out);
+void Markdown_Inline(StrView line, Style base, Array<Span>* out);

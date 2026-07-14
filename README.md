@@ -101,8 +101,10 @@ Keys: **Enter** sends · **Ctrl+J** / Alt+Enter inserts a newline · arrows move
 (↑/↓ across lines, then through history at the edges) · **Ctrl+←/→** word jump ·
 Home/End · **Ctrl+W/U/K** delete word / to start / to end · **mouse wheel**
 scrolls the transcript · type during a turn to **steer** · **Ctrl+C** interrupts a
-turn (or quits when idle) · **Ctrl+D** quits · **Ctrl+L** repaints. Honors
-`NO_COLOR`. Pasted multi-line text is inserted literally (bracketed paste).
+turn (or quits when idle) · hover or **left click** the first row of a transcript
+turn to highlight or collapse/expand it · **Ctrl+O** expands all tools when any
+is collapsed, otherwise collapses all · **Ctrl+D** quits · **Ctrl+L** repaints.
+Honors `NO_COLOR`. Pasted multi-line text is inserted literally (bracketed paste).
 
 When stdin/stdout isn't a TTY (pipes, redirected) or with `-p`, it falls back to
 a plain line renderer.
@@ -155,7 +157,7 @@ leaves seams for them):
 - Additional providers (OpenAI-compatible shape). OAuth is generic; each new
   provider is a config row + a small token-application branch.
 - Device-code OAuth (e.g. GitHub Copilot) — the loopback callback flow is done.
-- TUI niceties: mouse, visual-row (vs logical-line) Up/Down, syntax highlighting,
+- TUI niceties: visual-row (vs logical-line) Up/Down, syntax highlighting,
   images, undo. The full-screen differential TUI itself is done.
 - Compaction, on-disk sessions, skills, slash commands, and extensions.
 

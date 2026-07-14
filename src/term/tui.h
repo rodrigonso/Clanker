@@ -63,7 +63,15 @@ struct Tui {
   // Scroll.
   bool Follow;
   u32 Top;
+  u32 LastTop;
   u16 LastPaneH;
+
+  // Mouse interaction with the last rendered transcript viewport.
+  u64 HoveredEntryId;
+  u64 PressedEntryId;
+  u16 MouseX;
+  u16 MouseY;
+  bool HasMouse;
 
   // Streamed text staged for one re-render per frame.
   StrBuf Pending;

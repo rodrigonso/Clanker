@@ -25,26 +25,26 @@ void TestMarkdown() {
   // Inline: bold.
   {
     Array<Span> out = Array_Make<Span>(&a, 4);
-    Markdown_Inline(&a, SVL("a **b** c"), StyleDefault(), &out);
+    Markdown_Inline(SVL("a **b** c"), StyleDefault(), &out);
     CHECK(out.Count == 3);
     CHECK(SpanHas(&out, "b", ATTR_BOLD, 0));
   }
   // Inline: code (green fg 114).
   {
     Array<Span> out = Array_Make<Span>(&a, 4);
-    Markdown_Inline(&a, SVL("x `code` y"), StyleDefault(), &out);
+    Markdown_Inline(SVL("x `code` y"), StyleDefault(), &out);
     CHECK(SpanHas(&out, "code", 0, 114));
   }
   // Inline: italic.
   {
     Array<Span> out = Array_Make<Span>(&a, 4);
-    Markdown_Inline(&a, SVL("_em_"), StyleDefault(), &out);
+    Markdown_Inline(SVL("_em_"), StyleDefault(), &out);
     CHECK(SpanHas(&out, "em", ATTR_ITALIC, 0));
   }
   // Inline: link text underlined, URL dropped.
   {
     Array<Span> out = Array_Make<Span>(&a, 4);
-    Markdown_Inline(&a, SVL("see [t](http://u) end"), StyleDefault(), &out);
+    Markdown_Inline(SVL("see [t](http://u) end"), StyleDefault(), &out);
     CHECK(SpanHas(&out, "t", ATTR_UNDERLINE, 0));
   }
 

@@ -113,10 +113,11 @@ add_library(ma_term STATIC
   src/term/markdown.cpp
   src/term/sanitize.cpp
   src/term/linemodel.cpp
+  src/term/toolview.cpp
   src/term/lineedit.cpp
   src/term/tui.cpp
   ${MA_TERM_PLATFORM})
-target_link_libraries(ma_term PUBLIC ma_base ma_agent)
+target_link_libraries(ma_term PUBLIC ma_base ma_agent ma_json)
 
 # ---- llm providers -------------------------------------------------------
 add_library(ma_proto STATIC src/llm/anthropic_proto.cpp)

@@ -29,6 +29,8 @@ static void Clear(Key* out) {
   out->Ctrl = false;
   out->Alt = false;
   out->Shift = false;
+  out->MouseX = 0;
+  out->MouseY = 0;
 }
 
 // Decode one UTF-8 scalar at the buffer front. Returns false if incomplete.
@@ -138,19 +140,19 @@ static bool ParseCsi(KeyDecoder* d, Key* out) {
   return true;
 }
 
-// Parse an SGR mouse event: ESC [ < Cb ; Cx ; Cy (M|m). Wheel notches become
-// ScrollUp/ScrollDown; every other mouse event (click/release/drag/horizontal
-// wheel) is consumed and reported as None so it can't corrupt the stream.
+// Parse an SGR mouse event: ESC [ < Cb ; Cx ; Cy (M|m).
 static bool ParseMouse(KeyDecoder* d, Key* out) {
   // d->Buf[0] == ESC, d->Buf[1] == '[', d->Buf[2] == '<'
   u32 i = 3;
   u32 p[3] = {0, 0, 0};
+  bool have[3] = {false, false, false};
   u32 np = 0;
   while (i < d->Len) {
     char ch = d->Buf[i];
     if (ch >= '0' && ch <= '9') {
       u32 idx = np < 3 ? np : 2;
       p[idx] = p[idx] * 10 + (u32)(ch - '0');
+      have[idx] = true;
       i++;
     } else if (ch == ';') {
       if (np < 2) np++;
@@ -163,8 +165,17 @@ static bool ParseMouse(KeyDecoder* d, Key* out) {
   char fin = d->Buf[i];
   Clear(out);
   Consume(d, i + 1);
-  if (fin != 'M' && fin != 'm') return true;  // malformed -> ignore
+  if ((fin != 'M' && fin != 'm') || np != 2 || !have[0] || !have[1] || !have[2] ||
+      p[1] == 0 || p[2] == 0)
+    return true;
+
   u32 cb = p[0];
+  out->MouseX = (u16)MaMin(p[1] - 1, (u32)0xffff);
+  out->MouseY = (u16)MaMin(p[2] - 1, (u32)0xffff);
+  out->Shift = (cb & 0x04) != 0;
+  out->Alt = (cb & 0x08) != 0;
+  out->Ctrl = (cb & 0x10) != 0;
+
   if (cb & 0x40) {  // mouse wheel (bit 6 set); low 2 bits give direction
     u32 dir = cb & 0x03;
     if (dir == 0)
@@ -172,6 +183,10 @@ static bool ParseMouse(KeyDecoder* d, Key* out) {
     else if (dir == 1)
       out->Kind = KeyKind::ScrollDown;
     // dir 2/3 (horizontal wheel) -> leave as None
+  } else if (cb & 0x20) {
+    out->Kind = KeyKind::MouseMove;
+  } else if ((cb & 0x03) == 0) {
+    out->Kind = fin == 'm' ? KeyKind::MouseLeftUp : KeyKind::MouseLeftDown;
   }
   return true;
 }
@@ -212,6 +227,7 @@ bool KeyDecoder_Next(KeyDecoder* d, Key* out) {
       case 0x03: Consume(d, 1); out->Kind = KeyKind::CtrlC; return true;
       case 0x04: Consume(d, 1); out->Kind = KeyKind::CtrlD; return true;
       case 0x0c: Consume(d, 1); out->Kind = KeyKind::CtrlL; return true;
+      case 0x0f: Consume(d, 1); out->Kind = KeyKind::CtrlO; return true;
       case 0x15: Consume(d, 1); out->Kind = KeyKind::CtrlU; return true;
       case 0x0b: Consume(d, 1); out->Kind = KeyKind::CtrlK; return true;
       case 0x17: Consume(d, 1); out->Kind = KeyKind::CtrlW; return true;

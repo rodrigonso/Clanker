@@ -53,7 +53,7 @@ void Wake(Tui* t) {
 
 void FlushPending(Tui* t) {
   if (t->Pending.Length) {
-    LineModel_Append(&t->Model, StrBuf_View(&t->Pending));
+    LineModel_AppendAssistant(&t->Model, StrBuf_View(&t->Pending));
     StrBuf_Clear(&t->Pending);
   }
 }
@@ -113,10 +113,52 @@ void LayoutInput(StrView text, u32 cursor, u16 width, InputLayout* out) {
   if (out->RowCount < 256) out->Rows[out->RowCount++] = StrView{text.Data + rowStart, text.Length - rowStart};
 }
 
-void RenderSpanLine(Screen* s, u16 y, const SpanLine* ln, u16 cols) {
+Style HoverStyle(Style style) {
+  if (g_color)
+    style.Bg = 235;
+  else
+    style.Attr |= ATTR_DIM;
+  return style;
+}
+
+Style RowTextStyle(Style style, const SpanLine* line, bool hovered) {
+  if (hovered) return HoverStyle(style);
+  if (line->HasFill) style.Bg = line->Fill.Bg;
+  return style;
+}
+
+void RenderSpanLine(Screen* s, u16 y, const SpanLine* ln, u16 cols, bool hovered) {
+  if (cols && (ln->HasFill || hovered)) {
+    Style fill = hovered ? HoverStyle(StyleDefault()) : ln->Fill;
+    Screen_Fill(s, 0, y, (u16)(cols - 1), y, fill);
+  }
+
   u16 x = 0;
-  for (u32 i = 0; i < ln->Spans.Count && x < cols; i++)
-    x = Screen_PutText(s, x, y, ln->Spans.Data[i].Text, ln->Spans.Data[i].St, cols);
+  u16 leftLimit = cols;
+  u32 rightWidth = ln->HasRight ? TextWidth(ln->Right.Text) : 0;
+  bool drawRight = ln->HasRight && rightWidth < cols;
+  bool drawHidden = ln->HasHiddenContent && cols != 0;
+  if (drawHidden && drawRight && rightWidth + 2u >= cols) drawRight = false;
+  if (drawRight) leftLimit = (u16)(cols - rightWidth - 1u);
+
+  u16 hiddenX = cols;
+  if (drawHidden) {
+    hiddenX = drawRight ? (u16)(cols - rightWidth - 2u) : (u16)(cols - 1u);
+    if (hiddenX < leftLimit) leftLimit = hiddenX;
+  }
+
+  for (u32 i = 0; i < ln->Spans.Count && x < leftLimit; i++) {
+    Style style = RowTextStyle(ln->Spans.Data[i].St, ln, hovered);
+    x = Screen_PutText(s, x, y, ln->Spans.Data[i].Text, style, leftLimit);
+  }
+  if (drawHidden) {
+    Style style = RowTextStyle(St(244, ATTR_DIM), ln, hovered);
+    Screen_PutText(s, hiddenX, y, SVL("\xe2\x80\xa6"), style, (u16)(hiddenX + 1u));
+  }
+  if (drawRight) {
+    Style style = RowTextStyle(ln->Right.St, ln, hovered);
+    Screen_PutText(s, (u16)(cols - rightWidth), y, ln->Right.Text, style, cols);
+  }
 }
 
 void ComposeStatus(Tui* t, u16 statusY, u16 cols) {
@@ -178,19 +220,65 @@ void ComposeCwd(Tui* t, u16 cwdY, u16 cols) {
   }
 }
 
+struct ViewportAnchor {
+  u64 EntryId;
+  u32 EntryRowOffset;
+  u32 ScreenRow;
+};
+
+ViewportAnchor CaptureViewportAnchor(const Tui* t) {
+  ViewportAnchor anchor = {};
+  if (t->Follow) return anchor;
+
+  u32 count = LineModel_Count(&t->Model);
+  u32 maxTop = count > t->LastPaneH ? count - t->LastPaneH : 0;
+  u32 top = t->Top < maxTop ? t->Top : maxTop;
+  for (u32 row = top; row < count; row++) {
+    u64 id = LineModel_RowEntryId(&t->Model, row);
+    u32 first = 0;
+    if (id == 0 || !LineModel_FindEntryRows(&t->Model, id, &first, nullptr)) continue;
+    anchor.EntryId = id;
+    anchor.EntryRowOffset = row - first;
+    anchor.ScreenRow = row - top;
+    break;
+  }
+  return anchor;
+}
+
+void RestoreViewportAnchor(Tui* t, ViewportAnchor anchor) {
+  if (t->Follow) return;
+
+  u32 first = 0;
+  u32 count = 0;
+  if (anchor.EntryId != 0 &&
+      LineModel_FindEntryRows(&t->Model, anchor.EntryId, &first, &count)) {
+    u32 offset = anchor.EntryRowOffset < count ? anchor.EntryRowOffset : count - 1;
+    u32 target = first + offset;
+    t->Top = target > anchor.ScreenRow ? target - anchor.ScreenRow : 0;
+  }
+
+  u32 lineCount = LineModel_Count(&t->Model);
+  u32 maxTop = lineCount > t->LastPaneH ? lineCount - t->LastPaneH : 0;
+  if (t->Top > maxTop) t->Top = maxTop;
+}
+
 void Compose(Tui* t) {
   u16 cols = 0, rows = 0;
   Term_Size(&t->Trm, &cols, &rows);
   if (cols != t->Scr.Cols || rows != t->Scr.Rows) {
+    ViewportAnchor anchor = CaptureViewportAnchor(t);
     Screen_Resize(&t->Scr, cols, rows);
     LineModel_SetWidth(&t->Model, cols);
+    RestoreViewportAnchor(t, anchor);
   }
   if (cols < 4 || rows < 4) {
     Screen_BeginFrame(&t->Scr);
     return;
   }
 
+  ViewportAnchor pendingAnchor = CaptureViewportAnchor(t);
   FlushPending(t);
+  RestoreViewportAnchor(t, pendingAnchor);
   if (t->State != TuiState::Idle) t->Spinner++;
 
   // Input box layout.
@@ -226,10 +314,21 @@ void Compose(Tui* t) {
     u32 maxTop = count > paneH ? count - paneH : 0;
     top = t->Top > maxTop ? maxTop : t->Top;
   }
+  t->LastTop = top;
+  if (t->HasMouse && t->MouseY < paneH) {
+    const SpanLine* hoverLine = LineModel_At(&t->Model, top + t->MouseY);
+    t->HoveredEntryId = hoverLine && hoverLine->IsEntryStart ? hoverLine->EntryId : 0;
+  } else {
+    t->HoveredEntryId = 0;
+  }
+
   for (u16 r = 0; r < paneH; r++) {
     u32 idx = top + r;
     if (idx >= count) break;
-    RenderSpanLine(&t->Scr, r, LineModel_At(&t->Model, idx), cols);
+    const SpanLine* line = LineModel_At(&t->Model, idx);
+    bool hovered =
+        line->IsEntryStart && line->EntryId != 0 && line->EntryId == t->HoveredEntryId;
+    RenderSpanLine(&t->Scr, r, line, cols, hovered);
   }
 
   // Status.
@@ -257,7 +356,9 @@ void Compose(Tui* t) {
 void DoSubmit(Tui* t) {
   StrView line = LineEdit_Submit(&t->Edit);
   if (line.Length == 0) return;
-  LineModel_AddSimple(&t->Model, EntryKind::User, StrView{nullptr, 0}, line);
+  FlushPending(t);
+  if (t->Model.HasAssistant) LineModel_EndAssistant(&t->Model);
+  LineModel_AddUser(&t->Model, line, NowMillis());
   t->Follow = true;
   if (t->State != TuiState::Idle && t->Ag) {
     Agent_Steer(t->Ag, line);  // mid-turn submit -> steer the running agent
@@ -268,6 +369,19 @@ void DoSubmit(Tui* t) {
 }
 
 const i32 kWheelStep = 3;  // transcript rows per mouse-wheel notch
+
+u64 HitTestEntry(const Tui* t, u16 y) {
+  if (y >= t->LastPaneH) return 0;
+  const SpanLine* line = LineModel_At(&t->Model, t->LastTop + y);
+  return line && line->IsEntryStart ? line->EntryId : 0;
+}
+
+void UpdateMouse(Tui* t, const Key& key) {
+  t->MouseX = key.MouseX;
+  t->MouseY = key.MouseY;
+  t->HasMouse = true;
+  t->HoveredEntryId = HitTestEntry(t, key.MouseY);
+}
 
 void ScrollBy(Tui* t, i32 delta) {
   u32 count = LineModel_Count(&t->Model);
@@ -307,8 +421,31 @@ void HandleKey(Tui* t, const Key& k) {
     case KeyKind::CtrlU: LineEdit_KillToStart(&t->Edit); break;
     case KeyKind::CtrlK: LineEdit_KillToEnd(&t->Edit); break;
     case KeyKind::CtrlL: t->Scr.ForceRepaint = true; break;
+    case KeyKind::CtrlO: {
+      ViewportAnchor anchor = CaptureViewportAnchor(t);
+      if (LineModel_ToggleAllTools(&t->Model)) RestoreViewportAnchor(t, anchor);
+      break;
+    }
     case KeyKind::ScrollUp: ScrollBy(t, -kWheelStep); break;
     case KeyKind::ScrollDown: ScrollBy(t, kWheelStep); break;
+    case KeyKind::MouseMove:
+      UpdateMouse(t, k);
+      if (t->PressedEntryId != 0 && t->PressedEntryId != t->HoveredEntryId)
+        t->PressedEntryId = 0;
+      break;
+    case KeyKind::MouseLeftDown:
+      UpdateMouse(t, k);
+      t->PressedEntryId = t->HoveredEntryId;
+      break;
+    case KeyKind::MouseLeftUp: {
+      UpdateMouse(t, k);
+      u64 pressed = t->PressedEntryId;
+      t->PressedEntryId = 0;
+      if (pressed == 0 || pressed != t->HoveredEntryId) break;
+      ViewportAnchor anchor = CaptureViewportAnchor(t);
+      if (LineModel_ToggleEntry(&t->Model, pressed)) RestoreViewportAnchor(t, anchor);
+      break;
+    }
     case KeyKind::CtrlC:
       if (t->State != TuiState::Idle)
         t->AbortFlag = 1;
@@ -378,7 +515,10 @@ void RenderLoop(void* arg) {
 bool Tui_Start(Tui* t, Arena* mem, TuiOpts opts) {
   if (!Term_IsInteractive()) return false;
   Tui_InitModel(t, mem, opts);
-  if (!Term_Enter(&t->Trm)) return false;
+  if (!Term_Enter(&t->Trm)) {
+    LineModel_Release(&t->Model);
+    return false;
+  }
 
   u16 cols = 80, rows = 24;
   Term_Size(&t->Trm, &cols, &rows);
@@ -415,16 +555,18 @@ void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts) {
 }
 
 void Tui_Stop(Tui* t) {
-  if (!t->ThreadsUp) return;
-  Mutex_Lock(&t->Lock);
-  t->Stop = true;
-  Cond_Signal(&t->SubmitCv);
-  Cond_Signal(&t->RenderCv);
-  Mutex_Unlock(&t->Lock);
-  Thread_Join(&t->RenderThread);
-  Thread_Join(&t->InputThread);
-  t->ThreadsUp = false;
-  Term_Exit(&t->Trm);
+  if (t->ThreadsUp) {
+    Mutex_Lock(&t->Lock);
+    t->Stop = true;
+    Cond_Signal(&t->SubmitCv);
+    Cond_Signal(&t->RenderCv);
+    Mutex_Unlock(&t->Lock);
+    Thread_Join(&t->RenderThread);
+    Thread_Join(&t->InputThread);
+    t->ThreadsUp = false;
+    Term_Exit(&t->Trm);
+  }
+  LineModel_Release(&t->Model);
 }
 
 bool Tui_WaitForSubmit(Tui* t, StrView* out) {
@@ -456,6 +598,7 @@ void Tui_FeedInput(Tui* t, const char* data, u32 n) {
 void Tui_AgentEvent(void* user, const AgentEvent& ev) {
   Tui* t = (Tui*)user;
   Mutex_Lock(&t->Lock);
+  ViewportAnchor anchor = CaptureViewportAnchor(t);
   switch (ev.Kind) {
     case AgentEventKind::AgentStart:
       t->State = TuiState::Thinking;
@@ -468,31 +611,29 @@ void Tui_AgentEvent(void* user, const AgentEvent& ev) {
       // nothing to render yet. The assistant entry is begun lazily on its first
       // text delta below. This mirrors pi, where the assistant block stays empty
       // (invisible) until content streams, so tool-only turns show no header.
-      // User / tool-result messages are rendered via their own events.
       break;
     case AgentEventKind::MessageUpdate:
       if (ev.Stream.Kind == StreamEventKind::TextDelta) {
-        if (!t->Model.HasCur)
-          LineModel_Begin(&t->Model, EntryKind::Assistant, StrView{nullptr, 0}, true);
+        if (!t->Model.HasAssistant) LineModel_BeginAssistant(&t->Model);
         StrBuf_Append(&t->Pending, ev.Stream.Delta);
         t->State = TuiState::Streaming;
       }
       break;
     case AgentEventKind::MessageEnd:
       FlushPending(t);
-      if (t->Model.HasCur) LineModel_End(&t->Model);
+      if (t->Model.HasAssistant) LineModel_EndAssistant(&t->Model);
       if (ev.Msg) {
         t->Use = ev.Msg->Use;
         if (ev.Msg->Stop == StopReason::Error)
-          LineModel_AddSimple(&t->Model, EntryKind::Error, StrView{nullptr, 0}, ev.Msg->ErrorMessage);
+          LineModel_AddNotice(&t->Model, EntryKind::Error, ev.Msg->ErrorMessage);
         else if (ev.Msg->Stop == StopReason::Aborted)
-          LineModel_AddSimple(&t->Model, EntryKind::Info, StrView{nullptr, 0}, SVL("[interrupted]"));
+          LineModel_AddNotice(&t->Model, EntryKind::Info, SVL("[interrupted]"));
       }
       break;
     case AgentEventKind::ToolStart:
       FlushPending(t);
-      if (t->Model.HasCur) LineModel_End(&t->Model);
-      LineModel_AddSimple(&t->Model, EntryKind::ToolCall, ev.ToolName, Truncate(ev.ToolArgsJson, 200));
+      if (t->Model.HasAssistant) LineModel_EndAssistant(&t->Model);
+      LineModel_AddTool(&t->Model, ev.ToolCallId, ev.ToolName, ev.ToolArgsJson);
       t->State = TuiState::Tool;
       t->StateTool = ev.ToolName;
       break;
@@ -501,21 +642,26 @@ void Tui_AgentEvent(void* user, const AgentEvent& ev) {
       if (ev.Result && ev.Result->Content.Count > 0) preview = ev.Result->Content.Data[0].Text;
       StrBuf_Clear(&t->ToolText);
       Sanitize_Display(&t->ToolText, preview);  // strip \r / ANSI / control bytes from tool output
-      LineModel_AddSimple(&t->Model, EntryKind::ToolResult, StrView{nullptr, 0},
-                          Truncate(StrBuf_View(&t->ToolText), 1500));
+      StrView sanitized = StrBuf_View(&t->ToolText);
+      if (!LineModel_FinishTool(&t->Model, ev.ToolCallId, sanitized, Truncate(sanitized, 1500),
+                                ev.IsError)) {
+        LineModel_AddNotice(&t->Model, EntryKind::Error,
+                            SVL("tool result did not match a pending call"));
+      }
       t->State = TuiState::Thinking;
       break;
     }
     case AgentEventKind::AgentEnd:
       FlushPending(t);
-      if (t->Model.HasCur) LineModel_End(&t->Model);
+      if (t->Model.HasAssistant) LineModel_EndAssistant(&t->Model);
       t->State = TuiState::Idle;
-          break;
-        case AgentEventKind::QueueUpdate:
-          t->QueuedCount = ev.SteerCount + ev.FollowUpCount + ev.NextTurnCount;
-          break;
-        default: break;
-      }
-      Wake(t);
-      Mutex_Unlock(&t->Lock);
+      break;
+    case AgentEventKind::QueueUpdate:
+      t->QueuedCount = ev.SteerCount + ev.FollowUpCount + ev.NextTurnCount;
+      break;
+    default: break;
+  }
+  RestoreViewportAnchor(t, anchor);
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
 }

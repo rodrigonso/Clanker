@@ -19,11 +19,15 @@ enum class KeyKind : u8 {
   End,
   ScrollUp,    // mouse wheel up
   ScrollDown,  // mouse wheel down
+  MouseMove,
+  MouseLeftDown,
+  MouseLeftUp,
   WordLeft,
   WordRight,
   CtrlC,
   CtrlD,
   CtrlL,
+  CtrlO,
   CtrlU,
   CtrlK,
   CtrlW,
@@ -38,6 +42,8 @@ struct Key {
   bool Ctrl;
   bool Alt;
   bool Shift;
+  u16 MouseX;
+  u16 MouseY;
 };
 
 // Stateful byte-stream decoder. Push raw bytes, then pull complete keys.
