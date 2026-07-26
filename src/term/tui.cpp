@@ -490,6 +490,9 @@ void InputLoop(void* arg) {
   }
 }
 
+// Coalesce bursty stream deltas into frames at up to ~60fps.
+const u32 kMinFrameMs = 16;
+
 void RenderLoop(void* arg) {
   Tui* t = (Tui*)arg;
   for (;;) {
@@ -501,11 +504,17 @@ void RenderLoop(void* arg) {
     Compose(t);
     Mutex_Unlock(&t->Lock);
     Screen_Flush(&t->Scr);
+    u64 lastFrame = MonotonicMillis();
 
     Mutex_Lock(&t->Lock);
     u32 interval = (t->State != TuiState::Idle) ? 60 : 200;
     if (!t->Dirty && !t->Stop) Cond_WaitTimeout(&t->RenderCv, &t->Lock, interval);
     t->Dirty = false;
+    while (!t->Stop) {
+      u64 elapsed = MonotonicMillis() - lastFrame;
+      if (elapsed >= kMinFrameMs) break;
+      Cond_WaitTimeout(&t->RenderCv, &t->Lock, (u32)(kMinFrameMs - elapsed));
+    }
     Mutex_Unlock(&t->Lock);
   }
 }

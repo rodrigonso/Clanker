@@ -4,6 +4,17 @@
 #include "json/json.h"
 #include "llm/anthropic.h"
 
+static bool HasCacheBreakpoint(JsonValue* block) {
+  JsonValue* cc = Json_Get(block, "cache_control");
+  return cc != nullptr && StrView_EqCStr(Json_GetStr(cc, "type"), "ephemeral");
+}
+
+static JsonValue* LastContentBlock(JsonValue* msg) {
+  JsonValue* c = Json_Get(msg, "content");
+  CHECK(Json_IsArray(c) && c->Count > 0);
+  return c->Items[c->Count - 1];
+}
+
 static void TestBuildRequest() {
   Arena a = ArenaCreate();
   Model model = Anthropic_Model(SV("claude-x"));
@@ -31,11 +42,18 @@ static void TestBuildRequest() {
   CHECK(StrView_EqCStr(Json_GetStr(j, "model"), "claude-x"));
   CHECK(Json_GetInt(j, "max_tokens", 0) == 1000);
   CHECK(Json_GetBool(j, "stream", false) == true);
-  CHECK(StrView_EqCStr(Json_GetStr(j, "system"), "You are pi."));
+  JsonValue* sys = Json_Get(j, "system");
+  CHECK(Json_IsArray(sys) && sys->Count == 1);
+  CHECK(StrView_EqCStr(Json_GetStr(sys->Items[0], "text"), "You are pi."));
+  CHECK(HasCacheBreakpoint(sys->Items[0]));
 
   JsonValue* arr = Json_Get(j, "messages");
   CHECK(Json_IsArray(arr) && arr->Count == 3);
   CHECK(StrView_EqCStr(Json_GetStr(arr->Items[0], "role"), "user"));
+
+  CHECK(!HasCacheBreakpoint(LastContentBlock(arr->Items[0])));
+  CHECK(HasCacheBreakpoint(LastContentBlock(arr->Items[1])));
+  CHECK(HasCacheBreakpoint(LastContentBlock(arr->Items[2])));
 
   JsonValue* m1 = arr->Items[1];
   CHECK(StrView_EqCStr(Json_GetStr(m1, "role"), "assistant"));
@@ -141,11 +159,37 @@ static void TestBuildRequestOAuth() {
   CHECK(StrView_EqCStr(Json_GetStr(sys->Items[0], "text"),
                        "You are Claude Code, Anthropic's official CLI for Claude."));
   CHECK(StrView_EqCStr(Json_GetStr(sys->Items[1], "text"), "Be nice."));
+  CHECK(!HasCacheBreakpoint(sys->Items[0]));
+  CHECK(HasCacheBreakpoint(sys->Items[1]));
+  ArenaRelease(&a);
+}
+
+static void TestBuildRequestCachesToolsWithoutSystem() {
+  Arena a = ArenaCreate();
+  Model model = Anthropic_Model(SV("claude-x"));
+  Message msgs[1];
+  msgs[0] = Message_User(&a, SV("hi"));
+  ToolDef tools[2] = {{SV("read"), SV("Read a file"), SV("{\"type\":\"object\"}")},
+                      {SV("write"), SV("Write a file"), SV("{\"type\":\"object\"}")}};
+  LlmContext ctx = {};
+  ctx.Messages = msgs;
+  ctx.MessageCount = 1;
+  ctx.Tools = tools;
+  ctx.ToolCount = 2;
+  StrBuf body = Anthropic_BuildRequest(&a, &model, &ctx, nullptr);
+  JsonValue* j = Json_Parse(&a, StrBuf_View(&body));
+  CHECK(j != nullptr);
+  CHECK(Json_Get(j, "system") == nullptr);
+  JsonValue* tl = Json_Get(j, "tools");
+  CHECK(Json_IsArray(tl) && tl->Count == 2);
+  CHECK(!HasCacheBreakpoint(tl->Items[0]));
+  CHECK(HasCacheBreakpoint(tl->Items[1]));
   ArenaRelease(&a);
 }
 
 void TestAnthropic() {
   TestBuildRequest();
   TestBuildRequestOAuth();
+  TestBuildRequestCachesToolsWithoutSystem();
   TestParseSSE();
 }

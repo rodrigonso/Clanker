@@ -46,3 +46,5 @@ void Cond_Signal(CondVar* c) { WakeConditionVariable((CONDITION_VARIABLE*)c->Sto
 void Cond_Broadcast(CondVar* c) { WakeAllConditionVariable((CONDITION_VARIABLE*)c->Storage); }
 
 void Sleep_Ms(u32 ms) { Sleep(ms); }
+
+u64 MonotonicMillis() { return GetTickCount64(); }

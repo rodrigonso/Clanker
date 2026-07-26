@@ -55,3 +55,9 @@ void Sleep_Ms(u32 ms) {
   ts.tv_nsec = (long)(ms % 1000) * 1000000L;
   nanosleep(&ts, nullptr);
 }
+
+u64 MonotonicMillis() {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (u64)ts.tv_sec * 1000ull + (u64)(ts.tv_nsec / 1000000L);
+}

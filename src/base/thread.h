@@ -38,6 +38,9 @@ void Cond_Broadcast(CondVar* c);
 // Block the calling thread for at least `ms` milliseconds.
 void Sleep_Ms(u32 ms);
 
+// Monotonic milliseconds for measuring short intervals.
+u64 MonotonicMillis();
+
 // RAII-free scoped lock helper (no std). Use as: { ScopedLock _l(&m); ... }
 struct ScopedLock {
   Mutex* M;

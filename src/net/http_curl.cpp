@@ -1,9 +1,14 @@
 #include <curl/curl.h>
 
 #include "base/str.h"
+#include "base/thread.h"
 #include "net/http.h"
 
 namespace {
+
+// Reuse one serialized easy handle to retain connection, DNS, and TLS caches.
+CURL* g_curl;
+Mutex g_lock;
 
 struct WriteCtx {
   HttpStreamSink sink;
@@ -37,18 +42,33 @@ int XferCb(void* p, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
 
 }  // namespace
 
-void Http_GlobalInit() { curl_global_init(CURL_GLOBAL_DEFAULT); }
-void Http_GlobalShutdown() { curl_global_cleanup(); }
+void Http_GlobalInit() {
+  curl_global_init(CURL_GLOBAL_DEFAULT);
+  Mutex_Init(&g_lock);
+  g_curl = curl_easy_init();
+}
+
+void Http_GlobalShutdown() {
+  if (g_curl) {
+    curl_easy_cleanup(g_curl);
+    g_curl = nullptr;
+  }
+  Mutex_Destroy(&g_lock);
+  curl_global_cleanup();
+}
 
 HttpResult Http_Stream(Arena* arena, const HttpRequest* req, HttpStreamSink sink, volatile i32* abort) {
   HttpResult res = {};
   res.Status = -1;
 
-  CURL* curl = curl_easy_init();
-  if (!curl) {
+  if (!g_curl) {
     res.Error = SV("curl init failed");
     return res;
   }
+
+  Mutex_Lock(&g_lock);
+  CURL* curl = g_curl;
+  curl_easy_reset(curl);
 
   StrBuf url = StrBuf_Make(arena, req->Url.Length + 1);
   StrBuf_Append(&url, req->Url);
@@ -95,7 +115,7 @@ HttpResult Http_Stream(Arena* arena, const HttpRequest* req, HttpStreamSink sink
   }
 
   if (hdrs) curl_slist_free_all(hdrs);
-  curl_easy_cleanup(curl);
+  Mutex_Unlock(&g_lock);
   return res;
 }
 

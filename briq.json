@@ -1,3 +1,3 @@
 {
-  "run": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\build.ps1 -Config Debug -Target clank && build\\clank.exe"
+  "run": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"& '.\\build.ps1' -Config Debug -Target clank; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & '.\\build\\clank.exe'\""
 }

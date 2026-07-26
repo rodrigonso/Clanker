@@ -26,6 +26,13 @@ Model Anthropic_Model(StrView id) {
 
 // ---- request building ----------------------------------------------------
 
+// Attach a cache breakpoint to the JSON object just written.
+static void MarkCacheBreakpoint(StrBuf* b) {
+  FFI(b->Length == 0 || b->Data[b->Length - 1] != '}');
+  b->Length--;
+  StrBuf_AppendCStr(b, ",\"cache_control\":{\"type\":\"ephemeral\"}}");
+}
+
 static void ConcatText(StrBuf* out, const Message* m) {
   for (u32 i = 0; i < m->Content.Count; i++) {
     const Content* c = &m->Content.Data[i];
@@ -100,6 +107,7 @@ StrBuf Anthropic_BuildRequest(Arena* arena, const Model* model, const LlmContext
   // OAuth (subscription) tokens require the Claude Code identity as the first
   // system block, with the caller's system prompt appended after it.
   bool isOAuth = opt && StrView_Contains(opt->ApiKey, "sk-ant-oat");
+  bool haveSystem = isOAuth || ctx->SystemPrompt.Length != 0;
   if (isOAuth) {
     StrBuf_AppendCStr(&b, ",\"system\":[{\"type\":\"text\",\"text\":");
     Json_WriteString(&b, SVL("You are Claude Code, Anthropic's official CLI for Claude."));
@@ -109,10 +117,16 @@ StrBuf Anthropic_BuildRequest(Arena* arena, const Model* model, const LlmContext
       Json_WriteString(&b, ctx->SystemPrompt);
       StrBuf_AppendChar(&b, '}');
     }
+    // System follows tools in Anthropic's rendered prefix, so this caches both.
+    MarkCacheBreakpoint(&b);
     StrBuf_AppendChar(&b, ']');
   } else if (ctx->SystemPrompt.Length) {
-    StrBuf_AppendCStr(&b, ",\"system\":");
+    // Block form gives cache_control an object to attach to.
+    StrBuf_AppendCStr(&b, ",\"system\":[{\"type\":\"text\",\"text\":");
     Json_WriteString(&b, ctx->SystemPrompt);
+    StrBuf_AppendChar(&b, '}');
+    MarkCacheBreakpoint(&b);
+    StrBuf_AppendChar(&b, ']');
   }
 
   if (ctx->ToolCount) {
@@ -129,8 +143,21 @@ StrBuf Anthropic_BuildRequest(Arena* arena, const Model* model, const LlmContext
       else
         StrBuf_AppendCStr(&b, "{\"type\":\"object\",\"properties\":{}}");
       StrBuf_AppendChar(&b, '}');
+      // With no system prompt the tool list is the entire static prefix, so
+      // anchor the breakpoint on its last entry instead.
+      if (!haveSystem && i + 1 == ctx->ToolCount) MarkCacheBreakpoint(&b);
     }
     StrBuf_AppendChar(&b, ']');
+  }
+
+  // Cache the two most recent emitted messages. Consecutive tool results emit
+  // as one message, so walk backward to the start of each group.
+  u32 markFrom = ctx->MessageCount;
+  for (u32 marked = 0; marked < 2 && markFrom; marked++) {
+    markFrom--;
+    while (markFrom && ctx->Messages[markFrom].Kind == Role::ToolResult &&
+           ctx->Messages[markFrom - 1].Kind == Role::ToolResult)
+      markFrom--;
   }
 
   StrBuf_AppendCStr(&b, ",\"messages\":[");
@@ -138,6 +165,7 @@ StrBuf Anthropic_BuildRequest(Arena* arena, const Model* model, const LlmContext
   u32 i = 0;
   while (i < ctx->MessageCount) {
     const Message* m = &ctx->Messages[i];
+    bool markThis = i >= markFrom;
     if (m->Kind == Role::ToolResult) {
       if (!firstMsg) StrBuf_AppendChar(&b, ',');
       firstMsg = false;
@@ -158,6 +186,7 @@ StrBuf Anthropic_BuildRequest(Arena* arena, const Model* model, const LlmContext
         StrBuf_AppendChar(&b, '}');
         i++;
       }
+      if (markThis) MarkCacheBreakpoint(&b);
       StrBuf_AppendCStr(&b, "]}");
       continue;
     }
@@ -171,6 +200,7 @@ StrBuf Anthropic_BuildRequest(Arena* arena, const Model* model, const LlmContext
       StrBuf_AppendCStr(&b, "{\"role\":\"assistant\",\"content\":[");
       WriteAssistantContent(&b, m);
     }
+    if (markThis) MarkCacheBreakpoint(&b);
     StrBuf_AppendCStr(&b, "]}");
     i++;
   }
