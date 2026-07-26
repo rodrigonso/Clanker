@@ -644,7 +644,8 @@ bool Regex_Search(const Regex* re, StrView text, u32* start, u32* len) {
     ctx.Re = re;
     ctx.Text = text;
     ctx.Steps = 0;
-    ctx.StepLimit = 100000u + MaMin(text.Length, 100000u) * 100u + MaMin(re->PatternLength, 100000u) * 100u;
+    ctx.StepLimit =
+        100000u + ClankMin(text.Length, 100000u) * 100u + ClankMin(re->PatternLength, 100000u) * 100u;
     ctx.Depth = 0;
     ctx.DepthLimit = 2048;
 

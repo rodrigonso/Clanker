@@ -8,8 +8,8 @@
 
 static void TestStore() {
   Arena a = ArenaCreate();
-  StrView path = SVL("ma_auth_test.json");
-  remove("ma_auth_test.json");
+  StrView path = SVL("clank_auth_test.json");
+  remove("clank_auth_test.json");
 
   Credential ak = {};
   ak.Kind = CredKind::ApiKey;
@@ -52,7 +52,7 @@ static void TestStore() {
   CHECK(!AuthStore_Read(&a, path, SVL("openai"), &gone));
   CHECK(AuthStore_Read(&a, path, SVL("anthropic"), &r2));
 
-  remove("ma_auth_test.json");
+  remove("clank_auth_test.json");
   ArenaRelease(&a);
 }
 

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(mini_agent CXX)
+project(Clank CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,40 +26,40 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # ---- base ----------------------------------------------------------------
 if(WIN32)
-  set(MA_THREAD_SRC src/base/thread_win.cpp)
+  set(CLANK_THREAD_SRC src/base/thread_win.cpp)
 else()
-  set(MA_THREAD_SRC src/base/thread_posix.cpp)
+  set(CLANK_THREAD_SRC src/base/thread_posix.cpp)
 endif()
-add_library(ma_base STATIC
+add_library(clank_base STATIC
   src/base/arena.cpp
   src/base/sysinfo.cpp
-  ${MA_THREAD_SRC})
-target_include_directories(ma_base PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  ${CLANK_THREAD_SRC})
+target_include_directories(clank_base PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 if(WIN32)
-  target_link_libraries(ma_base PUBLIC psapi)
+  target_link_libraries(clank_base PUBLIC psapi)
 else()
-  target_link_libraries(ma_base PUBLIC pthread)
+  target_link_libraries(clank_base PUBLIC pthread)
 endif()
 
 # ---- json ----------------------------------------------------------------
-add_library(ma_json STATIC
+add_library(clank_json STATIC
   src/json/json.cpp)
-target_link_libraries(ma_json PUBLIC ma_base)
+target_link_libraries(clank_json PUBLIC clank_base)
 
 # ---- crypto --------------------------------------------------------------
-add_library(ma_crypto STATIC
+add_library(clank_crypto STATIC
   src/crypto/sha256.cpp
   src/crypto/random.cpp)
-target_link_libraries(ma_crypto PUBLIC ma_base)
+target_link_libraries(clank_crypto PUBLIC clank_base)
 if(WIN32)
-  target_link_libraries(ma_crypto PUBLIC bcrypt)
+  target_link_libraries(clank_crypto PUBLIC bcrypt)
 endif()
 
 # ---- agent ---------------------------------------------------------------
-add_library(ma_agent STATIC
+add_library(clank_agent STATIC
   src/agent/agent.cpp
   src/llm/retry.cpp)
-target_link_libraries(ma_agent PUBLIC ma_base)
+target_link_libraries(clank_agent PUBLIC clank_base)
 
 # ---- libcurl (vendored via FetchContent) ---------------------------------
 include(FetchContent)
@@ -87,25 +87,25 @@ FetchContent_Declare(curl
   GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(curl)
 
-add_library(ma_http STATIC src/net/http_curl.cpp)
-target_link_libraries(ma_http PUBLIC ma_base CURL::libcurl)
+add_library(clank_http STATIC src/net/http_curl.cpp)
+target_link_libraries(clank_http PUBLIC clank_base CURL::libcurl)
 
 # ---- loopback (OAuth callback server + browser opener) -------------------
-add_library(ma_loopback STATIC
+add_library(clank_loopback STATIC
   src/net/loopback.cpp
   src/net/browser.cpp)
-target_link_libraries(ma_loopback PUBLIC ma_base)
+target_link_libraries(clank_loopback PUBLIC clank_base)
 if(WIN32)
-  target_link_libraries(ma_loopback PUBLIC ws2_32 shell32)
+  target_link_libraries(clank_loopback PUBLIC ws2_32 shell32)
 endif()
 
 # ---- term (full-screen TUI) ----------------------------------------------
 if(WIN32)
-  set(MA_TERM_PLATFORM src/term/term_win.cpp)
+  set(CLANK_TERM_PLATFORM src/term/term_win.cpp)
 else()
-  set(MA_TERM_PLATFORM src/term/term_posix.cpp)
+  set(CLANK_TERM_PLATFORM src/term/term_posix.cpp)
 endif()
-add_library(ma_term STATIC
+add_library(clank_term STATIC
   src/term/term.cpp
   src/term/keys.cpp
   src/term/cell.cpp
@@ -116,25 +116,25 @@ add_library(ma_term STATIC
   src/term/toolview.cpp
   src/term/lineedit.cpp
   src/term/tui.cpp
-  ${MA_TERM_PLATFORM})
-target_link_libraries(ma_term PUBLIC ma_base ma_agent ma_json)
+  ${CLANK_TERM_PLATFORM})
+target_link_libraries(clank_term PUBLIC clank_base clank_agent clank_json)
 
 # ---- llm providers -------------------------------------------------------
-add_library(ma_proto STATIC src/llm/anthropic_proto.cpp)
-target_link_libraries(ma_proto PUBLIC ma_json)
+add_library(clank_proto STATIC src/llm/anthropic_proto.cpp)
+target_link_libraries(clank_proto PUBLIC clank_json)
 
-add_library(ma_anthropic STATIC src/llm/anthropic.cpp)
-target_link_libraries(ma_anthropic PUBLIC ma_proto ma_http)
+add_library(clank_anthropic STATIC src/llm/anthropic.cpp)
+target_link_libraries(clank_anthropic PUBLIC clank_proto clank_http)
 
 # ---- auth (api keys + OAuth) ---------------------------------------------
-add_library(ma_auth STATIC
+add_library(clank_auth STATIC
   src/auth/store.cpp
   src/auth/oauth.cpp
   src/auth/resolve.cpp)
-target_link_libraries(ma_auth PUBLIC ma_json ma_crypto ma_http ma_loopback)
+target_link_libraries(clank_auth PUBLIC clank_json clank_crypto clank_http clank_loopback)
 
 # ---- tools ---------------------------------------------------------------
-add_library(ma_tools STATIC
+add_library(clank_tools STATIC
   src/tools/exec.cpp
   src/tools/fs.cpp
   src/tools/truncate.cpp
@@ -149,18 +149,18 @@ add_library(ma_tools STATIC
   src/tools/find.cpp
   src/tools/grep.cpp
   src/tools/bash.cpp)
-target_link_libraries(ma_tools PUBLIC ma_json ma_agent)
+target_link_libraries(clank_tools PUBLIC clank_json clank_agent)
 
 # ---- executables ---------------------------------------------------------
-add_executable(mini-agent src/app/main.cpp)
-target_link_libraries(mini-agent PRIVATE ma_anthropic ma_tools ma_agent ma_auth ma_term)
+add_executable(clank src/app/main.cpp)
+target_link_libraries(clank PRIVATE clank_anthropic clank_tools clank_agent clank_auth clank_term)
 
-add_executable(ma_http_smoke src/app/http_smoke.cpp)
-target_link_libraries(ma_http_smoke PRIVATE ma_http)
+add_executable(clank_http_smoke src/app/http_smoke.cpp)
+target_link_libraries(clank_http_smoke PRIVATE clank_http)
 
 # ---- tests ---------------------------------------------------------------
 enable_testing()
-add_executable(ma_tests
+add_executable(clank_tests
   tests/test_main.cpp
   tests/test_base.cpp
   tests/test_types.cpp
@@ -180,5 +180,5 @@ add_executable(ma_tests
   tests/test_linemodel.cpp
   tests/test_lineedit.cpp
   tests/test_tui.cpp)
-target_link_libraries(ma_tests PRIVATE ma_proto ma_agent ma_tools ma_crypto ma_auth ma_loopback ma_term)
-add_test(NAME unit COMMAND ma_tests)
+target_link_libraries(clank_tests PRIVATE clank_proto clank_agent clank_tools clank_crypto clank_auth clank_loopback clank_term)
+add_test(NAME unit COMMAND clank_tests)

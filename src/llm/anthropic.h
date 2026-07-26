@@ -38,5 +38,5 @@ void AnthropicParse_Feed(AnthropicParse* st, StrView chunk);
 // Build a Model entry with Anthropic defaults (base URL, context window).
 Model Anthropic_Model(StrView id);
 
-// Provider that streams over HTTP. Requires libcurl (ma_http).
+// Provider that streams over HTTP. Requires libcurl (clank_http).
 Provider Anthropic_Provider();

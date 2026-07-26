@@ -135,8 +135,28 @@ StrView AuthStore_DefaultPath(Arena* a) {
 #endif
   StrBuf p = StrBuf_Make(a, 128);
   StrBuf_AppendCStr(&p, (home && *home) ? home : ".");
-  StrBuf_AppendCStr(&p, "/.mini-agent/auth.json");
-  return StrBuf_View(&p);
+  StrBuf_AppendCStr(&p, "/.clank/auth.json");
+  StrView path = StrBuf_View(&p);
+
+  FILE* current = fopen(StrBuf_CStr(&p), "rb");
+  if (current) {
+    fclose(current);
+    return path;
+  }
+
+  StrBuf legacy = StrBuf_Make(a, 128);
+  StrBuf_AppendCStr(&legacy, (home && *home) ? home : ".");
+  StrBuf_AppendCStr(&legacy, "/.mini-agent/auth.json");
+  FILE* old = fopen(StrBuf_CStr(&legacy), "rb");
+  if (!old) return path;
+  fclose(old);
+
+  EnsureParentDir(a, path);
+  if (rename(StrBuf_CStr(&legacy), StrBuf_CStr(&p)) == 0) return path;
+
+  fprintf(stderr, "warning: failed to migrate credentials to %s; using %s\n", StrBuf_CStr(&p),
+          StrBuf_CStr(&legacy));
+  return StrBuf_View(&legacy);
 }
 
 bool AuthStore_Read(Arena* a, StrView path, StrView providerId, Credential* out) {

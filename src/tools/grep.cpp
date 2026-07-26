@@ -61,7 +61,7 @@ static bool Grep_MatchesLine(const GrepState* s, StrView line) {
 }
 
 static bool Grep_IsBinary(StrView bytes) {
-  u32 n = MaMin(bytes.Length, 8192u);
+  u32 n = ClankMin(bytes.Length, 8192u);
   for (u32 i = 0; i < n; i++) {
     if (bytes.Data[i] == '\0') return true;
   }
@@ -115,7 +115,7 @@ static void Grep_AppendMatchesForFile(GrepState* s, StrView display, const Array
   for (u32 i = 0; i < matches->Count; i++) {
     u32 matchLine = matches->Data[i];
     u32 first = matchLine > s->Context ? matchLine - s->Context : 1u;
-    u32 last = MaMin(lines->Count, matchLine + s->Context);
+    u32 last = ClankMin(lines->Count, matchLine + s->Context);
     for (u32 lineNo = first; lineNo <= last; lineNo++) {
       if (lineNo <= lastEmitted) continue;
       bool isMatch = Grep_LineNumberInMatches(matches, lineNo);

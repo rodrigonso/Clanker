@@ -9,6 +9,6 @@
 //
 // Matching is case-insensitive substring (pi uses regex; the patterns here are
 // literal alternatives covering the same cases). Pass the assistant error text
-// (mini-agent's Message.ErrorMessage, which already includes "HTTP <status>" and
+// (clank's Message.ErrorMessage, which already includes "HTTP <status>" and
 // the response body). Returns false for empty input.
 bool IsRetryableError(StrView errorMessage);

@@ -48,7 +48,7 @@ typedef void (*OAuthReadyFn)(void* user, StrView authUrl);
 // redirect port (127.0.0.1), invokes `onReady` (open browser / print), then
 // blocks until the code arrives, the user aborts (*abort != 0), or an error
 // occurs. On success fills `out` and returns true; otherwise writes `err`.
-// Requires ma_loopback. `abort` may be null.
+// Requires clank_loopback. `abort` may be null.
 bool OAuth_WaitForCallback(Arena* arena, const OAuthConfig* cfg, StrView authUrl, StrView expectedState,
                            OAuthCode* out, volatile i32* abort, StrBuf* err, OAuthReadyFn onReady,
                            void* readyUser);
@@ -56,7 +56,7 @@ bool OAuth_WaitForCallback(Arena* arena, const OAuthConfig* cfg, StrView authUrl
 // Parse a token-endpoint JSON response into an OAuth credential (testable offline).
 bool OAuth_ParseTokenResponse(Arena* arena, StrView json, Credential* out);
 
-// Network calls (require ma_http). Fill `out` and return true, else write `err`.
+// Network calls (require clank_http). Fill `out` and return true, else write `err`.
 bool OAuth_ExchangeCode(Arena* arena, const OAuthConfig* cfg, StrView code, StrView state, StrView verifier,
                         Credential* out, StrBuf* err);
 bool OAuth_Refresh(Arena* arena, const OAuthConfig* cfg, StrView refresh, Credential* out, StrBuf* err);

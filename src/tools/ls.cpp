@@ -13,7 +13,7 @@ static char Ls_LowerAscii(char c) {
 static int Ls_CompareEntries(const void* a, const void* b) {
   const FsEntry* ea = (const FsEntry*)a;
   const FsEntry* eb = (const FsEntry*)b;
-  u32 n = MaMin(ea->Name.Length, eb->Name.Length);
+  u32 n = ClankMin(ea->Name.Length, eb->Name.Length);
   for (u32 i = 0; i < n; i++) {
     char ca = Ls_LowerAscii(ea->Name.Data[i]);
     char cb = Ls_LowerAscii(eb->Name.Data[i]);

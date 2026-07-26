@@ -6,7 +6,7 @@
 // Credential storage in a JSON file keyed by provider id, one credential each.
 // Writes are atomic (temp + rename) with restrictive perms on POSIX.
 
-// Default path: <home>/.mini-agent/auth.json
+// Default path: <home>/.clank/auth.json. Migrates the legacy mini-agent path.
 StrView AuthStore_DefaultPath(Arena* arena);
 
 bool AuthStore_Read(Arena* arena, StrView path, StrView providerId, Credential* out);

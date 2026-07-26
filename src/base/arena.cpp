@@ -19,9 +19,9 @@ static void ArenaCommitTo(Arena* a, usize targetUsed) {
   if (target <= a->Committed) return;
 #if defined(_WIN32)
   void* p = VirtualAlloc(a->Base + a->Committed, target - a->Committed, MEM_COMMIT, PAGE_READWRITE);
-  if (!p) MA_TRAP();
+  if (!p) CLANK_TRAP();
 #else
-  if (mprotect(a->Base + a->Committed, target - a->Committed, PROT_READ | PROT_WRITE) != 0) MA_TRAP();
+  if (mprotect(a->Base + a->Committed, target - a->Committed, PROT_READ | PROT_WRITE) != 0) CLANK_TRAP();
 #endif
   a->Committed = target;
 }
@@ -31,10 +31,10 @@ Arena ArenaCreate(usize reserveBytes) {
   usize reserve = RoundUp(reserveBytes, ARENA_COMMIT_CHUNK);
 #if defined(_WIN32)
   a.Base = (byte*)VirtualAlloc(nullptr, reserve, MEM_RESERVE, PAGE_READWRITE);
-  if (!a.Base) MA_TRAP();
+  if (!a.Base) CLANK_TRAP();
 #else
   void* p = mmap(nullptr, reserve, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  if (p == MAP_FAILED) MA_TRAP();
+  if (p == MAP_FAILED) CLANK_TRAP();
   a.Base = (byte*)p;
 #endif
   a.Reserved = reserve;

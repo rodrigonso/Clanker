@@ -1,25 +1,25 @@
-# Feature parity: mini-agent vs. pi
+# Feature parity: Clank vs. pi
 
 Tracks how much of the upstream [`earendil-works/pi`](https://github.com/earendil-works/pi)
-agent harness `mini-agent` currently reimplements.
+agent harness Clank currently reimplements.
 
 | | |
 |---|---|
 | Comparison date | 2026-06-27 |
 | pi ref | `f2e9d75` (pi-coding-agent `0.80.2`) |
-| mini-agent ref | `69e8680` |
+| Clank ref | `69e8680` |
 
-`mini-agent` deliberately reimplements only the **memory-first core**. This
+Clank deliberately reimplements only the **memory-first core**. This
 document is the running gap list — it is not a roadmap commitment.
 
 **Legend:** ✅ functional parity · 🟡 partial · ❌ missing
 
 ## Architecture mapping
 
-pi is a 5-package TypeScript monorepo. mini-agent collapses the first four into
+pi is a 5-package TypeScript monorepo. Clank collapses the first four into
 its module tree; the orchestrator has no equivalent.
 
-| pi package | role | mini-agent | status |
+| pi package | role | Clank | status |
 |---|---|---|---|
 | `ai` | LLM API: 60+ providers, 9 wire protocols, auth, model registry | `src/llm`, `src/net`, `src/auth` | 🟡 |
 | `agent` | harness: loop, sessions, compaction, skills, system prompt | `src/agent` | 🟡 |
@@ -54,7 +54,7 @@ its module tree; the orchestrator has no equivalent.
 
 ## Tools
 
-| pi tool | mini-agent | notes |
+| pi tool | Clank | notes |
 |---|---|---|
 | `read` | ✅ | `offset` / `limit`, verbatim text, pi-style head truncation, image content blocks; no image auto-resize |
 | `bash` | ✅ | `timeout` in **seconds**, process-tree kill, tail truncation with full-output temp log; no live UI streaming yet |
@@ -71,7 +71,7 @@ its module tree; the orchestrator has no equivalent.
 |---|---|---|
 | API key (env + stored) | ✅ | |
 | Anthropic OAuth (PKCE + loopback callback) | ✅ | `sk-ant-oat` → Bearer + claude-code beta headers |
-| Credential store (`~/.mini-agent/auth.json`, 0600, atomic) · per-request refresh | ✅ | |
+| Credential store (`~/.clank/auth.json`, 0600, atomic) · per-request refresh | ✅ | |
 | Device-code OAuth (GitHub Copilot, OpenAI Codex) | ❌ | |
 | Cloudflare auth · Google Vertex ADC · Bedrock ambient creds | ❌ | |
 | Multi-provider env-key map | ❌ | only `ANTHROPIC_API_KEY` wired |
@@ -80,7 +80,7 @@ its module tree; the orchestrator has no equivalent.
 
 | subsystem | status | notes |
 |---|---|---|
-| System prompt assembly (date, cwd, tool docs, `AGENTS.md`/`CLAUDE.md` project context) | ❌ | mini-agent ships a static one-line system prompt |
+| System prompt assembly (date, cwd, tool docs, `AGENTS.md`/`CLAUDE.md` project context) | ❌ | Clank ships a static one-line system prompt |
 | Prompt templates (`$1`, `$@`, `$ARGUMENTS`) | ❌ | |
 | Sessions / persistence (JSONL, resume, fork, branch, tree, listing, naming) | ❌ | |
 | Compaction (auto + manual, branch summarization) | ❌ | |

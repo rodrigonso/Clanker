@@ -110,7 +110,7 @@ static void ReportOutcome(Agent* ag) {
 }
 
 static void MaybeReportMem() {
-  if (getenv("MA_PRINT_MEM")) {
+  if (getenv("CLANK_PRINT_MEM")) {
     u64 b = PeakRssBytes();
     fprintf(stderr, "[peak RSS: %llu KB]\n", (unsigned long long)(b / 1024));
   }
@@ -172,8 +172,8 @@ static int RunLogin(Arena* arena, StrView authPath, const char* provider, bool a
 
 static void PrintHelp() {
   printf(
-      "mini-agent - a tiny memory-efficient coding agent\n\n"
-      "Usage: mini-agent [options]\n"
+      "Clank - a tiny memory-efficient coding agent\n\n"
+      "Usage: clank [options]\n"
       "  -m <model>        Anthropic model id (default: claude-sonnet-4-6)\n"
       "  -p <prompt>       Run a single prompt and exit (print mode)\n"
       "  --login [prov]    OAuth login in your browser (default provider: anthropic)\n"
@@ -188,7 +188,7 @@ static void PrintHelp() {
 
 // Plain line REPL (non-TTY / fallback): the original fgets loop.
 static void RunPlainRepl(Agent* ag, bool faux, Faux* fauxState, const char* modelId) {
-  printf("mini-agent (%s%s). Ctrl+C interrupts a turn, /exit quits.\n", faux ? "faux demo" : "model: ",
+  printf("Clank (%s%s). Ctrl+C interrupts a turn, /exit quits.\n", faux ? "faux demo" : "model: ",
          faux ? "" : modelId);
   char line[8192];
   for (;;) {
@@ -285,7 +285,7 @@ int main(int argc, char** argv) {
     StrView probe = Auth_ResolveToken(&arena, authPath, SV("anthropic"), "ANTHROPIC_API_KEY");
     if (probe.Length == 0) {
       fprintf(stderr,
-              "error: no credentials. Run `mini-agent --login anthropic` or set "
+              "error: no credentials. Run `clank --login anthropic` or set "
               "ANTHROPIC_API_KEY (or use --faux for an offline demo)\n");
       Http_GlobalShutdown();
       ArenaRelease(&arena);
@@ -295,7 +295,7 @@ int main(int argc, char** argv) {
 
   Model model = Anthropic_Model(SV(modelId));
   Agent ag = Agent_Make(&arena, model,
-                        SV("You are mini-agent, a concise coding assistant. You have these tools: "
+                        SV("You are Clank, a concise coding assistant. You have these tools: "
                            "read, write, edit, ls, find, grep, and bash. Use them when they help "
                            "answer the user."));
   Agent_InitQueues(&ag);

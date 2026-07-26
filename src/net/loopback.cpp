@@ -5,14 +5,14 @@
 #if defined(_WIN32)
 #include <winsock2.h>
 #include <ws2tcpip.h>
-typedef int ma_socklen_t;
+typedef int clank_socklen_t;
 #else
 #include <netinet/in.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
 typedef int SOCKET;
-typedef socklen_t ma_socklen_t;
+typedef socklen_t clank_socklen_t;
 #define INVALID_SOCKET (-1)
 #endif
 
@@ -198,7 +198,7 @@ bool Loopback_Open(LoopbackServer* s, u16 port, StrBuf* err) {
   }
   sockaddr_in bound;
   memset(&bound, 0, sizeof(bound));
-  ma_socklen_t bl = sizeof(bound);
+  clank_socklen_t bl = sizeof(bound);
   if (getsockname(fd, (sockaddr*)&bound, &bl) == 0)
     s->Port = ntohs(bound.sin_port);
   else

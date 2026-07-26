@@ -1,7 +1,7 @@
 #requires -Version 5.0
 <#
 .SYNOPSIS
-    Configures and builds mini-agent with CMake + Ninja using the Visual Studio toolchain.
+    Configures and builds Clank with CMake + Ninja using the Visual Studio toolchain.
 
 .DESCRIPTION
     Locates a Visual Studio installation (via vswhere), sets up the vcvars64
@@ -15,20 +15,20 @@
     Build directory (default: build), relative to the repo root unless absolute.
 
 .PARAMETER Target
-    Optional specific target to build (e.g. mini-agent, ma_tests). Builds all by default.
+    Optional specific target to build (e.g. clank, clank_tests). Builds all by default.
 
 .PARAMETER Clean
     Delete the build directory before configuring for a fresh build.
 
 .PARAMETER Test
-    Run the unit test suite (ma_tests) after a successful build.
+    Run the unit test suite (clank_tests) after a successful build.
 
 .EXAMPLE
     .\build.ps1
 .EXAMPLE
     .\build.ps1 -Config Debug -Test
 .EXAMPLE
-    .\build.ps1 -Target mini-agent -Clean
+    .\build.ps1 -Target clank -Clean
 #>
 [CmdletBinding()]
 param(
@@ -108,9 +108,9 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "Build succeeded -> $buildPath" -ForegroundColor Green
 
 if ($Test) {
-    $tests = Join-Path $buildPath 'ma_tests.exe'
+    $tests = Join-Path $buildPath 'clank_tests.exe'
     if (-not (Test-Path $tests)) {
-        Write-Host "ma_tests.exe not found (was it built?). Run without -Target or build the ma_tests target." -ForegroundColor Red
+        Write-Host "clank_tests.exe not found (was it built?). Run without -Target or build the clank_tests target." -ForegroundColor Red
         exit 1
     }
     Write-Host "Running tests..." -ForegroundColor Cyan

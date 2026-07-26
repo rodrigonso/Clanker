@@ -86,7 +86,7 @@ static bool ReadExec(void* ctx, Arena* arena, StrView id, StrView argsJson, vola
   fclose(f);
 
   StrView bytes = StrBuf_View(&file);
-  u32 sniffLen = MaMin(bytes.Length, 16u);
+  u32 sniffLen = ClankMin(bytes.Length, 16u);
   StrView mime = Img_SniffMime((const byte*)bytes.Data, sniffLen);
   if (mime.Length == 0) mime = Img_MimeForExt(Fs_Ext(path));
   if (mime.Length != 0) {

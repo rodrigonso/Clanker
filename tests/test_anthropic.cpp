@@ -105,7 +105,7 @@ static void TestParseSSE() {
 
   StrView all = SV(sse);
   for (u32 off = 0; off < all.Length; off += 7) {
-    u32 n = MaMin<u32>(7, all.Length - off);
+    u32 n = ClankMin<u32>(7, all.Length - off);
     AnthropicParse_Feed(&st, StrView{all.Data + off, n});
   }
 

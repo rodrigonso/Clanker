@@ -9,10 +9,10 @@
 
 #if defined(_WIN32)
 #include <direct.h>
-#define MA_RMDIR _rmdir
+#define CLANK_RMDIR _rmdir
 #else
 #include <unistd.h>
-#define MA_RMDIR rmdir
+#define CLANK_RMDIR rmdir
 #endif
 
 // ---- helpers -------------------------------------------------------------
@@ -53,7 +53,7 @@ static StrView Args1(Arena* a, const char* k, const char* v) {
 // ---- read ----------------------------------------------------------------
 
 static void TestRead(Arena* a) {
-  const char* path = "ma_tool_read_test.txt";
+  const char* path = "clank_tool_read_test.txt";
   MakeFile(path, "line1\nline2\n");
 
   Tool rt = ReadTool();
@@ -74,11 +74,11 @@ static void TestRead(Arena* a) {
   CHECK(!RunTool(rt, a, SV("{\"path\":\"no_such_file_xyz.txt\"}"), &o3, &e3));
 
   // offset + limit window with a continuation notice
-  const char* p2 = "ma_tool_read_ol.txt";
+  const char* p2 = "clank_tool_read_ol.txt";
   MakeFile(p2, "l1\nl2\nl3\nl4\nl5\n");
   ToolResult o4 = {};
   StrBuf e4 = StrBuf_Make(a, 32);
-  CHECK(RunTool(rt, a, SV("{\"path\":\"ma_tool_read_ol.txt\",\"offset\":2,\"limit\":2}"), &o4, &e4));
+  CHECK(RunTool(rt, a, SV("{\"path\":\"clank_tool_read_ol.txt\",\"offset\":2,\"limit\":2}"), &o4, &e4));
   CHECK(StrView_Contains(o4.Content.Data[0].Text, "l2"));
   CHECK(StrView_Contains(o4.Content.Data[0].Text, "l3"));
   CHECK(!StrView_Contains(o4.Content.Data[0].Text, "l5"));
@@ -86,7 +86,7 @@ static void TestRead(Arena* a) {
   remove(p2);
 
   // image file => text + image content blocks
-  const char* pimg = "ma_tool_read.png";
+  const char* pimg = "clank_tool_read.png";
   unsigned char png[12] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13};
   {
     FILE* f = fopen(pimg, "wb");
@@ -131,10 +131,10 @@ static void TestBash(Arena* a) {
 
 static void TestWrite(Arena* a) {
   Tool wt = WriteTool();
-  const char* path = "ma_tool_write_test.txt";
+  const char* path = "clank_tool_write_test.txt";
   ToolResult out = {};
   StrBuf err = StrBuf_Make(a, 32);
-  bool ok = RunTool(wt, a, SV("{\"path\":\"ma_tool_write_test.txt\",\"content\":\"written-data\"}"),
+  bool ok = RunTool(wt, a, SV("{\"path\":\"clank_tool_write_test.txt\",\"content\":\"written-data\"}"),
                     &out, &err);
   CHECK(ok);
   CHECK(StrView_Contains(out.Content.Data[0].Text, "Successfully wrote"));
@@ -148,13 +148,13 @@ static void TestEdit(Arena* a) {
   Tool et = EditTool();
 
   // exact match
-  const char* p1 = "ma_tool_edit_exact.txt";
+  const char* p1 = "clank_tool_edit_exact.txt";
   MakeFile(p1, "hello world\nsecond line\n");
   ToolResult o1 = {};
   StrBuf e1 = StrBuf_Make(a, 32);
   bool ok1 = RunTool(
       et, a,
-      SV("{\"path\":\"ma_tool_edit_exact.txt\",\"edits\":[{\"oldText\":\"hello world\",\"newText\":"
+      SV("{\"path\":\"clank_tool_edit_exact.txt\",\"edits\":[{\"oldText\":\"hello world\",\"newText\":"
          "\"HELLO\"}]}"),
       &o1, &e1);
   CHECK(ok1);
@@ -162,13 +162,13 @@ static void TestEdit(Arena* a) {
   remove(p1);
 
   // fuzzy match (different internal whitespace)
-  const char* p2 = "ma_tool_edit_fuzzy.txt";
+  const char* p2 = "clank_tool_edit_fuzzy.txt";
   MakeFile(p2, "x = foo   bar\n");
   ToolResult o2 = {};
   StrBuf e2 = StrBuf_Make(a, 32);
   bool ok2 = RunTool(
       et, a,
-      SV("{\"path\":\"ma_tool_edit_fuzzy.txt\",\"edits\":[{\"oldText\":\"foo bar\",\"newText\":"
+      SV("{\"path\":\"clank_tool_edit_fuzzy.txt\",\"edits\":[{\"oldText\":\"foo bar\",\"newText\":"
          "\"baz\"}]}"),
       &o2, &e2);
   CHECK(ok2);
@@ -176,13 +176,13 @@ static void TestEdit(Arena* a) {
   remove(p2);
 
   // not-found => error
-  const char* p3 = "ma_tool_edit_err.txt";
+  const char* p3 = "clank_tool_edit_err.txt";
   MakeFile(p3, "alpha\n");
   ToolResult o3 = {};
   StrBuf e3 = StrBuf_Make(a, 32);
   bool ok3 = RunTool(
       et, a,
-      SV("{\"path\":\"ma_tool_edit_err.txt\",\"edits\":[{\"oldText\":\"zzz\",\"newText\":\"q\"}]}"),
+      SV("{\"path\":\"clank_tool_edit_err.txt\",\"edits\":[{\"oldText\":\"zzz\",\"newText\":\"q\"}]}"),
       &o3, &e3);
   CHECK(!ok3);
   remove(p3);
@@ -191,16 +191,16 @@ static void TestEdit(Arena* a) {
 // ---- ls / find / grep (share a temp tree) --------------------------------
 
 static void TestTreeTools(Arena* a) {
-  Fs_MkdirP(a, SV("ma_tools_it/sub"));
-  MakeFile("ma_tools_it/a.txt", "alpha\nbeta\ngamma\n");
-  MakeFile("ma_tools_it/b.md", "hello\n");
-  MakeFile("ma_tools_it/sub/c.txt", "deep\n");
+  Fs_MkdirP(a, SV("clank_tools_it/sub"));
+  MakeFile("clank_tools_it/a.txt", "alpha\nbeta\ngamma\n");
+  MakeFile("clank_tools_it/b.md", "hello\n");
+  MakeFile("clank_tools_it/sub/c.txt", "deep\n");
 
   // ls
   Tool lt = LsTool();
   ToolResult lo = {};
   StrBuf le = StrBuf_Make(a, 32);
-  CHECK(RunTool(lt, a, Args1(a, "path", "ma_tools_it"), &lo, &le));
+  CHECK(RunTool(lt, a, Args1(a, "path", "clank_tools_it"), &lo, &le));
   CHECK(StrView_Contains(lo.Content.Data[0].Text, "a.txt"));
   CHECK(StrView_Contains(lo.Content.Data[0].Text, "b.md"));
   CHECK(StrView_Contains(lo.Content.Data[0].Text, "sub/"));
@@ -209,7 +209,7 @@ static void TestTreeTools(Arena* a) {
   Tool ft = FindTool();
   ToolResult fo = {};
   StrBuf fe = StrBuf_Make(a, 32);
-  CHECK(RunTool(ft, a, SV("{\"pattern\":\"*.txt\",\"path\":\"ma_tools_it\"}"), &fo, &fe));
+  CHECK(RunTool(ft, a, SV("{\"pattern\":\"*.txt\",\"path\":\"clank_tools_it\"}"), &fo, &fe));
   CHECK(StrView_Contains(fo.Content.Data[0].Text, "a.txt"));
   CHECK(StrView_Contains(fo.Content.Data[0].Text, "c.txt"));
   CHECK(!StrView_Contains(fo.Content.Data[0].Text, "b.md"));
@@ -218,15 +218,15 @@ static void TestTreeTools(Arena* a) {
   Tool gt = GrepTool();
   ToolResult go = {};
   StrBuf ge = StrBuf_Make(a, 32);
-  CHECK(RunTool(gt, a, SV("{\"pattern\":\"beta\",\"path\":\"ma_tools_it\"}"), &go, &ge));
+  CHECK(RunTool(gt, a, SV("{\"pattern\":\"beta\",\"path\":\"clank_tools_it\"}"), &go, &ge));
   CHECK(StrView_Contains(go.Content.Data[0].Text, "beta"));
   CHECK(StrView_Contains(go.Content.Data[0].Text, "a.txt"));
 
-  remove("ma_tools_it/a.txt");
-  remove("ma_tools_it/b.md");
-  remove("ma_tools_it/sub/c.txt");
-  MA_RMDIR("ma_tools_it/sub");
-  MA_RMDIR("ma_tools_it");
+  remove("clank_tools_it/a.txt");
+  remove("clank_tools_it/b.md");
+  remove("clank_tools_it/sub/c.txt");
+  CLANK_RMDIR("clank_tools_it/sub");
+  CLANK_RMDIR("clank_tools_it");
 }
 
 void TestTools() {

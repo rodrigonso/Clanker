@@ -1,4 +1,4 @@
-# mini-agent
+# Clank
 
 A tiny, memory-efficient coding-agent harness in C++ — a clean reimplementation
 of the core of [`earendil-works/pi`](https://github.com/earendil-works/pi)
@@ -6,15 +6,15 @@ without a JavaScript runtime.
 
 The goal is footprint. A Node/Bun-based agent carries a fixed ~100–300 MB+
 baseline (embedded JS engine + SDK object graphs) and duplicates the transcript
-several times in UTF-16. mini-agent runs the same agent loop with an
+several times in UTF-16. Clank runs the same agent loop with an
 arena-allocated, UTF-8, zero-copy transcript.
 
 **Measured:** a full faux run (libcurl init + agent + a `bash` tool execution)
-peaks at **~6 MB RSS** (`MA_PRINT_MEM=1`).
+peaks at **~6 MB RSS** (`CLANK_PRINT_MEM=1`).
 
 ## What it is
 
-A runnable mini-agent: the agent loop + the Anthropic Messages provider
+A runnable Clank agent: the agent loop + the Anthropic Messages provider
 (HTTP/SSE) + `read`, `write`, `edit`, `ls`, `find`, `grep`, and `bash` tools +
 a streaming REPL.
 
@@ -78,12 +78,12 @@ use the VS-bundled CMake/Ninja).
 
 ```sh
 # Offline demo (no API key, scripted provider) — exercises loop + tools + TUI:
-./build/mini-agent --faux
+./build/clank --faux
 
 # Live:
-./build/mini-agent --login anthropic     # OAuth (Claude Pro/Max), or set ANTHROPIC_API_KEY
-./build/mini-agent                        # full-screen TUI (interactive)
-./build/mini-agent -m claude-sonnet-4-6 -p "summarize README.md"
+./build/clank --login anthropic     # OAuth (Claude Pro/Max), or set ANTHROPIC_API_KEY
+./build/clank                        # full-screen TUI (interactive)
+./build/clank -m claude-sonnet-4-6 -p "summarize README.md"
 ```
 
 ## TUI
@@ -110,15 +110,16 @@ When stdin/stdout isn't a TTY (pipes, redirected) or with `-p`, it falls back to
 a plain line renderer.
 
 Interactive: Ctrl+C interrupts the current turn, `/exit` quits.
-Set `MA_PRINT_MEM=1` to print peak RSS at exit.
+Set `CLANK_PRINT_MEM=1` to print peak RSS at exit.
 
 ## Authentication
 
-Two credential types, stored in `~/.mini-agent/auth.json` (atomic writes,
-restricted perms), resolved per turn so OAuth tokens refresh mid-session:
+Two credential types, stored in `~/.clank/auth.json` (atomic writes,
+restricted perms), resolved per turn so OAuth tokens refresh mid-session.
+Existing `~/.mini-agent/auth.json` credentials are migrated automatically:
 
 - **API key** — set `ANTHROPIC_API_KEY`, or store one in `auth.json`.
-- **OAuth (subscription)** — `mini-agent --login anthropic` runs an
+- **OAuth (subscription)** — `clank --login anthropic` runs an
   authorization-code + PKCE flow: it opens your browser to approve access and a
   local callback server on `http://localhost:53692/callback` captures the
   redirect automatically (no copy/paste). The browser shows a success page; the
@@ -136,10 +137,10 @@ Resolution priority: stored api_key → stored OAuth (refresh) → env var.
 ## Test
 
 ```sh
-./build/ma_tests          # unit tests: base, json, loop, anthropic, tools, crypto,
+./build/clank_tests       # unit tests: base, json, loop, anthropic, tools, crypto,
                           #   auth, loopback, threads, keys, screen, markdown,
                           #   linemodel, lineedit, tui
-./build/ma_http_smoke     # TLS/HTTP smoke against https://example.com
+./build/clank_http_smoke  # TLS/HTTP smoke against https://example.com
 ```
 
 The unit suite is network-free and key-free: the loop runs against a faux

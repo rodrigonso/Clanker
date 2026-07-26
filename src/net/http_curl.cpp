@@ -79,7 +79,7 @@ HttpResult Http_Stream(Arena* arena, const HttpRequest* req, HttpStreamSink sink
   curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, XferCb);
   curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &w);
   curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
-  curl_easy_setopt(curl, CURLOPT_USERAGENT, "mini-agent/0.1");
+  curl_easy_setopt(curl, CURLOPT_USERAGENT, "clank/0.1");
   curl_easy_setopt(curl, CURLOPT_TIMEOUT, 600L);
   curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
 
