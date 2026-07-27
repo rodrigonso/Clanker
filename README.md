@@ -95,7 +95,10 @@ git-branch line** just above the prompt, a minimal status line along the bottom
 (spinner and state on the left; model and token usage right-aligned), and a
 **multi-line input editor**. It runs three threads — the agent loop, a key-input
 thread, and a render thread (~20fps) so the spinner stays live while a turn waits
-on the network.
+on the network. Bursty assistant deltas are revealed continuously across ~60fps
+frames at a capped UTF-8 scalar rate instead of painting a large received chunk
+all at once. Visual message/tool transitions wait behind queued text without
+blocking the agent or tool execution.
 
 Keys: **Enter** sends · **Ctrl+J** / Alt+Enter inserts a newline · arrows move
 (↑/↓ across lines, then through history at the edges) · **Ctrl+←/→** word jump ·
@@ -107,7 +110,8 @@ is collapsed, otherwise collapses all · **Ctrl+D** quits · **Ctrl+L** repaints
 Honors `NO_COLOR`. Pasted multi-line text is inserted literally (bracketed paste).
 
 When stdin/stdout isn't a TTY (pipes, redirected) or with `-p`, it falls back to
-a plain line renderer.
+a plain line renderer. Plain and piped output write provider deltas immediately
+without display pacing.
 
 Interactive: Ctrl+C interrupts the current turn, `/exit` quits.
 Set `CLANK_PRINT_MEM=1` to print peak RSS at exit.

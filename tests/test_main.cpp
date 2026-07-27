@@ -24,6 +24,7 @@ int main() {
   TestScreen();
   TestMarkdown();
   TestSanitize();
+  TestStreamReveal();
   TestLineModel();
   TestLineEdit();
   TestTui();

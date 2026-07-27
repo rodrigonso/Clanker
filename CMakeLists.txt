@@ -112,6 +112,7 @@ add_library(clank_term STATIC
   src/term/screen.cpp
   src/term/markdown.cpp
   src/term/sanitize.cpp
+  src/term/stream_reveal.cpp
   src/term/linemodel.cpp
   src/term/toolview.cpp
   src/term/lineedit.cpp
@@ -177,6 +178,7 @@ add_executable(clank_tests
   tests/test_screen.cpp
   tests/test_markdown.cpp
   tests/test_sanitize.cpp
+  tests/test_stream_reveal.cpp
   tests/test_linemodel.cpp
   tests/test_lineedit.cpp
   tests/test_tui.cpp)

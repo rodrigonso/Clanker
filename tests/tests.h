@@ -18,6 +18,7 @@ void TestKeys();
 void TestScreen();
 void TestMarkdown();
 void TestSanitize();
+void TestStreamReveal();
 void TestLineModel();
 void TestLineEdit();
 void TestTui();

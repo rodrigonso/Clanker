@@ -6,6 +6,7 @@
 #include "term/lineedit.h"
 #include "term/linemodel.h"
 #include "term/screen.h"
+#include "term/stream_reveal.h"
 #include "term/term.h"
 
 // Full-screen TUI controller. Owns the terminal, a differential renderer, the
@@ -14,6 +15,27 @@
 // events through Tui_AgentEvent / drains user input via Tui_WaitForSubmit.
 
 enum class TuiState : u8 { Idle, Thinking, Streaming, Tool };
+
+enum class TuiDisplayEventKind : u8 {
+  Text,
+  MessageEnd,
+  ToolStart,
+  ToolEnd,
+  User,
+  AgentEnd,
+};
+
+struct TuiDisplayEvent {
+  TuiDisplayEventKind Kind;
+  StrBuf Payload;
+  StrView ToolCallId;
+  StrView ToolName;
+  StrView ToolArgsJson;
+  StopReason Stop;
+  Usage Use;
+  u64 Timestamp;
+  bool IsError;
+};
 
 struct Agent;  // forward decl; the TUI pushes steering into the agent's queues
 
@@ -45,6 +67,7 @@ struct Tui {
   bool Dirty;
   bool Stop;
   bool Quit;
+  bool AgentRunning;
   volatile i32 AbortFlag;
 
   // Status.
@@ -73,10 +96,10 @@ struct Tui {
   u16 MouseY;
   bool HasMouse;
 
-  // Streamed text staged for one re-render per frame.
-  StrBuf Pending;
-  // Reused scratch for sanitizing tool output before it enters the transcript.
-  StrBuf ToolText;
+  // Received assistant text paced across render frames.
+  StreamReveal Reveal;
+  Array<TuiDisplayEvent> DisplayEvents;
+  u32 DisplayHead;
 };
 
 // Enter the alt screen and start threads. Returns false if not a TTY (caller
@@ -98,5 +121,10 @@ bool Tui_WaitForSubmit(Tui* t, StrView* out);
 
 // AgentSink callback (User = Tui*).
 void Tui_AgentEvent(void* user, const AgentEvent& ev);
+
+// Advance the paced display pipeline at `nowMs`. Compose uses this under the
+// TUI lock; headless tests call it directly when no TUI threads are running.
+bool Tui_AdvanceStream(Tui* t, u64 nowMs);
+bool Tui_HasPendingDisplay(const Tui* t);
 
 volatile i32* Tui_Abort(Tui* t);

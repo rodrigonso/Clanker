@@ -76,10 +76,55 @@ void Wake(Tui* t) {
   Cond_Signal(&t->RenderCv);
 }
 
-void FlushPending(Tui* t) {
-  if (t->Pending.Length) {
-    LineModel_AppendAssistant(&t->Model, StrBuf_View(&t->Pending));
-    StrBuf_Clear(&t->Pending);
+bool HasQueuedDisplayEvents(const Tui* t) {
+  return t->DisplayHead < t->DisplayEvents.Count;
+}
+
+void CompactDisplayEvents(Tui* t) {
+  if (t->DisplayHead == 0) return;
+  if (t->DisplayHead == t->DisplayEvents.Count) {
+    t->DisplayHead = 0;
+    t->DisplayEvents.Count = 0;
+    return;
+  }
+  if (t->DisplayHead < 64) return;
+  u32 remaining = t->DisplayEvents.Count - t->DisplayHead;
+  memmove(t->DisplayEvents.Data, t->DisplayEvents.Data + t->DisplayHead,
+          sizeof(TuiDisplayEvent) * remaining);
+  t->DisplayEvents.Count = remaining;
+  t->DisplayHead = 0;
+}
+
+TuiDisplayEvent* QueueDisplayEvent(Tui* t, TuiDisplayEventKind kind) {
+  CompactDisplayEvents(t);
+  TuiDisplayEvent ev = {};
+  ev.Kind = kind;
+  return Array_Push(&t->DisplayEvents, ev);
+}
+
+void SetDisplayPayload(Tui* t, TuiDisplayEvent* ev, StrView text) {
+  ev->Payload = StrBuf_Make(t->Mem, text.Length + 1);
+  StrBuf_Append(&ev->Payload, text);
+}
+
+StrView DisplayPayload(const TuiDisplayEvent& ev) {
+  return StrView{ev.Payload.Data, ev.Payload.Length};
+}
+
+void QueueText(Tui* t, StrView text) {
+  if (text.Length == 0) return;
+  if (!HasQueuedDisplayEvents(t)) {
+    StreamReveal_Push(&t->Reveal, text);
+    t->State = TuiState::Streaming;
+    return;
+  }
+
+  TuiDisplayEvent* last = &t->DisplayEvents.Data[t->DisplayEvents.Count - 1];
+  if (last->Kind != TuiDisplayEventKind::Text) {
+    last = QueueDisplayEvent(t, TuiDisplayEventKind::Text);
+    SetDisplayPayload(t, last, text);
+  } else {
+    StrBuf_Append(&last->Payload, text);
   }
 }
 
@@ -312,6 +357,80 @@ void RestoreViewportAnchor(Tui* t, ViewportAnchor anchor) {
   if (t->Top > maxTop) t->Top = maxTop;
 }
 
+void ApplyDisplayEvent(Tui* t, const TuiDisplayEvent& ev) {
+  switch (ev.Kind) {
+    case TuiDisplayEventKind::MessageEnd:
+      if (t->Model.HasAssistant) LineModel_EndAssistant(&t->Model);
+      t->Use = ev.Use;
+      if (ev.Stop == StopReason::Error)
+        LineModel_AddNotice(&t->Model, EntryKind::Error, DisplayPayload(ev));
+      else if (ev.Stop == StopReason::Aborted)
+        LineModel_AddNotice(&t->Model, EntryKind::Info, SVL("[interrupted]"));
+      break;
+    case TuiDisplayEventKind::ToolStart:
+      LineModel_AddTool(&t->Model, ev.ToolCallId, ev.ToolName, ev.ToolArgsJson);
+      t->State = TuiState::Tool;
+      t->StateTool = ev.ToolName;
+      break;
+    case TuiDisplayEventKind::ToolEnd:
+      {
+        StrView payload = DisplayPayload(ev);
+        if (!LineModel_FinishTool(&t->Model, ev.ToolCallId, payload, Truncate(payload, 1500),
+                                  ev.IsError))
+          LineModel_AddNotice(&t->Model, EntryKind::Error,
+                              SVL("tool result did not match a pending call"));
+      }
+      t->State = TuiState::Thinking;
+      break;
+    case TuiDisplayEventKind::User:
+      if (t->Model.HasAssistant) LineModel_EndAssistant(&t->Model);
+      LineModel_AddUser(&t->Model, DisplayPayload(ev), ev.Timestamp);
+      break;
+    case TuiDisplayEventKind::AgentEnd:
+      t->State = t->AgentRunning ? TuiState::Thinking : TuiState::Idle;
+      break;
+    case TuiDisplayEventKind::Text: break;
+  }
+}
+
+bool PumpDisplay(Tui* t, u64 nowMs) {
+  ViewportAnchor anchor = CaptureViewportAnchor(t);
+  bool changed = false;
+
+  for (;;) {
+    if (StreamReveal_HasPending(&t->Reveal)) {
+      if (!t->Model.HasAssistant) {
+        LineModel_BeginAssistant(&t->Model);
+        t->State = TuiState::Streaming;
+      }
+      StrView next =
+          StreamReveal_NextFrame(&t->Reveal, nowMs, HasQueuedDisplayEvents(t));
+      if (next.Length) {
+        LineModel_AppendAssistant(&t->Model, next);
+        changed = true;
+      }
+      if (StreamReveal_HasPending(&t->Reveal)) {
+        RestoreViewportAnchor(t, anchor);
+        return changed;
+      }
+    }
+
+    if (!HasQueuedDisplayEvents(t)) break;
+    TuiDisplayEvent* ev = &t->DisplayEvents.Data[t->DisplayHead++];
+    if (ev->Kind == TuiDisplayEventKind::Text) {
+      StreamReveal_Adopt(&t->Reveal, ev->Payload);
+      t->State = TuiState::Streaming;
+      continue;
+    }
+    ApplyDisplayEvent(t, *ev);
+    changed = true;
+  }
+
+  CompactDisplayEvents(t);
+  RestoreViewportAnchor(t, anchor);
+  return changed;
+}
+
 void Compose(Tui* t) {
   u16 cols = 0, rows = 0;
   Term_Size(&t->Trm, &cols, &rows);
@@ -326,9 +445,7 @@ void Compose(Tui* t) {
     return;
   }
 
-  ViewportAnchor pendingAnchor = CaptureViewportAnchor(t);
-  FlushPending(t);
-  RestoreViewportAnchor(t, pendingAnchor);
+  PumpDisplay(t, MonotonicMillis());
   if (t->State != TuiState::Idle) t->Spinner++;
 
   // Input box layout: left/right border column + one padding column each side.
@@ -407,11 +524,11 @@ void Compose(Tui* t) {
 void DoSubmit(Tui* t) {
   StrView line = LineEdit_Submit(&t->Edit);
   if (line.Length == 0) return;
-  FlushPending(t);
-  if (t->Model.HasAssistant) LineModel_EndAssistant(&t->Model);
-  LineModel_AddUser(&t->Model, line, NowMillis());
+  TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::User);
+  SetDisplayPayload(t, display, line);
+  display->Timestamp = NowMillis();
   t->Follow = true;
-  if (t->State != TuiState::Idle && t->Ag) {
+  if (t->AgentRunning && t->Ag) {
     Agent_Steer(t->Ag, line);  // mid-turn submit -> steer the running agent
   } else {
     QPush(t, line);  // idle -> next prompt for Tui_WaitForSubmit
@@ -498,7 +615,7 @@ void HandleKey(Tui* t, const Key& k) {
       break;
     }
     case KeyKind::CtrlC:
-      if (t->State != TuiState::Idle)
+      if (t->AgentRunning)
         t->AbortFlag = 1;
       else if (!LineEdit_Empty(&t->Edit))
         LineEdit_Clear(&t->Edit);
@@ -558,7 +675,8 @@ void RenderLoop(void* arg) {
     u64 lastFrame = MonotonicMillis();
 
     Mutex_Lock(&t->Lock);
-    u32 interval = (t->State != TuiState::Idle) ? 60 : 200;
+    u32 interval =
+        Tui_HasPendingDisplay(t) ? kMinFrameMs : ((t->State != TuiState::Idle) ? 60 : 200);
     if (!t->Dirty && !t->Stop) Cond_WaitTimeout(&t->RenderCv, &t->Lock, interval);
     t->Dirty = false;
     while (!t->Stop) {
@@ -571,6 +689,12 @@ void RenderLoop(void* arg) {
 }
 
 }  // namespace
+
+bool Tui_AdvanceStream(Tui* t, u64 nowMs) { return PumpDisplay(t, nowMs); }
+
+bool Tui_HasPendingDisplay(const Tui* t) {
+  return StreamReveal_HasPending(&t->Reveal) || HasQueuedDisplayEvents(t);
+}
 
 bool Tui_Start(Tui* t, Arena* mem, TuiOpts opts) {
   if (!Term_IsInteractive()) return false;
@@ -605,8 +729,8 @@ void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts) {
   LineModel_Init(&t->Model, mem, 80, 5000);
   LineEdit_Init(&t->Edit, mem);
   KeyDecoder_Init(&t->Dec);
-  t->Pending = StrBuf_Make(mem, 256);
-  t->ToolText = StrBuf_Make(mem, 256);
+  StreamReveal_Init(&t->Reveal, mem);
+  t->DisplayEvents = Array_Make<TuiDisplayEvent>(mem, 16);
   Mutex_Init(&t->Lock);
   Cond_Init(&t->SubmitCv);
   Cond_Init(&t->RenderCv);
@@ -658,10 +782,10 @@ void Tui_FeedInput(Tui* t, const char* data, u32 n) {
 void Tui_AgentEvent(void* user, const AgentEvent& ev) {
   Tui* t = (Tui*)user;
   Mutex_Lock(&t->Lock);
-  ViewportAnchor anchor = CaptureViewportAnchor(t);
   switch (ev.Kind) {
     case AgentEventKind::AgentStart:
-      t->State = TuiState::Thinking;
+      t->AgentRunning = true;
+      if (!Tui_HasPendingDisplay(t)) t->State = TuiState::Thinking;
       t->TurnStartMs = NowMillis();
       t->Spinner = 0;
       break;
@@ -673,55 +797,42 @@ void Tui_AgentEvent(void* user, const AgentEvent& ev) {
       // (invisible) until content streams, so tool-only turns show no header.
       break;
     case AgentEventKind::MessageUpdate:
-      if (ev.Stream.Kind == StreamEventKind::TextDelta) {
-        if (!t->Model.HasAssistant) LineModel_BeginAssistant(&t->Model);
-        StrBuf_Append(&t->Pending, ev.Stream.Delta);
-        t->State = TuiState::Streaming;
-      }
+      if (ev.Stream.Kind == StreamEventKind::TextDelta) QueueText(t, ev.Stream.Delta);
       break;
-    case AgentEventKind::MessageEnd:
-      FlushPending(t);
-      if (t->Model.HasAssistant) LineModel_EndAssistant(&t->Model);
-      if (ev.Msg) {
-        t->Use = ev.Msg->Use;
-        if (ev.Msg->Stop == StopReason::Error)
-          LineModel_AddNotice(&t->Model, EntryKind::Error, ev.Msg->ErrorMessage);
-        else if (ev.Msg->Stop == StopReason::Aborted)
-          LineModel_AddNotice(&t->Model, EntryKind::Info, SVL("[interrupted]"));
-      }
+    case AgentEventKind::MessageEnd: {
+      if (!ev.Msg || ev.Msg->Kind != Role::Assistant) break;
+      TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::MessageEnd);
+      display->Stop = ev.Msg->Stop;
+      display->Use = ev.Msg->Use;
+      if (ev.Msg->ErrorMessage.Length) SetDisplayPayload(t, display, ev.Msg->ErrorMessage);
       break;
-    case AgentEventKind::ToolStart:
-      FlushPending(t);
-      if (t->Model.HasAssistant) LineModel_EndAssistant(&t->Model);
-      LineModel_AddTool(&t->Model, ev.ToolCallId, ev.ToolName, ev.ToolArgsJson);
-      t->State = TuiState::Tool;
-      t->StateTool = ev.ToolName;
+    }
+    case AgentEventKind::ToolStart: {
+      TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::ToolStart);
+      display->ToolCallId = StrView_Dup(t->Mem, ev.ToolCallId);
+      display->ToolName = StrView_Dup(t->Mem, ev.ToolName);
+      display->ToolArgsJson = StrView_Dup(t->Mem, ev.ToolArgsJson);
       break;
+    }
     case AgentEventKind::ToolEnd: {
       StrView preview = StrView{nullptr, 0};
       if (ev.Result && ev.Result->Content.Count > 0) preview = ev.Result->Content.Data[0].Text;
-      StrBuf_Clear(&t->ToolText);
-      Sanitize_Display(&t->ToolText, preview);  // strip \r / ANSI / control bytes from tool output
-      StrView sanitized = StrBuf_View(&t->ToolText);
-      if (!LineModel_FinishTool(&t->Model, ev.ToolCallId, sanitized, Truncate(sanitized, 1500),
-                                ev.IsError)) {
-        LineModel_AddNotice(&t->Model, EntryKind::Error,
-                            SVL("tool result did not match a pending call"));
-      }
-      t->State = TuiState::Thinking;
+      TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::ToolEnd);
+      display->ToolCallId = StrView_Dup(t->Mem, ev.ToolCallId);
+      display->Payload = StrBuf_Make(t->Mem, preview.Length + 1);
+      Sanitize_Display(&display->Payload, preview);
+      display->IsError = ev.IsError;
       break;
     }
     case AgentEventKind::AgentEnd:
-      FlushPending(t);
-      if (t->Model.HasAssistant) LineModel_EndAssistant(&t->Model);
-      t->State = TuiState::Idle;
+      t->AgentRunning = false;
+      QueueDisplayEvent(t, TuiDisplayEventKind::AgentEnd);
       break;
     case AgentEventKind::QueueUpdate:
       t->QueuedCount = ev.SteerCount + ev.FollowUpCount + ev.NextTurnCount;
       break;
     default: break;
   }
-  RestoreViewportAnchor(t, anchor);
   Wake(t);
   Mutex_Unlock(&t->Lock);
 }

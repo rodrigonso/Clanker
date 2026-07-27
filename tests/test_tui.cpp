@@ -25,6 +25,16 @@ void Feed(Tui* t, const char* s) {
   Tui_FeedInput(t, s, n);
 }
 
+void DrainDisplay(Tui* t, u64 startMs = 1000) {
+  u32 frames = 0;
+  while (Tui_HasPendingDisplay(t) && frames < 10000) {
+    Tui_AdvanceStream(t, startMs);
+    startMs += 16;
+    frames++;
+  }
+  CHECK(!Tui_HasPendingDisplay(t));
+}
+
 }  // namespace
 
 void TestTui() {
@@ -58,8 +68,13 @@ void TestTui() {
   ev.Stream.Kind = StreamEventKind::TextDelta;
   ev.Stream.Delta = SVL("Hello ");
   Tui_AgentEvent(&t, ev);
+  CHECK(Tui_AdvanceStream(&t, 1000));
+  CHECK(t.Model.Entries.Count == 1);
+  CHECK(t.Model.Entries.Data[0].Text.Content.Length == 1);
   ev.Stream.Delta = SVL("**world**");
   Tui_AgentEvent(&t, ev);
+  CHECK(Tui_AdvanceStream(&t, 1016));
+  CHECK(t.Model.Entries.Data[0].Text.Content.Length < sizeof("Hello **world**") - 1);
   CHECK(t.State == TuiState::Streaming);
 
   m.Stop = StopReason::ToolUse;
@@ -76,7 +91,8 @@ void TestTui() {
   ev.ToolName = SVL("bash");
   ev.ToolArgsJson = SVL("{\"command\":\"ls\"}");
   Tui_AgentEvent(&t, ev);
-  CHECK(t.State == TuiState::Tool);
+  CHECK(t.State == TuiState::Streaming);
+  CHECK(t.Model.Entries.Count == 1);
 
   ToolResult tr = {};
   tr.Content = Array_Make<Content>(&a, 1);
@@ -90,6 +106,9 @@ void TestTui() {
   ev = {};
   ev.Kind = AgentEventKind::AgentEnd;
   Tui_AgentEvent(&t, ev);
+  CHECK(!t.AgentRunning);
+  CHECK(t.State == TuiState::Streaming);
+  DrainDisplay(&t, 1032);
 
   // The transcript captured the unlabeled assistant text and compact tool row.
   CHECK(!AnyRow(&a, &t, "assistant"));
@@ -188,15 +207,16 @@ void TestTui() {
     Tui_InitModel(&t2, &a2, o2);
     t2.Ag = &ag;
 
-    t2.State = TuiState::Tool;  // a turn is running
+    t2.AgentRunning = true;  // a turn is running
     Feed(&t2, "steer me\r");
     CHECK(ag.Steer.Count == 1);
     CHECK(t2.QCount == 0);  // did not land in the idle prompt queue
+    DrainDisplay(&t2);
     CHECK(!AnyRow(&a2, &t2, "you"));
     CHECK(AnyRow(&a2, &t2, "steer me"));
     CHECK(t2.Model.Entries.Data[t2.Model.Entries.Count - 1].Text.Timestamp.Length == 5);
 
-    t2.State = TuiState::Idle;  // between turns
+    t2.AgentRunning = false;  // between turns
     Feed(&t2, "next prompt\r");
     CHECK(t2.QCount == 1);
     CHECK(ag.Steer.Count == 1);  // unchanged
@@ -206,9 +226,7 @@ void TestTui() {
   }
 
   // End-to-end: a real agent turn (faux provider) must surface the assistant's
-  // streamed text in the transcript. Regression for the agent emitting
-  // MessageStart with the assistant role so the entry is opened and streamed
-  // deltas are not silently dropped by FlushPending.
+  // streamed text in the transcript after the display queue drains.
   {
     Arena a3 = ArenaCreate();
     Model model = {};
@@ -233,6 +251,7 @@ void TestTui() {
     ag.Sink.OnEvent = Tui_AgentEvent;
 
     Agent_Prompt(&ag, SV("ask"));
+    DrainDisplay(&t3);
 
     CHECK(!AnyRow(&a3, &t3, "assistant"));
     CHECK(AnyRow(&a3, &t3, "Here is the explanation"));
@@ -240,6 +259,88 @@ void TestTui() {
 
     Tui_Stop(&t3);
     ArenaRelease(&a3);
+  }
+
+  // The agent may complete tools and start another assistant turn before the
+  // display catches up. Deferred events retain their data and visual order.
+  {
+    Arena aq = ArenaCreate();
+    TuiOpts oq;
+    oq.ModelName = SVL("m");
+    oq.Color = false;
+    Tui tq;
+    Tui_InitModel(&tq, &aq, oq);
+
+    AgentEvent q = {};
+    q.Kind = AgentEventKind::AgentStart;
+    Tui_AgentEvent(&tq, q);
+    q = {};
+    q.Kind = AgentEventKind::MessageUpdate;
+    q.Stream.Kind = StreamEventKind::TextDelta;
+    q.Stream.Delta = SVL("first response");
+    Tui_AgentEvent(&tq, q);
+
+    Message first = {};
+    first.Kind = Role::Assistant;
+    first.Stop = StopReason::ToolUse;
+    q = {};
+    q.Kind = AgentEventKind::MessageEnd;
+    q.Msg = &first;
+    Tui_AgentEvent(&tq, q);
+
+    char args[] = "{\"command\":\"echo original\"}";
+    q = {};
+    q.Kind = AgentEventKind::ToolStart;
+    q.ToolCallId = SVL("queued-tool");
+    q.ToolName = SVL("bash");
+    q.ToolArgsJson = StrView{args, (u32)sizeof(args) - 1};
+    Tui_AgentEvent(&tq, q);
+
+    char resultText[] = "original result";
+    ToolResult result = {};
+    result.Content = Array_Make<Content>(&aq, 1);
+    Array_Push(&result.Content,
+               Content_Text(StrView{resultText, (u32)sizeof(resultText) - 1}));
+    q = {};
+    q.Kind = AgentEventKind::ToolEnd;
+    q.ToolCallId = SVL("queued-tool");
+    q.Result = &result;
+    Tui_AgentEvent(&tq, q);
+
+    memset(args, 'x', sizeof(args) - 1);
+    memset(resultText, 'z', sizeof(resultText) - 1);
+
+    q = {};
+    q.Kind = AgentEventKind::MessageUpdate;
+    q.Stream.Kind = StreamEventKind::TextDelta;
+    q.Stream.Delta = SVL("second response");
+    Tui_AgentEvent(&tq, q);
+    Message second = {};
+    second.Kind = Role::Assistant;
+    second.Stop = StopReason::Stop;
+    q = {};
+    q.Kind = AgentEventKind::MessageEnd;
+    q.Msg = &second;
+    Tui_AgentEvent(&tq, q);
+    q = {};
+    q.Kind = AgentEventKind::AgentEnd;
+    Tui_AgentEvent(&tq, q);
+
+    CHECK(tq.Model.Entries.Count == 0);
+    DrainDisplay(&tq);
+    CHECK(tq.Model.Entries.Count == 3);
+    CHECK(tq.Model.Entries.Data[0].Kind == EntryKind::Assistant);
+    CHECK(tq.Model.Entries.Data[1].Kind == EntryKind::Tool);
+    CHECK(tq.Model.Entries.Data[2].Kind == EntryKind::Assistant);
+    CHECK(AnyRow(&aq, &tq, "first response"));
+    CHECK(AnyRow(&aq, &tq, "echo original"));
+    CHECK(AnyRow(&aq, &tq, "second response"));
+    CHECK(StrView_Eq(StrBuf_View(&tq.Model.Entries.Data[1].Tool.Preview),
+                     SVL("original result")));
+    CHECK(tq.State == TuiState::Idle);
+
+    Tui_Stop(&tq);
+    ArenaRelease(&aq);
   }
 
   // Tool output entering the TUI remains sanitized and capped at 1,500 bytes.
@@ -269,6 +370,7 @@ void TestTui() {
     end.ToolCallId = SVL("long");
     end.Result = &longResult;
     Tui_AgentEvent(&t4, end);
+    DrainDisplay(&t4);
 
     CHECK(t4.Model.Entries.Count == 1);
     CHECK(t4.Model.Entries.Data[0].Tool.Preview.Length == 1500);
@@ -337,6 +439,7 @@ void TestTui() {
     finish.ToolCallId = SVL("early");
     finish.Result = &inserted;
     Tui_AgentEvent(&t6, finish);
+    DrainDisplay(&t6);
     CHECK(LineModel_RowEntryId(&t6.Model, t6.Top) == completionAnchorId);
 
     Tui_Stop(&t6);
