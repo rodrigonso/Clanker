@@ -41,13 +41,13 @@ AppCommandHandlerResult Model(void* user, const AppCommandUx* ux) {
 }
 
 void TestParse() {
-  CHECK(AppCommandSpec_Count() == 4);
-  CHECK(AppCommandSpec_At(AppCommandSpec_Count()) == nullptr);
-  CHECK(AppCommandSpec_At(0)->Kind == AppCommandKind::Login);
-  CHECK(StrView_EqCStr(AppCommandSpec_At(0)->Name, "login"));
-  CHECK(AppCommandSpec_At(3)->Kind == AppCommandKind::Exit);
-  CHECK(StrView_EqCStr(AppCommandSpec_At(3)->Alias, "quit"));
-  CHECK(AppCommandSpec_At(3)->Description.Length != 0);
+  CHECK_ALL(AppCommandSpec_Count() == 4,
+            AppCommandSpec_At(AppCommandSpec_Count()) == nullptr,
+            AppCommandSpec_At(0)->Kind == AppCommandKind::Login,
+            StrView_EqCStr(AppCommandSpec_At(0)->Name, "login"),
+            AppCommandSpec_At(3)->Kind == AppCommandKind::Exit,
+            StrView_EqCStr(AppCommandSpec_At(3)->Alias, "quit"),
+            AppCommandSpec_At(3)->Description.Length != 0);
 
   AppCommand plain = AppCommand_Parse(SVL("  hello  "));
   CHECK(plain.Kind == AppCommandKind::NotCommand);
@@ -56,18 +56,26 @@ void TestParse() {
   CHECK(login.Kind == AppCommandKind::Login);
   CHECK(login.Arguments.Length == 0);
 
-  CHECK(AppCommand_Parse(SVL("/model")).Kind == AppCommandKind::Model);
-  CHECK(AppCommand_Parse(SVL("/clear")).Kind == AppCommandKind::Clear);
-  CHECK(AppCommand_Parse(SVL("/exit")).Kind == AppCommandKind::Exit);
-  CHECK(AppCommand_Parse(SVL("/quit")).Kind == AppCommandKind::Exit);
+  struct ParseCase {
+    StrView Input;
+    AppCommandKind Expected;
+  };
+  ParseCase cases[] = {
+      {SVL("/model"), AppCommandKind::Model},   {SVL("/clear"), AppCommandKind::Clear},
+      {SVL("/exit"), AppCommandKind::Exit},     {SVL("/quit"), AppCommandKind::Exit},
+      {SVL("/LOGIN"), AppCommandKind::Unknown}, {SVL("/"), AppCommandKind::Unknown},
+      {SVL("/wat"), AppCommandKind::Unknown},
+  };
+  bool parsed = true;
+  for (u32 i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    bool matches = AppCommand_Parse(cases[i].Input).Kind == cases[i].Expected;
+    parsed = matches && parsed;
+  }
+  CHECK(parsed);
 
   AppCommand args = AppCommand_Parse(SVL(" /model \t claude-test \n"));
-  CHECK(args.Kind == AppCommandKind::Model);
-  CHECK(StrView_EqCStr(args.Arguments, "claude-test"));
-
-  CHECK(AppCommand_Parse(SVL("/LOGIN")).Kind == AppCommandKind::Unknown);
-  CHECK(AppCommand_Parse(SVL("/")).Kind == AppCommandKind::Unknown);
-  CHECK(AppCommand_Parse(SVL("/wat")).Kind == AppCommandKind::Unknown);
+  CHECK_ALL(args.Kind == AppCommandKind::Model,
+            StrView_EqCStr(args.Arguments, "claude-test"));
 }
 
 void TestDispatch() {
@@ -78,18 +86,16 @@ void TestDispatch() {
   AppCommandHandlers handlers = {&ctx, Login, Model};
 
   AppCommandDispatchResult plain = AppCommand_Dispatch(SVL("ordinary prompt"), &handlers, &ux);
-  CHECK(!plain.Handled);
-  CHECK(plain.Action == AppLoopAction::Continue);
+  CHECK_ALL(!plain.Handled, plain.Action == AppLoopAction::Continue);
 
   AppCommandDispatchResult login = AppCommand_Dispatch(SVL(" /login "), &handlers, &ux);
-  CHECK(login.Handled && login.Action == AppLoopAction::Continue);
-  CHECK(ctx.LoginCalls == 1 && ctx.ModelCalls == 0);
-  CHECK(ctx.Notices == 1 && StrView_EqCStr(ctx.LastNotice, "Logged in."));
+  CHECK_ALL(login.Handled && login.Action == AppLoopAction::Continue,
+            ctx.LoginCalls == 1 && ctx.ModelCalls == 0,
+            ctx.Notices == 1 && StrView_EqCStr(ctx.LastNotice, "Logged in."));
 
   AppCommandDispatchResult model = AppCommand_Dispatch(SVL("/model"), &handlers, &ux);
-  CHECK(model.Handled && model.Action == AppLoopAction::Continue);
-  CHECK(ctx.ModelCalls == 1);
-  CHECK(ctx.Notices == 2 && StrView_EqCStr(ctx.LastNotice, "Model selected."));
+  CHECK_ALL(model.Handled && model.Action == AppLoopAction::Continue, ctx.ModelCalls == 1,
+            ctx.Notices == 2 && StrView_EqCStr(ctx.LastNotice, "Model selected."));
 
   AppCommandDispatchResult clear = AppCommand_Dispatch(SVL("/clear"), &handlers, &ux);
   CHECK(clear.Handled && clear.Action == AppLoopAction::ResetSession);
@@ -101,27 +107,26 @@ void TestDispatch() {
 
   int calls = ctx.LoginCalls + ctx.ModelCalls;
   AppCommandDispatchResult args = AppCommand_Dispatch(SVL("/login anthropic"), &handlers, &ux);
-  CHECK(args.Handled && args.Action == AppLoopAction::Continue);
-  CHECK(ctx.LoginCalls + ctx.ModelCalls == calls);
-  CHECK(ctx.Errors == 1 && StrView_EqCStr(ctx.LastError, "Usage: /login"));
+  CHECK_ALL(args.Handled && args.Action == AppLoopAction::Continue,
+            ctx.LoginCalls + ctx.ModelCalls == calls,
+            ctx.Errors == 1 && StrView_EqCStr(ctx.LastError, "Usage: /login"));
 
   AppCommandDispatchResult modelArgs = AppCommand_Dispatch(SVL("/model claude-test"), &handlers, &ux);
-  CHECK(modelArgs.Handled && modelArgs.Action == AppLoopAction::Continue);
-  CHECK(ctx.LoginCalls + ctx.ModelCalls == calls);
-  CHECK(ctx.Errors == 2 && StrView_EqCStr(ctx.LastError, "Usage: /model"));
+  CHECK_ALL(modelArgs.Handled && modelArgs.Action == AppLoopAction::Continue,
+            ctx.LoginCalls + ctx.ModelCalls == calls,
+            ctx.Errors == 2 && StrView_EqCStr(ctx.LastError, "Usage: /model"));
 
   AppCommandDispatchResult clearArgs = AppCommand_Dispatch(SVL("/clear now"), &handlers, &ux);
-  CHECK(clearArgs.Handled && clearArgs.Action == AppLoopAction::Continue);
-  CHECK(ctx.Errors == 3 && StrView_EqCStr(ctx.LastError, "Usage: /clear"));
+  CHECK_ALL(clearArgs.Handled && clearArgs.Action == AppLoopAction::Continue,
+            ctx.Errors == 3 && StrView_EqCStr(ctx.LastError, "Usage: /clear"));
 
   AppCommandDispatchResult quitArgs = AppCommand_Dispatch(SVL("/quit now"), &handlers, &ux);
-  CHECK(quitArgs.Handled && quitArgs.Action == AppLoopAction::Continue);
-  CHECK(ctx.Errors == 4 && StrView_Contains(ctx.LastError, "Usage: /exit"));
+  CHECK_ALL(quitArgs.Handled && quitArgs.Action == AppLoopAction::Continue,
+            ctx.Errors == 4 && StrView_Contains(ctx.LastError, "Usage: /exit"));
 
   AppCommandDispatchResult unknown = AppCommand_Dispatch(SVL(" /unknown "), &handlers, &ux);
-  CHECK(unknown.Handled && unknown.Action == AppLoopAction::Continue);
-  CHECK(ctx.Errors == 5);
-  CHECK(StrView_Contains(ctx.LastError, "Unknown slash command"));
+  CHECK_ALL(unknown.Handled && unknown.Action == AppLoopAction::Continue, ctx.Errors == 5,
+            StrView_Contains(ctx.LastError, "Unknown slash command"));
 }
 
 void TestHandlerOutcomes() {
@@ -145,8 +150,8 @@ void TestHandlerOutcomes() {
 
   AppCommandDispatchResult clear = AppCommand_Dispatch(SVL("/clear"), &faux, &ux);
   AppCommandDispatchResult exit = AppCommand_Dispatch(SVL("/exit"), &faux, &ux);
-  CHECK(clear.Action == AppLoopAction::ResetSession);
-  CHECK(exit.Action == AppLoopAction::Exit);
+  CHECK_ALL(clear.Action == AppLoopAction::ResetSession,
+            exit.Action == AppLoopAction::Exit);
 }
 
 }  // namespace

@@ -9,17 +9,32 @@
 #include "tools/truncate.h"
 
 static void TestGlob() {
-  CHECK(Glob_Match(SVL("*.ts"), SVL("a.ts"), false));
-  CHECK(!Glob_Match(SVL("*.ts"), SVL("src/a.ts"), false));
-  CHECK(Glob_Match(SVL("**/*.ts"), SVL("src/a.ts"), false));
-  CHECK(Glob_Match(SVL("src/**"), SVL("src/a/b.ts"), false));
-  CHECK(Glob_Match(SVL("a?c"), SVL("abc"), false));
-  CHECK(!Glob_Match(SVL("a?c"), SVL("a/c"), false));
-  CHECK(Glob_Match(SVL("[abc]x"), SVL("bx"), false));
-  CHECK(!Glob_Match(SVL("[abc]x"), SVL("zx"), false));
-  CHECK(Glob_Match(SVL("{a,b}.ts"), SVL("b.ts"), false));
-  CHECK(Glob_Match(SVL("**"), SVL("anything/here"), false));
-  CHECK(Glob_Match(SVL("*.TS"), SVL("a.ts"), true));
+  struct GlobCase {
+    StrView Pattern;
+    StrView Path;
+    bool CaseInsensitive;
+    bool Expected;
+  };
+  GlobCase cases[] = {
+      {SVL("*.ts"), SVL("a.ts"), false, true},
+      {SVL("*.ts"), SVL("src/a.ts"), false, false},
+      {SVL("**/*.ts"), SVL("src/a.ts"), false, true},
+      {SVL("src/**"), SVL("src/a/b.ts"), false, true},
+      {SVL("a?c"), SVL("abc"), false, true},
+      {SVL("a?c"), SVL("a/c"), false, false},
+      {SVL("[abc]x"), SVL("bx"), false, true},
+      {SVL("[abc]x"), SVL("zx"), false, false},
+      {SVL("{a,b}.ts"), SVL("b.ts"), false, true},
+      {SVL("**"), SVL("anything/here"), false, true},
+      {SVL("*.TS"), SVL("a.ts"), true, true},
+  };
+  bool matched = true;
+  for (u32 i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    bool result =
+        Glob_Match(cases[i].Pattern, cases[i].Path, cases[i].CaseInsensitive);
+    matched = (result == cases[i].Expected) && matched;
+  }
+  CHECK(matched);
 }
 
 static void TestRegex(Arena* a) {
@@ -27,8 +42,7 @@ static void TestRegex(Arena* a) {
 
   Regex* re = Regex_Compile(a, SVL("a.c"), false, &err);
   CHECK(re != nullptr);
-  CHECK(Regex_Test(re, SVL("xabcx")));
-  CHECK(!Regex_Test(re, SVL("axxc")));
+  CHECK_ALL(Regex_Test(re, SVL("xabcx")), !Regex_Test(re, SVL("axxc")));
 
   re = Regex_Compile(a, SVL("a+"), false, &err);
   CHECK(Regex_Test(re, SVL("baaa")));
@@ -42,8 +56,7 @@ static void TestRegex(Arena* a) {
   CHECK(Regex_Test(re, SVL("xxbaryy")));
 
   re = Regex_Compile(a, SVL("^hello$"), false, &err);
-  CHECK(Regex_Test(re, SVL("hello")));
-  CHECK(!Regex_Test(re, SVL("hello world")));
+  CHECK_ALL(Regex_Test(re, SVL("hello")), !Regex_Test(re, SVL("hello world")));
 
   re = Regex_Compile(a, SVL("[a-z]+"), false, &err);
   CHECK(Regex_Test(re, SVL("ABCdef")));
@@ -57,9 +70,8 @@ static void TestRegex(Arena* a) {
 
 static void TestDiff(Arena* a) {
   DiffResult d = Diff_Make(a, SVL("f.txt"), SVL("a\nb\nc\n"), SVL("a\nB\nc\n"), 4);
-  CHECK(d.FirstChangedLine == 2);
-  CHECK(StrView_Contains(d.Patch, "-b"));
-  CHECK(StrView_Contains(d.Patch, "+B"));
+  CHECK_ALL(d.FirstChangedLine == 2, StrView_Contains(d.Patch, "-b"),
+            StrView_Contains(d.Patch, "+B"));
 
   DiffResult same = Diff_Make(a, SVL("f.txt"), SVL("x\n"), SVL("x\n"), 4);
   CHECK(same.FirstChangedLine == -1);
@@ -67,29 +79,26 @@ static void TestDiff(Arena* a) {
 
 static void TestTruncate(Arena* a) {
   TruncResult h = Trunc_Head(a, SVL("a\nb\nc\nd\ne"), 3, 1000);
-  CHECK(h.Truncated);
-  CHECK(!h.ByBytes);
-  CHECK(h.TotalLines == 5);
-  CHECK(h.OutputLines == 3);
+  CHECK_ALL(h.Truncated, !h.ByBytes, h.TotalLines == 5, h.OutputLines == 3);
 
   TruncResult none = Trunc_Head(a, SVL("a\nb"), 100, 1000);
   CHECK(!none.Truncated);
 
   TruncResult t = Trunc_Tail(a, SVL("a\nb\nc\nd\ne"), 2, 1000);
-  CHECK(t.Truncated);
-  CHECK(t.OutputLines == 2);
-  CHECK(StrView_Contains(t.Content, "e"));
-  CHECK(!StrView_Contains(t.Content, "a"));
+  CHECK_ALL(t.Truncated, t.OutputLines == 2, StrView_Contains(t.Content, "e"),
+            !StrView_Contains(t.Content, "a"));
 }
 
 static void TestFsPaths(Arena* a) {
-  CHECK(StrView_EqCStr(Fs_Parent(SVL("a/b/c.txt")), "a/b"));
-  CHECK(StrView_EqCStr(Fs_Base(SVL("a/b/c.txt")), "c.txt"));
-  CHECK(StrView_EqCStr(Fs_Ext(SVL("a/b/c.txt")), ".txt"));
-  CHECK(StrView_EqCStr(Fs_Ext(SVL("noext")), ""));
-  CHECK(StrView_EqCStr(Fs_ToPosix(a, SVL("a\\b\\c")), "a/b/c"));
-  CHECK(StrView_EqCStr(Fs_ToPosix(a, Fs_Join(a, SVL("a/b"), SVL("c.txt"))), "a/b/c.txt"));
-  CHECK(StrView_EqCStr(Fs_Relativize(a, SVL("src"), SVL("src/x/y.ts")), "x/y.ts"));
+  CHECK_ALL(StrView_EqCStr(Fs_Parent(SVL("a/b/c.txt")), "a/b"),
+            StrView_EqCStr(Fs_Base(SVL("a/b/c.txt")), "c.txt"),
+            StrView_EqCStr(Fs_Ext(SVL("a/b/c.txt")), ".txt"),
+            StrView_EqCStr(Fs_Ext(SVL("noext")), ""),
+            StrView_EqCStr(Fs_ToPosix(a, SVL("a\\b\\c")), "a/b/c"),
+            StrView_EqCStr(Fs_ToPosix(a, Fs_Join(a, SVL("a/b"), SVL("c.txt"))),
+                           "a/b/c.txt"),
+            StrView_EqCStr(Fs_Relativize(a, SVL("src"), SVL("src/x/y.ts")),
+                           "x/y.ts"));
 }
 
 static void TestFileLock() {

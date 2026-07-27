@@ -39,21 +39,20 @@ static void TestBuildRequest() {
   StrBuf body = Anthropic_BuildRequest(&a, &model, &ctx, &opt);
   JsonValue* j = Json_Parse(&a, StrBuf_View(&body));
   CHECK(j != nullptr);
-  CHECK(StrView_EqCStr(Json_GetStr(j, "model"), "claude-x"));
-  CHECK(Json_GetInt(j, "max_tokens", 0) == 1000);
-  CHECK(Json_GetBool(j, "stream", false) == true);
+  CHECK_ALL(StrView_EqCStr(Json_GetStr(j, "model"), "claude-x"),
+            Json_GetInt(j, "max_tokens", 0) == 1000,
+            Json_GetBool(j, "stream", false) == true);
   JsonValue* sys = Json_Get(j, "system");
   CHECK(Json_IsArray(sys) && sys->Count == 1);
-  CHECK(StrView_EqCStr(Json_GetStr(sys->Items[0], "text"), "You are pi."));
-  CHECK(HasCacheBreakpoint(sys->Items[0]));
+  CHECK_ALL(StrView_EqCStr(Json_GetStr(sys->Items[0], "text"), "You are pi."),
+            HasCacheBreakpoint(sys->Items[0]));
 
   JsonValue* arr = Json_Get(j, "messages");
   CHECK(Json_IsArray(arr) && arr->Count == 3);
-  CHECK(StrView_EqCStr(Json_GetStr(arr->Items[0], "role"), "user"));
-
-  CHECK(!HasCacheBreakpoint(LastContentBlock(arr->Items[0])));
-  CHECK(HasCacheBreakpoint(LastContentBlock(arr->Items[1])));
-  CHECK(HasCacheBreakpoint(LastContentBlock(arr->Items[2])));
+  CHECK_ALL(StrView_EqCStr(Json_GetStr(arr->Items[0], "role"), "user"),
+            !HasCacheBreakpoint(LastContentBlock(arr->Items[0])),
+            HasCacheBreakpoint(LastContentBlock(arr->Items[1])),
+            HasCacheBreakpoint(LastContentBlock(arr->Items[2])));
 
   JsonValue* m1 = arr->Items[1];
   CHECK(StrView_EqCStr(Json_GetStr(m1, "role"), "assistant"));
@@ -68,9 +67,9 @@ static void TestBuildRequest() {
   CHECK(StrView_EqCStr(Json_GetStr(m2, "role"), "user"));
   JsonValue* c2 = Json_Get(m2, "content");
   CHECK(Json_IsArray(c2) && c2->Count == 1);
-  CHECK(StrView_EqCStr(Json_GetStr(c2->Items[0], "type"), "tool_result"));
-  CHECK(StrView_EqCStr(Json_GetStr(c2->Items[0], "tool_use_id"), "tu1"));
-  CHECK(StrView_EqCStr(Json_GetStr(c2->Items[0], "content"), "file data"));
+  CHECK_ALL(StrView_EqCStr(Json_GetStr(c2->Items[0], "type"), "tool_result"),
+            StrView_EqCStr(Json_GetStr(c2->Items[0], "tool_use_id"), "tu1"),
+            StrView_EqCStr(Json_GetStr(c2->Items[0], "content"), "file data"));
 
   JsonValue* tools = Json_Get(j, "tools");
   CHECK(Json_IsArray(tools) && tools->Count == 1);
@@ -127,15 +126,12 @@ static void TestParseSSE() {
     AnthropicParse_Feed(&st, StrView{all.Data + off, n});
   }
 
-  CHECK(m.Content.Count == 2);
-  CHECK(m.Content.Data[0].Kind == ContentKind::Text);
-  CHECK(StrView_EqCStr(m.Content.Data[0].Text, "Hello world"));
-  CHECK(m.Content.Data[1].Kind == ContentKind::ToolCall);
-  CHECK(StrView_EqCStr(m.Content.Data[1].ToolName, "read"));
-  CHECK(StrView_EqCStr(m.Content.Data[1].ToolArgsJson, "{\"path\":\"a.txt\"}"));
-  CHECK(st.Stop == StopReason::ToolUse);
-  CHECK(st.Use.Input == 10);
-  CHECK(st.Use.Output == 15);
+  CHECK_ALL(m.Content.Count == 2, m.Content.Data[0].Kind == ContentKind::Text,
+            StrView_EqCStr(m.Content.Data[0].Text, "Hello world"),
+            m.Content.Data[1].Kind == ContentKind::ToolCall,
+            StrView_EqCStr(m.Content.Data[1].ToolName, "read"),
+            StrView_EqCStr(m.Content.Data[1].ToolArgsJson, "{\"path\":\"a.txt\"}"));
+  CHECK_ALL(st.Stop == StopReason::ToolUse, st.Use.Input == 10, st.Use.Output == 15);
 
   ArenaRelease(&a);
 }
@@ -156,11 +152,11 @@ static void TestBuildRequestOAuth() {
   JsonValue* j = Json_Parse(&a, StrBuf_View(&body));
   JsonValue* sys = Json_Get(j, "system");
   CHECK(Json_IsArray(sys) && sys->Count == 2);
-  CHECK(StrView_EqCStr(Json_GetStr(sys->Items[0], "text"),
-                       "You are Claude Code, Anthropic's official CLI for Claude."));
-  CHECK(StrView_EqCStr(Json_GetStr(sys->Items[1], "text"), "Be nice."));
-  CHECK(!HasCacheBreakpoint(sys->Items[0]));
-  CHECK(HasCacheBreakpoint(sys->Items[1]));
+  CHECK_ALL(
+      StrView_EqCStr(Json_GetStr(sys->Items[0], "text"),
+                     "You are Claude Code, Anthropic's official CLI for Claude."),
+      StrView_EqCStr(Json_GetStr(sys->Items[1], "text"), "Be nice."),
+      !HasCacheBreakpoint(sys->Items[0]), HasCacheBreakpoint(sys->Items[1]));
   ArenaRelease(&a);
 }
 
@@ -178,12 +174,11 @@ static void TestBuildRequestCachesToolsWithoutSystem() {
   ctx.ToolCount = 2;
   StrBuf body = Anthropic_BuildRequest(&a, &model, &ctx, nullptr);
   JsonValue* j = Json_Parse(&a, StrBuf_View(&body));
-  CHECK(j != nullptr);
-  CHECK(Json_Get(j, "system") == nullptr);
+  CHECK_ALL(j != nullptr, Json_Get(j, "system") == nullptr);
   JsonValue* tl = Json_Get(j, "tools");
   CHECK(Json_IsArray(tl) && tl->Count == 2);
-  CHECK(!HasCacheBreakpoint(tl->Items[0]));
-  CHECK(HasCacheBreakpoint(tl->Items[1]));
+  CHECK_ALL(!HasCacheBreakpoint(tl->Items[0]),
+            HasCacheBreakpoint(tl->Items[1]));
   ArenaRelease(&a);
 }
 
@@ -199,27 +194,22 @@ static void TestParseModelsResponse() {
       "\"capabilities\":{\"thinking\":{\"supported\":false}}}"
       "],\"has_more\":true,\"last_id\":\"claude-basic\"}";
   CHECK(Anthropic_ParseModelsResponse(&a, SV(fixture), &page));
-  CHECK(page.Count == 2);
-  CHECK(page.HasMore);
-  CHECK(StrView_EqCStr(page.LastId, "claude-basic"));
-  CHECK(StrView_EqCStr(page.Models[0].Id, "claude-opus-4-6"));
-  CHECK(StrView_EqCStr(page.Models[0].Name, "Claude Opus 4.6"));
-  CHECK(page.Models[0].ContextWindow == 1000000);
-  CHECK(page.Models[0].MaxTokens == 128000);
-  CHECK(page.Models[0].Reasoning);
-  CHECK(StrView_EqCStr(page.Models[0].Provider, "anthropic"));
-  CHECK(StrView_EqCStr(page.Models[0].Api, "anthropic-messages"));
-  CHECK(StrView_EqCStr(page.Models[1].Name, "claude-basic"));
-  CHECK(page.Models[1].ContextWindow == 200000);
-  CHECK(page.Models[1].MaxTokens == 8192);
-  CHECK(!page.Models[1].Reasoning);
+  CHECK_ALL(page.Count == 2, page.HasMore,
+            StrView_EqCStr(page.LastId, "claude-basic"));
+  CHECK_ALL(StrView_EqCStr(page.Models[0].Id, "claude-opus-4-6"),
+            StrView_EqCStr(page.Models[0].Name, "Claude Opus 4.6"),
+            page.Models[0].ContextWindow == 1000000, page.Models[0].MaxTokens == 128000,
+            page.Models[0].Reasoning,
+            StrView_EqCStr(page.Models[0].Provider, "anthropic"),
+            StrView_EqCStr(page.Models[0].Api, "anthropic-messages"));
+  CHECK_ALL(StrView_EqCStr(page.Models[1].Name, "claude-basic"),
+            page.Models[1].ContextWindow == 200000, page.Models[1].MaxTokens == 8192,
+            !page.Models[1].Reasoning);
 
   AnthropicModelPage empty = {};
   CHECK(Anthropic_ParseModelsResponse(
       &a, SVL("{\"data\":[],\"has_more\":false,\"last_id\":null}"), &empty));
-  CHECK(empty.Count == 0);
-  CHECK(empty.Models == nullptr);
-  CHECK(!empty.HasMore);
+  CHECK_ALL(empty.Count == 0, empty.Models == nullptr, !empty.HasMore);
   ArenaRelease(&a);
 }
 
@@ -237,13 +227,15 @@ static void TestParseModelsResponseRejectsMalformedData() {
           "\"has_more\":false}"),
       SVL("{\"data\":[],\"has_more\":true,\"last_id\":null}"),
   };
+  bool rejected = true;
   for (u32 i = 0; i < sizeof(fixtures) / sizeof(fixtures[0]); i++) {
     Arena a = ArenaCreate();
     AnthropicModelPage page = {};
-    CHECK(!Anthropic_ParseModelsResponse(&a, fixtures[i], &page));
-    CHECK(page.Error.Length != 0);
+    bool parsed = Anthropic_ParseModelsResponse(&a, fixtures[i], &page);
+    rejected = (!parsed && page.Error.Length != 0) && rejected;
     ArenaRelease(&a);
   }
+  CHECK(rejected);
 }
 
 static void TestMergeModels() {
@@ -268,22 +260,20 @@ static void TestMergeModels() {
   fallback[0].Name = SVL("Fallback shared");
   fallback[1].Name = SVL("Fallback only");
   ProviderModelList merged = ProviderModelList_Merge(&a, live, fallback, 2);
-  CHECK(merged.Status == ProviderModelListStatus::Success);
-  CHECK(merged.Count == 3);
-  CHECK(StrView_EqCStr(merged.Models[0].Id, "claude-shared"));
-  CHECK(StrView_EqCStr(merged.Models[0].Name, "Live shared"));
-  CHECK(merged.Models[0].ContextWindow == 999999);
-  CHECK(StrView_EqCStr(merged.Models[1].Id, "claude-live"));
-  CHECK(StrView_EqCStr(merged.Models[2].Id, "claude-fallback"));
-  CHECK(StrView_EqCStr(merged.Models[2].Name, "Fallback only"));
+  CHECK_ALL(merged.Status == ProviderModelListStatus::Success, merged.Count == 3,
+            StrView_EqCStr(merged.Models[0].Id, "claude-shared"),
+            StrView_EqCStr(merged.Models[0].Name, "Live shared"),
+            merged.Models[0].ContextWindow == 999999,
+            StrView_EqCStr(merged.Models[1].Id, "claude-live"),
+            StrView_EqCStr(merged.Models[2].Id, "claude-fallback"),
+            StrView_EqCStr(merged.Models[2].Name, "Fallback only"));
 
   ProviderModelList failed = {};
   failed.Status = ProviderModelListStatus::Failed;
   failed.Error = SVL("failed");
   ProviderModelList noFallback = ProviderModelList_Merge(&a, failed, fallback, 2);
-  CHECK(noFallback.Status == ProviderModelListStatus::Failed);
-  CHECK(noFallback.Count == 0);
-  CHECK(StrView_EqCStr(noFallback.Error, "failed"));
+  CHECK_ALL(noFallback.Status == ProviderModelListStatus::Failed, noFallback.Count == 0,
+            StrView_EqCStr(noFallback.Error, "failed"));
   ArenaRelease(&a);
 }
 

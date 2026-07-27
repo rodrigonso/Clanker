@@ -50,17 +50,16 @@ static void TestParseHelpers() {
 
   StrView path, query;
   CHECK(Loopback_ParseRequestLine(SVL("GET /callback?code=abc&state=xyz HTTP/1.1\r\n"), &path, &query));
-  CHECK(StrView_EqCStr(path, "/callback"));
-  CHECK(StrView_EqCStr(query, "code=abc&state=xyz"));
-  CHECK(StrView_EqCStr(Loopback_QueryParam(query, "code"), "abc"));
-  CHECK(StrView_EqCStr(Loopback_QueryParam(query, "state"), "xyz"));
-  CHECK(Loopback_QueryParam(query, "missing").Data == nullptr);
+  CHECK_ALL(StrView_EqCStr(path, "/callback"),
+            StrView_EqCStr(query, "code=abc&state=xyz"),
+            StrView_EqCStr(Loopback_QueryParam(query, "code"), "abc"),
+            StrView_EqCStr(Loopback_QueryParam(query, "state"), "xyz"),
+            Loopback_QueryParam(query, "missing").Data == nullptr);
 
   // A path with no query yields an empty query view.
   StrView p2, q2;
   CHECK(Loopback_ParseRequestLine(SVL("GET /favicon.ico HTTP/1.1\r\n"), &p2, &q2));
-  CHECK(StrView_EqCStr(p2, "/favicon.ico"));
-  CHECK(q2.Length == 0);
+  CHECK_ALL(StrView_EqCStr(p2, "/favicon.ico"), q2.Length == 0);
 
   // error= is extracted like any other param.
   StrView pe, qe;
@@ -75,12 +74,10 @@ static void TestParseHelpers() {
 
 static void TestParseRedirect() {
   OAuthRedirect rd = OAuth_ParseRedirect(SVL("http://localhost:53692/callback"));
-  CHECK(rd.Port == 53692);
-  CHECK(StrView_EqCStr(rd.Path, "/callback"));
+  CHECK_ALL(rd.Port == 53692, StrView_EqCStr(rd.Path, "/callback"));
 
   OAuthRedirect rd2 = OAuth_ParseRedirect(SVL("https://example.com/cb"));
-  CHECK(rd2.Port == 443);
-  CHECK(StrView_EqCStr(rd2.Path, "/cb"));
+  CHECK_ALL(rd2.Port == 443, StrView_EqCStr(rd2.Path, "/cb"));
 }
 
 // Drive the real socket path in-process: open the server on an ephemeral port,
@@ -102,17 +99,16 @@ static void TestCaptureRoundTrip() {
   send(cs, req, (int)strlen(req), 0);
 
   LoopbackCapture cap = Loopback_WaitForCode(&a, &srv, SVL("/callback"), SVL("tok-xyz"), nullptr);
-  CHECK(cap.Ok);
-  CHECK(StrView_EqCStr(cap.Code, "abc123"));
-  CHECK(StrView_EqCStr(cap.State, "tok-xyz"));
+  CHECK_ALL(cap.Ok, StrView_EqCStr(cap.Code, "abc123"),
+            StrView_EqCStr(cap.State, "tok-xyz"));
 
   char resp[2048];
   int n = (int)recv(cs, resp, sizeof(resp) - 1, 0);
   CHECK(n > 0);
   if (n > 0) {
     StrView r{resp, (u32)n};
-    CHECK(StrView_Contains(r, "200 OK"));
-    CHECK(StrView_Contains(r, "Authentication complete"));
+    CHECK_ALL(StrView_Contains(r, "200 OK"),
+              StrView_Contains(r, "Authentication complete"));
   }
 
   CloseClient(cs);
@@ -136,8 +132,7 @@ static void TestStateMismatch() {
   send(cs, req, (int)strlen(req), 0);
 
   LoopbackCapture cap = Loopback_WaitForCode(&a, &srv, SVL("/callback"), SVL("expected"), nullptr);
-  CHECK(!cap.Ok);
-  CHECK(cap.Error.Length > 0);
+  CHECK_ALL(!cap.Ok, cap.Error.Length > 0);
 
   char resp[2048];
   int n = (int)recv(cs, resp, sizeof(resp) - 1, 0);
@@ -184,8 +179,7 @@ static void TestCancelStalledClient() {
   abort = 1;
   Thread_Join(&waiter);
 
-  CHECK(!ctx.Capture.Ok);
-  CHECK(StrView_Contains(ctx.Capture.Error, "cancelled"));
+  CHECK_ALL(!ctx.Capture.Ok, StrView_Contains(ctx.Capture.Error, "cancelled"));
   CloseClient(cs);
   Loopback_Close(&srv);
   ArenaRelease(&a);

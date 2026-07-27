@@ -13,19 +13,18 @@ void TestJson() {
       "\"esc\":\"line1\\nline2\\t\\\"q\\\"\",\"arr\":[1,2,3],\"obj\":{\"k\":\"v\"}}";
   JsonValue* root = Json_Parse(&a, SV(doc));
   CHECK(Json_IsObject(root));
-  CHECK(StrView_EqCStr(Json_GetStr(root, "name"), "pi"));
-  CHECK(Json_GetInt(root, "n", 0) == 42);
-  CHECK(Json_GetNum(root, "f", 0) == 3.5);
-  CHECK(Json_GetBool(root, "ok", false) == true);
-  CHECK(Json_GetBool(root, "nope", true) == false);
+  CHECK_ALL(StrView_EqCStr(Json_GetStr(root, "name"), "pi"),
+            Json_GetInt(root, "n", 0) == 42, Json_GetNum(root, "f", 0) == 3.5,
+            Json_GetBool(root, "ok", false) == true,
+            Json_GetBool(root, "nope", true) == false);
   JsonValue* nil = Json_Get(root, "nil");
-  CHECK(nil && nil->Kind == JsonKind::Null);
-  CHECK(StrView_EqCStr(Json_GetStr(root, "esc"), "line1\nline2\t\"q\""));
+  CHECK_ALL(nil && nil->Kind == JsonKind::Null,
+            StrView_EqCStr(Json_GetStr(root, "esc"), "line1\nline2\t\"q\""));
 
   JsonValue* arr = Json_Get(root, "arr");
-  CHECK(Json_IsArray(arr));
-  CHECK(arr->Count == 3);
-  CHECK(arr->Items[1]->Kind == JsonKind::Number && (i64)arr->Items[1]->Number == 2);
+  CHECK_ALL(Json_IsArray(arr), arr->Count == 3,
+            arr->Items[1]->Kind == JsonKind::Number &&
+                (i64)arr->Items[1]->Number == 2);
 
   JsonValue* obj = Json_Get(root, "obj");
   CHECK(StrView_EqCStr(Json_GetStr(obj, "k"), "v"));
@@ -33,9 +32,10 @@ void TestJson() {
   // Unicode escape decodes to UTF-8.
   JsonValue* uni = Json_Parse(&a, SV("{\"s\":\"\\u00e9\\u4e2d\"}"));
   StrView s = Json_GetStr(uni, "s");
-  CHECK(s.Length == 5);  // é (2 bytes) + 中 (3 bytes)
-  CHECK((u8)s.Data[0] == 0xC3 && (u8)s.Data[1] == 0xA9);
-  CHECK((u8)s.Data[2] == 0xE4 && (u8)s.Data[3] == 0xB8 && (u8)s.Data[4] == 0xAD);
+  CHECK_ALL(s.Length == 5,  // é (2 bytes) + 中 (3 bytes)
+            (u8)s.Data[0] == 0xC3 && (u8)s.Data[1] == 0xA9,
+            (u8)s.Data[2] == 0xE4 && (u8)s.Data[3] == 0xB8 &&
+                (u8)s.Data[4] == 0xAD);
 
   // Surrogate pair (emoji U+1F600).
   JsonValue* emo = Json_Parse(&a, SV("{\"e\":\"\\ud83d\\ude00\"}"));

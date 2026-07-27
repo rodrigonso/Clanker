@@ -26,8 +26,7 @@ void TestMarkdown() {
   {
     Array<Span> out = Array_Make<Span>(&a, 4);
     Markdown_Inline(SVL("a **b** c"), StyleDefault(), &out);
-    CHECK(out.Count == 3);
-    CHECK(SpanHas(&out, "b", ATTR_BOLD, 0));
+    CHECK_ALL(out.Count == 3, SpanHas(&out, "b", ATTR_BOLD, 0));
   }
   // Inline: code (green fg 114).
   {
@@ -52,23 +51,22 @@ void TestMarkdown() {
   {
     Array<SpanLine> out = Array_Make<SpanLine>(&a, 4);
     Markdown_Render(&a, SVL("# Title"), &out);
-    CHECK(out.Count == 1);
-    CHECK(SpanHas(&out.Data[0].Spans, "Title", ATTR_BOLD, 0));
+    CHECK_ALL(out.Count == 1,
+              SpanHas(&out.Data[0].Spans, "Title", ATTR_BOLD, 0));
   }
   // Block: unordered list bullet.
   {
     Array<SpanLine> out = Array_Make<SpanLine>(&a, 4);
     Markdown_Render(&a, SVL("- item"), &out);
-    CHECK(out.Count == 1);
-    CHECK(SpanHas(&out.Data[0].Spans, "\xe2\x80\xa2 ", 0, 0));
-    CHECK(SpanHas(&out.Data[0].Spans, "item", 0, 0));
+    CHECK_ALL(out.Count == 1,
+              SpanHas(&out.Data[0].Spans, "\xe2\x80\xa2 ", 0, 0),
+              SpanHas(&out.Data[0].Spans, "item", 0, 0));
   }
   // Block: fenced code -> code style, fence lines dropped.
   {
     Array<SpanLine> out = Array_Make<SpanLine>(&a, 4);
     Markdown_Render(&a, SVL("```\ncode\n```"), &out);
-    CHECK(out.Count == 1);
-    CHECK(SpanHas(&out.Data[0].Spans, "code", 0, 114));
+    CHECK_ALL(out.Count == 1, SpanHas(&out.Data[0].Spans, "code", 0, 114));
   }
 
   ArenaRelease(&a);

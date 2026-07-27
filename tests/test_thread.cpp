@@ -46,12 +46,15 @@ void TestThread() {
   const int ITERS = 20000;
   Thread th[N];
   Counter c[N];
+  bool started = true;
   for (int i = 0; i < N; i++) {
     c[i].M = &m;
     c[i].Val = &val;
     c[i].Iters = ITERS;
-    CHECK(Thread_Start(&th[i], Worker, &c[i]));
+    bool ok = Thread_Start(&th[i], Worker, &c[i]);
+    started = ok && started;
   }
+  CHECK(started);
   for (int i = 0; i < N; i++) Thread_Join(&th[i]);
   CHECK(val == N * ITERS);
   Mutex_Destroy(&m);

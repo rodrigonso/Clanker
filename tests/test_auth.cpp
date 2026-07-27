@@ -19,8 +19,7 @@ static void TestStore() {
 
   Credential r = {};
   CHECK(AuthStore_Read(&a, path, SVL("openai"), &r));
-  CHECK(r.Kind == CredKind::ApiKey);
-  CHECK(StrView_EqCStr(r.ApiKey, "sk-test-123"));
+  CHECK_ALL(r.Kind == CredKind::ApiKey, StrView_EqCStr(r.ApiKey, "sk-test-123"));
 
   Credential oc = {};
   oc.Kind = CredKind::OAuth;
@@ -31,10 +30,9 @@ static void TestStore() {
 
   Credential r2 = {};
   CHECK(AuthStore_Read(&a, path, SVL("anthropic"), &r2));
-  CHECK(r2.Kind == CredKind::OAuth);
-  CHECK(StrView_EqCStr(r2.Access, "acc"));
-  CHECK(StrView_EqCStr(r2.Refresh, "ref"));
-  CHECK(r2.ExpiresMs == 1234567890123ull);
+  CHECK_ALL(r2.Kind == CredKind::OAuth, StrView_EqCStr(r2.Access, "acc"),
+            StrView_EqCStr(r2.Refresh, "ref"),
+            r2.ExpiresMs == 1234567890123ull);
   volatile i32 abort = 1;
   CHECK(Auth_ResolveToken(&a, path, SVL("anthropic"), nullptr, &abort).Length == 0);
 
@@ -63,22 +61,22 @@ static void TestOAuth() {
   Arena a = ArenaCreate();
 
   const OAuthConfig* cfg = OAuth_GetConfig(SVL("anthropic"));
-  CHECK(cfg != nullptr);
-  CHECK(OAuth_GetConfig(SVL("nope")) == nullptr);
+  CHECK_ALL(cfg != nullptr, OAuth_GetConfig(SVL("nope")) == nullptr);
 
   OAuthBegin beg = OAuth_BeginAuthCode(&a, cfg);
-  CHECK(beg.Verifier.Length == 43);
-  CHECK(StrView_Contains(beg.AuthUrl, "https://claude.ai/oauth/authorize?"));
-  CHECK(StrView_Contains(beg.AuthUrl, "client_id=9d1c250a"));
-  CHECK(StrView_Contains(beg.AuthUrl, "code_challenge_method=S256"));
-  CHECK(StrView_Contains(beg.AuthUrl, "scope=org%3Acreate_api_key"));  // ':' url-encoded
+  CHECK_ALL(beg.Verifier.Length == 43,
+            StrView_Contains(beg.AuthUrl, "https://claude.ai/oauth/authorize?"),
+            StrView_Contains(beg.AuthUrl, "client_id=9d1c250a"),
+            StrView_Contains(beg.AuthUrl, "code_challenge_method=S256"),
+            StrView_Contains(beg.AuthUrl,
+                             "scope=org%3Acreate_api_key"));  // ':' url-encoded
 
   Credential tr = {};
   CHECK(OAuth_ParseTokenResponse(
       &a, SV("{\"access_token\":\"at\",\"refresh_token\":\"rt\",\"expires_in\":3600}"), &tr));
-  CHECK(tr.Kind == CredKind::OAuth);
-  CHECK(StrView_EqCStr(tr.Access, "at") && StrView_EqCStr(tr.Refresh, "rt"));
-  CHECK(tr.ExpiresMs > NowMillis());
+  CHECK_ALL(tr.Kind == CredKind::OAuth,
+            StrView_EqCStr(tr.Access, "at") && StrView_EqCStr(tr.Refresh, "rt"),
+            tr.ExpiresMs > NowMillis());
 
   volatile i32 abort = 1;
   Credential cancelled = {};

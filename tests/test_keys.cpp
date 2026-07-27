@@ -4,6 +4,8 @@
 
 namespace {
 
+bool g_allKeysAvailable;
+
 // Push a C-string of bytes into the decoder.
 void Push(KeyDecoder* d, const char* s) {
   u32 n = 0;
@@ -11,26 +13,33 @@ void Push(KeyDecoder* d, const char* s) {
   KeyDecoder_Push(d, s, n);
 }
 
-// Pull the next key, asserting one is available, and return it.
+// Pull the next key. Callers validate the decoded value.
 Key Next(KeyDecoder* d) {
-  Key k;
-  bool ok = KeyDecoder_Next(d, &k);
-  CHECK(ok);
+  Key k = {};
+  bool available = KeyDecoder_Next(d, &k);
+  g_allKeysAvailable = available && g_allKeysAvailable;
   return k;
+}
+
+bool NextKind(KeyDecoder* d, KeyKind kind) { return Next(d).Kind == kind; }
+
+bool NextCodepoint(KeyDecoder* d, u32 codepoint) {
+  Key key = Next(d);
+  return key.Kind == KeyKind::Char && key.Codepoint == codepoint;
 }
 
 }  // namespace
 
 void TestKeys() {
+  g_allKeysAvailable = true;
   KeyDecoder d;
 
   // Plain ASCII characters.
   KeyDecoder_Init(&d);
   Push(&d, "abc");
-  Key k = Next(&d);
-  CHECK(k.Kind == KeyKind::Char && k.Codepoint == 'a');
-  CHECK(Next(&d).Codepoint == 'b');
-  CHECK(Next(&d).Codepoint == 'c');
+  Key k = {};
+  CHECK(NextCodepoint(&d, 'a') && NextCodepoint(&d, 'b') &&
+        NextCodepoint(&d, 'c'));
   CHECK(!KeyDecoder_Next(&d, &k));  // drained
 
   // Enter vs newline.
@@ -42,14 +51,9 @@ void TestKeys() {
 
   // Control keys + backspace.
   KeyDecoder_Init(&d);
-  Push(&d, "\x7f");
-  CHECK(Next(&d).Kind == KeyKind::Backspace);
-  Push(&d, "\x03");
-  CHECK(Next(&d).Kind == KeyKind::CtrlC);
-  Push(&d, "\x17");
-  CHECK(Next(&d).Kind == KeyKind::CtrlW);
-  Push(&d, "\x0f");
-  CHECK(Next(&d).Kind == KeyKind::CtrlO);
+  Push(&d, "\x7f\x03\x17\x0f");
+  CHECK(NextKind(&d, KeyKind::Backspace) && NextKind(&d, KeyKind::CtrlC) &&
+        NextKind(&d, KeyKind::CtrlW) && NextKind(&d, KeyKind::CtrlO));
 
   // Consecutive Escape bytes are two standalone presses, including when an
   // Escape is immediately followed by an arrow sequence.
@@ -65,14 +69,11 @@ void TestKeys() {
   // Arrows + Home/End + Delete.
   KeyDecoder_Init(&d);
   Push(&d, "\x1b[A\x1b[B\x1b[C\x1b[D");
-  CHECK(Next(&d).Kind == KeyKind::Up);
-  CHECK(Next(&d).Kind == KeyKind::Down);
-  CHECK(Next(&d).Kind == KeyKind::Right);
-  CHECK(Next(&d).Kind == KeyKind::Left);
+  CHECK(NextKind(&d, KeyKind::Up) && NextKind(&d, KeyKind::Down) &&
+        NextKind(&d, KeyKind::Right) && NextKind(&d, KeyKind::Left));
   Push(&d, "\x1b[H\x1b[F\x1b[3~");
-  CHECK(Next(&d).Kind == KeyKind::Home);
-  CHECK(Next(&d).Kind == KeyKind::End);
-  CHECK(Next(&d).Kind == KeyKind::Delete);
+  CHECK(NextKind(&d, KeyKind::Home) && NextKind(&d, KeyKind::End) &&
+        NextKind(&d, KeyKind::Delete));
 
   // Ctrl+Right / Ctrl+Left -> word navigation.
   KeyDecoder_Init(&d);
@@ -125,21 +126,18 @@ void TestKeys() {
   // Bracketed paste: newline inside is a Newline, not Enter.
   KeyDecoder_Init(&d);
   Push(&d, "\x1b[200~ab\ncd\x1b[201~");
-  CHECK(Next(&d).Kind == KeyKind::PasteStart);
-  CHECK(Next(&d).Codepoint == 'a');
-  CHECK(Next(&d).Codepoint == 'b');
-  CHECK(Next(&d).Kind == KeyKind::Newline);
-  CHECK(Next(&d).Codepoint == 'c');
-  CHECK(Next(&d).Codepoint == 'd');
-  CHECK(Next(&d).Kind == KeyKind::PasteEnd);
+  CHECK(NextKind(&d, KeyKind::PasteStart) && NextCodepoint(&d, 'a') &&
+        NextCodepoint(&d, 'b') && NextKind(&d, KeyKind::Newline) &&
+        NextCodepoint(&d, 'c') && NextCodepoint(&d, 'd') &&
+        NextKind(&d, KeyKind::PasteEnd));
   CHECK(!KeyDecoder_Next(&d, &k));
 
   // SGR mouse: wheel up/down map to ScrollUp/ScrollDown.
   KeyDecoder_Init(&d);
   Push(&d, "\x1b[<64;10;5M");
   Key wheelUp = Next(&d);
-  CHECK(wheelUp.Kind == KeyKind::ScrollUp);
-  CHECK(wheelUp.MouseX == 9 && wheelUp.MouseY == 4);
+  CHECK_ALL(wheelUp.Kind == KeyKind::ScrollUp,
+            wheelUp.MouseX == 9 && wheelUp.MouseY == 4);
   Push(&d, "\x1b[<65;10;5M");
   CHECK(Next(&d).Kind == KeyKind::ScrollDown);
 
@@ -153,30 +151,27 @@ void TestKeys() {
   KeyDecoder_Init(&d);
   Push(&d, "\x1b[<0;3;4M\x1b[<0;3;4m");
   Key mouseDown = Next(&d);
-  CHECK(mouseDown.Kind == KeyKind::MouseLeftDown);
-  CHECK(mouseDown.MouseX == 2 && mouseDown.MouseY == 3);
+  CHECK_ALL(mouseDown.Kind == KeyKind::MouseLeftDown,
+            mouseDown.MouseX == 2 && mouseDown.MouseY == 3);
   Key mouseUp = Next(&d);
-  CHECK(mouseUp.Kind == KeyKind::MouseLeftUp);
-  CHECK(mouseUp.MouseX == 2 && mouseUp.MouseY == 3);
+  CHECK_ALL(mouseUp.Kind == KeyKind::MouseLeftUp,
+            mouseUp.MouseX == 2 && mouseUp.MouseY == 3);
   CHECK(!KeyDecoder_Next(&d, &k));  // drained
 
   // All-motion tracking reports hover movement, including button drags.
   KeyDecoder_Init(&d);
   Push(&d, "\x1b[<35;8;6M\x1b[<60;9;7M");
   Key move = Next(&d);
-  CHECK(move.Kind == KeyKind::MouseMove);
-  CHECK(move.MouseX == 7 && move.MouseY == 5);
+  CHECK_ALL(move.Kind == KeyKind::MouseMove, move.MouseX == 7 && move.MouseY == 5);
   Key drag = Next(&d);
-  CHECK(drag.Kind == KeyKind::MouseMove);
-  CHECK(drag.MouseX == 8 && drag.MouseY == 6);
-  CHECK(drag.Shift && drag.Alt && drag.Ctrl);
+  CHECK_ALL(drag.Kind == KeyKind::MouseMove, drag.MouseX == 8 && drag.MouseY == 6,
+            drag.Shift && drag.Alt && drag.Ctrl);
 
   // Unsupported buttons and malformed zero coordinates are consumed.
   KeyDecoder_Init(&d);
   Push(&d, "\x1b[<2;1;1M\x1b[<2;1;1m\x1b[<0;0;0M");
-  CHECK(Next(&d).Kind == KeyKind::None);
-  CHECK(Next(&d).Kind == KeyKind::None);
-  CHECK(Next(&d).Kind == KeyKind::None);
+  CHECK(NextKind(&d, KeyKind::None) && NextKind(&d, KeyKind::None) &&
+        NextKind(&d, KeyKind::None));
 
   // Horizontal wheel (Cb 66/67) is recognised but ignored.
   KeyDecoder_Init(&d);
@@ -189,4 +184,5 @@ void TestKeys() {
   CHECK(!KeyDecoder_Next(&d, &k));
   Push(&d, "5M");
   CHECK(Next(&d).Kind == KeyKind::ScrollUp);
+  CHECK(g_allKeysAvailable);
 }

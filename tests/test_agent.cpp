@@ -77,6 +77,29 @@ u32 CountKind(Recorder* r, AgentEventKind k) {
   return c;
 }
 
+bool MessageTextEq(const Agent* agent, u32 index, Role role, const char* text) {
+  if (index >= agent->Messages.Count) return false;
+  const Message* message = &agent->Messages.Data[index];
+  return message->Kind == role && message->Content.Count > 0 &&
+         StrView_EqCStr(message->Content.Data[0].Text, text);
+}
+
+bool ToolResultEq(const Agent* agent, u32 index, const char* id, const char* text,
+                  bool isError = false) {
+  if (index >= agent->Messages.Count) return false;
+  const Message* message = &agent->Messages.Data[index];
+  return message->Kind == Role::ToolResult && message->IsError == isError &&
+         StrView_EqCStr(message->ToolCallId, id) && message->Content.Count > 0 &&
+         StrView_EqCStr(message->Content.Data[0].Text, text);
+}
+
+bool BatchEventsEq(Recorder* recorder, u32 count) {
+  return CountKind(recorder, AgentEventKind::ToolStart) == count &&
+         CountKind(recorder, AgentEventKind::ToolEnd) == count &&
+         recorder->Kinds.Count > 0 &&
+         recorder->Kinds.Data[recorder->Kinds.Count - 1] == (u8)AgentEventKind::AgentEnd;
+}
+
 // Shared instrument for the parallel/sequential tests: each tool execution bumps
 // a live-counter (tracking peak concurrency), sleeps so overlap is observable,
 // then echoes its args as a marker. Peak >= 2 proves real concurrency; peak == 1
@@ -217,17 +240,15 @@ void TestAgent() {
 
     Agent_Prompt(&ag, SV("hello"));
 
-    CHECK(ag.Messages.Count == 4);
-    CHECK(ag.Messages.Data[0].Kind == Role::User);
-    CHECK(ag.Messages.Data[1].Kind == Role::Assistant);
-    CHECK(ag.Messages.Data[2].Kind == Role::ToolResult);
-    CHECK(ag.Messages.Data[3].Kind == Role::Assistant);
-    CHECK(StrView_EqCStr(ag.Messages.Data[2].Content.Data[0].Text, "echo:{\"x\":1}"));
-    CHECK(StrView_EqCStr(StrBuf_View(&rec.Text), "done!"));
-    CHECK(rec.Kinds.Data[0] == (u8)AgentEventKind::AgentStart);
-    CHECK(rec.Kinds.Data[rec.Kinds.Count - 1] == (u8)AgentEventKind::AgentEnd);
-    CHECK(HasKind(&rec, AgentEventKind::ToolStart));
-    CHECK(HasKind(&rec, AgentEventKind::ToolEnd));
+    CHECK_ALL(ag.Messages.Count == 4, ag.Messages.Data[0].Kind == Role::User,
+              ag.Messages.Data[1].Kind == Role::Assistant,
+              ToolResultEq(&ag, 2, "call_1", "echo:{\"x\":1}"),
+              ag.Messages.Data[3].Kind == Role::Assistant);
+    CHECK_ALL(StrView_EqCStr(StrBuf_View(&rec.Text), "done!"),
+              rec.Kinds.Data[0] == (u8)AgentEventKind::AgentStart,
+              rec.Kinds.Data[rec.Kinds.Count - 1] == (u8)AgentEventKind::AgentEnd,
+              HasKind(&rec, AgentEventKind::ToolStart),
+              HasKind(&rec, AgentEventKind::ToolEnd));
     ArenaRelease(&a);
   }
 
@@ -252,10 +273,7 @@ void TestAgent() {
     ag.Prov = Faux_Provider(&f);
 
     Agent_Prompt(&ag, SV("go"));
-    CHECK(ag.Messages.Count == 4);
-    CHECK(ag.Messages.Data[2].Kind == Role::ToolResult);
-    CHECK(ag.Messages.Data[2].IsError == true);
-    CHECK(StrView_EqCStr(ag.Messages.Data[2].Content.Data[0].Text, "boom"));
+    CHECK_ALL(ag.Messages.Count == 4, ToolResultEq(&ag, 2, "c1", "boom", true));
     ArenaRelease(&a);
   }
 
@@ -276,20 +294,11 @@ void TestAgent() {
     Recorder rec;
     RunBatch(&a, &ag, &conc, &rec, calls, 3);
 
-    CHECK(ag.Messages.Count == 6);
-    CHECK(ag.Messages.Data[1].Kind == Role::Assistant);
-    CHECK(ag.Messages.Data[2].Kind == Role::ToolResult);
-    CHECK(StrView_EqCStr(ag.Messages.Data[2].ToolCallId, "c0"));
-    CHECK(StrView_EqCStr(ag.Messages.Data[2].Content.Data[0].Text, "A"));
-    CHECK(StrView_EqCStr(ag.Messages.Data[3].ToolCallId, "c1"));
-    CHECK(StrView_EqCStr(ag.Messages.Data[3].Content.Data[0].Text, "B"));
-    CHECK(StrView_EqCStr(ag.Messages.Data[4].ToolCallId, "c2"));
-    CHECK(StrView_EqCStr(ag.Messages.Data[4].Content.Data[0].Text, "C"));
-    CHECK(ag.Messages.Data[5].Kind == Role::Assistant);
-    CHECK(CountKind(&rec, AgentEventKind::ToolStart) == 3);
-    CHECK(CountKind(&rec, AgentEventKind::ToolEnd) == 3);
-    CHECK(rec.Kinds.Data[rec.Kinds.Count - 1] == (u8)AgentEventKind::AgentEnd);
-    CHECK(conc.Max >= 2);  // proves real concurrency
+    CHECK_ALL(ag.Messages.Count == 6, ag.Messages.Data[1].Kind == Role::Assistant,
+              ToolResultEq(&ag, 2, "c0", "A"), ToolResultEq(&ag, 3, "c1", "B"),
+              ToolResultEq(&ag, 4, "c2", "C"),
+              ag.Messages.Data[5].Kind == Role::Assistant);
+    CHECK_ALL(BatchEventsEq(&rec, 3), conc.Max >= 2);  // proves real concurrency
 
     Mutex_Destroy(&conc.Lock);
     ArenaRelease(&a);
@@ -312,11 +321,9 @@ void TestAgent() {
     Recorder rec;
     RunBatch(&a, &ag, &conc, &rec, calls, 3);
 
-    CHECK(ag.Messages.Count == 6);
-    CHECK(StrView_EqCStr(ag.Messages.Data[2].Content.Data[0].Text, "A"));
-    CHECK(StrView_EqCStr(ag.Messages.Data[3].Content.Data[0].Text, "B"));
-    CHECK(StrView_EqCStr(ag.Messages.Data[4].Content.Data[0].Text, "C"));
-    CHECK(conc.Max == 1);  // never overlapped
+    CHECK_ALL(ag.Messages.Count == 6, ToolResultEq(&ag, 2, "c0", "A"),
+              ToolResultEq(&ag, 3, "c1", "B"), ToolResultEq(&ag, 4, "c2", "C"),
+              conc.Max == 1);  // never overlapped
 
     Mutex_Destroy(&conc.Lock);
     ArenaRelease(&a);
@@ -339,10 +346,8 @@ void TestAgent() {
     Recorder rec;
     RunBatch(&a, &ag, &conc, &rec, calls, 3, ToolExecMode::Sequential);
 
-    CHECK(ag.Messages.Count == 6);
-    CHECK(StrView_EqCStr(ag.Messages.Data[2].Content.Data[0].Text, "A"));
-    CHECK(StrView_EqCStr(ag.Messages.Data[4].Content.Data[0].Text, "C"));
-    CHECK(conc.Max == 1);
+    CHECK_ALL(ag.Messages.Count == 6, ToolResultEq(&ag, 2, "c0", "A"),
+              ToolResultEq(&ag, 4, "c2", "C"), conc.Max == 1);
 
     Mutex_Destroy(&conc.Lock);
     ArenaRelease(&a);
@@ -365,13 +370,9 @@ void TestAgent() {
     Recorder rec;
     RunBatch(&a, &ag, &conc, &rec, calls, 3);
 
-    CHECK(ag.Messages.Count == 6);
-    CHECK(StrView_EqCStr(ag.Messages.Data[2].Content.Data[0].Text, "A"));
-    CHECK(ag.Messages.Data[2].IsError == false);
-    CHECK(ag.Messages.Data[3].IsError == true);
-    CHECK(StrView_EqCStr(ag.Messages.Data[3].Content.Data[0].Text, "Tool not found: missing"));
-    CHECK(StrView_EqCStr(ag.Messages.Data[4].Content.Data[0].Text, "C"));
-    CHECK(conc.Max >= 2);
+    CHECK_ALL(ag.Messages.Count == 6, ToolResultEq(&ag, 2, "c0", "A"),
+              ToolResultEq(&ag, 3, "c1", "Tool not found: missing", true),
+              ToolResultEq(&ag, 4, "c2", "C"), conc.Max >= 2);
 
     Mutex_Destroy(&conc.Lock);
     ArenaRelease(&a);
@@ -400,9 +401,7 @@ void TestAgent() {
     ag.Prov = Faux_Provider(&f);
 
     Agent_Prompt(&ag, SV("go"));
-    CHECK(ag.Messages.Count == 4);
-    CHECK(ag.Messages.Data[2].Kind == Role::ToolResult);
-    CHECK(StrView_EqCStr(ag.Messages.Data[2].Content.Data[0].Text, "OVERRIDDEN"));
+    CHECK_ALL(ag.Messages.Count == 4, ToolResultEq(&ag, 2, "c1", "OVERRIDDEN"));
     ArenaRelease(&a);
   }
 
@@ -457,8 +456,7 @@ void TestAgent() {
 
     Agent_Prompt(&ag, SV("go"));
     // user, assistant(toolcall), toolResult — loop stops (terminate); step 1 unused.
-    CHECK(ag.Messages.Count == 3);
-    CHECK(ag.Messages.Data[2].Kind == Role::ToolResult);
+    CHECK_ALL(ag.Messages.Count == 3, ag.Messages.Data[2].Kind == Role::ToolResult);
     ArenaRelease(&a);
   }
 
@@ -487,13 +485,12 @@ void TestAgent() {
 
     Agent_Prompt(&ag, SV("go"));
     // Only the final (successful) assistant turn is recorded.
-    CHECK(ag.Messages.Count == 2);
-    CHECK(ag.Messages.Data[1].Kind == Role::Assistant);
-    CHECK(ag.Messages.Data[1].Stop == StopReason::Stop);
-    CHECK(StrView_EqCStr(StrBuf_View(&rec.Text), "recovered"));
-    CHECK(CountKind(&rec, AgentEventKind::RetryStart) == 1);
-    CHECK(CountKind(&rec, AgentEventKind::RetryEnd) == 1);
-    CHECK(f.Index == 2);  // two provider calls: error then success
+    CHECK_ALL(ag.Messages.Count == 2, ag.Messages.Data[1].Kind == Role::Assistant,
+              ag.Messages.Data[1].Stop == StopReason::Stop,
+              StrView_EqCStr(StrBuf_View(&rec.Text), "recovered"),
+              CountKind(&rec, AgentEventKind::RetryStart) == 1,
+              CountKind(&rec, AgentEventKind::RetryEnd) == 1,
+              f.Index == 2);  // two provider calls: error then success
     ArenaRelease(&a);
   }
 
@@ -518,9 +515,9 @@ void TestAgent() {
     ag.Sink.OnEvent = RecSink;
 
     Agent_Prompt(&ag, SV("go"));
-    CHECK(ag.Messages.Data[1].Stop == StopReason::Error);
-    CHECK(CountKind(&rec, AgentEventKind::RetryStart) == 0);
-    CHECK(f.Index == 1);  // single provider call, no retry
+    CHECK_ALL(ag.Messages.Data[1].Stop == StopReason::Error,
+              CountKind(&rec, AgentEventKind::RetryStart) == 0,
+              f.Index == 1);  // single provider call, no retry
     ArenaRelease(&a);
   }
 
@@ -547,9 +544,9 @@ void TestAgent() {
     ag.Sink.OnEvent = RecSink;
 
     Agent_Prompt(&ag, SV("go"));
-    CHECK(ag.Messages.Data[1].Stop == StopReason::Error);
-    CHECK(CountKind(&rec, AgentEventKind::RetryStart) == 3);  // 3 retries, 4 calls
-    CHECK(f.Index == 4);
+    CHECK_ALL(ag.Messages.Data[1].Stop == StopReason::Error,
+              CountKind(&rec, AgentEventKind::RetryStart) == 3,
+              f.Index == 4);  // 3 retries, 4 calls
     ArenaRelease(&a);
   }
 
@@ -582,26 +579,36 @@ void TestAgent() {
     u64 t0 = NowMillis();
     Agent_Prompt(&ag, SV("go"));
     u64 elapsed = NowMillis() - t0;
-    CHECK(elapsed < 5000);  // did not actually sleep 100s
-    CHECK(CountKind(&rec, AgentEventKind::RetryStart) == 0);
-    CHECK(f.Index == 0);
-    CHECK(ag.Messages.Data[1].Stop == StopReason::Aborted);
+    CHECK_ALL(elapsed < 5000,  // did not actually sleep 100s
+              CountKind(&rec, AgentEventKind::RetryStart) == 0, f.Index == 0,
+              ag.Messages.Data[1].Stop == StopReason::Aborted);
     ArenaRelease(&a);
   }
 
   // IsRetryableError classifier (port of pi's isRetryableAssistantError).
   {
-    CHECK(IsRetryableError(SVL("HTTP 429: overloaded_error")) == true);
-    CHECK(IsRetryableError(SVL("overloaded")) == true);
-    CHECK(IsRetryableError(SVL("HTTP 503 Service Unavailable")) == true);
-    CHECK(IsRetryableError(SVL("network error: connection refused")) == true);
-    CHECK(IsRetryableError(SVL("socket hang up")) == true);
-    CHECK(IsRetryableError(SVL("HTTP 400: invalid_request_error")) == false);
-    CHECK(IsRetryableError(SVL("HTTP 401 unauthorized")) == false);
-    CHECK(IsRetryableError(SVL("insufficient_quota")) == false);
-    // Non-retryable exclusion wins even when a retryable token is present.
-    CHECK(IsRetryableError(SVL("429 but Monthly usage limit reached")) == false);
-    CHECK(IsRetryableError(StrView{nullptr, 0}) == false);
+    struct RetryableCase {
+      StrView Error;
+      bool Expected;
+    };
+    RetryableCase cases[] = {
+        {SVL("HTTP 429: overloaded_error"), true},
+        {SVL("overloaded"), true},
+        {SVL("HTTP 503 Service Unavailable"), true},
+        {SVL("network error: connection refused"), true},
+        {SVL("socket hang up"), true},
+        {SVL("HTTP 400: invalid_request_error"), false},
+        {SVL("HTTP 401 unauthorized"), false},
+        {SVL("insufficient_quota"), false},
+        {SVL("429 but Monthly usage limit reached"), false},
+        {StrView{nullptr, 0}, false},
+    };
+    bool classified = true;
+    for (u32 i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      bool matches = IsRetryableError(cases[i].Error) == cases[i].Expected;
+      classified = matches && classified;
+    }
+    CHECK(classified);
   }
 
   // nextTurn: queued messages are prepended at the start of the next run.
@@ -628,12 +635,10 @@ void TestAgent() {
 
     Agent_Prompt(&ag, SV("go"));
     // user(queued-first), user(go), assistant(ok)
-    CHECK(ag.Messages.Count == 3);
-    CHECK(ag.Messages.Data[0].Kind == Role::User);
-    CHECK(StrView_EqCStr(ag.Messages.Data[0].Content.Data[0].Text, "queued-first"));
-    CHECK(StrView_EqCStr(ag.Messages.Data[1].Content.Data[0].Text, "go"));
-    CHECK(ag.Messages.Data[2].Kind == Role::Assistant);
-    CHECK(CountKind(&rec, AgentEventKind::QueueUpdate) >= 1);
+    CHECK_ALL(ag.Messages.Count == 3, MessageTextEq(&ag, 0, Role::User, "queued-first"),
+              MessageTextEq(&ag, 1, Role::User, "go"),
+              ag.Messages.Data[2].Kind == Role::Assistant,
+              CountKind(&rec, AgentEventKind::QueueUpdate) >= 1);
     ArenaRelease(&a);
   }
 
@@ -655,9 +660,8 @@ void TestAgent() {
 
     Agent_Prompt(&ag, SV("go"));
     // user(go), user(steer-pre), assistant(ok)
-    CHECK(ag.Messages.Count == 3);
-    CHECK(StrView_EqCStr(ag.Messages.Data[0].Content.Data[0].Text, "go"));
-    CHECK(StrView_EqCStr(ag.Messages.Data[1].Content.Data[0].Text, "steer-pre"));
+    CHECK_ALL(ag.Messages.Count == 3, MessageTextEq(&ag, 0, Role::User, "go"),
+              MessageTextEq(&ag, 1, Role::User, "steer-pre"));
     ArenaRelease(&a);
   }
 
@@ -687,10 +691,8 @@ void TestAgent() {
 
     Agent_Prompt(&ag, SV("go"));
     // user(go), assistant(toolcall), toolResult(poked), user(steered), assistant(after)
-    CHECK(ag.Messages.Count == 5);
-    CHECK(ag.Messages.Data[3].Kind == Role::User);
-    CHECK(StrView_EqCStr(ag.Messages.Data[3].Content.Data[0].Text, "steered"));
-    CHECK(StrView_EqCStr(ag.Messages.Data[4].Content.Data[0].Text, "after"));
+    CHECK_ALL(ag.Messages.Count == 5, MessageTextEq(&ag, 3, Role::User, "steered"),
+              MessageTextEq(&ag, 4, Role::Assistant, "after"));
     ArenaRelease(&a);
   }
 
@@ -714,11 +716,9 @@ void TestAgent() {
 
     Agent_Prompt(&ag, SV("go"));
     // user(go), assistant(first), user(follow), assistant(second)
-    CHECK(ag.Messages.Count == 4);
-    CHECK(StrView_EqCStr(ag.Messages.Data[1].Content.Data[0].Text, "first"));
-    CHECK(ag.Messages.Data[2].Kind == Role::User);
-    CHECK(StrView_EqCStr(ag.Messages.Data[2].Content.Data[0].Text, "follow"));
-    CHECK(StrView_EqCStr(ag.Messages.Data[3].Content.Data[0].Text, "second"));
+    CHECK_ALL(ag.Messages.Count == 4, MessageTextEq(&ag, 1, Role::Assistant, "first"),
+              MessageTextEq(&ag, 2, Role::User, "follow"),
+              MessageTextEq(&ag, 3, Role::Assistant, "second"));
     ArenaRelease(&a);
   }
 
@@ -744,30 +744,24 @@ void TestAgent() {
     Agent_NextTurn(&ag, SVL("next"));
 
     ag.Streaming = true;
-    CHECK(!Agent_ResetSession(&ag));
-    CHECK(ag.Messages.Count == 1);
-    CHECK(!Agent_Release(&ag));
-    CHECK(ag.QueueInit);
+    bool resetWhileStreaming = Agent_ResetSession(&ag);
+    CHECK_ALL(!resetWhileStreaming, ag.Messages.Count == 1);
+    bool releaseWhileStreaming = Agent_Release(&ag);
+    CHECK_ALL(!releaseWhileStreaming, ag.QueueInit);
 
     ag.Streaming = false;
     CHECK(Agent_ResetSession(&ag));
-    CHECK(ag.Messages.Count == 0);
-    CHECK(ag.Steer.Count == 0);
-    CHECK(ag.FollowUp.Count == 0);
-    CHECK(ag.NextTurn.Count == 0);
-    CHECK(!ag.QueuesDirty);
-    CHECK(ag.Stream.Abort == &abort);
-    CHECK(abort == 1);
-    CHECK(StrView_Eq(ag.Model.Id, SVL("kept-model")));
-    CHECK(StrView_Eq(ag.SystemPrompt, SVL("kept-system")));
-    CHECK(ag.Tools.Count == 1);
-    CHECK(ag.Prov.Stream == provider.Stream);
+    CHECK_ALL(ag.Messages.Count == 0, ag.Steer.Count == 0, ag.FollowUp.Count == 0,
+              ag.NextTurn.Count == 0, !ag.QueuesDirty);
+    CHECK_ALL(ag.Stream.Abort == &abort, abort == 1,
+              StrView_Eq(ag.Model.Id, SVL("kept-model")),
+              StrView_Eq(ag.SystemPrompt, SVL("kept-system")), ag.Tools.Count == 1,
+              ag.Prov.Stream == provider.Stream);
 
     Agent_Steer(&ag, SVL("after reset"));
     CHECK(ag.Steer.Count == 1);
     CHECK(Agent_Release(&ag));
-    CHECK(!ag.QueueInit);
-    CHECK(ag.Steer.Count == 0);
+    CHECK_ALL(!ag.QueueInit, ag.Steer.Count == 0);
     ArenaRelease(&a);
   }
 
@@ -793,12 +787,9 @@ void TestAgent() {
     ag.Prov = Faux_Provider(&faux);
 
     Agent_Prompt(&ag, SVL("go"));
-    CHECK(auth.Calls == 1);
-    CHECK(auth.SeenAbort == &abort);
-    CHECK(faux.Index == 0);
-    CHECK(ag.Messages.Count == 2);
-    CHECK(ag.Messages.Data[1].Kind == Role::Assistant);
-    CHECK(ag.Messages.Data[1].Stop == StopReason::Aborted);
+    CHECK_ALL(auth.Calls == 1, auth.SeenAbort == &abort, faux.Index == 0,
+              ag.Messages.Count == 2, ag.Messages.Data[1].Kind == Role::Assistant,
+              ag.Messages.Data[1].Stop == StopReason::Aborted);
     ArenaRelease(&a);
   }
 }

@@ -18,6 +18,7 @@ struct ModelsFetchFixture {
   StrView Apps[4];
   StrView Versions[4];
   volatile i32* AbortSeen;
+  bool RequestsValid = true;
 };
 
 static StrView FindHeader(const HttpRequest* request, const char* name) {
@@ -30,10 +31,14 @@ static StrView FindHeader(const HttpRequest* request, const char* name) {
 static HttpResponse FetchModelsFixture(void* user, Arena*, const HttpRequest* request,
                                        volatile i32* abort) {
   ModelsFetchFixture* fixture = (ModelsFetchFixture*)user;
-  CHECK(fixture->Calls < fixture->ResponseCount);
   u32 call = fixture->Calls++;
-  CHECK(StrView_EqCStr(request->Method, "GET"));
-  CHECK(request->Body.Length == 0);
+  if (call >= fixture->ResponseCount) {
+    fixture->RequestsValid = false;
+    return {};
+  }
+  fixture->RequestsValid =
+      fixture->RequestsValid && StrView_EqCStr(request->Method, "GET") &&
+      request->Body.Length == 0;
   fixture->Urls[call] = request->Url;
   fixture->ApiKeys[call] = FindHeader(request, "x-api-key");
   fixture->Authorizations[call] = FindHeader(request, "authorization");
@@ -64,30 +69,26 @@ static void TestAnthropicModelDiscovery() {
 
   ProviderModelList live =
       Anthropic_ListModelsWithFetch(&arena, SVL("sk-ant-api"), &abort, FetchModelsFixture, &fixture);
-  CHECK(live.Status == ProviderModelListStatus::Success);
-  CHECK(live.Count == 2);
-  CHECK(fixture.Calls == 2);
-  CHECK(fixture.AbortSeen == &abort);
-  CHECK(StrView_EqCStr(fixture.Urls[0], "https://api.anthropic.com/v1/models?limit=1000"));
-  CHECK(StrView_EqCStr(
-      fixture.Urls[1],
-      "https://api.anthropic.com/v1/models?limit=1000&after_id=cursor%20%2Fone"));
-  CHECK(StrView_EqCStr(fixture.ApiKeys[0], "sk-ant-api"));
-  CHECK(fixture.Authorizations[0].Length == 0);
-  CHECK(StrView_EqCStr(fixture.Versions[0], "2023-06-01"));
-  CHECK(StrView_EqCStr(live.Models[0].Name, "Live Sonnet"));
-  CHECK(live.Models[0].ContextWindow == 1000000);
-  CHECK(live.Models[0].MaxTokens == 64000);
-  CHECK(live.Models[0].Reasoning);
-  CHECK(StrView_EqCStr(live.Models[1].Id, "claude-extra"));
+  CHECK_ALL(live.Status == ProviderModelListStatus::Success, live.Count == 2,
+            fixture.RequestsValid, fixture.Calls == 2, fixture.AbortSeen == &abort);
+  CHECK_ALL(
+      StrView_EqCStr(fixture.Urls[0], "https://api.anthropic.com/v1/models?limit=1000"),
+      StrView_EqCStr(
+          fixture.Urls[1],
+          "https://api.anthropic.com/v1/models?limit=1000&after_id=cursor%20%2Fone"),
+      StrView_EqCStr(fixture.ApiKeys[0], "sk-ant-api"),
+      fixture.Authorizations[0].Length == 0,
+      StrView_EqCStr(fixture.Versions[0], "2023-06-01"));
+  CHECK_ALL(StrView_EqCStr(live.Models[0].Name, "Live Sonnet"),
+            live.Models[0].ContextWindow == 1000000, live.Models[0].MaxTokens == 64000,
+            live.Models[0].Reasoning, StrView_EqCStr(live.Models[1].Id, "claude-extra"));
 
   const ProviderSpec* spec = ProviderRegistry_Find(SVL("anthropic"));
   ProviderModelList merged =
       ProviderModelList_Merge(&arena, live, spec->FallbackModels, spec->FallbackModelCount);
-  CHECK(merged.Count == 4);
-  CHECK(StrView_EqCStr(merged.Models[0].Name, "Live Sonnet"));
-  CHECK(StrView_EqCStr(merged.Models[2].Id, "claude-opus-4-6"));
-  CHECK(StrView_EqCStr(merged.Models[3].Id, "claude-haiku-4-5"));
+  CHECK_ALL(merged.Count == 4, StrView_EqCStr(merged.Models[0].Name, "Live Sonnet"),
+            StrView_EqCStr(merged.Models[2].Id, "claude-opus-4-6"),
+            StrView_EqCStr(merged.Models[3].Id, "claude-haiku-4-5"));
   ArenaRelease(&arena);
 }
 
@@ -99,14 +100,12 @@ static void TestAnthropicModelDiscoveryOAuthAndEmpty() {
   fixture.Responses[0].Body = SVL("{\"data\":[],\"has_more\":false,\"last_id\":null}");
   ProviderModelList live = Anthropic_ListModelsWithFetch(
       &arena, SVL("sk-ant-oat01-test"), nullptr, FetchModelsFixture, &fixture);
-  CHECK(live.Status == ProviderModelListStatus::Success);
-  CHECK(live.Count == 0);
-  CHECK(fixture.Calls == 1);
-  CHECK(fixture.ApiKeys[0].Length == 0);
+  CHECK_ALL(live.Status == ProviderModelListStatus::Success, live.Count == 0,
+            fixture.RequestsValid, fixture.Calls == 1, fixture.ApiKeys[0].Length == 0);
   CHECK(StrView_EqCStr(fixture.Authorizations[0], "Bearer sk-ant-oat01-test"));
-  CHECK(StrView_EqCStr(fixture.Betas[0], "claude-code-20250219,oauth-2025-04-20"));
-  CHECK(StrView_EqCStr(fixture.UserAgents[0], "claude-cli/2.1.75"));
-  CHECK(StrView_EqCStr(fixture.Apps[0], "cli"));
+  CHECK_ALL(StrView_EqCStr(fixture.Betas[0], "claude-code-20250219,oauth-2025-04-20"),
+            StrView_EqCStr(fixture.UserAgents[0], "claude-cli/2.1.75"),
+            StrView_EqCStr(fixture.Apps[0], "cli"));
 
   const ProviderSpec* spec = ProviderRegistry_Find(SVL("anthropic"));
   ProviderModelList merged =
@@ -119,15 +118,14 @@ static void TestAnthropicModelDiscoveryFailures() {
   Arena arena = ArenaCreate();
   ProviderModelList missing =
       Anthropic_ListModelsWithFetch(&arena, {}, nullptr, FetchModelsFixture, nullptr);
-  CHECK(missing.Status == ProviderModelListStatus::Unavailable);
-  CHECK(missing.Error.Length != 0);
+  CHECK_ALL(missing.Status == ProviderModelListStatus::Unavailable,
+            missing.Error.Length != 0);
 
   volatile i32 abort = 1;
   ModelsFetchFixture unused = {};
   ProviderModelList aborted = Anthropic_ListModelsWithFetch(
       &arena, SVL("token"), &abort, FetchModelsFixture, &unused);
-  CHECK(aborted.Status == ProviderModelListStatus::Unavailable);
-  CHECK(unused.Calls == 0);
+  CHECK_ALL(aborted.Status == ProviderModelListStatus::Unavailable, unused.Calls == 0);
 
   ModelsFetchFixture transport = {};
   transport.ResponseCount = 1;
@@ -135,16 +133,16 @@ static void TestAnthropicModelDiscoveryFailures() {
   transport.Responses[0].Error = SVL("offline");
   ProviderModelList unavailable = Anthropic_ListModelsWithFetch(
       &arena, SVL("token"), nullptr, FetchModelsFixture, &transport);
-  CHECK(unavailable.Status == ProviderModelListStatus::Unavailable);
-  CHECK(StrView_EqCStr(unavailable.Error, "offline"));
+  CHECK_ALL(unavailable.Status == ProviderModelListStatus::Unavailable,
+            StrView_EqCStr(unavailable.Error, "offline"), transport.RequestsValid);
 
   ModelsFetchFixture http = {};
   http.ResponseCount = 1;
   http.Responses[0].Status = 401;
   ProviderModelList failed =
       Anthropic_ListModelsWithFetch(&arena, SVL("token"), nullptr, FetchModelsFixture, &http);
-  CHECK(failed.Status == ProviderModelListStatus::Failed);
-  CHECK(failed.Error.Length != 0);
+  CHECK_ALL(failed.Status == ProviderModelListStatus::Failed, failed.Error.Length != 0,
+            http.RequestsValid);
 
   ModelsFetchFixture malformed = {};
   malformed.ResponseCount = 1;
@@ -152,7 +150,7 @@ static void TestAnthropicModelDiscoveryFailures() {
   malformed.Responses[0].Body = SVL("{\"data\":[],\"has_more\":true}");
   ProviderModelList badPage = Anthropic_ListModelsWithFetch(
       &arena, SVL("token"), nullptr, FetchModelsFixture, &malformed);
-  CHECK(badPage.Status == ProviderModelListStatus::Failed);
+  CHECK_ALL(badPage.Status == ProviderModelListStatus::Failed, malformed.RequestsValid);
 
   ModelsFetchFixture repeated = {};
   repeated.ResponseCount = 2;
@@ -162,39 +160,37 @@ static void TestAnthropicModelDiscoveryFailures() {
   repeated.Responses[1] = repeated.Responses[0];
   ProviderModelList loop = Anthropic_ListModelsWithFetch(
       &arena, SVL("token"), nullptr, FetchModelsFixture, &repeated);
-  CHECK(loop.Status == ProviderModelListStatus::Failed);
-  CHECK(repeated.Calls == 2);
+  CHECK_ALL(loop.Status == ProviderModelListStatus::Failed, repeated.RequestsValid,
+            repeated.Calls == 2);
   ArenaRelease(&arena);
 }
 
 void TestProviderRegistry() {
-  CHECK(ProviderRegistry_Count() == 1);
-  CHECK(ProviderRegistry_At(ProviderRegistry_Count()) == nullptr);
-  CHECK(ProviderRegistry_Find(SVL("faux")) == nullptr);
-  CHECK(ProviderRegistry_Find(SVL("missing")) == nullptr);
+  CHECK_ALL(ProviderRegistry_Count() == 1,
+            ProviderRegistry_At(ProviderRegistry_Count()) == nullptr,
+            ProviderRegistry_Find(SVL("faux")) == nullptr,
+            ProviderRegistry_Find(SVL("missing")) == nullptr);
 
   const ProviderSpec* spec = ProviderRegistry_Find(SVL("anthropic"));
   CHECK(spec != nullptr);
-  CHECK(StrView_EqCStr(spec->Name, "Anthropic"));
-  CHECK(StrView_EqCStr(spec->DefaultModel, "claude-sonnet-4-6"));
-  CHECK(strcmp(spec->ApiKeyEnvVar, "ANTHROPIC_API_KEY") == 0);
-  CHECK(spec->CreateProvider != nullptr);
-  CHECK(spec->CreateModel != nullptr);
-  CHECK(spec->ListModels != nullptr);
-  CHECK(spec->FallbackModels != nullptr);
-  CHECK(spec->FallbackModelCount == 3);
+  CHECK_ALL(StrView_EqCStr(spec->Name, "Anthropic"),
+            StrView_EqCStr(spec->DefaultModel, "claude-sonnet-4-6"),
+            strcmp(spec->ApiKeyEnvVar, "ANTHROPIC_API_KEY") == 0,
+            spec->CreateProvider != nullptr, spec->CreateModel != nullptr,
+            spec->ListModels != nullptr, spec->FallbackModels != nullptr,
+            spec->FallbackModelCount == 3);
 
   Arena arena = ArenaCreate();
   char manualId[] = "claude-manual";
   Model manual = spec->CreateModel(&arena, StrView{manualId, 13});
   manualId[0] = 'x';
-  CHECK(StrView_EqCStr(manual.Id, "claude-manual"));
-  CHECK(StrView_EqCStr(manual.Name, "claude-manual"));
-  CHECK(StrView_Eq(manual.Provider, spec->Id));
+  CHECK_ALL(StrView_EqCStr(manual.Id, "claude-manual"),
+            StrView_EqCStr(manual.Name, "claude-manual"),
+            StrView_Eq(manual.Provider, spec->Id));
 
   Model fallback = spec->CreateModel(&arena, spec->FallbackModels[0].Id);
-  CHECK(StrView_Eq(fallback.Id, spec->DefaultModel));
-  CHECK(StrView_EqCStr(fallback.Name, "Claude Sonnet 4.6"));
+  CHECK_ALL(StrView_Eq(fallback.Id, spec->DefaultModel),
+            StrView_EqCStr(fallback.Name, "Claude Sonnet 4.6"));
 
   Provider provider = spec->CreateProvider(&arena);
   CHECK(provider.Stream != nullptr);

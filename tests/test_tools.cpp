@@ -60,9 +60,8 @@ static void TestRead(Arena* a) {
   ToolResult out = {};
   StrBuf err = StrBuf_Make(a, 32);
   bool ok = RunTool(rt, a, Args1(a, "path", path), &out, &err);
-  CHECK(ok);
-  CHECK(out.Content.Count == 1);
-  CHECK(StrView_EqCStr(out.Content.Data[0].Text, "line1\nline2"));
+  CHECK_ALL(ok, out.Content.Count == 1,
+            StrView_EqCStr(out.Content.Data[0].Text, "line1\nline2"));
   remove(path);
 
   // missing path + nonexistent file => errors
@@ -79,10 +78,10 @@ static void TestRead(Arena* a) {
   ToolResult o4 = {};
   StrBuf e4 = StrBuf_Make(a, 32);
   CHECK(RunTool(rt, a, SV("{\"path\":\"clank_tool_read_ol.txt\",\"offset\":2,\"limit\":2}"), &o4, &e4));
-  CHECK(StrView_Contains(o4.Content.Data[0].Text, "l2"));
-  CHECK(StrView_Contains(o4.Content.Data[0].Text, "l3"));
-  CHECK(!StrView_Contains(o4.Content.Data[0].Text, "l5"));
-  CHECK(StrView_Contains(o4.Content.Data[0].Text, "more lines in file"));
+  CHECK_ALL(StrView_Contains(o4.Content.Data[0].Text, "l2"),
+            StrView_Contains(o4.Content.Data[0].Text, "l3"),
+            !StrView_Contains(o4.Content.Data[0].Text, "l5"),
+            StrView_Contains(o4.Content.Data[0].Text, "more lines in file"));
   remove(p2);
 
   // image file => text + image content blocks
@@ -98,11 +97,11 @@ static void TestRead(Arena* a) {
   ToolResult o5 = {};
   StrBuf e5 = StrBuf_Make(a, 32);
   CHECK(RunTool(rt, a, Args1(a, "path", pimg), &o5, &e5));
-  CHECK(o5.Content.Count == 2);
-  CHECK(StrView_Contains(o5.Content.Data[0].Text, "image/png"));
-  CHECK(o5.Content.Data[1].Kind == ContentKind::Image);
-  CHECK(StrView_EqCStr(o5.Content.Data[1].ImageMimeType, "image/png"));
-  CHECK(o5.Content.Data[1].ImageData.Length > 0);
+  CHECK_ALL(o5.Content.Count == 2,
+            StrView_Contains(o5.Content.Data[0].Text, "image/png"),
+            o5.Content.Data[1].Kind == ContentKind::Image,
+            StrView_EqCStr(o5.Content.Data[1].ImageMimeType, "image/png"),
+            o5.Content.Data[1].ImageData.Length > 0);
   remove(pimg);
 }
 
@@ -114,17 +113,15 @@ static void TestBash(Arena* a) {
   ToolResult out = {};
   StrBuf err = StrBuf_Make(a, 32);
   bool ok = RunTool(bt, a, SV("{\"command\":\"echo hello123\"}"), &out, &err);
-  CHECK(ok);
-  CHECK(out.Content.Count == 1);
-  CHECK(StrView_Contains(out.Content.Data[0].Text, "hello123"));
-  CHECK(!StrView_Contains(out.Content.Data[0].Text, "exit code"));
+  CHECK_ALL(ok, out.Content.Count == 1,
+            StrView_Contains(out.Content.Data[0].Text, "hello123"),
+            !StrView_Contains(out.Content.Data[0].Text, "exit code"));
 
   // non-zero exit => error result
   ToolResult o2 = {};
   StrBuf e2 = StrBuf_Make(a, 32);
   bool ok2 = RunTool(bt, a, SV("{\"command\":\"exit 3\"}"), &o2, &e2);
-  CHECK(!ok2);
-  CHECK(StrView_Contains(StrBuf_View(&e2), "exited with code 3"));
+  CHECK_ALL(!ok2, StrView_Contains(StrBuf_View(&e2), "exited with code 3"));
 }
 
 // ---- write ---------------------------------------------------------------
@@ -136,9 +133,8 @@ static void TestWrite(Arena* a) {
   StrBuf err = StrBuf_Make(a, 32);
   bool ok = RunTool(wt, a, SV("{\"path\":\"clank_tool_write_test.txt\",\"content\":\"written-data\"}"),
                     &out, &err);
-  CHECK(ok);
-  CHECK(StrView_Contains(out.Content.Data[0].Text, "Successfully wrote"));
-  CHECK(StrView_EqCStr(Slurp(a, path), "written-data"));
+  CHECK_ALL(ok, StrView_Contains(out.Content.Data[0].Text, "Successfully wrote"),
+            StrView_EqCStr(Slurp(a, path), "written-data"));
   remove(path);
 }
 
@@ -157,8 +153,7 @@ static void TestEdit(Arena* a) {
       SV("{\"path\":\"clank_tool_edit_exact.txt\",\"edits\":[{\"oldText\":\"hello world\",\"newText\":"
          "\"HELLO\"}]}"),
       &o1, &e1);
-  CHECK(ok1);
-  CHECK(StrView_EqCStr(Slurp(a, p1), "HELLO\nsecond line\n"));
+  CHECK_ALL(ok1, StrView_EqCStr(Slurp(a, p1), "HELLO\nsecond line\n"));
   remove(p1);
 
   // fuzzy match (different internal whitespace)
@@ -171,8 +166,7 @@ static void TestEdit(Arena* a) {
       SV("{\"path\":\"clank_tool_edit_fuzzy.txt\",\"edits\":[{\"oldText\":\"foo bar\",\"newText\":"
          "\"baz\"}]}"),
       &o2, &e2);
-  CHECK(ok2);
-  CHECK(StrView_Contains(Slurp(a, p2), "baz"));
+  CHECK_ALL(ok2, StrView_Contains(Slurp(a, p2), "baz"));
   remove(p2);
 
   // not-found => error
@@ -201,26 +195,26 @@ static void TestTreeTools(Arena* a) {
   ToolResult lo = {};
   StrBuf le = StrBuf_Make(a, 32);
   CHECK(RunTool(lt, a, Args1(a, "path", "clank_tools_it"), &lo, &le));
-  CHECK(StrView_Contains(lo.Content.Data[0].Text, "a.txt"));
-  CHECK(StrView_Contains(lo.Content.Data[0].Text, "b.md"));
-  CHECK(StrView_Contains(lo.Content.Data[0].Text, "sub/"));
+  CHECK_ALL(StrView_Contains(lo.Content.Data[0].Text, "a.txt"),
+            StrView_Contains(lo.Content.Data[0].Text, "b.md"),
+            StrView_Contains(lo.Content.Data[0].Text, "sub/"));
 
   // find *.txt (basename match, recursive)
   Tool ft = FindTool();
   ToolResult fo = {};
   StrBuf fe = StrBuf_Make(a, 32);
   CHECK(RunTool(ft, a, SV("{\"pattern\":\"*.txt\",\"path\":\"clank_tools_it\"}"), &fo, &fe));
-  CHECK(StrView_Contains(fo.Content.Data[0].Text, "a.txt"));
-  CHECK(StrView_Contains(fo.Content.Data[0].Text, "c.txt"));
-  CHECK(!StrView_Contains(fo.Content.Data[0].Text, "b.md"));
+  CHECK_ALL(StrView_Contains(fo.Content.Data[0].Text, "a.txt"),
+            StrView_Contains(fo.Content.Data[0].Text, "c.txt"),
+            !StrView_Contains(fo.Content.Data[0].Text, "b.md"));
 
   // grep
   Tool gt = GrepTool();
   ToolResult go = {};
   StrBuf ge = StrBuf_Make(a, 32);
   CHECK(RunTool(gt, a, SV("{\"pattern\":\"beta\",\"path\":\"clank_tools_it\"}"), &go, &ge));
-  CHECK(StrView_Contains(go.Content.Data[0].Text, "beta"));
-  CHECK(StrView_Contains(go.Content.Data[0].Text, "a.txt"));
+  CHECK_ALL(StrView_Contains(go.Content.Data[0].Text, "beta"),
+            StrView_Contains(go.Content.Data[0].Text, "a.txt"));
 
   remove("clank_tools_it/a.txt");
   remove("clank_tools_it/b.md");

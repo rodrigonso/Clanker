@@ -38,8 +38,8 @@ void TestSettings() {
   saved.Model = SVL("claude-\"test\"");
   CHECK(AppSettings_Save(&a, SV(path), &saved));
   CHECK(AppSettings_Load(&a, SV(path), &loaded) == AppSettingsLoadResult::Success);
-  CHECK(StrView_Eq(loaded.Provider, saved.Provider));
-  CHECK(StrView_Eq(loaded.Model, saved.Model));
+  CHECK_ALL(StrView_Eq(loaded.Provider, saved.Provider),
+            StrView_Eq(loaded.Model, saved.Model));
 
 #if !defined(_WIN32)
   struct stat st = {};
@@ -47,8 +47,9 @@ void TestSettings() {
   CHECK((st.st_mode & 0777) == 0600);
 #endif
 
-  CHECK(!AppSettings_Save(&a, SV(dir), &saved));
-  CHECK(AppSettings_Load(&a, SV(dir), &loaded) == AppSettingsLoadResult::ReadFailure);
+  CHECK_ALL(!AppSettings_Save(&a, SV(dir), &saved),
+            AppSettings_Load(&a, SV(dir), &loaded) ==
+                AppSettingsLoadResult::ReadFailure);
 
   remove(path);
 #if defined(_WIN32)

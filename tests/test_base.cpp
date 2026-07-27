@@ -6,6 +6,13 @@
 #include "base/sysinfo.h"
 #include "check.h"
 
+static bool IsSingleLine(StrView text) {
+  for (u32 i = 0; i < text.Length; i++) {
+    if (text.Data[i] == '\n' || text.Data[i] == '\r') return false;
+  }
+  return true;
+}
+
 void TestArena() {
   Arena a = ArenaCreate();
   void* p1 = ArenaAlloc(&a, 100, 16);
@@ -28,12 +35,10 @@ void TestArray() {
   Arena a = ArenaCreate();
   Array<int> arr = Array_Make<int>(&a, 2);
   for (int i = 0; i < 100; i++) Array_Push(&arr, i);
-  CHECK(arr.Count == 100);
-  CHECK(*Array_Get(&arr, 50) == 50);
-  CHECK(*Array_Last(&arr) == 99);
+  CHECK_ALL(arr.Count == 100, *Array_Get(&arr, 50) == 50,
+            *Array_Last(&arr) == 99);
   CHECK(Array_Pop(&arr) == 99);
-  CHECK(arr.Count == 99);
-  CHECK(Array_Get(&arr, 999) == nullptr);
+  CHECK_ALL(arr.Count == 99, Array_Get(&arr, 999) == nullptr);
   ArenaRelease(&a);
 }
 
@@ -44,12 +49,11 @@ void TestStr() {
   StrBuf_AppendChar(&b, ' ');
   StrBuf_AppendCStr(&b, "world");
   StrBuf_AppendU64(&b, 123);
-  CHECK(strcmp(StrBuf_CStr(&b), "hello world123") == 0);
-  CHECK(b.Length == 14);
+  CHECK_ALL(strcmp(StrBuf_CStr(&b), "hello world123") == 0, b.Length == 14);
   StrView v = StrBuf_View(&b);
-  CHECK(StrView_EqCStr(v, "hello world123"));
-  CHECK(StrView_Eq(SVL("abc"), SV("abc")));
-  CHECK(!StrView_Eq(SVL("abc"), SV("abd")));
+  CHECK_ALL(StrView_EqCStr(v, "hello world123"),
+            StrView_Eq(SVL("abc"), SV("abc")),
+            !StrView_Eq(SVL("abc"), SV("abd")));
 
   StrBuf neg = StrBuf_Make(&a, 4);
   StrBuf_AppendI64(&neg, -42);
@@ -64,23 +68,29 @@ void TestHostInfo() {
   Arena a = ArenaCreate();
 
   // Pure HEAD parsing: "ref: refs/heads/<branch>" -> <branch> (slashes kept).
-  CHECK(StrView_EqCStr(Git_BranchFromHead(SVL("ref: refs/heads/main\n")), "main"));
-  CHECK(StrView_EqCStr(Git_BranchFromHead(SVL("ref: refs/heads/worktree/swift-mortar-e0e4\n")),
-                       "worktree/swift-mortar-e0e4"));
-  CHECK(StrView_EqCStr(Git_BranchFromHead(SVL("ref: refs/heads/feature/x")), "feature/x"));
+  CHECK_ALL(StrView_EqCStr(Git_BranchFromHead(SVL("ref: refs/heads/main\n")), "main"),
+            StrView_EqCStr(
+                Git_BranchFromHead(SVL("ref: refs/heads/worktree/swift-mortar-e0e4\n")),
+                "worktree/swift-mortar-e0e4"),
+            StrView_EqCStr(Git_BranchFromHead(SVL("ref: refs/heads/feature/x")),
+                           "feature/x"));
   // Detached HEAD (raw SHA) -> empty.
   CHECK(Git_BranchFromHead(SVL("0123456789abcdef0123456789abcdef01234567\n")).Length == 0);
 
   // Pure gitdir-file parsing (worktree/submodule indirection), trailing sep stripped.
-  CHECK(StrView_EqCStr(Git_GitdirFromFile(SVL("gitdir: C:/repo/.git/worktrees/wt/\n")),
-                       "C:/repo/.git/worktrees/wt"));
-  CHECK(StrView_EqCStr(Git_GitdirFromFile(SVL("gitdir: ../.git/modules/sub")), "../.git/modules/sub"));
-  CHECK(Git_GitdirFromFile(SVL("not a gitdir file")).Length == 0);
+  CHECK_ALL(StrView_EqCStr(
+                Git_GitdirFromFile(SVL("gitdir: C:/repo/.git/worktrees/wt/\n")),
+                "C:/repo/.git/worktrees/wt"),
+            StrView_EqCStr(Git_GitdirFromFile(SVL("gitdir: ../.git/modules/sub")),
+                           "../.git/modules/sub"),
+            Git_GitdirFromFile(SVL("not a gitdir file")).Length == 0);
 
   // Home abbreviation.
   StrView home = SVL("C:\\Users\\rodri");
-  CHECK(StrView_EqCStr(Sys_AbbreviatePath(&a, SVL("C:\\Users\\rodri\\.briq\\wt"), home), "~\\.briq\\wt"));
-  CHECK(StrView_EqCStr(Sys_AbbreviatePath(&a, home, home), "~"));
+  CHECK_ALL(
+      StrView_EqCStr(Sys_AbbreviatePath(&a, SVL("C:\\Users\\rodri\\.briq\\wt"), home),
+                     "~\\.briq\\wt"),
+      StrView_EqCStr(Sys_AbbreviatePath(&a, home, home), "~"));
   // A path that only shares a partial final segment must NOT be abbreviated.
   CHECK(StrView_EqCStr(Sys_AbbreviatePath(&a, SVL("C:\\Users\\rodrigo\\x"), home), "C:\\Users\\rodrigo\\x"));
   // Empty home -> unchanged copy.
@@ -95,7 +105,7 @@ void TestHostInfo() {
     if (cwd.Data[i] == '/' || cwd.Data[i] == '\\') hasSep = true;
   CHECK(hasSep);
   StrView branch = Sys_GitBranch(&a, cwd);
-  for (u32 i = 0; i < branch.Length; i++) CHECK(branch.Data[i] != '\n' && branch.Data[i] != '\r');
+  CHECK(IsSingleLine(branch));
 
   ArenaRelease(&a);
 }

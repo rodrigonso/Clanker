@@ -35,15 +35,14 @@ void TestCrypto() {
 
   Arena a = ArenaCreate();
   byte b3[3] = {0, 1, 2};
-  CHECK(StrView_EqCStr(Base64UrlEncode(&a, b3, 3), "AAEC"));
   byte bff[3] = {0xff, 0xff, 0xff};
-  CHECK(StrView_EqCStr(Base64UrlEncode(&a, bff, 3), "____"));
   byte b1[1] = {0x66};
-  CHECK(StrView_EqCStr(Base64UrlEncode(&a, b1, 1), "Zg"));
+  CHECK_ALL(StrView_EqCStr(Base64UrlEncode(&a, b3, 3), "AAEC"),
+            StrView_EqCStr(Base64UrlEncode(&a, bff, 3), "____"),
+            StrView_EqCStr(Base64UrlEncode(&a, b1, 1), "Zg"));
 
   Pkce p = Pkce_Generate(&a);
-  CHECK(p.Verifier.Length == 43);
-  CHECK(p.Challenge.Length == 43);
+  CHECK_ALL(p.Verifier.Length == 43, p.Challenge.Length == 43);
   byte vh[32];
   Sha256((const byte*)p.Verifier.Data, p.Verifier.Length, vh);
   CHECK(StrView_Eq(p.Challenge, Base64UrlEncode(&a, vh, 32)));

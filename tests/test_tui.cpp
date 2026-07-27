@@ -8,6 +8,8 @@
 
 namespace {
 
+bool g_displayDrainsOk;
+
 bool AnyRow(Arena* a, Tui* t, const char* needle) {
   for (u32 i = 0; i < LineModel_Count(&t->Model); i++) {
     const SpanLine* sl = LineModel_At(&t->Model, i);
@@ -32,7 +34,7 @@ void DrainDisplay(Tui* t, u64 startMs = 1000) {
     startMs += 16;
     frames++;
   }
-  CHECK(!Tui_HasPendingDisplay(t));
+  g_displayDrainsOk = !Tui_HasPendingDisplay(t) && g_displayDrainsOk;
 }
 
 struct BlockingSelect {
@@ -64,9 +66,41 @@ u32 ScrollMaxTop(const Tui* t) {
   return count > t->LastPaneH ? count - t->LastPaneH : 0;
 }
 
+bool ScrollbarRendered(const Tui* t, u16 x) {
+  u16 trackY = t->LastScrollbarThumbTop == 0 ? t->LastScrollbarThumbH : (u16)0;
+  return t->ScrollbarVisible && t->Model.Width == 19 && t->LastPaneH == 7 && x == 19 &&
+         t->LastScrollbarThumbH > 0 && t->LastScrollbarThumbH < t->LastPaneH &&
+         t->LastScrollbarThumbTop + t->LastScrollbarThumbH == t->LastPaneH &&
+         Screen_BackAt(&t->Scr, x, t->LastScrollbarThumbTop).Ch == 0x2595 &&
+         (Screen_BackAt(&t->Scr, x, t->LastScrollbarThumbTop).St.Attr & ATTR_BOLD) != 0 &&
+         Screen_BackAt(&t->Scr, x, trackY).Ch == 0x2595 &&
+         (Screen_BackAt(&t->Scr, x, trackY).St.Attr & ATTR_DIM) != 0;
+}
+
+bool SessionUiCleared(const Tui* t, usize usedBefore) {
+  return t->SessionMem.Base != nullptr && t->SessionMem.Used > 0 &&
+         t->SessionMem.Used < usedBefore && t->Model.Entries.Count == 0 &&
+         LineModel_Count(&t->Model) == 0 && LineEdit_Empty(&t->Edit) &&
+         t->Edit.History.Count == 0 && LineEdit_Empty(&t->ModalEdit) &&
+         t->ModalEdit.History.Count == 0 && !Tui_HasPendingDisplay(t) &&
+         t->DisplayHead == 0 && t->Use.Input == 0 && t->Use.Output == 0 &&
+         t->State == TuiState::Idle && t->StateTool.Length == 0 && t->TurnStartMs == 0 &&
+         t->QueuedCount == 0 && t->Follow && t->Top == 0 && t->LastTop == 0 &&
+         t->LastPaneH == 0 && t->HoveredEntryId == 0 && t->PressedEntryId == 0 &&
+         !t->HasMouse && !t->OperationActive && t->ModalKind == TuiModalKind::None &&
+         t->ModalResult == TuiModalResult::None;
+}
+
+bool SessionContextPreserved(const Tui* t, const Agent* agent) {
+  return StrView_Eq(t->ModelName, SVL("kept-model")) &&
+         StrView_Eq(t->Cwd, SVL("kept-cwd")) &&
+         StrView_Eq(t->Branch, SVL("kept-branch")) && t->Ag == agent;
+}
+
 }  // namespace
 
 void TestTui() {
+  g_displayDrainsOk = true;
   Arena a = ArenaCreate();
   TuiOpts o;
   o.ModelName = SVL("test-model");
@@ -98,13 +132,13 @@ void TestTui() {
   ev.Stream.Delta = SVL("Hello ");
   Tui_AgentEvent(&t, ev);
   CHECK(Tui_AdvanceStream(&t, 1000));
-  CHECK(t.Model.Entries.Count == 1);
-  CHECK(t.Model.Entries.Data[0].Text.Content.Length == 1);
+  CHECK_ALL(t.Model.Entries.Count == 1,
+            t.Model.Entries.Data[0].Text.Content.Length == 1);
   ev.Stream.Delta = SVL("**world**");
   Tui_AgentEvent(&t, ev);
   CHECK(Tui_AdvanceStream(&t, 1016));
-  CHECK(t.Model.Entries.Data[0].Text.Content.Length < sizeof("Hello **world**") - 1);
-  CHECK(t.State == TuiState::Streaming);
+  CHECK_ALL(t.Model.Entries.Data[0].Text.Content.Length < sizeof("Hello **world**") - 1,
+            t.State == TuiState::Streaming);
 
   m.Stop = StopReason::ToolUse;
   m.Use.Input = 12;
@@ -135,17 +169,14 @@ void TestTui() {
   ev = {};
   ev.Kind = AgentEventKind::AgentEnd;
   Tui_AgentEvent(&t, ev);
-  CHECK(!t.AgentRunning);
-  CHECK(t.State == TuiState::Streaming);
+  CHECK_ALL(!t.AgentRunning, t.State == TuiState::Streaming);
   DrainDisplay(&t, 1032);
 
   // The transcript captured the unlabeled assistant text and compact tool row.
-  CHECK(!AnyRow(&a, &t, "assistant"));
-  CHECK(AnyRow(&a, &t, "Hello world"));
-  CHECK(AnyRow(&a, &t, "\xe2\x96\xa0  ls"));
-  CHECK(!AnyRow(&a, &t, "hello-from-bash"));
-  CHECK(t.State == TuiState::Idle);
-  CHECK(t.Use.Output == 7);
+  CHECK_ALL(!AnyRow(&a, &t, "assistant"), AnyRow(&a, &t, "Hello world"),
+            AnyRow(&a, &t, "\xe2\x96\xa0  ls"),
+            !AnyRow(&a, &t, "hello-from-bash"), t.State == TuiState::Idle,
+            t.Use.Output == 7);
 
   u64 assistantEntryId = t.Model.Entries.Data[0].Id;
   u64 toolEntryId = t.Model.Entries.Data[1].Id;
@@ -233,29 +264,15 @@ void TestTui() {
 
     Tui_ComposeFrame(&ts, 20, 12);
     u16 scrollbarX = ScrollbarColumn(&ts);
-    CHECK(ts.ScrollbarVisible);
-    CHECK(ts.Model.Width == 19);
-    CHECK(ts.LastPaneH == 7);
-    CHECK(scrollbarX == 19);
-    CHECK(ts.LastScrollbarThumbH > 0 && ts.LastScrollbarThumbH < ts.LastPaneH);
-    CHECK(ts.LastScrollbarThumbTop + ts.LastScrollbarThumbH == ts.LastPaneH);
-    CHECK(Screen_BackAt(&ts.Scr, scrollbarX, ts.LastScrollbarThumbTop).Ch ==
-          0x2595);
-    CHECK((Screen_BackAt(&ts.Scr, scrollbarX, ts.LastScrollbarThumbTop).St.Attr &
-           ATTR_BOLD) != 0);
-    u16 trackY =
-        ts.LastScrollbarThumbTop == 0 ? ts.LastScrollbarThumbH : (u16)0;
-    CHECK(Screen_BackAt(&ts.Scr, scrollbarX, trackY).Ch == 0x2595);
-    CHECK((Screen_BackAt(&ts.Scr, scrollbarX, trackY).St.Attr & ATTR_DIM) != 0);
+    CHECK(ScrollbarRendered(&ts, scrollbarX));
 
     // Clicking the track centers the thumb near the clicked row and cannot
     // toggle the transcript entry under that screen row.
     u64 clickedId = LineModel_RowEntryId(&ts.Model, ts.LastTop + 3);
     CHECK(clickedId != 0);
     Feed(&ts, "\x1b[<0;20;4M\x1b[<0;20;4m");
-    CHECK(!LineModel_IsEntryCollapsed(&ts.Model, clickedId));
-    CHECK(!ts.ScrollbarDragging);
-    CHECK(!ts.Follow);
+    CHECK_ALL(!LineModel_IsEntryCollapsed(&ts.Model, clickedId),
+              !ts.ScrollbarDragging, !ts.Follow);
     Tui_ComposeFrame(&ts, 20, 12);
     u16 thumbCenter =
         (u16)(ts.LastScrollbarThumbTop + ts.LastScrollbarThumbH / 2);
@@ -268,21 +285,17 @@ void TestTui() {
     // A top track click clamps to the beginning. Dragging the thumb to the
     // bottom continues after the pointer leaves the scrollbar column.
     Feed(&ts, "\x1b[<0;20;1M\x1b[<0;20;1m");
-    CHECK(ts.Top == 0);
-    CHECK(!ts.Follow);
+    CHECK_ALL(ts.Top == 0, !ts.Follow);
     Tui_ComposeFrame(&ts, 20, 12);
     Feed(&ts, "\x1b[<0;20;1M\x1b[<32;10;7M\x1b[<0;10;7m");
-    CHECK(!ts.ScrollbarDragging);
-    CHECK(ts.Follow);
-    CHECK(ts.Top == ScrollMaxTop(&ts));
+    CHECK_ALL(!ts.ScrollbarDragging, ts.Follow, ts.Top == ScrollMaxTop(&ts));
 
     // The release position itself is applied even if no final motion event is
     // delivered.
     Feed(&ts, "\x1b[<0;20;1M\x1b[<0;20;1m");
     Tui_ComposeFrame(&ts, 20, 12);
     Feed(&ts, "\x1b[<0;20;1M\x1b[<0;10;7m");
-    CHECK(ts.Follow);
-    CHECK(ts.Top == ScrollMaxTop(&ts));
+    CHECK_ALL(ts.Follow, ts.Top == ScrollMaxTop(&ts));
 
     // A detached logical top remains anchored when a resize rewraps the model.
     u64 resizeAnchorId = ts.Model.Entries.Data[6].Id;
@@ -292,12 +305,11 @@ void TestTui() {
     ts.Top = resizeAnchorRow;
     Tui_ComposeFrame(&ts, 20, 12);
     Tui_ComposeFrame(&ts, 14, 12);
-    CHECK(ts.ScrollbarVisible);
-    CHECK(ts.Model.Width == 13);
-    CHECK(LineModel_RowEntryId(&ts.Model, ts.Top) == resizeAnchorId);
+    CHECK_ALL(ts.ScrollbarVisible, ts.Model.Width == 13,
+              LineModel_RowEntryId(&ts.Model, ts.Top) == resizeAnchorId);
     Tui_ComposeFrame(&ts, 14, 10);
-    CHECK(ts.LastPaneH == 5);
-    CHECK(LineModel_RowEntryId(&ts.Model, ts.Top) == resizeAnchorId);
+    CHECK_ALL(ts.LastPaneH == 5,
+              LineModel_RowEntryId(&ts.Model, ts.Top) == resizeAnchorId);
     Tui_ComposeFrame(&ts, 5, 5);
     Tui_ComposeFrame(&ts, 14, 10);
     CHECK(LineModel_RowEntryId(&ts.Model, ts.Top) == resizeAnchorId);
@@ -319,8 +331,8 @@ void TestTui() {
 
     Tui_ComposeFrame(&ts, 20, 12);
     u16 scrollbarX = ScrollbarColumn(&ts);
-    CHECK(ts.ScrollbarVisible);
-    CHECK(Screen_BackAt(&ts.Scr, scrollbarX, ts.LastScrollbarThumbTop).St.Fg == 250);
+    CHECK_ALL(ts.ScrollbarVisible,
+              Screen_BackAt(&ts.Scr, scrollbarX, ts.LastScrollbarThumbTop).St.Fg == 250);
     u16 colorTrackY =
         ts.LastScrollbarThumbTop == 0 ? ts.LastScrollbarThumbH : (u16)0;
     CHECK(Screen_BackAt(&ts.Scr, scrollbarX, colorTrackY).St.Fg == 238);
@@ -330,14 +342,11 @@ void TestTui() {
     Feed(&ts, "\x1b[<0;2;1M\x1b[<0;2;1m");
     CHECK(LineModel_IsEntryCollapsed(&ts.Model, entryId));
     Tui_ComposeFrame(&ts, 20, 12);
-    CHECK(!ts.ScrollbarVisible);
-    CHECK(ts.Model.Width == 20);
-    CHECK(ts.LastScrollbarThumbH == 0);
+    CHECK_ALL(!ts.ScrollbarVisible, ts.Model.Width == 20,
+              ts.LastScrollbarThumbH == 0);
 
     Tui_ComposeFrame(&ts, 5, 5);
-    CHECK(!ts.ScrollbarVisible);
-    CHECK(!ts.ScrollbarDragging);
-    CHECK(ts.LastPaneH == 0);
+    CHECK_ALL(!ts.ScrollbarVisible, !ts.ScrollbarDragging, ts.LastPaneH == 0);
 
     Tui_Stop(&ts);
     ArenaRelease(&as);
@@ -370,8 +379,7 @@ void TestTui() {
       Tui_ComposeFrame(&ts, (u16)(boundaryCols - 1), 12);
       CHECK(ts.ScrollbarVisible);
       Tui_ComposeFrame(&ts, boundaryCols, 12);
-      CHECK(!ts.ScrollbarVisible);
-      CHECK(ts.Model.Width == boundaryCols);
+      CHECK_ALL(!ts.ScrollbarVisible, ts.Model.Width == boundaryCols);
     }
 
     Tui_Stop(&ts);
@@ -396,34 +404,29 @@ void TestTui() {
 
     t2.AgentRunning = true;  // a turn is running
     Feed(&t2, "steer me\r");
-    CHECK(ag.Steer.Count == 1);
-    CHECK(t2.QCount == 0);
+    CHECK_ALL(ag.Steer.Count == 1, t2.QCount == 0);
     DrainDisplay(&t2);
-    CHECK(!AnyRow(&a2, &t2, "you"));
-    CHECK(AnyRow(&a2, &t2, "steer me"));
-    CHECK(t2.Model.Entries.Data[t2.Model.Entries.Count - 1].Text.Timestamp.Length == 5);
+    CHECK_ALL(!AnyRow(&a2, &t2, "you"), AnyRow(&a2, &t2, "steer me"),
+              t2.Model.Entries.Data[t2.Model.Entries.Count - 1].Text.Timestamp.Length == 5);
 
     u32 entriesAfterSteer = t2.Model.Entries.Count;
     Feed(&t2, "  /model  \r");
-    CHECK(t2.QCount == 1);
-    CHECK(ag.Steer.Count == 1);
+    CHECK_ALL(t2.QCount == 1, ag.Steer.Count == 1);
     DrainDisplay(&t2);
-    CHECK(t2.Model.Entries.Count == entriesAfterSteer + 1);
-    CHECK(AnyRow(&a2, &t2, "Queued command:"));
-    CHECK(AnyRow(&a2, &t2, "/model"));
+    CHECK_ALL(t2.Model.Entries.Count == entriesAfterSteer + 1,
+              AnyRow(&a2, &t2, "Queued command:"), AnyRow(&a2, &t2, "/model"));
 
     TuiSubmission submission = {};
     CHECK(Tui_WaitForSubmit(&t2, &submission));
-    CHECK(submission.Kind == TuiSubmissionKind::Command);
-    CHECK(StrView_Eq(submission.Text, SVL("  /model  ")));
+    CHECK_ALL(submission.Kind == TuiSubmissionKind::Command,
+              StrView_Eq(submission.Text, SVL("  /model  ")));
 
     t2.AgentRunning = false;  // between turns
     Feed(&t2, "next prompt\r");
-    CHECK(t2.QCount == 1);
-    CHECK(ag.Steer.Count == 1);  // unchanged
+    CHECK_ALL(t2.QCount == 1, ag.Steer.Count == 1);  // unchanged
     CHECK(Tui_WaitForSubmit(&t2, &submission));
-    CHECK(submission.Kind == TuiSubmissionKind::Prompt);
-    CHECK(StrView_Eq(submission.Text, SVL("next prompt")));
+    CHECK_ALL(submission.Kind == TuiSubmissionKind::Prompt,
+              StrView_Eq(submission.Text, SVL("next prompt")));
     DrainDisplay(&t2);
     CHECK(!AnyRow(&a2, &t2, "next prompt"));
     CHECK(Tui_AcceptPrompt(&t2, submission.Text));
@@ -435,11 +438,11 @@ void TestTui() {
     Feed(&t2, "/unknown\r");
     CHECK(t2.QCount == 1);
     CHECK(Tui_WaitForSubmit(&t2, &submission));
-    CHECK(submission.Kind == TuiSubmissionKind::Command);
-    CHECK(StrView_Eq(submission.Text, SVL("/unknown")));
+    CHECK_ALL(submission.Kind == TuiSubmissionKind::Command,
+              StrView_Eq(submission.Text, SVL("/unknown")));
     DrainDisplay(&t2);
-    CHECK(t2.Model.Entries.Count == entriesAfterPrompt);
-    CHECK(!AnyRow(&a2, &t2, "/unknown"));
+    CHECK_ALL(t2.Model.Entries.Count == entriesAfterPrompt,
+              !AnyRow(&a2, &t2, "/unknown"));
 
     for (u32 i = 0; i < 64; i++) Feed(&t2, "queued prompt\r");
     CHECK(t2.QCount == 64);
@@ -533,8 +536,8 @@ void TestTui() {
     Feed(&tp, "\x1b[B\x1b[B\r");
     TuiSubmission paletteSubmission = {};
     CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
-    CHECK(paletteSubmission.Kind == TuiSubmissionKind::Command);
-    CHECK(StrView_Eq(paletteSubmission.Text, SVL("/clear")));
+    CHECK_ALL(paletteSubmission.Kind == TuiSubmissionKind::Command,
+              StrView_Eq(paletteSubmission.Text, SVL("/clear")));
 
     Feed(&tp, "/q\r");
     CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
@@ -547,8 +550,8 @@ void TestTui() {
     Feed(&tp, "/");
     tp.AgentRunning = true;
     Feed(&tp, "\x1b");
-    CHECK(tp.CommandPaletteDismissed);
-    CHECK(StrView_Eq(LineEdit_Text(&tp.Edit), SVL("/")));
+    CHECK_ALL(tp.CommandPaletteDismissed,
+              StrView_Eq(LineEdit_Text(&tp.Edit), SVL("/")));
     CHECK(*Tui_Abort(&tp) == 0);
     Feed(&tp, "\x1b");
     CHECK(*Tui_Abort(&tp) == 1);
@@ -559,8 +562,7 @@ void TestTui() {
     CHECK(StrView_Eq(paletteSubmission.Text, SVL("/model")));
 
     CHECK(Tui_ClearSession(&tp));
-    CHECK(tp.CommandCount == 4);
-    CHECK(!tp.CommandPaletteDismissed);
+    CHECK_ALL(tp.CommandCount == 4, !tp.CommandPaletteDismissed);
     Feed(&tp, "/c\r");
     CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
     CHECK(StrView_Eq(paletteSubmission.Text, SVL("/clear")));
@@ -597,9 +599,9 @@ void TestTui() {
     Agent_Prompt(&ag, SV("ask"));
     DrainDisplay(&t3);
 
-    CHECK(!AnyRow(&a3, &t3, "assistant"));
-    CHECK(AnyRow(&a3, &t3, "Here is the explanation"));
-    CHECK(t3.State == TuiState::Idle);
+    CHECK_ALL(!AnyRow(&a3, &t3, "assistant"),
+              AnyRow(&a3, &t3, "Here is the explanation"),
+              t3.State == TuiState::Idle);
 
     Tui_Stop(&t3);
     ArenaRelease(&a3);
@@ -672,16 +674,15 @@ void TestTui() {
 
     CHECK(tq.Model.Entries.Count == 0);
     DrainDisplay(&tq);
-    CHECK(tq.Model.Entries.Count == 3);
-    CHECK(tq.Model.Entries.Data[0].Kind == EntryKind::Assistant);
-    CHECK(tq.Model.Entries.Data[1].Kind == EntryKind::Tool);
-    CHECK(tq.Model.Entries.Data[2].Kind == EntryKind::Assistant);
-    CHECK(AnyRow(&aq, &tq, "first response"));
-    CHECK(AnyRow(&aq, &tq, "echo original"));
-    CHECK(AnyRow(&aq, &tq, "second response"));
-    CHECK(StrView_Eq(StrBuf_View(&tq.Model.Entries.Data[1].Tool.Preview),
-                     SVL("original result")));
-    CHECK(tq.State == TuiState::Idle);
+    CHECK_ALL(tq.Model.Entries.Count == 3,
+              tq.Model.Entries.Data[0].Kind == EntryKind::Assistant,
+              tq.Model.Entries.Data[1].Kind == EntryKind::Tool,
+              tq.Model.Entries.Data[2].Kind == EntryKind::Assistant);
+    CHECK_ALL(AnyRow(&aq, &tq, "first response"), AnyRow(&aq, &tq, "echo original"),
+              AnyRow(&aq, &tq, "second response"),
+              StrView_Eq(StrBuf_View(&tq.Model.Entries.Data[1].Tool.Preview),
+                         SVL("original result")),
+              tq.State == TuiState::Idle);
 
     Tui_Stop(&tq);
     ArenaRelease(&aq);
@@ -716,9 +717,10 @@ void TestTui() {
     Tui_AgentEvent(&t4, end);
     DrainDisplay(&t4);
 
-    CHECK(t4.Model.Entries.Count == 1);
-    CHECK(t4.Model.Entries.Data[0].Tool.Preview.Length == 1500);
-    CHECK(!StrView_Contains(StrBuf_View(&t4.Model.Entries.Data[0].Tool.Preview), "\x1b"));
+    CHECK_ALL(
+        t4.Model.Entries.Count == 1,
+        t4.Model.Entries.Data[0].Tool.Preview.Length == 1500,
+        !StrView_Contains(StrBuf_View(&t4.Model.Entries.Data[0].Tool.Preview), "\x1b"));
 
     Tui_Stop(&t4);
     ArenaRelease(&a4);
@@ -747,12 +749,10 @@ void TestTui() {
     Feed(&t5, "\x1b[<0;2;2M\x1b[<0;2;2m");
     CHECK(t5.Follow);
     Feed(&t5, "\x1b[<0;2;1M\x1b[<32;2;2M\x1b[<32;2;1M\x1b[<0;2;1m");
-    CHECK(!LineModel_IsEntryCollapsed(&t5.Model, noticeId));
-    CHECK(!t5.Follow);
+    CHECK_ALL(!LineModel_IsEntryCollapsed(&t5.Model, noticeId), !t5.Follow);
     t5.Follow = true;
     Feed(&t5, "\x1b[<0;2;1M\x1b[<0;2;1m");
-    CHECK(LineModel_IsEntryCollapsed(&t5.Model, noticeId));
-    CHECK(t5.Follow);
+    CHECK_ALL(LineModel_IsEntryCollapsed(&t5.Model, noticeId), t5.Follow);
 
     Tui_Stop(&t5);
     ArenaRelease(&a5);
@@ -778,11 +778,10 @@ void TestTui() {
     LineModel_AppendAssistant(&tc.Model, SVL(" update"));
     CHECK(LineModel_DisplayRevision(&tc.Model) == pressedRevision);
     Tui_TestCompose(&tc, 20, 12);
-    CHECK(tc.DragDomain == TuiDragDomain::Transcript);
-    CHECK(tc.PressedEntryId == targetId);
+    CHECK_ALL(tc.DragDomain == TuiDragDomain::Transcript,
+              tc.PressedEntryId == targetId);
     Feed(&tc, "\x1b[<0;2;1m");
-    CHECK(LineModel_IsEntryCollapsed(&tc.Model, targetId));
-    CHECK(tc.Follow);
+    CHECK_ALL(LineModel_IsEntryCollapsed(&tc.Model, targetId), tc.Follow);
 
     Feed(&tc, "\x1b[<0;4;3M\x1b[<32;9;3M\x1b[<0;9;3m");
     CHECK(tc.TranscriptSelectionRevision != 0);
@@ -870,24 +869,22 @@ void TestTui() {
     Feed(&ts, "abcdef");
     Tui_TestCompose(&ts, 20, 12);
     Feed(&ts, "\x1b[<0;4;10M\x1b[<32;7;10M\x1b[<0;7;10m");
-    CHECK(LineEdit_HasSelection(&ts.Edit));
-    CHECK(StrView_Eq(LineEdit_SelectedText(&ts.Edit), SVL("bcd")));
+    CHECK_ALL(LineEdit_HasSelection(&ts.Edit),
+              StrView_Eq(LineEdit_SelectedText(&ts.Edit), SVL("bcd")));
     Tui_TestCompose(&ts, 20, 12);
-    CHECK(Screen_BackAt(&ts.Scr, 3, ts.LastInputTop).St.Bg == 238);
-    CHECK(Screen_BackAt(&ts.Scr, 5, ts.LastInputTop).St.Bg == 238);
-    CHECK(Screen_BackAt(&ts.Scr, 2, ts.LastInputTop).St.Bg != 238);
+    CHECK_ALL(Screen_BackAt(&ts.Scr, 3, ts.LastInputTop).St.Bg == 238,
+              Screen_BackAt(&ts.Scr, 5, ts.LastInputTop).St.Bg == 238,
+              Screen_BackAt(&ts.Scr, 2, ts.LastInputTop).St.Bg != 238);
 
     Feed(&ts, "\x1b[<0;5;10M\x1b[<0;5;10m");
-    CHECK(LineEdit_Cursor(&ts.Edit) == 2);
-    CHECK(!LineEdit_HasSelection(&ts.Edit));
+    CHECK_ALL(LineEdit_Cursor(&ts.Edit) == 2, !LineEdit_HasSelection(&ts.Edit));
 
     LineEdit_Clear(&ts.Edit);
     Feed(&ts, "one two");
     Feed(&ts, "\x1b[1;6D");  // Shift+Ctrl+Left
     CHECK(StrView_Eq(LineEdit_SelectedText(&ts.Edit), SVL("two")));
     Feed(&ts, "\x1b[D");  // unshifted Left collapses to the selection start
-    CHECK(!LineEdit_HasSelection(&ts.Edit));
-    CHECK(LineEdit_Cursor(&ts.Edit) == 4);
+    CHECK_ALL(!LineEdit_HasSelection(&ts.Edit), LineEdit_Cursor(&ts.Edit) == 4);
     Feed(&ts, "\x1b[1;2C");  // Shift+Right
     CHECK(StrView_Eq(LineEdit_SelectedText(&ts.Edit), SVL("t")));
 
@@ -923,10 +920,10 @@ void TestTui() {
     ts.AgentRunning = true;
     ts.AbortFlag = 0;
     Feed(&ts, "\x03");
-    CHECK(ts.AbortFlag == 0);
-    CHECK(StrView_Eq(StrBuf_View(&ts.ClipboardRaw), SVL("text")));
-    CHECK(StrView_Eq(LineEdit_SelectedText(&ts.Edit), SVL("text")));
-    CHECK(StrView_Eq(LineEdit_Text(&ts.Edit), SVL("paste\ntext")));
+    CHECK_ALL(ts.AbortFlag == 0,
+              StrView_Eq(StrBuf_View(&ts.ClipboardRaw), SVL("text")),
+              StrView_Eq(LineEdit_SelectedText(&ts.Edit), SVL("text")),
+              StrView_Eq(LineEdit_Text(&ts.Edit), SVL("paste\ntext")));
 
     // Moving the cursor on mouse-down must not change the viewport origin used
     // to map later drag rows in a scrolled composer.
@@ -984,21 +981,21 @@ void TestTui() {
     Tui_TestCompose(&ts, 20, 12);
 
     Feed(&ts, "\x1b[<0;4;1M\x1b[<32;6;3M\x1b[<0;6;3m");
-    CHECK(ts.TranscriptSelectionRevision != 0);
-    CHECK(!ts.Follow);
+    CHECK_ALL(ts.TranscriptSelectionRevision != 0, !ts.Follow);
     Tui_TestCompose(&ts, 20, 12);
-    CHECK(Screen_BackAt(&ts.Scr, 3, 0).St.Bg == 238);
-    CHECK(Screen_BackAt(&ts.Scr, 0, 1).St.Bg == 238);
-    CHECK(Screen_BackAt(&ts.Scr, 4, 2).St.Bg == 238);
-    CHECK(Screen_BackAt(&ts.Scr, 5, 2).St.Bg == 238);
-    CHECK(Screen_BackAt(&ts.Scr, 6, 2).St.Bg != 238);
+    CHECK_ALL(Screen_BackAt(&ts.Scr, 3, 0).St.Bg == 238,
+              Screen_BackAt(&ts.Scr, 0, 1).St.Bg == 238,
+              Screen_BackAt(&ts.Scr, 4, 2).St.Bg == 238,
+              Screen_BackAt(&ts.Scr, 5, 2).St.Bg == 238,
+              Screen_BackAt(&ts.Scr, 6, 2).St.Bg != 238);
 
     ts.AgentRunning = true;
     ts.AbortFlag = 0;
     Feed(&ts, "\x03");
-    CHECK(ts.AbortFlag == 0);
-    CHECK(StrView_Eq(StrBuf_View(&ts.ClipboardRaw), SVL("alpha\n   bravo\n   cha")));
-    CHECK(ts.TranscriptSelectionRevision != 0);
+    CHECK_ALL(ts.AbortFlag == 0,
+              StrView_Eq(StrBuf_View(&ts.ClipboardRaw),
+                         SVL("alpha\n   bravo\n   cha")),
+              ts.TranscriptSelectionRevision != 0);
 
     Feed(&ts, "\x1b[<0;6;3M\x1b[<32;4;1M\x1b[<0;4;1m");
     Feed(&ts, "\x03");
@@ -1015,17 +1012,17 @@ void TestTui() {
     // Typing moves focus to the composer and clears transcript selection.
     ts.AbortFlag = 0;
     Feed(&ts, "x");
-    CHECK(ts.TranscriptSelectionRevision == 0);
-    CHECK(StrView_Eq(LineEdit_Text(&ts.Edit), SVL("x")));
+    CHECK_ALL(ts.TranscriptSelectionRevision == 0,
+              StrView_Eq(LineEdit_Text(&ts.Edit), SVL("x")));
     Feed(&ts, "\x1b[1;2D");
     CHECK(LineEdit_HasSelection(&ts.Edit));
     Feed(&ts, "\x1b[<0;4;1M\x1b[<32;5;2M\x1b[<0;5;2m");
-    CHECK(ts.TranscriptSelectionRevision != 0);
-    CHECK(!LineEdit_HasSelection(&ts.Edit));
+    CHECK_ALL(ts.TranscriptSelectionRevision != 0,
+              !LineEdit_HasSelection(&ts.Edit));
     Tui_TestCompose(&ts, 20, 12);
     Feed(&ts, "\x1b[<0;3;10M\x1b[<32;4;10M\x1b[<0;4;10m");
-    CHECK(LineEdit_HasSelection(&ts.Edit));
-    CHECK(ts.TranscriptSelectionRevision == 0);
+    CHECK_ALL(LineEdit_HasSelection(&ts.Edit),
+              ts.TranscriptSelectionRevision == 0);
 
     Tui_Stop(&ts);
     ArenaRelease(&as);
@@ -1098,13 +1095,12 @@ void TestTui() {
     Tui_TestCompose(&ts, 20, 12);
     Feed(&ts, "\x1b[<0;1;1M\x1b[<32;2;2M\x1b[<0;2;2m\x03");
     StrView copied = StrBuf_View(&ts.ClipboardRaw);
-    CHECK(StrView_Contains(copied, "copy me"));
     char timestamp[6];
     memcpy(timestamp, ts.Model.Entries.Data[0].Text.Timestamp.Data, 5);
     timestamp[5] = '\0';
-    CHECK(StrView_Contains(copied, timestamp));
-    CHECK(!StrView_Contains(copied, "ready"));
-    CHECK(!StrView_Contains(copied, "model-chrome"));
+    CHECK_ALL(StrView_Contains(copied, "copy me"), StrView_Contains(copied, timestamp),
+              !StrView_Contains(copied, "ready"),
+              !StrView_Contains(copied, "model-chrome"));
     Tui_Stop(&ts);
     ArenaRelease(&as);
   }
@@ -1155,9 +1151,7 @@ void TestTui() {
     Tui_TestCompose(&ts, 20, 12, 1020);
     CHECK(ts.Top == top + 1);
     Tui_TestCompose(&ts, 20, 12, 1050);
-    CHECK(ts.Top == top + 2);
-    CHECK(ts.TranscriptFocusRow > focus);
-    CHECK(!ts.Follow);
+    CHECK_ALL(ts.Top == top + 2, ts.TranscriptFocusRow > focus, !ts.Follow);
     Feed(&ts, "\x1b[<32;5;1M");
     Tui_TestCompose(&ts, 20, 12, 1060);
     CHECK(ts.Top == top + 1);
@@ -1204,18 +1198,15 @@ void TestTui() {
     Feed(&ts, "keep");
     ts.AgentRunning = true;
     Feed(&ts, "\x03");
-    CHECK(ts.AbortFlag == 1);
-    CHECK(StrView_Eq(LineEdit_Text(&ts.Edit), SVL("keep")));
-    CHECK(!ts.Quit);
+    CHECK_ALL(ts.AbortFlag == 1,
+              StrView_Eq(LineEdit_Text(&ts.Edit), SVL("keep")), !ts.Quit);
 
     ts.AgentRunning = false;
     ts.AbortFlag = 0;
     Feed(&ts, "\x03");
-    CHECK(LineEdit_Empty(&ts.Edit));
-    CHECK(!ts.Quit);
+    CHECK_ALL(LineEdit_Empty(&ts.Edit), !ts.Quit);
     Feed(&ts, "\x03");
-    CHECK(ts.Quit);
-    CHECK(ts.Stop);
+    CHECK_ALL(ts.Quit, ts.Stop);
 
     Tui_Stop(&ts);
     ArenaRelease(&as);
@@ -1233,8 +1224,7 @@ void TestTui() {
     Feed(&ts, "copy");
     Feed(&ts, "\x1b[1;6D");
     Feed(&ts, "\x03\x04");
-    CHECK(ts.Stop);
-    CHECK(StrView_Eq(StrBuf_View(&ts.ClipboardRaw), SVL("copy")));
+    CHECK_ALL(ts.Stop, StrView_Eq(StrBuf_View(&ts.ClipboardRaw), SVL("copy")));
 
     struct ClipboardCapture {
       StrBuf Bytes;
@@ -1248,9 +1238,10 @@ void TestTui() {
       capture->Writes++;
     };
     CHECK(Tui_TestDrainShutdown(&ts, captureWrite, &capture));
-    CHECK(capture.Writes == 1);
-    CHECK(StrView_Eq(StrBuf_View(&capture.Bytes), SVL("\x1b]52;c;Y29weQ==\x07")));
-    CHECK(ts.ClipboardRaw.Length == 0);
+    CHECK_ALL(capture.Writes == 1,
+              StrView_Eq(StrBuf_View(&capture.Bytes),
+                         SVL("\x1b]52;c;Y29weQ==\x07")),
+              ts.ClipboardRaw.Length == 0);
     CHECK(Tui_TestDrainShutdown(&ts, captureWrite, &capture));
     CHECK(capture.Writes == 1);
 
@@ -1273,9 +1264,9 @@ void TestTui() {
     CHECK(Tui_GetModalResult(&tm, nullptr, nullptr) == TuiModalResult::Pending);
     Feed(&tm, "\x1b[B\x1b[B\r");
     u32 selected = 0;
-    CHECK(Tui_GetModalResult(&tm, &selected, nullptr) == TuiModalResult::Confirmed);
-    CHECK(selected == 2);
-    CHECK(LineEdit_Empty(&tm.Edit));
+    TuiModalResult result = Tui_GetModalResult(&tm, &selected, nullptr);
+    CHECK_ALL(result == TuiModalResult::Confirmed, selected == 2,
+              LineEdit_Empty(&tm.Edit));
 
     CHECK(Tui_BeginSelection(&tm, SVL("Cancel"), options, 3, 1));
     Feed(&tm, "\x1b");
@@ -1288,21 +1279,22 @@ void TestTui() {
     CHECK(Tui_BeginTextEntry(&tm, SVL("Model"), SVL("Enter model ID")));
     Feed(&tm, "claude-manual\r");
     StrView entered = {};
-    CHECK(Tui_GetModalResult(&tm, nullptr, &entered) == TuiModalResult::Confirmed);
-    CHECK(StrView_Eq(entered, SVL("claude-manual")));
+    result = Tui_GetModalResult(&tm, nullptr, &entered);
+    CHECK_ALL(result == TuiModalResult::Confirmed,
+              StrView_Eq(entered, SVL("claude-manual")));
 
     CHECK(Tui_BeginTextEntry(&tm, SVL("Model"), SVL("Enter model ID"),
                              SVL("x")));
     Feed(&tm, "\x7f");
-    CHECK(Tui_GetModalResult(&tm, nullptr, nullptr) == TuiModalResult::Pending);
-    CHECK(LineEdit_Empty(&tm.ModalEdit));
+    CHECK_ALL(Tui_GetModalResult(&tm, nullptr, nullptr) == TuiModalResult::Pending,
+              LineEdit_Empty(&tm.ModalEdit));
     Feed(&tm, "\x7f");
     CHECK(Tui_GetModalResult(&tm, nullptr, nullptr) == TuiModalResult::Back);
 
     Tui_OpenCommandPalette(&tm);
-    CHECK(StrView_Eq(LineEdit_Text(&tm.Edit), SVL("/")));
-    CHECK(tm.ModalKind == TuiModalKind::None);
-    CHECK(tm.ModalResult == TuiModalResult::None);
+    CHECK_ALL(StrView_Eq(LineEdit_Text(&tm.Edit), SVL("/")),
+              tm.ModalKind == TuiModalKind::None,
+              tm.ModalResult == TuiModalResult::None);
 
     BlockingSelect blocking = {};
     blocking.Controller = &tm;
@@ -1317,8 +1309,7 @@ void TestTui() {
     CHECK(Tui_GetModalResult(&tm, nullptr, nullptr) == TuiModalResult::Pending);
     Feed(&tm, "\x1b[B\r");
     Thread_Join(&waiter);
-    CHECK(blocking.Confirmed);
-    CHECK(blocking.Selected == 1);
+    CHECK_ALL(blocking.Confirmed, blocking.Selected == 1);
 
     Tui_Stop(&tm);
     ArenaRelease(&am);
@@ -1337,22 +1328,19 @@ void TestTui() {
     Tui_CommandNotice(&tc, SVL("model discovery unavailable; using fallback"));
     Tui_CommandError(&tc, SVL("settings write failed"));
     DrainDisplay(&tc);
-    CHECK(AnyRow(&ac, &tc, "model discovery unavailable"));
-    CHECK(AnyRow(&ac, &tc, "settings write failed"));
+    CHECK_ALL(AnyRow(&ac, &tc, "model discovery unavailable"),
+              AnyRow(&ac, &tc, "settings write failed"));
 
     Tui_SetModelName(&tc, SVL("after"));
     CHECK(StrView_Eq(tc.ModelName, SVL("after")));
 
     Tui_BeginOperation(&tc, SVL("login"));
     Tui_SetOperationStatus(&tc, SVL("waiting for approval"));
-    CHECK(tc.OperationActive);
-    CHECK(StrView_Eq(tc.OperationLabel, SVL("login")));
-    CHECK(StrView_Eq(tc.OperationStatus, SVL("waiting for approval")));
-    CHECK(*Tui_OperationAbort(&tc) == 0);
+    CHECK_ALL(tc.OperationActive, StrView_Eq(tc.OperationLabel, SVL("login")),
+              StrView_Eq(tc.OperationStatus, SVL("waiting for approval")),
+              *Tui_OperationAbort(&tc) == 0);
     Feed(&tc, "\x03");
-    CHECK(*Tui_OperationAbort(&tc) == 1);
-    CHECK(!tc.Quit);
-    CHECK(!tc.Stop);
+    CHECK_ALL(*Tui_OperationAbort(&tc) == 1, !tc.Quit, !tc.Stop);
     CHECK(Tui_EndOperation(&tc));
     CHECK(!tc.OperationActive);
     Tui_BeginOperation(&tc, SVL("models"));
@@ -1360,15 +1348,13 @@ void TestTui() {
     StrView stopOptions[] = {SVL("one"), SVL("two")};
     CHECK(Tui_BeginSelection(&tc, SVL("Stop"), stopOptions, 2));
     Feed(&tc, "\x04");
-    CHECK(*Tui_OperationAbort(&tc) == 1);
-    CHECK(tc.Quit);
-    CHECK(tc.Stop);
-    CHECK(Tui_GetModalResult(&tc, nullptr, nullptr) == TuiModalResult::Cancelled);
+    CHECK_ALL(*Tui_OperationAbort(&tc) == 1, tc.Quit, tc.Stop,
+              Tui_GetModalResult(&tc, nullptr, nullptr) == TuiModalResult::Cancelled);
     CHECK(Tui_EndOperation(&tc));
     Tui_BeginOperation(&tc, SVL("must not restart"));
-    CHECK(!tc.OperationActive);
-    CHECK(*Tui_OperationAbort(&tc) == 1);
-    CHECK(!Tui_BeginSelection(&tc, SVL("Stopped"), stopOptions, 2));
+    bool selectionStarted = Tui_BeginSelection(&tc, SVL("Stopped"), stopOptions, 2);
+    CHECK_ALL(!tc.OperationActive, *Tui_OperationAbort(&tc) == 1,
+              !selectionStarted);
 
     Tui_Stop(&tc);
     ArenaRelease(&ac);
@@ -1416,45 +1402,20 @@ void TestTui() {
     usize usedBeforeClear = resetTui.SessionMem.Used;
 
     resetTui.AgentRunning = true;
-    CHECK(!Tui_ClearSession(&resetTui));
-    CHECK(resetTui.Model.Entries.Count != 0);
+    bool clearedWhileRunning = Tui_ClearSession(&resetTui);
+    CHECK_ALL(!clearedWhileRunning, resetTui.Model.Entries.Count != 0);
     resetTui.AgentRunning = false;
 
     CHECK(Agent_ResetSession(&ag));
     CHECK(Tui_ClearSession(&resetTui));
-    CHECK(resetTui.SessionMem.Base != nullptr);
-    CHECK(resetTui.SessionMem.Used > 0);
-    CHECK(resetTui.SessionMem.Used < usedBeforeClear);
-    CHECK(resetTui.Model.Entries.Count == 0);
-    CHECK(LineModel_Count(&resetTui.Model) == 0);
-    CHECK(LineEdit_Empty(&resetTui.Edit));
-    CHECK(resetTui.Edit.History.Count == 0);
-    CHECK(LineEdit_Empty(&resetTui.ModalEdit));
-    CHECK(resetTui.ModalEdit.History.Count == 0);
     CHECK(resetTui.QCount == 1);
-    CHECK(!Tui_HasPendingDisplay(&resetTui));
-    CHECK(resetTui.DisplayHead == 0);
-    CHECK(resetTui.Use.Input == 0 && resetTui.Use.Output == 0);
-    CHECK(resetTui.State == TuiState::Idle);
-    CHECK(resetTui.StateTool.Length == 0);
-    CHECK(resetTui.TurnStartMs == 0);
-    CHECK(resetTui.QueuedCount == 0);
-    CHECK(resetTui.Follow);
-    CHECK(resetTui.Top == 0 && resetTui.LastTop == 0 && resetTui.LastPaneH == 0);
-    CHECK(resetTui.HoveredEntryId == 0 && resetTui.PressedEntryId == 0);
-    CHECK(!resetTui.HasMouse);
-    CHECK(!resetTui.OperationActive);
-    CHECK(resetTui.ModalKind == TuiModalKind::None);
-    CHECK(resetTui.ModalResult == TuiModalResult::None);
-    CHECK(StrView_Eq(resetTui.ModelName, SVL("kept-model")));
-    CHECK(StrView_Eq(resetTui.Cwd, SVL("kept-cwd")));
-    CHECK(StrView_Eq(resetTui.Branch, SVL("kept-branch")));
-    CHECK(resetTui.Ag == &ag);
+    CHECK(SessionUiCleared(&resetTui, usedBeforeClear));
+    CHECK(SessionContextPreserved(&resetTui, &ag));
 
     TuiSubmission preserved = {};
     CHECK(Tui_WaitForSubmit(&resetTui, &preserved));
-    CHECK(preserved.Kind == TuiSubmissionKind::Command);
-    CHECK(StrView_Eq(preserved.Text, SVL("/queued")));
+    CHECK_ALL(preserved.Kind == TuiSubmissionKind::Command,
+              StrView_Eq(preserved.Text, SVL("/queued")));
 
     LineEdit_InsertText(&resetTui.Edit, SVL("new prompt"));
     CHECK(Tui_BeginSelection(&resetTui, SVL("new modal"), options, 2));
@@ -1463,12 +1424,12 @@ void TestTui() {
     Tui_EndOperation(&resetTui);
     CHECK(Agent_Release(&ag));
     Tui_Stop(&resetTui);
-    CHECK(!resetTui.SessionUp);
-    CHECK(!resetTui.SyncUp);
+    CHECK_ALL(!resetTui.SessionUp, !resetTui.SyncUp);
     Tui_Stop(&resetTui);  // final cleanup is idempotent
     ArenaRelease(&ar);
   }
 
+  CHECK(g_displayDrainsOk);
   Tui_Stop(&t);
   ArenaRelease(&a);
 }
