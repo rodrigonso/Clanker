@@ -17,7 +17,7 @@
 enum class TuiState : u8 { Idle, Thinking, Streaming, Tool };
 
 enum class TuiModalKind : u8 { None, Select, Text };
-enum class TuiModalResult : u8 { None, Pending, Confirmed, Cancelled };
+enum class TuiModalResult : u8 { None, Pending, Confirmed, Back, Cancelled };
 
 enum class TuiSubmissionKind : u8 { Prompt, Command };
 
@@ -51,9 +51,17 @@ struct TuiDisplayEvent {
 
 struct Agent;  // forward decl; the TUI pushes steering into the agent's queues
 
+struct TuiCommandSpec {
+  StrView Name;
+  StrView Alias;
+  StrView Description;
+};
+
 struct TuiOpts {
-  StrView ModelName;
-  bool Color;
+  StrView ModelName = {};
+  bool Color = true;
+  const TuiCommandSpec* Commands = nullptr;
+  u32 CommandCount = 0;
 };
 
 struct Tui {
@@ -99,6 +107,11 @@ struct Tui {
   u32 Spinner;
   StrView ModelName;
   u32 QueuedCount;  // messages queued (steer/followUp/nextTurn) per last queue_update
+  TuiCommandSpec* Commands;
+  u32 CommandCount;
+  u32 CommandPaletteSelected;
+  u32 CommandPaletteFirst;
+  bool CommandPaletteDismissed;
   bool OperationActive;
   StrView OperationLabel;
   StrView OperationStatus;
@@ -186,9 +199,12 @@ TuiModalResult Tui_GetModalResult(Tui* t, u32* selected, StrView* text);
 
 // Blocking conveniences. Cond_Wait releases the TUI lock, so input and render
 // threads remain active while the caller waits.
-bool Tui_Select(Tui* t, StrView title, const StrView* options, u32 optionCount,
-                u32* selected, u32 initialSelection = 0);
-bool Tui_ReadText(Tui* t, StrView title, StrView prompt, StrView initial, StrView* out);
+TuiModalResult Tui_Select(Tui* t, StrView title, const StrView* options,
+                         u32 optionCount, u32* selected,
+                         u32 initialSelection = 0);
+TuiModalResult Tui_ReadText(Tui* t, StrView title, StrView prompt,
+                           StrView initial, StrView* out);
+void Tui_OpenCommandPalette(Tui* t);
 
 // AgentSink callback (User = Tui*).
 void Tui_AgentEvent(void* user, const AgentEvent& ev);

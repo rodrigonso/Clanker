@@ -2,6 +2,14 @@
 
 namespace {
 
+const AppCommandSpec kCommands[] = {
+    {AppCommandKind::Login, SVL("login"), {}, SVL("Sign in and choose a provider")},
+    {AppCommandKind::Model, SVL("model"), {}, SVL("Change the active provider and model")},
+    {AppCommandKind::Clear, SVL("clear"), {}, SVL("Clear the current conversation")},
+    {AppCommandKind::Exit, SVL("exit"), SVL("quit"),
+     SVL("Exit Clank and return to the shell (alias: /quit)")},
+};
+
 bool IsSpace(char c) {
   return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
 }
@@ -65,6 +73,12 @@ void ReportHandlerResult(const AppCommandUx* ux, AppCommandKind kind, AppCommand
 
 }  // namespace
 
+u32 AppCommandSpec_Count() { return sizeof(kCommands) / sizeof(kCommands[0]); }
+
+const AppCommandSpec* AppCommandSpec_At(u32 index) {
+  return index < AppCommandSpec_Count() ? &kCommands[index] : nullptr;
+}
+
 AppCommand AppCommand_Parse(StrView input) {
   StrView line = Trim(input);
   if (!line.Length || line.Data[0] != '/')
@@ -76,14 +90,14 @@ AppCommand AppCommand_Parse(StrView input) {
   StrView arguments = Trim(StrView{line.Data + nameEnd, line.Length - nameEnd});
 
   AppCommandKind kind = AppCommandKind::Unknown;
-  if (StrView_EqCStr(name, "login"))
-    kind = AppCommandKind::Login;
-  else if (StrView_EqCStr(name, "model"))
-    kind = AppCommandKind::Model;
-  else if (StrView_EqCStr(name, "clear"))
-    kind = AppCommandKind::Clear;
-  else if (StrView_EqCStr(name, "exit") || StrView_EqCStr(name, "quit"))
-    kind = AppCommandKind::Exit;
+  for (u32 i = 0; i < AppCommandSpec_Count(); i++) {
+    const AppCommandSpec* spec = AppCommandSpec_At(i);
+    if (StrView_Eq(name, spec->Name) ||
+        (spec->Alias.Length && StrView_Eq(name, spec->Alias))) {
+      kind = spec->Kind;
+      break;
+    }
+  }
 
   return AppCommand{kind, arguments};
 }

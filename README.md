@@ -122,6 +122,12 @@ Interactive commands:
 - `/clear` — clear the conversation while preserving provider, model, and credentials.
 - `/exit` (or `/quit`) — close Clank and return to the shell.
 
+In the TUI, typing `/` opens a prefix-filtered command flyout over the content
+directly above the composer. Provider, model, and manual-entry choices drill down
+as pages in the same surface. Use Up/Down to select, Enter to continue or run the
+command, Backspace on an empty page to go back, or Escape to dismiss the current
+choice.
+
 Commands entered during a TUI turn run afterward; ordinary text still steers the
 active turn. In `--faux` mode, `/clear` and `/exit` work while `/login` and
 `/model` are unavailable.

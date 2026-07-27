@@ -10,6 +10,16 @@ enum class AppCommandKind : u8 {
   Unknown,
 };
 
+struct AppCommandSpec {
+  AppCommandKind Kind;
+  StrView Name;
+  StrView Alias;
+  StrView Description;
+};
+
+u32 AppCommandSpec_Count();
+const AppCommandSpec* AppCommandSpec_At(u32 index);
+
 struct AppCommand {
   AppCommandKind Kind;
   StrView Arguments;

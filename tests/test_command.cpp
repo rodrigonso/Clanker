@@ -41,6 +41,14 @@ AppCommandHandlerResult Model(void* user, const AppCommandUx* ux) {
 }
 
 void TestParse() {
+  CHECK(AppCommandSpec_Count() == 4);
+  CHECK(AppCommandSpec_At(AppCommandSpec_Count()) == nullptr);
+  CHECK(AppCommandSpec_At(0)->Kind == AppCommandKind::Login);
+  CHECK(StrView_EqCStr(AppCommandSpec_At(0)->Name, "login"));
+  CHECK(AppCommandSpec_At(3)->Kind == AppCommandKind::Exit);
+  CHECK(StrView_EqCStr(AppCommandSpec_At(3)->Alias, "quit"));
+  CHECK(AppCommandSpec_At(3)->Description.Length != 0);
+
   AppCommand plain = AppCommand_Parse(SVL("  hello  "));
   CHECK(plain.Kind == AppCommandKind::NotCommand);
 

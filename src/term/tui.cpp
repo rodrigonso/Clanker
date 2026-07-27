@@ -72,15 +72,62 @@ bool QPop(Tui* t, TuiSubmission* out) {
   return true;
 }
 
+bool IsInputSpace(char c) {
+  return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
 bool IsSlashCommand(StrView line) {
   u32 i = 0;
-  while (i < line.Length) {
-    char c = line.Data[i];
-    if (c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != '\f' && c != '\v')
-      break;
-    i++;
-  }
+  while (i < line.Length && IsInputSpace(line.Data[i])) i++;
   return i < line.Length && line.Data[i] == '/';
+}
+
+bool HasPrefix(StrView text, StrView prefix) {
+  return prefix.Length <= text.Length &&
+         (prefix.Length == 0 || memcmp(text.Data, prefix.Data, prefix.Length) == 0);
+}
+
+bool CommandMatches(const TuiCommandSpec& command, StrView query) {
+  return HasPrefix(command.Name, query) ||
+         (command.Alias.Length && HasPrefix(command.Alias, query));
+}
+
+u32 CommandMatchCount(const Tui* t, StrView query) {
+  u32 count = 0;
+  for (u32 i = 0; i < t->CommandCount; i++)
+    if (CommandMatches(t->Commands[i], query)) count++;
+  return count;
+}
+
+const TuiCommandSpec* CommandMatchAt(const Tui* t, StrView query, u32 matchIndex) {
+  for (u32 i = 0; i < t->CommandCount; i++) {
+    if (!CommandMatches(t->Commands[i], query)) continue;
+    if (matchIndex == 0) return &t->Commands[i];
+    matchIndex--;
+  }
+  return nullptr;
+}
+
+bool CommandPaletteQuery(const Tui* t, StrView* out) {
+  if (!t->Commands || t->CommandCount == 0 || t->CommandPaletteDismissed ||
+      t->ModalResult == TuiModalResult::Pending)
+    return false;
+
+  StrView text = LineEdit_Text(&t->Edit);
+  if (LineEdit_Cursor(&t->Edit) != text.Length) return false;
+  u32 first = 0;
+  while (first < text.Length && IsInputSpace(text.Data[first])) first++;
+  if (first >= text.Length || text.Data[first] != '/') return false;
+  for (u32 i = first + 1; i < text.Length; i++)
+    if (IsInputSpace(text.Data[i])) return false;
+  *out = StrView{text.Data + first + 1, text.Length - first - 1};
+  return true;
+}
+
+void ResetCommandPalette(Tui* t) {
+  t->CommandPaletteSelected = 0;
+  t->CommandPaletteFirst = 0;
+  t->CommandPaletteDismissed = false;
 }
 
 void Wake(Tui* t) {
@@ -291,7 +338,8 @@ void ComposeStatus(Tui* t, u16 statusY, u16 cols) {
   u16 rightX = (u32)cols > rightW ? (u16)(cols - rightW) : 0;
 
   // Draw the state on the left, clipped so it never overruns the right block.
-  Screen_PutText(&t->Scr, 0, statusY, StrView{left, ll}, st, rightX ? rightX : cols);
+  Screen_PutText(&t->Scr, 1, statusY, StrView{left, ll}, st,
+                 rightX ? rightX : cols);
   Screen_PutText(&t->Scr, rightX, statusY, rightView, st, cols);
 }
 
@@ -329,7 +377,7 @@ void DrawInputBox(Tui* t, u16 topY, u16 bottomY, u16 innerTop, u16 innerH, u16 c
 void ComposeCwd(Tui* t, u16 cwdY, u16 cols) {
   if (t->Cwd.Length == 0) return;
   Style st = St(g_color ? 244 : COL_DEFAULT, ATTR_NONE);
-  u16 x = Screen_PutText(&t->Scr, 0, cwdY, t->Cwd, st, cols);
+  u16 x = Screen_PutText(&t->Scr, 1, cwdY, t->Cwd, st, cols);
   if (t->Branch.Length) {
     x = Screen_PutText(&t->Scr, x, cwdY, SVL("  (\xe2\x8e\x87 "), st, cols);
     x = Screen_PutText(&t->Scr, x, cwdY, t->Branch, st, cols);
@@ -478,29 +526,35 @@ void DrawPanelBorder(Tui* t, u16 x0, u16 y0, u16 x1, u16 y1, Style style) {
   }
 }
 
-void ComposeModal(Tui* t, u16 cols, u16 rows) {
+void ComposeModal(Tui* t, u16 cols, u16 topBorderY) {
   if (t->ModalKind == TuiModalKind::None || t->ModalResult != TuiModalResult::Pending)
     return;
 
-  u16 panelW = cols > 76 ? 72 : (u16)(cols - 4);
-  if (panelW < 10) panelW = (u16)(cols - 2);
+  if (topBorderY < 4) return;
+  u16 panelW = cols > 76 ? 72 : (u16)(cols - 2);
   u16 desiredH =
       t->ModalKind == TuiModalKind::Select
-          ? (u16)((t->ModalOptionCount < 12 ? t->ModalOptionCount : 12) + 4)
-          : 7;
-  u16 panelH = desiredH < (u16)(rows - 2) ? desiredH : (u16)(rows - 2);
-  if (panelH < 5) panelH = 5;
-  u16 x0 = (u16)((cols - panelW) / 2);
-  u16 y0 = (u16)((rows - panelH) / 2);
+          ? (u16)((t->ModalOptionCount < 12 ? t->ModalOptionCount : 12) + 3)
+          : 6;
+  u16 panelH = desiredH < topBorderY ? desiredH : topBorderY;
+  if (panelH < 4) return;
+  u16 x0 = 1;
+  u16 y0 = (u16)(topBorderY - panelH);
   u16 x1 = (u16)(x0 + panelW - 1);
-  u16 y1 = (u16)(y0 + panelH - 1);
+  u16 y1 = (u16)(topBorderY - 1);
+  bool compactText = t->ModalKind == TuiModalKind::Text && panelH < 5;
   Style panel = St(g_color ? 252 : COL_DEFAULT, ATTR_NONE);
-  if (g_color) panel.Bg = 235;
   DrawPanelBorder(t, x0, y0, x1, y1, panel);
 
+  Style path = panel;
+  path.Attr |= ATTR_DIM;
+  u16 titleX =
+      Screen_PutText(&t->Scr, (u16)(x0 + 2), (u16)(y0 + 1),
+                     SVL("Commands  /  "), path, (u16)(x1 - 1));
   Style title = panel;
   title.Attr |= ATTR_BOLD;
-  Screen_PutText(&t->Scr, (u16)(x0 + 2), (u16)(y0 + 1), t->ModalTitle, title,
+  Screen_PutText(&t->Scr, titleX, (u16)(y0 + 1),
+                 compactText ? t->ModalPrompt : t->ModalTitle, title,
                  (u16)(x1 - 1));
 
   if (t->ModalKind == TuiModalKind::Select) {
@@ -530,8 +584,9 @@ void ComposeModal(Tui* t, u16 cols, u16 rows) {
 
   Style prompt = panel;
   prompt.Attr |= ATTR_DIM;
-  Screen_PutText(&t->Scr, (u16)(x0 + 2), (u16)(y0 + 2), t->ModalPrompt, prompt,
-                 (u16)(x1 - 1));
+  if (!compactText)
+    Screen_PutText(&t->Scr, (u16)(x0 + 2), (u16)(y0 + 2), t->ModalPrompt,
+                   prompt, (u16)(x1 - 1));
   u16 editY = (u16)(y1 - 1);
   Style edit = panel;
   edit.Attr |= ATTR_REVERSE;
@@ -542,6 +597,69 @@ void ComposeModal(Tui* t, u16 cols, u16 rows) {
   u16 cursorX = (u16)(x0 + 3 + cursorW);
   if (cursorX >= x1 - 2) cursorX = (u16)(x1 - 3);
   Screen_SetCursor(&t->Scr, true, cursorX, editY);
+}
+
+void ComposeCommandPalette(Tui* t, StrView query, u32 matchCount, u16 topBorderY,
+                           u16 paletteH, u16 cols) {
+  if (paletteH < 4 || topBorderY < paletteH) return;
+
+  u16 y0 = (u16)(topBorderY - paletteH);
+  u16 y1 = (u16)(topBorderY - 1);
+  u16 panelW = cols > 76 ? 72 : (u16)(cols - 2);
+  u16 x0 = 1;
+  u16 x1 = (u16)(x0 + panelW - 1);
+  Style panel = St(g_color ? 252 : COL_DEFAULT, ATTR_NONE);
+  DrawPanelBorder(t, x0, y0, x1, y1, panel);
+
+  Style title = panel;
+  title.Attr |= ATTR_BOLD;
+  Screen_PutText(&t->Scr, (u16)(x0 + 2), (u16)(y0 + 1), SVL("Commands"),
+                 title, x1);
+
+  u32 visible = paletteH - 3;
+  if (matchCount == 0) {
+    t->CommandPaletteSelected = 0;
+    t->CommandPaletteFirst = 0;
+    Style empty = panel;
+    empty.Attr |= ATTR_DIM;
+    Screen_PutText(&t->Scr, (u16)(x0 + 2), (u16)(y0 + 2),
+                   SVL("No matching commands"), empty, x1);
+    return;
+  }
+
+  if (t->CommandPaletteSelected >= matchCount) t->CommandPaletteSelected = 0;
+  if (t->CommandPaletteSelected < t->CommandPaletteFirst)
+    t->CommandPaletteFirst = t->CommandPaletteSelected;
+  if (t->CommandPaletteSelected >= t->CommandPaletteFirst + visible)
+    t->CommandPaletteFirst = t->CommandPaletteSelected - visible + 1;
+  u32 maxFirst = matchCount > visible ? matchCount - visible : 0;
+  if (t->CommandPaletteFirst > maxFirst) t->CommandPaletteFirst = maxFirst;
+
+  for (u32 row = 0; row < visible; row++) {
+    u32 matchIndex = t->CommandPaletteFirst + row;
+    const TuiCommandSpec* command = CommandMatchAt(t, query, matchIndex);
+    if (!command) break;
+    u16 y = (u16)(y0 + 2 + row);
+    bool selected = matchIndex == t->CommandPaletteSelected;
+    Style option = panel;
+    if (selected) {
+      option.Attr |= ATTR_REVERSE;
+      Screen_Fill(&t->Scr, (u16)(x0 + 1), y, (u16)(x1 - 1), y, option);
+    }
+
+    u16 x = Screen_PutText(&t->Scr, (u16)(x0 + 2), y,
+                           selected ? SVL("\xe2\x80\xba ") : SVL("  "), option, x1);
+    Style name = option;
+    name.Attr |= ATTR_BOLD;
+    x = Screen_PutText(&t->Scr, x, y, SVL("/"), name, x1);
+    x = Screen_PutText(&t->Scr, x, y, command->Name, name, x1);
+
+    u16 descriptionX = (u16)(x0 + 18);
+    if (descriptionX < x + 2) descriptionX = (u16)(x + 2);
+    Style description = option;
+    description.Attr |= ATTR_DIM;
+    Screen_PutText(&t->Scr, descriptionX, y, command->Description, description, x1);
+  }
 }
 
 void Compose(Tui* t) {
@@ -581,6 +699,16 @@ void Compose(Tui* t) {
   u16 bottomBorderY = (u16)(statusY - 1);
   u16 inputTop = (u16)(bottomBorderY - inputH);
   u16 topBorderY = (u16)(inputTop - 1);
+  StrView commandQuery = {};
+  bool commandPalette = CommandPaletteQuery(t, &commandQuery);
+  u32 commandMatches = commandPalette ? CommandMatchCount(t, commandQuery) : 0;
+  u16 paletteH = 0;
+  if (commandPalette) {
+    u32 visible = commandMatches ? commandMatches : 1;
+    if (visible > 6) visible = 6;
+    u16 desired = (u16)(visible + 3);
+    if (topBorderY >= 4) paletteH = desired < topBorderY ? desired : topBorderY;
+  }
   u16 cwdY = (u16)(topBorderY - 1);
   u16 paneH = cwdY;  // rows [0, cwdY)
   t->LastPaneH = paneH;
@@ -631,7 +759,8 @@ void Compose(Tui* t) {
 
   // Sticky context line above the prompt.
   ComposeCwd(t, cwdY, cols);
-  ComposeModal(t, cols, rows);
+  ComposeCommandPalette(t, commandQuery, commandMatches, topBorderY, paletteH, cols);
+  ComposeModal(t, cols, topBorderY);
 }
 
 // ---- key handling (lock held) ----
@@ -644,6 +773,7 @@ void QueueUserDisplayLocked(Tui* t, StrView line) {
 
 void DoSubmit(Tui* t) {
   StrView line = LineEdit_Submit(&t->Edit);
+  ResetCommandPalette(t);
   if (line.Length == 0) return;
   if (IsSlashCommand(line)) {
     if (!QPush(t, TuiSubmission{TuiSubmissionKind::Command, line})) {
@@ -678,6 +808,25 @@ void DoSubmit(Tui* t) {
     }
     Cond_Signal(&t->SubmitCv);
   }
+}
+
+void SubmitPaletteCommand(Tui* t, StrView query) {
+  u32 matchCount = CommandMatchCount(t, query);
+  if (matchCount == 0) {
+    DoSubmit(t);
+    return;
+  }
+  if (t->CommandPaletteSelected >= matchCount) t->CommandPaletteSelected = 0;
+  const TuiCommandSpec* command =
+      CommandMatchAt(t, query, t->CommandPaletteSelected);
+  if (!command) {
+    DoSubmit(t);
+    return;
+  }
+  LineEdit_Clear(&t->Edit);
+  LineEdit_InsertText(&t->Edit, SVL("/"));
+  LineEdit_InsertText(&t->Edit, command->Name);
+  DoSubmit(t);
 }
 
 const i32 kWheelStep = 3;  // transcript rows per mouse-wheel notch
@@ -736,6 +885,7 @@ void HandleSelectKey(Tui* t, const Key& k) {
       if (t->ModalOptionCount) t->ModalSelected = t->ModalOptionCount - 1;
       break;
     case KeyKind::Enter: FinishModal(t, TuiModalResult::Confirmed); break;
+    case KeyKind::Backspace: FinishModal(t, TuiModalResult::Back); break;
     case KeyKind::Escape: FinishModal(t, TuiModalResult::Cancelled); break;
     case KeyKind::CtrlC:
       if (t->OperationActive) t->OperationAbortFlag = 1;
@@ -756,7 +906,12 @@ void HandleTextKey(Tui* t, const Key& k) {
         FinishModal(t, TuiModalResult::Confirmed);
       }
       break;
-    case KeyKind::Backspace: LineEdit_Backspace(&t->ModalEdit); break;
+    case KeyKind::Backspace:
+      if (LineEdit_Empty(&t->ModalEdit))
+        FinishModal(t, TuiModalResult::Back);
+      else
+        LineEdit_Backspace(&t->ModalEdit);
+      break;
     case KeyKind::Delete: LineEdit_Delete(&t->ModalEdit); break;
     case KeyKind::Left: LineEdit_Left(&t->ModalEdit); break;
     case KeyKind::Right: LineEdit_Right(&t->ModalEdit); break;
@@ -790,31 +945,75 @@ void HandleKey(Tui* t, const Key& k) {
     return;
   }
 
+  StrView commandQuery = {};
+  if (CommandPaletteQuery(t, &commandQuery)) {
+    u32 matchCount = CommandMatchCount(t, commandQuery);
+    if (t->CommandPaletteSelected >= matchCount) t->CommandPaletteSelected = 0;
+    switch (k.Kind) {
+      case KeyKind::Up:
+        if (t->CommandPaletteSelected > 0) t->CommandPaletteSelected--;
+        return;
+      case KeyKind::Down:
+        if (t->CommandPaletteSelected + 1 < matchCount) t->CommandPaletteSelected++;
+        return;
+      case KeyKind::Enter:
+        SubmitPaletteCommand(t, commandQuery);
+        return;
+      case KeyKind::Escape:
+        t->CommandPaletteDismissed = true;
+        return;
+      default: break;
+    }
+  }
+
   switch (k.Kind) {
     case KeyKind::Char:
-      if (!k.Alt && k.Codepoint >= 0x20) LineEdit_InsertChar(&t->Edit, k.Codepoint);
+      if (!k.Alt && k.Codepoint >= 0x20) {
+        LineEdit_InsertChar(&t->Edit, k.Codepoint);
+        ResetCommandPalette(t);
+      }
       break;
     case KeyKind::Enter: DoSubmit(t); break;
-    case KeyKind::Newline: LineEdit_Newline(&t->Edit); break;
-    case KeyKind::Backspace: LineEdit_Backspace(&t->Edit); break;
-    case KeyKind::Delete: LineEdit_Delete(&t->Edit); break;
+    case KeyKind::Newline:
+      LineEdit_Newline(&t->Edit);
+      ResetCommandPalette(t);
+      break;
+    case KeyKind::Backspace:
+      LineEdit_Backspace(&t->Edit);
+      ResetCommandPalette(t);
+      break;
+    case KeyKind::Delete:
+      LineEdit_Delete(&t->Edit);
+      ResetCommandPalette(t);
+      break;
     case KeyKind::Left: LineEdit_Left(&t->Edit); break;
     case KeyKind::Right: LineEdit_Right(&t->Edit); break;
     case KeyKind::Up:
       if (LineEdit_OnFirstLine(&t->Edit) || !LineEdit_Up(&t->Edit))
         LineEdit_HistoryPrev(&t->Edit);
+      ResetCommandPalette(t);
       break;
     case KeyKind::Down:
       if (LineEdit_OnLastLine(&t->Edit) || !LineEdit_Down(&t->Edit))
         LineEdit_HistoryNext(&t->Edit);
+      ResetCommandPalette(t);
       break;
     case KeyKind::Home: LineEdit_Home(&t->Edit); break;
     case KeyKind::End: LineEdit_End(&t->Edit); break;
     case KeyKind::WordLeft: LineEdit_WordLeft(&t->Edit); break;
     case KeyKind::WordRight: LineEdit_WordRight(&t->Edit); break;
-    case KeyKind::CtrlW: LineEdit_DeleteWordBack(&t->Edit); break;
-    case KeyKind::CtrlU: LineEdit_KillToStart(&t->Edit); break;
-    case KeyKind::CtrlK: LineEdit_KillToEnd(&t->Edit); break;
+    case KeyKind::CtrlW:
+      LineEdit_DeleteWordBack(&t->Edit);
+      ResetCommandPalette(t);
+      break;
+    case KeyKind::CtrlU:
+      LineEdit_KillToStart(&t->Edit);
+      ResetCommandPalette(t);
+      break;
+    case KeyKind::CtrlK:
+      LineEdit_KillToEnd(&t->Edit);
+      ResetCommandPalette(t);
+      break;
     case KeyKind::CtrlL: t->Scr.ForceRepaint = true; break;
     case KeyKind::CtrlO: {
       ViewportAnchor anchor = CaptureViewportAnchor(t);
@@ -846,10 +1045,12 @@ void HandleKey(Tui* t, const Key& k) {
         t->OperationAbortFlag = 1;
       else if (t->AgentRunning)
         t->AbortFlag = 1;
-      else if (!LineEdit_Empty(&t->Edit))
+      else if (!LineEdit_Empty(&t->Edit)) {
         LineEdit_Clear(&t->Edit);
-      else
+        ResetCommandPalette(t);
+      } else {
         RequestStopLocked(t);
+      }
       break;
     default: break;
   }
@@ -961,6 +1162,15 @@ void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts) {
   g_color = opts.Color;
   LineModel_SetColorEnabled(opts.Color);
   t->ModelName = StrView_Dup(mem, opts.ModelName);
+  if (opts.Commands && opts.CommandCount) {
+    t->Commands = ArenaPushArray(mem, TuiCommandSpec, opts.CommandCount);
+    t->CommandCount = opts.CommandCount;
+    for (u32 i = 0; i < opts.CommandCount; i++) {
+      t->Commands[i].Name = StrView_Dup(mem, opts.Commands[i].Name);
+      t->Commands[i].Alias = StrView_Dup(mem, opts.Commands[i].Alias);
+      t->Commands[i].Description = StrView_Dup(mem, opts.Commands[i].Description);
+    }
+  }
   t->SessionMem = ArenaCreate();
   LineModel_Init(&t->Model, &t->SessionMem, 80, 5000);
   LineEdit_Init(&t->Edit, &t->SessionMem);
@@ -1021,6 +1231,9 @@ bool Tui_ClearSession(Tui* t) {
   t->Use = {};
   t->Spinner = 0;
   t->QueuedCount = 0;
+  t->CommandPaletteSelected = 0;
+  t->CommandPaletteFirst = 0;
+  t->CommandPaletteDismissed = false;
   t->OperationActive = false;
   t->OperationLabel = {};
   t->OperationStatus = {};
@@ -1228,27 +1441,45 @@ TuiModalResult Tui_GetModalResult(Tui* t, u32* selected, StrView* text) {
   return result;
 }
 
-bool Tui_Select(Tui* t, StrView title, const StrView* options, u32 optionCount,
-                u32* selected, u32 initialSelection) {
-  if (!Tui_BeginSelection(t, title, options, optionCount, initialSelection)) return false;
+TuiModalResult Tui_Select(Tui* t, StrView title, const StrView* options,
+                         u32 optionCount, u32* selected,
+                         u32 initialSelection) {
+  if (!Tui_BeginSelection(t, title, options, optionCount, initialSelection))
+    return TuiModalResult::Cancelled;
   Mutex_Lock(&t->Lock);
   while (t->ModalResult == TuiModalResult::Pending && !t->Stop)
     Cond_Wait(&t->ModalCv, &t->Lock);
-  bool confirmed = t->ModalResult == TuiModalResult::Confirmed;
+  TuiModalResult result = t->ModalResult;
   if (selected) *selected = t->ModalSelected;
   Mutex_Unlock(&t->Lock);
-  return confirmed;
+  return result;
 }
 
-bool Tui_ReadText(Tui* t, StrView title, StrView prompt, StrView initial, StrView* out) {
-  if (!Tui_BeginTextEntry(t, title, prompt, initial)) return false;
+TuiModalResult Tui_ReadText(Tui* t, StrView title, StrView prompt,
+                           StrView initial, StrView* out) {
+  if (!Tui_BeginTextEntry(t, title, prompt, initial))
+    return TuiModalResult::Cancelled;
   Mutex_Lock(&t->Lock);
   while (t->ModalResult == TuiModalResult::Pending && !t->Stop)
     Cond_Wait(&t->ModalCv, &t->Lock);
-  bool confirmed = t->ModalResult == TuiModalResult::Confirmed;
-  if (out) *out = confirmed ? t->ModalTextResult : StrView{};
+  TuiModalResult result = t->ModalResult;
+  if (out)
+    *out = result == TuiModalResult::Confirmed ? t->ModalTextResult : StrView{};
   Mutex_Unlock(&t->Lock);
-  return confirmed;
+  return result;
+}
+
+void Tui_OpenCommandPalette(Tui* t) {
+  Mutex_Lock(&t->Lock);
+  if (!t->Stop && !t->Quit) {
+    t->ModalKind = TuiModalKind::None;
+    t->ModalResult = TuiModalResult::None;
+    LineEdit_Clear(&t->Edit);
+    LineEdit_InsertText(&t->Edit, SVL("/"));
+    ResetCommandPalette(t);
+    Wake(t);
+  }
+  Mutex_Unlock(&t->Lock);
 }
 
 volatile i32* Tui_Abort(Tui* t) { return &t->AbortFlag; }

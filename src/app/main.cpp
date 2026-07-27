@@ -263,27 +263,46 @@ static StrView TrimAscii(StrView value) {
   return StrView{value.Data ? value.Data + first : nullptr, last - first};
 }
 
-static bool RuntimeSelect(InteractiveRuntime* rt, StrView title, const StrView* options,
-                          u32 optionCount, u32* selected, u32 initialSelection = 0) {
-  if (rt->TuiView)
-    return Tui_Select(rt->TuiView, title, options, optionCount, selected, initialSelection);
-  return Plain_Select(title, options, optionCount, selected);
+enum class RuntimeInputResult : u8 { Confirmed, Back, Cancelled };
+
+static RuntimeInputResult RuntimeSelect(InteractiveRuntime* rt, StrView title,
+                                        const StrView* options, u32 optionCount,
+                                        u32* selected,
+                                        u32 initialSelection = 0) {
+  if (rt->TuiView) {
+    TuiModalResult result =
+        Tui_Select(rt->TuiView, title, options, optionCount, selected,
+                   initialSelection);
+    if (result == TuiModalResult::Confirmed)
+      return RuntimeInputResult::Confirmed;
+    if (result == TuiModalResult::Back) return RuntimeInputResult::Back;
+    return RuntimeInputResult::Cancelled;
+  }
+  return Plain_Select(title, options, optionCount, selected)
+             ? RuntimeInputResult::Confirmed
+             : RuntimeInputResult::Cancelled;
 }
 
-static bool RuntimeReadText(InteractiveRuntime* rt, Arena* arena, StrView title, StrView prompt,
-                            StrView initial, StrView* out) {
+static RuntimeInputResult RuntimeReadText(InteractiveRuntime* rt, Arena* arena,
+                                          StrView title, StrView prompt,
+                                          StrView initial, StrView* out) {
   if (rt->TuiView) {
     StrView value = {};
-    if (!Tui_ReadText(rt->TuiView, title, prompt, initial, &value)) return false;
+    TuiModalResult result =
+        Tui_ReadText(rt->TuiView, title, prompt, initial, &value);
+    if (result == TuiModalResult::Back) return RuntimeInputResult::Back;
+    if (result != TuiModalResult::Confirmed)
+      return RuntimeInputResult::Cancelled;
     *out = StrView_Dup(arena, value);
-    return true;
+    return RuntimeInputResult::Confirmed;
   }
 
   char buffer[1024];
   StrView value = {};
-  if (!Plain_ReadText(prompt, buffer, (u32)sizeof(buffer), &value)) return false;
+  if (!Plain_ReadText(prompt, buffer, (u32)sizeof(buffer), &value))
+    return RuntimeInputResult::Cancelled;
   *out = StrView_Dup(arena, value);
-  return true;
+  return RuntimeInputResult::Confirmed;
 }
 
 static volatile i32* RuntimeBeginOperation(InteractiveRuntime* rt, const AppCommandUx* ux,
@@ -310,7 +329,7 @@ static bool RuntimeEndOperation(InteractiveRuntime* rt) {
   return g_abort != 0;
 }
 
-enum class RuntimeChoiceStatus : u8 { Selected, Cancelled, Failed };
+enum class RuntimeChoiceStatus : u8 { Selected, Back, Cancelled, Failed };
 
 struct RuntimeProviderChoice {
   RuntimeChoiceStatus Status;
@@ -355,11 +374,16 @@ static RuntimeProviderChoice ChooseProvider(InteractiveRuntime* rt, bool oauthOn
   u32 selected = 0;
   StrView title = oauthOnly ? SVL("Choose a provider to log in")
                             : SVL("Choose a model provider");
-  bool confirmed = RuntimeSelect(rt, title, options, count, &selected, initial);
-  const ProviderSpec* spec = confirmed ? specs[selected] : nullptr;
+  RuntimeInputResult result =
+      RuntimeSelect(rt, title, options, count, &selected, initial);
+  const ProviderSpec* spec =
+      result == RuntimeInputResult::Confirmed ? specs[selected] : nullptr;
   ArenaRelease(&scratch);
-  return RuntimeProviderChoice{confirmed ? RuntimeChoiceStatus::Selected
-                                         : RuntimeChoiceStatus::Cancelled,
+  return RuntimeProviderChoice{result == RuntimeInputResult::Confirmed
+                                   ? RuntimeChoiceStatus::Selected
+                               : result == RuntimeInputResult::Back
+                                   ? RuntimeChoiceStatus::Back
+                                   : RuntimeChoiceStatus::Cancelled,
                                spec, StrView{}};
 }
 
@@ -582,23 +606,46 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
   StrBuf_AppendCStr(&title, "Choose ");
   StrBuf_Append(&title, spec->Name);
   StrBuf_AppendCStr(&title, " model");
-  u32 selected = 0;
-  if (!RuntimeSelect(rt, StrBuf_View(&title), options, optionCount, &selected, initial)) {
-    ArenaRelease(&scratch);
-    return RuntimeModelChoice{RuntimeChoiceStatus::Cancelled, Model{}, StrView{}};
-  }
 
   Model chosen = {};
-  if (selected == models.Count) {
+  for (;;) {
+    u32 selected = 0;
+    RuntimeInputResult selection =
+        RuntimeSelect(rt, StrBuf_View(&title), options, optionCount, &selected,
+                      initial);
+    if (selection == RuntimeInputResult::Back) {
+      ArenaRelease(&scratch);
+      return RuntimeModelChoice{RuntimeChoiceStatus::Back, Model{}, StrView{}};
+    }
+    if (selection != RuntimeInputResult::Confirmed) {
+      ArenaRelease(&scratch);
+      return RuntimeModelChoice{RuntimeChoiceStatus::Cancelled, Model{},
+                                StrView{}};
+    }
+    initial = selected;
+
+    if (selected != models.Count) {
+      chosen = Model_Dup(rt->Mem, models.Models[selected]);
+      break;
+    }
+
     StrView initialId =
         rt->Spec && StrView_Eq(rt->Spec->Id, spec->Id) ? rt->CurrentModel.Id
                                                        : spec->DefaultModel;
+    bool returnToModels = false;
     for (;;) {
       StrView entered = {};
-      if (!RuntimeReadText(rt, &scratch, StrBuf_View(&title), SVL("Model ID"), initialId,
-                           &entered)) {
+      RuntimeInputResult entry =
+          RuntimeReadText(rt, &scratch, StrBuf_View(&title), SVL("Model ID"),
+                          initialId, &entered);
+      if (entry == RuntimeInputResult::Back) {
+        returnToModels = true;
+        break;
+      }
+      if (entry != RuntimeInputResult::Confirmed) {
         ArenaRelease(&scratch);
-        return RuntimeModelChoice{RuntimeChoiceStatus::Cancelled, Model{}, StrView{}};
+        return RuntimeModelChoice{RuntimeChoiceStatus::Cancelled, Model{},
+                                  StrView{}};
       }
       entered = TrimAscii(entered);
       if (entered.Length) {
@@ -607,8 +654,8 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
       }
       EmitCommandError(ux, SVL("A model ID is required."));
     }
-  } else {
-    chosen = Model_Dup(rt->Mem, models.Models[selected]);
+    if (returnToModels) continue;
+    break;
   }
 
   chosen.Provider = StrView_Dup(rt->Mem, spec->Id);
@@ -682,66 +729,98 @@ static StrView SelectionMessage(InteractiveRuntime* rt, const char* prefix) {
   return StrBuf_View(&message);
 }
 
+static AppCommandHandlerResult ReturnToCommandPalette(InteractiveRuntime* rt) {
+  if (rt->TuiView) Tui_OpenCommandPalette(rt->TuiView);
+  return AppCommandHandlerResult{AppCommandHandlerStatus::Success, StrView{}};
+}
+
 static AppCommandHandlerResult HandleModelCommand(void* user, const AppCommandUx* ux) {
   InteractiveRuntime* rt = (InteractiveRuntime*)user;
-  RuntimeProviderChoice provider = ChooseProvider(rt, false);
-  if (provider.Status == RuntimeChoiceStatus::Cancelled)
-    return AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled, StrView{}};
-  if (provider.Status == RuntimeChoiceStatus::Failed)
-    return AppCommandHandlerResult{AppCommandHandlerStatus::Failed, provider.Message};
+  for (;;) {
+    RuntimeProviderChoice provider = ChooseProvider(rt, false);
+    if (provider.Status == RuntimeChoiceStatus::Back)
+      return ReturnToCommandPalette(rt);
+    if (provider.Status == RuntimeChoiceStatus::Cancelled)
+      return AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled,
+                                     StrView{}};
+    if (provider.Status == RuntimeChoiceStatus::Failed)
+      return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
+                                     provider.Message};
 
-  RuntimeModelChoice model = ChooseModelForProvider(rt, provider.Spec, ux);
-  if (model.Status == RuntimeChoiceStatus::Cancelled)
-    return AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled, StrView{}};
-  if (model.Status == RuntimeChoiceStatus::Failed)
-    return AppCommandHandlerResult{AppCommandHandlerStatus::Failed, model.Message};
-  if (!ActivateRuntimeSelection(rt, provider.Spec, model.Selected, ux))
-    return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
-                                   SVL("The selected model could not be activated.")};
+    RuntimeModelChoice model = ChooseModelForProvider(rt, provider.Spec, ux);
+    if (model.Status == RuntimeChoiceStatus::Back) continue;
+    if (model.Status == RuntimeChoiceStatus::Cancelled)
+      return AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled,
+                                     StrView{}};
+    if (model.Status == RuntimeChoiceStatus::Failed)
+      return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
+                                     model.Message};
+    if (!ActivateRuntimeSelection(rt, provider.Spec, model.Selected, ux))
+      return AppCommandHandlerResult{
+          AppCommandHandlerStatus::Failed,
+          SVL("The selected model could not be activated.")};
 
-  return AppCommandHandlerResult{AppCommandHandlerStatus::Success,
-                                 SelectionMessage(rt, "Using ")};
+    return AppCommandHandlerResult{AppCommandHandlerStatus::Success,
+                                   SelectionMessage(rt, "Using ")};
+  }
 }
 
 static AppCommandHandlerResult HandleLoginCommand(void* user, const AppCommandUx* ux) {
   InteractiveRuntime* rt = (InteractiveRuntime*)user;
-  RuntimeProviderChoice provider = ChooseProvider(rt, true);
-  if (provider.Status == RuntimeChoiceStatus::Cancelled)
-    return AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled, StrView{}};
-  if (provider.Status == RuntimeChoiceStatus::Failed)
-    return AppCommandHandlerResult{AppCommandHandlerStatus::Failed, provider.Message};
-
-  AppCommandHandlerResult login = RunOAuthLogin(rt, provider.Spec, ux);
-  if (login.Status != AppCommandHandlerStatus::Success) return login;
-
-  RuntimeModelChoice model = ChooseModelForProvider(rt, provider.Spec, ux);
-  if (model.Status != RuntimeChoiceStatus::Selected) {
-    if (model.Status == RuntimeChoiceStatus::Failed && model.Message.Length)
-      EmitCommandError(ux, model.Message);
-    Model fallback = provider.Spec->CreateModel(rt->Mem, provider.Spec->DefaultModel);
-    bool persisted = false;
-    if (!ActivateRuntimeSelection(rt, provider.Spec, fallback, ux, &persisted))
+  const ProviderSpec* authenticated = nullptr;
+  for (;;) {
+    RuntimeProviderChoice provider = ChooseProvider(rt, true);
+    if (provider.Status == RuntimeChoiceStatus::Back)
+      return ReturnToCommandPalette(rt);
+    if (provider.Status == RuntimeChoiceStatus::Cancelled)
+      return AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled,
+                                     StrView{}};
+    if (provider.Status == RuntimeChoiceStatus::Failed)
       return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
-                                     SVL("Login succeeded, but the provider could not be activated.")};
+                                     provider.Message};
 
-    StrBuf notice = StrBuf_Make(rt->Mem, provider.Spec->Name.Length +
-                                                provider.Spec->DefaultModel.Length + 96);
-    StrBuf_AppendCStr(&notice, model.Status == RuntimeChoiceStatus::Cancelled
-                                  ? "Model selection was cancelled; switched to "
-                                  : "Model selection failed; switched to ");
-    StrBuf_Append(&notice, provider.Spec->Name);
-    StrBuf_AppendCStr(&notice, " default model '");
-    StrBuf_Append(&notice, provider.Spec->DefaultModel);
-    StrBuf_AppendCStr(&notice, persisted ? "' and saved the provider selection."
-                                        : "' in memory; settings were not saved.");
-    EmitCommandNotice(ux, StrBuf_View(&notice));
-  } else if (!ActivateRuntimeSelection(rt, provider.Spec, model.Selected, ux)) {
-    return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
-                                   SVL("Login succeeded, but the selected model could not be activated.")};
+    if (authenticated != provider.Spec) {
+      AppCommandHandlerResult login = RunOAuthLogin(rt, provider.Spec, ux);
+      if (login.Status != AppCommandHandlerStatus::Success) return login;
+      authenticated = provider.Spec;
+    }
+
+    RuntimeModelChoice model = ChooseModelForProvider(rt, provider.Spec, ux);
+    if (model.Status == RuntimeChoiceStatus::Back) continue;
+    if (model.Status != RuntimeChoiceStatus::Selected) {
+      if (model.Status == RuntimeChoiceStatus::Failed && model.Message.Length)
+        EmitCommandError(ux, model.Message);
+      Model fallback =
+          provider.Spec->CreateModel(rt->Mem, provider.Spec->DefaultModel);
+      bool persisted = false;
+      if (!ActivateRuntimeSelection(rt, provider.Spec, fallback, ux, &persisted))
+        return AppCommandHandlerResult{
+            AppCommandHandlerStatus::Failed,
+            SVL("Login succeeded, but the provider could not be activated.")};
+
+      StrBuf notice =
+          StrBuf_Make(rt->Mem, provider.Spec->Name.Length +
+                                  provider.Spec->DefaultModel.Length + 96);
+      StrBuf_AppendCStr(&notice,
+                       model.Status == RuntimeChoiceStatus::Cancelled
+                           ? "Model selection was cancelled; switched to "
+                           : "Model selection failed; switched to ");
+      StrBuf_Append(&notice, provider.Spec->Name);
+      StrBuf_AppendCStr(&notice, " default model '");
+      StrBuf_Append(&notice, provider.Spec->DefaultModel);
+      StrBuf_AppendCStr(
+          &notice, persisted ? "' and saved the provider selection."
+                             : "' in memory; settings were not saved.");
+      EmitCommandNotice(ux, StrBuf_View(&notice));
+    } else if (!ActivateRuntimeSelection(rt, provider.Spec, model.Selected, ux)) {
+      return AppCommandHandlerResult{
+          AppCommandHandlerStatus::Failed,
+          SVL("Login succeeded, but the selected model could not be activated.")};
+    }
+
+    return AppCommandHandlerResult{AppCommandHandlerStatus::Success,
+                                   SelectionMessage(rt, "Logged in; using ")};
   }
-
-  return AppCommandHandlerResult{AppCommandHandlerStatus::Success,
-                                 SelectionMessage(rt, "Logged in; using ")};
 }
 
 static bool RuntimeResetSession(InteractiveRuntime* rt, const AppCommandUx* ux) {
@@ -878,6 +957,17 @@ static void RunTuiRepl(InteractiveRuntime* rt, Faux* fauxState) {
   TuiOpts opts;
   opts.ModelName = rt->Faux ? SVL("faux") : rt->CurrentModel.Id;
   opts.Color = (getenv("NO_COLOR") == nullptr);
+  u32 catalogCount = AppCommandSpec_Count();
+  TuiCommandSpec* commands = ArenaPushArray(rt->Mem, TuiCommandSpec, catalogCount);
+  for (u32 i = 0; i < catalogCount; i++) {
+    const AppCommandSpec* command = AppCommandSpec_At(i);
+    if (rt->Faux &&
+        (command->Kind == AppCommandKind::Login || command->Kind == AppCommandKind::Model))
+      continue;
+    commands[opts.CommandCount++] =
+        TuiCommandSpec{command->Name, command->Alias, command->Description};
+  }
+  opts.Commands = commands;
 
   Tui tui;
   if (!Tui_Start(&tui, rt->Mem, opts)) {

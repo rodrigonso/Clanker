@@ -47,7 +47,7 @@ void RunBlockingSelect(void* user) {
   BlockingSelect* select = (BlockingSelect*)user;
   select->Confirmed =
       Tui_Select(select->Controller, SVL("Blocking"), select->Options, select->OptionCount,
-                 &select->Selected);
+                 &select->Selected) == TuiModalResult::Confirmed;
 }
 
 }  // namespace
@@ -279,6 +279,61 @@ void TestTui() {
 
     Tui_Stop(&t2);
     ArenaRelease(&a2);
+  }
+
+  // Slash input opens a prefix-filtered command palette. Arrow keys select a
+  // command, Enter submits its canonical name, and Escape dismisses the flyout
+  // without modifying the composer.
+  {
+    Arena ap = ArenaCreate();
+    TuiCommandSpec commands[] = {
+        {SVL("login"), {}, SVL("Sign in")},
+        {SVL("model"), {}, SVL("Change model")},
+        {SVL("clear"), {}, SVL("Clear conversation")},
+        {SVL("exit"), SVL("quit"), SVL("Exit")},
+    };
+    TuiOpts op;
+    op.ModelName = SVL("m");
+    op.Color = false;
+    op.Commands = commands;
+    op.CommandCount = 4;
+    Tui tp;
+    Tui_InitModel(&tp, &ap, op);
+
+    Feed(&tp, "/");
+    CHECK(StrView_Eq(LineEdit_Text(&tp.Edit), SVL("/")));
+    CHECK(tp.CommandPaletteSelected == 0);
+    Feed(&tp, "\x1b[B\x1b[B\r");
+    TuiSubmission paletteSubmission = {};
+    CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
+    CHECK(paletteSubmission.Kind == TuiSubmissionKind::Command);
+    CHECK(StrView_Eq(paletteSubmission.Text, SVL("/clear")));
+
+    Feed(&tp, "/q\r");
+    CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
+    CHECK(StrView_Eq(paletteSubmission.Text, SVL("/exit")));
+
+    Feed(&tp, "/unknown\r");
+    CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
+    CHECK(StrView_Eq(paletteSubmission.Text, SVL("/unknown")));
+
+    Feed(&tp, "/");
+    Feed(&tp, "\x1b");
+    CHECK(tp.CommandPaletteDismissed);
+    CHECK(StrView_Eq(LineEdit_Text(&tp.Edit), SVL("/")));
+    Feed(&tp, "m\r");
+    CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
+    CHECK(StrView_Eq(paletteSubmission.Text, SVL("/model")));
+
+    CHECK(Tui_ClearSession(&tp));
+    CHECK(tp.CommandCount == 4);
+    CHECK(!tp.CommandPaletteDismissed);
+    Feed(&tp, "/c\r");
+    CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
+    CHECK(StrView_Eq(paletteSubmission.Text, SVL("/clear")));
+
+    Tui_Stop(&tp);
+    ArenaRelease(&ap);
   }
 
   // End-to-end: a real agent turn (faux provider) must surface the assistant's
@@ -525,11 +580,28 @@ void TestTui() {
     Feed(&tm, "\x1b");
     CHECK(Tui_GetModalResult(&tm, nullptr, nullptr) == TuiModalResult::Cancelled);
 
+    CHECK(Tui_BeginSelection(&tm, SVL("Back"), options, 3, 1));
+    Feed(&tm, "\x7f");
+    CHECK(Tui_GetModalResult(&tm, nullptr, nullptr) == TuiModalResult::Back);
+
     CHECK(Tui_BeginTextEntry(&tm, SVL("Model"), SVL("Enter model ID")));
     Feed(&tm, "claude-manual\r");
     StrView entered = {};
     CHECK(Tui_GetModalResult(&tm, nullptr, &entered) == TuiModalResult::Confirmed);
     CHECK(StrView_Eq(entered, SVL("claude-manual")));
+
+    CHECK(Tui_BeginTextEntry(&tm, SVL("Model"), SVL("Enter model ID"),
+                             SVL("x")));
+    Feed(&tm, "\x7f");
+    CHECK(Tui_GetModalResult(&tm, nullptr, nullptr) == TuiModalResult::Pending);
+    CHECK(LineEdit_Empty(&tm.ModalEdit));
+    Feed(&tm, "\x7f");
+    CHECK(Tui_GetModalResult(&tm, nullptr, nullptr) == TuiModalResult::Back);
+
+    Tui_OpenCommandPalette(&tm);
+    CHECK(StrView_Eq(LineEdit_Text(&tm.Edit), SVL("/")));
+    CHECK(tm.ModalKind == TuiModalKind::None);
+    CHECK(tm.ModalResult == TuiModalResult::None);
 
     BlockingSelect blocking = {};
     blocking.Controller = &tm;
