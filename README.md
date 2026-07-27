@@ -102,18 +102,21 @@ blocking the agent or tool execution.
 
 Keys: **Enter** sends · **Ctrl+J** / Alt+Enter inserts a newline · arrows move
 (↑/↓ across lines, then through history at the edges) · **Ctrl+←/→** word jump ·
-Home/End · **Ctrl+W/U/K** delete word / to start / to end · **mouse wheel**
-scrolls the transcript · type during a turn to **steer** · **Ctrl+C** interrupts a
-turn (or quits when idle) · hover or **left click** the first row of a transcript
-turn to highlight or collapse/expand it · **Ctrl+O** expands all tools when any
-is collapsed, otherwise collapses all · **Ctrl+D** quits · **Ctrl+L** repaints.
-Honors `NO_COLOR`. Pasted multi-line text is inserted literally (bracketed paste).
+Home/End · **Shift** + movement selects composer text ·
+**Ctrl+W/U/K** delete word / to start / to end · **mouse wheel** scrolls the
+transcript · **left-drag** selects transcript or composer text (and auto-scrolls
+the transcript) · type during a turn to **steer** · **Ctrl+C** copies selections
+via OSC 52; otherwise it interrupts, clears the composer, or quits · hover or
+**left click** a turn's first row to highlight or collapse/expand it · **Ctrl+O**
+expands or collapses all tools · **Ctrl+D** quits · **Ctrl+L** repaints. Honors
+`NO_COLOR`. Bracketed paste inserts literal multi-line text and replaces a
+composer selection.
 
 When stdin/stdout isn't a TTY (pipes, redirected) or with `-p`, it falls back to
 a plain line renderer. Plain and piped output write provider deltas immediately
 without display pacing.
 
-Interactive: Ctrl+C interrupts the current turn, `/exit` quits.
+In interactive mode, `/exit` also quits.
 Set `CLANK_PRINT_MEM=1` to print peak RSS at exit.
 
 ## Authentication

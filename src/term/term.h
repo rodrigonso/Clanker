@@ -1,5 +1,6 @@
 #pragma once
 #include "base/basics.h"
+#include "base/str.h"
 
 // Terminal control: raw mode + alternate screen, size query, and raw output.
 // Internal fields are platform-specific but the header pulls in no OS headers.
@@ -34,6 +35,12 @@ void Term_Size(const Term* t, u16* cols, u16* rows);
 // Raw byte output to stdout (no newline translation), flushed immediately.
 void Term_Write(const char* data, u32 len);
 void Term_WriteStr(const char* s);
+
+// Append an OSC 52 clipboard-set sequence using padded RFC 4648 base64.
+// Binary-safe. Reuse `out` across copies to avoid per-copy allocations.
+// Terminal integrations must call this on the render/output thread so the
+// sequence remains ordered with screen output.
+void Term_AppendOSC52(StrBuf* out, StrView data);
 
 // Blocking read of up to `cap` raw input bytes (VT/ANSI stream). Returns the
 // number of bytes read, or 0 on EOF/error.

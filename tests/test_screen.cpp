@@ -2,6 +2,7 @@
 #include "base/str.h"
 #include "check.h"
 #include "term/screen.h"
+#include "term/term.h"
 
 namespace {
 
@@ -15,6 +16,17 @@ void CapWrite(void* u, const char* d, u32 n) { StrBuf_Append(&((Cap*)u)->B, StrV
 
 void TestScreen() {
   Arena a = ArenaCreate();
+
+  StrBuf osc52 = StrBuf_Make(&a, 8);
+  Term_AppendOSC52(&osc52, StrView{nullptr, 0});
+  CHECK(StrView_Eq(StrBuf_View(&osc52), SVL("\x1b]52;c;\x07")));
+
+  const char binary[] = {'\0', (char)0xff, '\x10', 'f'};
+  StrBuf_Clear(&osc52);
+  StrBuf_AppendCStr(&osc52, "before:");
+  Term_AppendOSC52(&osc52, StrView{binary, sizeof(binary)});
+  CHECK(StrView_Eq(StrBuf_View(&osc52), SVL("before:\x1b]52;c;AP8QZg==\x07")));
+
   Cap cap;
   cap.B = StrBuf_Make(&a, 256);
 

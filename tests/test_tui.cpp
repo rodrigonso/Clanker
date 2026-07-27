@@ -399,13 +399,80 @@ void TestTui() {
     Feed(&t5, "\x1b[<35;2;2M");
     CHECK(t5.HoveredEntryId == 0);
 
+    t5.Follow = true;
+    Feed(&t5, "\x1b[<0;2;2M\x1b[<0;2;2m");
+    CHECK(t5.Follow);
     Feed(&t5, "\x1b[<0;2;1M\x1b[<32;2;2M\x1b[<32;2;1M\x1b[<0;2;1m");
     CHECK(!LineModel_IsEntryCollapsed(&t5.Model, noticeId));
+    CHECK(!t5.Follow);
+    t5.Follow = true;
     Feed(&t5, "\x1b[<0;2;1M\x1b[<0;2;1m");
     CHECK(LineModel_IsEntryCollapsed(&t5.Model, noticeId));
+    CHECK(t5.Follow);
 
     Tui_Stop(&t5);
     ArenaRelease(&a5);
+  }
+
+  // Streaming updates preserve transcript selection coordinates and stationary
+  // click activation while the assistant response is still growing.
+  {
+    Arena ac = ArenaCreate();
+    TuiOpts oc;
+    oc.ModelName = SVL("m");
+    oc.Color = false;
+    Tui tc;
+    Tui_InitModel(&tc, &ac, oc);
+    LineModel_AddNotice(&tc.Model, EntryKind::Info, SVL("click target"));
+    u64 targetId = tc.Model.Entries.Data[0].Id;
+    LineModel_BeginAssistant(&tc.Model);
+    LineModel_AppendAssistant(&tc.Model, SVL("stream"));
+    Tui_TestCompose(&tc, 20, 12);
+
+    Feed(&tc, "\x1b[<0;2;1M");
+    u64 pressedRevision = tc.TranscriptSelectionRevision;
+    LineModel_AppendAssistant(&tc.Model, SVL(" update"));
+    CHECK(LineModel_DisplayRevision(&tc.Model) == pressedRevision);
+    Tui_TestCompose(&tc, 20, 12);
+    CHECK(tc.DragDomain == TuiDragDomain::Transcript);
+    CHECK(tc.PressedEntryId == targetId);
+    Feed(&tc, "\x1b[<0;2;1m");
+    CHECK(LineModel_IsEntryCollapsed(&tc.Model, targetId));
+    CHECK(tc.Follow);
+
+    Feed(&tc, "\x1b[<0;4;3M\x1b[<32;9;3M\x1b[<0;9;3m");
+    CHECK(tc.TranscriptSelectionRevision != 0);
+    LineModel_AppendAssistant(&tc.Model, SVL(" more"));
+    Tui_TestCompose(&tc, 20, 12);
+    CHECK(tc.TranscriptSelectionRevision != 0);
+    Feed(&tc, "\x03");
+    CHECK(StrView_Eq(StrBuf_View(&tc.ClipboardRaw), SVL("stream")));
+
+    Tui_Stop(&tc);
+    ArenaRelease(&ac);
+  }
+
+  // A stable same-row stream append preserves text selections, but invalidates
+  // a selection if newly rendered text replaces cells selected as whitespace.
+  {
+    Arena aw = ArenaCreate();
+    TuiOpts ow;
+    ow.ModelName = SVL("m");
+    ow.Color = false;
+    Tui tw;
+    Tui_InitModel(&tw, &aw, ow);
+    LineModel_BeginAssistant(&tw.Model);
+    LineModel_AppendAssistant(&tw.Model, SVL("stream"));
+    Tui_TestCompose(&tw, 20, 12);
+    Feed(&tw, "\x1b[<0;11;1M\x1b[<32;13;1M\x1b[<0;13;1m");
+    u64 whitespaceRevision = tw.TranscriptSelectionRevision;
+    CHECK(whitespaceRevision != 0);
+    LineModel_AppendAssistant(&tw.Model, SVL(" more"));
+    CHECK(LineModel_DisplayRevision(&tw.Model) == whitespaceRevision);
+    Tui_TestCompose(&tw, 20, 12);
+    CHECK(tw.TranscriptSelectionRevision == 0);
+    Tui_Stop(&tw);
+    ArenaRelease(&aw);
   }
 
   // Tool completion can insert an expanded preview above a detached viewport;
@@ -444,6 +511,407 @@ void TestTui() {
 
     Tui_Stop(&t6);
     ArenaRelease(&a6);
+  }
+
+  // Composer mouse placement/dragging uses the last rendered wrapped layout,
+  // and keyboard motion extends or collapses the editor selection.
+  {
+    Arena as = ArenaCreate();
+    TuiOpts os;
+    os.ModelName = SVL("m");
+    os.Color = true;
+    Tui ts;
+    Tui_InitModel(&ts, &as, os);
+
+    Feed(&ts, "abcdef");
+    Tui_TestCompose(&ts, 20, 12);
+    Feed(&ts, "\x1b[<0;4;10M\x1b[<32;7;10M\x1b[<0;7;10m");
+    CHECK(LineEdit_HasSelection(&ts.Edit));
+    CHECK(StrView_Eq(LineEdit_SelectedText(&ts.Edit), SVL("bcd")));
+    Tui_TestCompose(&ts, 20, 12);
+    CHECK(Screen_BackAt(&ts.Scr, 3, ts.LastInputTop).St.Bg == 238);
+    CHECK(Screen_BackAt(&ts.Scr, 5, ts.LastInputTop).St.Bg == 238);
+    CHECK(Screen_BackAt(&ts.Scr, 2, ts.LastInputTop).St.Bg != 238);
+
+    Feed(&ts, "\x1b[<0;5;10M\x1b[<0;5;10m");
+    CHECK(LineEdit_Cursor(&ts.Edit) == 2);
+    CHECK(!LineEdit_HasSelection(&ts.Edit));
+
+    LineEdit_Clear(&ts.Edit);
+    Feed(&ts, "one two");
+    Feed(&ts, "\x1b[1;6D");  // Shift+Ctrl+Left
+    CHECK(StrView_Eq(LineEdit_SelectedText(&ts.Edit), SVL("two")));
+    Feed(&ts, "\x1b[D");  // unshifted Left collapses to the selection start
+    CHECK(!LineEdit_HasSelection(&ts.Edit));
+    CHECK(LineEdit_Cursor(&ts.Edit) == 4);
+    Feed(&ts, "\x1b[1;2C");  // Shift+Right
+    CHECK(StrView_Eq(LineEdit_SelectedText(&ts.Edit), SVL("t")));
+
+    LineEdit_Clear(&ts.Edit);
+    Feed(&ts, "ab\ncde");
+    Feed(&ts, "\x1b[1;2A");  // Shift+Up
+    CHECK(StrView_Eq(LineEdit_SelectedText(&ts.Edit), SVL("\ncde")));
+    Tui_TestCompose(&ts, 20, 12);
+    CHECK(Screen_BackAt(&ts.Scr, 4, ts.LastInputTop).St.Bg == 238);
+    Feed(&ts, "\x1b[1;2B");  // Shift+Down
+    CHECK(!LineEdit_HasSelection(&ts.Edit));
+    Feed(&ts, "\x1b[1;2H");  // Shift+Home
+    CHECK(StrView_Eq(LineEdit_SelectedText(&ts.Edit), SVL("cde")));
+    Feed(&ts, "\x1b[1;2D");  // Shift+Left
+    CHECK(StrView_Eq(LineEdit_SelectedText(&ts.Edit), SVL("\ncde")));
+    Feed(&ts, "\x1b[1;2C");
+    CHECK(StrView_Eq(LineEdit_SelectedText(&ts.Edit), SVL("cde")));
+    Feed(&ts, "\x1b[1;2F");  // Shift+End
+    CHECK(!LineEdit_HasSelection(&ts.Edit));
+
+    LineEdit_Clear(&ts.Edit);
+    Feed(&ts, "hello");
+    Feed(&ts, "\x1b[1;6D");
+    Feed(&ts, "z");
+    CHECK(StrView_Eq(LineEdit_Text(&ts.Edit), SVL("z")));
+    Feed(&ts, "\x1b[1;2D");
+    Feed(&ts, "\x1b[200~paste\ntext\x1b[201~");
+    CHECK(StrView_Eq(LineEdit_Text(&ts.Edit), SVL("paste\ntext")));
+
+    // Copying a composer selection wins over the interrupt path and preserves
+    // both the selection and editor state.
+    Feed(&ts, "\x1b[1;6D");
+    ts.AgentRunning = true;
+    ts.AbortFlag = 0;
+    Feed(&ts, "\x03");
+    CHECK(ts.AbortFlag == 0);
+    CHECK(StrView_Eq(StrBuf_View(&ts.ClipboardRaw), SVL("text")));
+    CHECK(StrView_Eq(LineEdit_SelectedText(&ts.Edit), SVL("text")));
+    CHECK(StrView_Eq(LineEdit_Text(&ts.Edit), SVL("paste\ntext")));
+
+    // Moving the cursor on mouse-down must not change the viewport origin used
+    // to map later drag rows in a scrolled composer.
+    LineEdit_Clear(&ts.Edit);
+    Feed(&ts, "0\n1\n2\n3\n4\n5\n6\n7\n8\n9");
+    Tui_TestCompose(&ts, 20, 12);
+    Feed(&ts, "\x1b[<0;3;5M");
+    Tui_TestCompose(&ts, 20, 12);
+    Feed(&ts, "\x1b[<32;4;10M\x1b[<0;4;10m");
+    CHECK(StrView_Eq(LineEdit_SelectedText(&ts.Edit), SVL("4\n5\n6\n7\n8\n9")));
+
+    Tui_Stop(&ts);
+    ArenaRelease(&as);
+  }
+
+  // Composer highlighting uses the same minimum-one-cell scalar widths as
+  // layout and rendering, including combining marks.
+  {
+    Arena as = ArenaCreate();
+    TuiOpts os;
+    os.ModelName = SVL("m");
+    os.Color = false;
+    Tui ts;
+    Tui_InitModel(&ts, &as, os);
+    Feed(&ts, "a\xcc\x81" "b");
+    Feed(&ts, "\x1b[1;2D");
+    Tui_TestCompose(&ts, 20, 12);
+    CHECK((Screen_BackAt(&ts.Scr, 4, ts.LastInputTop).St.Attr & ATTR_UNDERLINE) != 0);
+    CHECK((Screen_BackAt(&ts.Scr, 3, ts.LastInputTop).St.Attr & ATTR_UNDERLINE) == 0);
+
+    LineEdit_Clear(&ts.Edit);
+    LineModel_BeginAssistant(&ts.Model);
+    LineModel_AppendAssistant(&ts.Model, SVL("[link](https://example.com)"));
+    LineModel_EndAssistant(&ts.Model);
+    Tui_TestCompose(&ts, 20, 12);
+    Feed(&ts, "\x1b[<0;4;1M\x1b[<32;7;1M\x1b[<0;7;1m");
+    Tui_TestCompose(&ts, 20, 12);
+    Style selectedLink = Screen_BackAt(&ts.Scr, 3, 0).St;
+    CHECK((selectedLink.Attr & ATTR_UNDERLINE) != 0);
+    CHECK((selectedLink.Attr & ATTR_REVERSE) != 0);
+    Tui_Stop(&ts);
+    ArenaRelease(&as);
+  }
+
+  // Transcript selections serialize the visual rows (including indentation),
+  // work in either direction, and highlight every selected row range.
+  {
+    Arena as = ArenaCreate();
+    TuiOpts os;
+    os.ModelName = SVL("m");
+    os.Color = true;
+    Tui ts;
+    Tui_InitModel(&ts, &as, os);
+    LineModel_AddNotice(&ts.Model, EntryKind::Info, SVL("alpha\nbravo\ncharlie"));
+    Tui_TestCompose(&ts, 20, 12);
+
+    Feed(&ts, "\x1b[<0;4;1M\x1b[<32;6;3M\x1b[<0;6;3m");
+    CHECK(ts.TranscriptSelectionRevision != 0);
+    CHECK(!ts.Follow);
+    Tui_TestCompose(&ts, 20, 12);
+    CHECK(Screen_BackAt(&ts.Scr, 3, 0).St.Bg == 238);
+    CHECK(Screen_BackAt(&ts.Scr, 0, 1).St.Bg == 238);
+    CHECK(Screen_BackAt(&ts.Scr, 4, 2).St.Bg == 238);
+    CHECK(Screen_BackAt(&ts.Scr, 5, 2).St.Bg == 238);
+    CHECK(Screen_BackAt(&ts.Scr, 6, 2).St.Bg != 238);
+
+    ts.AgentRunning = true;
+    ts.AbortFlag = 0;
+    Feed(&ts, "\x03");
+    CHECK(ts.AbortFlag == 0);
+    CHECK(StrView_Eq(StrBuf_View(&ts.ClipboardRaw), SVL("alpha\n   bravo\n   cha")));
+    CHECK(ts.TranscriptSelectionRevision != 0);
+
+    Feed(&ts, "\x1b[<0;6;3M\x1b[<32;4;1M\x1b[<0;4;1m");
+    Feed(&ts, "\x03");
+    CHECK(StrView_Eq(StrBuf_View(&ts.ClipboardRaw), SVL("alpha\n   bravo\n   cha")));
+
+    // Moving away and back still cancels activation, but leaves no non-empty
+    // range, so Ctrl+C falls back to interrupt.
+    Feed(&ts, "\x1b[<0;4;1M\x1b[<32;5;1M\x1b[<32;4;1M\x1b[<0;4;1m");
+    CHECK(ts.TranscriptSelectionRevision == 0);
+    ts.AbortFlag = 0;
+    Feed(&ts, "\x03");
+    CHECK(ts.AbortFlag == 1);
+
+    // Typing moves focus to the composer and clears transcript selection.
+    ts.AbortFlag = 0;
+    Feed(&ts, "x");
+    CHECK(ts.TranscriptSelectionRevision == 0);
+    CHECK(StrView_Eq(LineEdit_Text(&ts.Edit), SVL("x")));
+    Feed(&ts, "\x1b[1;2D");
+    CHECK(LineEdit_HasSelection(&ts.Edit));
+    Feed(&ts, "\x1b[<0;4;1M\x1b[<32;5;2M\x1b[<0;5;2m");
+    CHECK(ts.TranscriptSelectionRevision != 0);
+    CHECK(!LineEdit_HasSelection(&ts.Edit));
+    Tui_TestCompose(&ts, 20, 12);
+    Feed(&ts, "\x1b[<0;3;10M\x1b[<32;4;10M\x1b[<0;4;10m");
+    CHECK(LineEdit_HasSelection(&ts.Edit));
+    CHECK(ts.TranscriptSelectionRevision == 0);
+
+    Tui_Stop(&ts);
+    ArenaRelease(&as);
+  }
+
+  // A transcript drag can begin in blank pane space below the rendered rows.
+  {
+    Arena as = ArenaCreate();
+    TuiOpts os;
+    os.ModelName = SVL("m");
+    os.Color = false;
+    Tui ts;
+    Tui_InitModel(&ts, &as, os);
+    LineModel_AddNotice(&ts.Model, EntryKind::Info, SVL("alpha\nbravo"));
+    Tui_TestCompose(&ts, 20, 12);
+    CHECK(ts.LastPaneH > LineModel_Count(&ts.Model));
+
+    Feed(&ts, "\x1b[<0;20;5M\x1b[<32;4;1M\x1b[<0;4;1m\x03");
+    CHECK(StrView_Eq(StrBuf_View(&ts.ClipboardRaw), SVL("alpha\n   bravo")));
+
+    Tui_Stop(&ts);
+    ArenaRelease(&as);
+  }
+
+  // The pointed transcript cell is included at both drag endpoints, including
+  // the terminal's rightmost cell in forward and reverse selections.
+  {
+    Arena as = ArenaCreate();
+    TuiOpts os;
+    os.ModelName = SVL("m");
+    os.Color = false;
+    Tui ts;
+    Tui_InitModel(&ts, &as, os);
+    LineModel_AddNotice(&ts.Model, EntryKind::Info, SVL("abcdefghijklmnopq"));
+    Tui_TestCompose(&ts, 20, 12);
+    Feed(&ts, "\x1b[<0;4;1M\x1b[<32;20;1M\x1b[<0;20;1m\x03");
+    CHECK(StrView_Eq(StrBuf_View(&ts.ClipboardRaw), SVL("abcdefghijklmnopq")));
+    Feed(&ts, "\x1b[<0;20;1M\x1b[<32;4;1M\x1b[<0;4;1m\x03");
+    CHECK(StrView_Eq(StrBuf_View(&ts.ClipboardRaw), SVL("abcdefghijklmnopq")));
+    Tui_Stop(&ts);
+    ArenaRelease(&as);
+  }
+
+  // Cell ranges snap outwards around width-two glyphs.
+  {
+    Arena as = ArenaCreate();
+    TuiOpts os;
+    os.ModelName = SVL("m");
+    os.Color = false;
+    Tui ts;
+    Tui_InitModel(&ts, &as, os);
+    LineModel_AddNotice(&ts.Model, EntryKind::Info, SVL("wide \xe5\xa5\xbdx"));
+    Tui_TestCompose(&ts, 20, 12);
+    Feed(&ts, "\x1b[<0;10;1M\x1b[<32;9;1M\x1b[<0;9;1m\x03");
+    CHECK(StrView_Eq(StrBuf_View(&ts.ClipboardRaw), SVL("\xe5\xa5\xbd")));
+    Tui_Stop(&ts);
+    ArenaRelease(&as);
+  }
+
+  // Full visual-row copy includes right metadata and excludes sticky/status
+  // chrome because only LineModel display rows are serialized.
+  {
+    Arena as = ArenaCreate();
+    TuiOpts os;
+    os.ModelName = SVL("model-chrome");
+    os.Color = false;
+    Tui ts;
+    Tui_InitModel(&ts, &as, os);
+    LineModel_AddUser(&ts.Model, SVL("copy me\nnext"), 1000);
+    Tui_TestCompose(&ts, 20, 12);
+    Feed(&ts, "\x1b[<0;1;1M\x1b[<32;2;2M\x1b[<0;2;2m\x03");
+    StrView copied = StrBuf_View(&ts.ClipboardRaw);
+    CHECK(StrView_Contains(copied, "copy me"));
+    char timestamp[6];
+    memcpy(timestamp, ts.Model.Entries.Data[0].Text.Timestamp.Data, 5);
+    timestamp[5] = '\0';
+    CHECK(StrView_Contains(copied, timestamp));
+    CHECK(!StrView_Contains(copied, "ready"));
+    CHECK(!StrView_Contains(copied, "model-chrome"));
+    Tui_Stop(&ts);
+    ArenaRelease(&as);
+  }
+
+  // Hidden collapsed content is copied from the same visual-layout iterator as
+  // rendering, including the ellipsis run.
+  {
+    Arena as = ArenaCreate();
+    TuiOpts os;
+    os.ModelName = SVL("m");
+    os.Color = false;
+    Tui ts;
+    Tui_InitModel(&ts, &as, os);
+    LineModel_AddTool(&ts.Model, SVL("copy-tool"), SVL("bash"),
+                      SVL("{\"command\":\"echo hi\"}"));
+    CHECK(LineModel_FinishTool(&ts.Model, SVL("copy-tool"), SVL("result"),
+                               SVL("hidden preview"), false));
+    LineModel_AddNotice(&ts.Model, EntryKind::Info, SVL("after"));
+    Tui_TestCompose(&ts, 20, 12);
+    Feed(&ts, "\x1b[<0;1;1M\x1b[<32;2;2M\x1b[<0;2;2m\x03");
+    CHECK(StrView_Contains(StrBuf_View(&ts.ClipboardRaw), "\xe2\x80\xa6"));
+    Tui_Stop(&ts);
+    ArenaRelease(&as);
+  }
+
+  // Edge dragging auto-scrolls at a controlled cadence and extends the
+  // absolute transcript focus across pages while remaining detached.
+  {
+    Arena as = ArenaCreate();
+    TuiOpts os;
+    os.ModelName = SVL("m");
+    os.Color = false;
+    Tui ts;
+    Tui_InitModel(&ts, &as, os);
+    for (u32 i = 0; i < 30; i++)
+      LineModel_AddNotice(&ts.Model, EntryKind::Info, SVL("scroll row"));
+    Tui_TestCompose(&ts, 20, 12);
+    ts.Follow = false;
+    ts.Top = 10;
+    Tui_TestCompose(&ts, 20, 12);
+
+    Feed(&ts, "\x1b[<0;4;4M\x1b[<32;5;7M");
+    CHECK(ts.TranscriptSelectionRevision != 0);
+    u32 top = ts.Top;
+    u32 focus = ts.TranscriptFocusRow;
+    Tui_TestCompose(&ts, 20, 12, 1000);
+    CHECK(ts.Top == top + 1);
+    Tui_TestCompose(&ts, 20, 12, 1020);
+    CHECK(ts.Top == top + 1);
+    Tui_TestCompose(&ts, 20, 12, 1050);
+    CHECK(ts.Top == top + 2);
+    CHECK(ts.TranscriptFocusRow > focus);
+    CHECK(!ts.Follow);
+    Feed(&ts, "\x1b[<32;5;1M");
+    Tui_TestCompose(&ts, 20, 12, 1060);
+    CHECK(ts.Top == top + 1);
+    Feed(&ts, "\x1b[<0;5;1m");
+
+    Tui_Stop(&ts);
+    ArenaRelease(&as);
+  }
+
+  // Display structure changes and terminal resizes invalidate absolute-row
+  // transcript selections before they can be rendered or copied.
+  {
+    Arena as = ArenaCreate();
+    TuiOpts os;
+    os.ModelName = SVL("m");
+    os.Color = false;
+    Tui ts;
+    Tui_InitModel(&ts, &as, os);
+    LineModel_AddNotice(&ts.Model, EntryKind::Info, SVL("one\ntwo"));
+    Tui_TestCompose(&ts, 20, 12);
+    Feed(&ts, "\x1b[<0;4;1M\x1b[<32;5;2M\x1b[<0;5;2m");
+    CHECK(ts.TranscriptSelectionRevision != 0);
+    LineModel_AddNotice(&ts.Model, EntryKind::Info, SVL("changed"));
+    Tui_TestCompose(&ts, 20, 12);
+    CHECK(ts.TranscriptSelectionRevision == 0);
+
+    Feed(&ts, "\x1b[<0;4;1M\x1b[<32;5;2M\x1b[<0;5;2m");
+    CHECK(ts.TranscriptSelectionRevision != 0);
+    Tui_TestCompose(&ts, 20, 13);
+    CHECK(ts.TranscriptSelectionRevision == 0);
+
+    Tui_Stop(&ts);
+    ArenaRelease(&as);
+  }
+
+  // With no selection, Ctrl+C keeps the exact interrupt/clear/quit fallback.
+  {
+    Arena as = ArenaCreate();
+    TuiOpts os;
+    os.ModelName = SVL("m");
+    os.Color = false;
+    Tui ts;
+    Tui_InitModel(&ts, &as, os);
+    Feed(&ts, "keep");
+    ts.AgentRunning = true;
+    Feed(&ts, "\x03");
+    CHECK(ts.AbortFlag == 1);
+    CHECK(StrView_Eq(LineEdit_Text(&ts.Edit), SVL("keep")));
+    CHECK(!ts.Quit);
+
+    ts.AgentRunning = false;
+    ts.AbortFlag = 0;
+    Feed(&ts, "\x03");
+    CHECK(LineEdit_Empty(&ts.Edit));
+    CHECK(!ts.Quit);
+    Feed(&ts, "\x03");
+    CHECK(ts.Quit);
+    CHECK(ts.Stop);
+
+    Tui_Stop(&ts);
+    ArenaRelease(&as);
+  }
+
+  // Clipboard output queued immediately before shutdown is emitted once by the
+  // render shutdown path before terminal restoration.
+  {
+    Arena as = ArenaCreate();
+    TuiOpts os;
+    os.ModelName = SVL("m");
+    os.Color = false;
+    Tui ts;
+    Tui_InitModel(&ts, &as, os);
+    Feed(&ts, "copy");
+    Feed(&ts, "\x1b[1;6D");
+    Feed(&ts, "\x03\x04");
+    CHECK(ts.Stop);
+    CHECK(StrView_Eq(StrBuf_View(&ts.ClipboardRaw), SVL("copy")));
+
+    struct ClipboardCapture {
+      StrBuf Bytes;
+      u32 Writes;
+    };
+    ClipboardCapture capture = {};
+    capture.Bytes = StrBuf_Make(&as, 64);
+    auto captureWrite = [](void* user, const char* data, u32 n) {
+      ClipboardCapture* capture = (ClipboardCapture*)user;
+      StrBuf_Append(&capture->Bytes, StrView{data, n});
+      capture->Writes++;
+    };
+    CHECK(Tui_TestDrainShutdown(&ts, captureWrite, &capture));
+    CHECK(capture.Writes == 1);
+    CHECK(StrView_Eq(StrBuf_View(&capture.Bytes), SVL("\x1b]52;c;Y29weQ==\x07")));
+    CHECK(ts.ClipboardRaw.Length == 0);
+    CHECK(Tui_TestDrainShutdown(&ts, captureWrite, &capture));
+    CHECK(capture.Writes == 1);
+
+    Tui_Stop(&ts);
+    ArenaRelease(&as);
   }
 
   Tui_Stop(&t);

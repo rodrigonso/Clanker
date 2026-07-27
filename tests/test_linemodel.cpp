@@ -21,6 +21,13 @@ bool RowStartsWith(Arena* a, const SpanLine* row, const char* prefix) {
          (wanted.Length == 0 || memcmp(text.Data, wanted.Data, wanted.Length) == 0);
 }
 
+void CheckText(StrView actual, StrView expected) { CHECK(StrView_Eq(actual, expected)); }
+
+StrView ExtractRow(Arena* a, const SpanLine* row, u16 columns, u16 anchor, u16 focus) {
+  DisplayRowLayout layout = LineModel_LayoutDisplayRow(row, columns);
+  return LineModel_ExtractDisplayRow(a, &layout, anchor, focus);
+}
+
 u16 RowWidth(const SpanLine* row) {
   u16 width = 0;
   for (u32 i = 0; i < row->Spans.Count; i++)
@@ -93,9 +100,188 @@ void TestLineModel() {
       CHECK(RowWidth(LineModel_At(&model, i)) <= 10);
     CHECK(AnyRowHas(&a, &model, "world"));
     const SpanLine* assistantContinuation = FindRow(&a, &model, "world");
+    const SpanLine* assistantFirst = FindRow(&a, &model, "Hello");
+    CHECK(assistantFirst != nullptr);
     CHECK(assistantContinuation != nullptr);
     CHECK(RowStartsWith(&a, assistantContinuation, "   "));
+    CheckText(ExtractRow(&a, assistantFirst, 10, 0, 8), SVL("\xe2\x96\xa0  Hello"));
+    CheckText(ExtractRow(&a, assistantContinuation, 10, 0, 8), SVL("   world"));
     LineModel_Release(&model);
+  }
+
+  {
+    LineModel visual;
+    LineModel_Init(&visual, &a, 20, 5000);
+    LineModel_AddUser(&visual, SVL("hi"), 0);
+    const SpanLine* row = LineModel_At(&visual, 0);
+    DisplayRowLayout layout = LineModel_LayoutDisplayRow(row, 20);
+    CHECK(layout.RightColumn == 15);
+    CHECK(layout.ContentEnd == 20);
+
+    StrBuf expected = StrBuf_Make(&a, 32);
+    StrBuf_AppendCStr(&expected, "\xe2\x96\xa0  hi          ");
+    StrBuf_Append(&expected, row->Right.Text);
+    CheckText(LineModel_ExtractDisplayRow(&a, &layout, 0, layout.ContentEnd),
+              StrBuf_View(&expected));
+
+    StrBuf partial = StrBuf_Make(&a, 24);
+    StrBuf_AppendCStr(&partial, "hi          ");
+    StrBuf_Append(&partial, StrView{row->Right.Text.Data, 2});
+    CheckText(LineModel_ExtractDisplayRow(&a, &layout, 3, 17), StrBuf_View(&partial));
+    CheckText(LineModel_ExtractDisplayRow(&a, &layout, 17, 3), StrBuf_View(&partial));
+    LineModel_Release(&visual);
+  }
+
+  {
+    LineModel hidden;
+    LineModel_Init(&hidden, &a, 20, 5000);
+    LineModel_AddUser(&hidden, SVL("first line\nsecond line"), 0);
+    CHECK(LineModel_ToggleEntry(&hidden, hidden.Entries.Data[0].Id));
+    const SpanLine* row = LineModel_At(&hidden, 0);
+    DisplayRowLayout layout = LineModel_LayoutDisplayRow(row, 20);
+    CHECK(layout.HiddenColumn == 13);
+    CHECK(layout.RightColumn == 15);
+
+    StrBuf expected = StrBuf_Make(&a, 32);
+    StrBuf_AppendCStr(&expected, "\xe2\x96\xa0  first line\xe2\x80\xa6 ");
+    StrBuf_Append(&expected, row->Right.Text);
+    CheckText(LineModel_ExtractDisplayRow(&a, &layout, 0, 20), StrBuf_View(&expected));
+    LineModel_Release(&hidden);
+  }
+
+  {
+    SpanLine blanks = {};
+    blanks.Spans = Array_Make<Span>(&a, 2);
+    Array_Push(&blanks.Spans, Span{SVL("a b  "), StyleDefault()});
+    DisplayRowLayout layout = LineModel_LayoutDisplayRow(&blanks, 8);
+    CHECK(layout.ContentEnd == 5);
+    CheckText(LineModel_ExtractDisplayRow(&a, &layout, 0, 5), SVL("a b  "));
+    CheckText(LineModel_ExtractDisplayRow(&a, &layout, 0, 8), SVL("a b     "));
+    CheckText(LineModel_ExtractDisplayRow(&a, &layout, 1, 7), SVL(" b    "));
+  }
+
+  {
+    SpanLine clipped = {};
+    clipped.Spans = Array_Make<Span>(&a, 1);
+    Array_Push(&clipped.Spans, Span{SVL("abcdef"), StyleDefault()});
+    clipped.Right = Span{SVL("R"), StyleDefault()};
+    clipped.HasRight = true;
+    DisplayRowLayout layout = LineModel_LayoutDisplayRow(&clipped, 5);
+    CHECK(layout.LeftLimit == 3);
+    CheckText(LineModel_ExtractDisplayRow(&a, &layout, 0, 5), SVL("abc R"));
+
+    clipped.HasHiddenContent = true;
+    layout = LineModel_LayoutDisplayRow(&clipped, 5);
+    CHECK(layout.LeftLimit == 2);
+    CHECK(layout.HiddenColumn == 2);
+    CheckText(LineModel_ExtractDisplayRow(&a, &layout, 0, 5), SVL("ab\xe2\x80\xa6 R"));
+  }
+
+  {
+    SpanLine wide = {};
+    wide.Spans = Array_Make<Span>(&a, 1);
+    Array_Push(&wide.Spans, Span{SVL("A\xe4\xbd\xa0" "B"), StyleDefault()});
+    DisplayRowLayout layout = LineModel_LayoutDisplayRow(&wide, 6);
+    CHECK(layout.ContentEnd == 4);
+    DisplayRowRange middle = LineModel_NormalizeDisplayRowRange(&layout, 2, 3);
+    CHECK(middle.Start == 1 && middle.End == 3);
+    DisplayRowRange reverse = LineModel_NormalizeDisplayRowRange(&layout, 4, 2);
+    CHECK(reverse.Start == 1 && reverse.End == 4);
+    CheckText(LineModel_ExtractDisplayRow(&a, &layout, 2, 3), SVL("\xe4\xbd\xa0"));
+    CheckText(LineModel_ExtractDisplayRow(&a, &layout, 0, 2), SVL("A\xe4\xbd\xa0"));
+    CheckText(LineModel_ExtractDisplayRow(&a, &layout, 2, 4), SVL("\xe4\xbd\xa0" "B"));
+    CheckText(LineModel_ExtractDisplayRow(&a, &layout, 4, 2), SVL("\xe4\xbd\xa0" "B"));
+    CheckText(LineModel_ExtractDisplayRow(&a, &layout, 0, 6),
+              SVL("A\xe4\xbd\xa0" "B  "));
+  }
+
+  {
+    LineModel combining;
+    LineModel_Init(&combining, &a, 6, 5000);
+    LineModel_BeginAssistant(&combining);
+    LineModel_AppendAssistant(&combining, SVL("a\xcc\x81" "bc"));
+    LineModel_EndAssistant(&combining);
+    CHECK(LineModel_Count(&combining) == 3);
+    CheckText(ExtractRow(&a, LineModel_At(&combining, 0), 6, 0, 3), SVL("\xe2\x96\xa0  "));
+    CheckText(ExtractRow(&a, LineModel_At(&combining, 1), 6, 0, 6),
+              SVL("   a\xcc\x81" "b"));
+    CheckText(ExtractRow(&a, LineModel_At(&combining, 1), 6, 4, 5), SVL("\xcc\x81"));
+    CheckText(ExtractRow(&a, LineModel_At(&combining, 2), 6, 0, 4), SVL("   c"));
+    LineModel_Release(&combining);
+  }
+
+  {
+    SpanLine withRight = {};
+    withRight.Spans = Array_Make<Span>(&a, 1);
+    Array_Push(&withRight.Spans, Span{SVL("abcd"), StyleDefault()});
+    withRight.Right = Span{SVL("R\xcc\x81"), StyleDefault()};
+    withRight.HasRight = true;
+
+    DisplayRowLayout layout = LineModel_LayoutDisplayRow(&withRight, 6);
+    CHECK(layout.LeftLimit == 3);
+    CHECK(layout.RightColumn == 4);
+    CHECK(layout.ContentEnd == 6);
+    CheckText(LineModel_ExtractDisplayRow(&a, &layout, 0, 6), SVL("abc R\xcc\x81"));
+  }
+
+  {
+    LineModel revision;
+    LineModel_Init(&revision, &a, 20, 5000);
+    u64 rev = LineModel_DisplayRevision(&revision);
+    CHECK(rev != 0);
+    LineModel_BeginAssistant(&revision);
+    CHECK(LineModel_DisplayRevision(&revision) == rev);
+    LineModel_AppendAssistant(&revision, StrView{});
+    CHECK(LineModel_DisplayRevision(&revision) == rev);
+    LineModel_AppendAssistant(&revision, SVL("streaming content"));
+    CHECK(LineModel_DisplayRevision(&revision) == rev);
+    LineModel_AppendAssistant(&revision, SVL(" more"));
+    CHECK(LineModel_DisplayRevision(&revision) == rev);
+    LineModel_EndAssistant(&revision);
+    CHECK(LineModel_DisplayRevision(&revision) == rev);
+
+    LineModel_SetWidth(&revision, 8);
+    CHECK(LineModel_DisplayRevision(&revision) != rev);
+    rev = LineModel_DisplayRevision(&revision);
+    LineModel_SetWidth(&revision, 8);
+    CHECK(LineModel_DisplayRevision(&revision) == rev);
+    LineModel_Release(&revision);
+
+    LineModel cropped;
+    LineModel_Init(&cropped, &a, 8, 2);
+    LineModel_BeginAssistant(&cropped);
+    LineModel_AppendAssistant(&cropped, SVL("one"));
+    rev = LineModel_DisplayRevision(&cropped);
+    LineModel_AppendAssistant(&cropped, SVL("\ntwo\nthree"));
+    CHECK(LineModel_DisplayRevision(&cropped) != rev);
+    LineModel_Release(&cropped);
+
+    LineModel cappedStable;
+    LineModel_Init(&cappedStable, &a, 20, 2);
+    LineModel_BeginAssistant(&cappedStable);
+    LineModel_AppendAssistant(&cappedStable, SVL("one\ntwo\nthree"));
+    rev = LineModel_DisplayRevision(&cappedStable);
+    LineModel_AppendAssistant(&cappedStable, SVL("x"));
+    CHECK(LineModel_DisplayRevision(&cappedStable) == rev);
+    LineModel_Release(&cappedStable);
+
+    LineModel cappedShift;
+    LineModel_Init(&cappedShift, &a, 20, 2);
+    LineModel_BeginAssistant(&cappedShift);
+    LineModel_AppendAssistant(&cappedShift, SVL("x\nx\nx"));
+    rev = LineModel_DisplayRevision(&cappedShift);
+    LineModel_AppendAssistant(&cappedShift, SVL("\nx"));
+    CHECK(LineModel_DisplayRevision(&cappedShift) != rev);
+    LineModel_Release(&cappedShift);
+
+    LineModel reflow;
+    LineModel_Init(&reflow, &a, 20, 5000);
+    LineModel_BeginAssistant(&reflow);
+    LineModel_AppendAssistant(&reflow, SVL("abcdefghijklmnopq"));
+    rev = LineModel_DisplayRevision(&reflow);
+    LineModel_AppendAssistant(&reflow, SVL("r"));
+    CHECK(LineModel_DisplayRevision(&reflow) != rev);
+    LineModel_Release(&reflow);
   }
 
   {

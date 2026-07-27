@@ -70,6 +70,13 @@ void TestKeys() {
   CHECK(wr.Kind == KeyKind::WordRight && wr.Ctrl);
   CHECK(Next(&d).Kind == KeyKind::WordLeft);
 
+  // Shift+Ctrl word selection.
+  KeyDecoder_Init(&d);
+  Push(&d, "\x1b[1;6C\x1b[1;6D");
+  Key swr = Next(&d);
+  CHECK(swr.Kind == KeyKind::WordRight && swr.Shift && swr.Ctrl);
+  CHECK(Next(&d).Kind == KeyKind::WordLeft);
+
   // Modifier parsing: Shift+Up keeps the Up kind but flags Shift.
   KeyDecoder_Init(&d);
   Push(&d, "\x1b[1;2A");
@@ -144,13 +151,14 @@ void TestKeys() {
 
   // All-motion tracking reports hover movement, including button drags.
   KeyDecoder_Init(&d);
-  Push(&d, "\x1b[<35;8;6M\x1b[<32;9;7M");
+  Push(&d, "\x1b[<35;8;6M\x1b[<60;9;7M");
   Key move = Next(&d);
   CHECK(move.Kind == KeyKind::MouseMove);
   CHECK(move.MouseX == 7 && move.MouseY == 5);
   Key drag = Next(&d);
   CHECK(drag.Kind == KeyKind::MouseMove);
   CHECK(drag.MouseX == 8 && drag.MouseY == 6);
+  CHECK(drag.Shift && drag.Alt && drag.Ctrl);
 
   // Unsupported buttons and malformed zero coordinates are consumed.
   KeyDecoder_Init(&d);

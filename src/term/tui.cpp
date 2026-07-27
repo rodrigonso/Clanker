@@ -143,6 +143,11 @@ struct InputLayout {
   u16 CurCol;
 };
 
+u32 InputCellWidth(u32 cp) {
+  u32 width = CharWidth(cp);
+  return width < 1 ? 1 : width;
+}
+
 void LayoutInput(StrView text, u32 cursor, u16 width, InputLayout* out) {
   out->RowCount = 0;
   out->CurRow = 0;
@@ -166,8 +171,7 @@ void LayoutInput(StrView text, u32 cursor, u16 width, InputLayout* out) {
     }
     u32 jj = i;
     u32 cp = Utf8Decode(text, &jj);
-    u32 cw = CharWidth(cp);
-    if (cw < 1) cw = 1;
+    u32 cw = InputCellWidth(cp);
     if ((u32)col + cw > width) {
       if (out->RowCount < 256) out->Rows[out->RowCount++] = StrView{text.Data + rowStart, i - rowStart};
       rowStart = i;
@@ -183,6 +187,13 @@ void LayoutInput(StrView text, u32 cursor, u16 width, InputLayout* out) {
   if (out->RowCount < 256) out->Rows[out->RowCount++] = StrView{text.Data + rowStart, text.Length - rowStart};
 }
 
+u32 InputTextWidth(StrView text) {
+  u32 width = 0;
+  u32 i = 0;
+  while (i < text.Length) width += InputCellWidth(Utf8Decode(text, &i));
+  return width;
+}
+
 Style HoverStyle(Style style) {
   if (g_color)
     style.Bg = 235;
@@ -196,38 +207,155 @@ Style RowTextStyle(Style style, bool hovered) {
   return style;
 }
 
-void RenderSpanLine(Screen* s, u16 y, const SpanLine* ln, u16 cols, bool hovered) {
+const u8 SELECTION_BG = 238;
+
+void ClearTranscriptSelection(Tui* t) {
+  if (t->TranscriptSelectionRevision == 0 &&
+      t->DragDomain != TuiDragDomain::Transcript)
+    return;
+  t->TranscriptSelectionRevision = 0;
+  t->TranscriptSelectionHash = 0;
+  t->SelectionEdgeDirection = 0;
+  t->NextSelectionScrollMs = 0;
+  if (t->DragDomain == TuiDragDomain::Transcript)
+    t->DragDomain = TuiDragDomain::None;
+}
+
+void FocusComposer(Tui* t) { ClearTranscriptSelection(t); }
+
+bool TranscriptPointsDiffer(const Tui* t) {
+  return t->TranscriptAnchorRow != t->TranscriptFocusRow ||
+         t->TranscriptAnchorCell != t->TranscriptFocusCell;
+}
+
+struct TranscriptSelection {
+  u32 FirstRow;
+  u32 LastRow;
+  u16 FirstCell;
+  u16 LastCell;
+};
+
+bool NormalizeTranscriptSelection(const Tui* t, TranscriptSelection* selection) {
+  if (!TranscriptPointsDiffer(t)) return false;
+  bool forward = t->TranscriptAnchorRow < t->TranscriptFocusRow ||
+                 (t->TranscriptAnchorRow == t->TranscriptFocusRow &&
+                  t->TranscriptAnchorCell <= t->TranscriptFocusCell);
+  if (forward) {
+    selection->FirstRow = t->TranscriptAnchorRow;
+    selection->FirstCell = t->TranscriptAnchorCell;
+    selection->LastRow = t->TranscriptFocusRow;
+    selection->LastCell = t->TranscriptFocusCell;
+  } else {
+    selection->FirstRow = t->TranscriptFocusRow;
+    selection->FirstCell = t->TranscriptFocusCell;
+    selection->LastRow = t->TranscriptAnchorRow;
+    selection->LastCell = t->TranscriptAnchorCell;
+  }
+  selection->LastCell++;
+  return true;
+}
+
+bool TranscriptRangeForRow(const TranscriptSelection* selection, u32 row,
+                           const DisplayRowLayout* layout,
+                           DisplayRowRange* out) {
+  if (!selection || !layout || layout->Columns == 0 ||
+      row < selection->FirstRow || row > selection->LastRow)
+    return false;
+
+  u16 start = 0;
+  u16 end = layout->ContentEnd;
+  if (selection->FirstRow == selection->LastRow) {
+    start = selection->FirstCell;
+    end = selection->LastCell;
+  } else if (row == selection->FirstRow) {
+    start = selection->FirstCell;
+    if (start >= end) return false;
+  } else if (row == selection->LastRow) {
+    end = selection->LastCell;
+  }
+  *out = LineModel_NormalizeDisplayRowRange(layout, start, end);
+  return out->Start != out->End;
+}
+
+u64 MixSelectionHash(u64 hash, u64 value) {
+  for (u32 i = 0; i < 8; i++) {
+    hash ^= (u8)(value >> (i * 8));
+    hash *= 1099511628211ull;
+  }
+  return hash;
+}
+
+u64 ComputeTranscriptSelectionHash(const Tui* t) {
+  TranscriptSelection selection;
+  if (!NormalizeTranscriptSelection(t, &selection)) return 0;
+  u64 hash = 1469598103934665603ull;
+  for (u32 row = selection.FirstRow; row <= selection.LastRow; row++) {
+    const SpanLine* line = LineModel_At(&t->Model, row);
+    if (!line) return 0;
+    DisplayRowLayout layout = LineModel_LayoutDisplayRow(line, t->LastCols);
+    DisplayRowRange range;
+    if (!TranscriptRangeForRow(&selection, row, &layout, &range)) continue;
+    hash = MixSelectionHash(hash, row);
+    hash = MixSelectionHash(hash, range.Start);
+    hash = MixSelectionHash(hash, range.End);
+    hash = MixSelectionHash(
+        hash, LineModel_HashDisplayRow(&layout, range.Start, range.End));
+  }
+  return hash;
+}
+
+void RefreshTranscriptSelectionHash(Tui* t) {
+  t->TranscriptSelectionHash = ComputeTranscriptSelectionHash(t);
+}
+
+bool ValidateTranscriptSelection(Tui* t) {
+  if (t->TranscriptSelectionRevision == 0) return false;
+  if (t->TranscriptSelectionRevision != LineModel_DisplayRevision(&t->Model) ||
+      (TranscriptPointsDiffer(t) &&
+       t->TranscriptSelectionHash != ComputeTranscriptSelectionHash(t))) {
+    ClearTranscriptSelection(t);
+    return false;
+  }
+  return true;
+}
+
+bool GetTranscriptSelection(Tui* t, TranscriptSelection* selection) {
+  return ValidateTranscriptSelection(t) &&
+         NormalizeTranscriptSelection(t, selection);
+}
+
+void ApplySelectedCells(Screen* s, u16 y, DisplayRowRange range) {
+  if (y >= s->Rows || range.Start >= range.End) return;
+  if (range.End > s->Cols) range.End = s->Cols;
+  for (u16 x = range.Start; x < range.End; x++) {
+    Style* style = &s->Back[(u32)y * s->Cols + x].St;
+    if (g_color)
+      style->Bg = SELECTION_BG;
+    else if (style->Attr & ATTR_UNDERLINE)
+      style->Attr |= ATTR_REVERSE;
+    else
+      style->Attr |= ATTR_UNDERLINE;
+  }
+}
+
+void RenderSpanLine(Tui* t, u16 y, u32 row, const SpanLine* ln, u16 cols, bool hovered,
+                    const TranscriptSelection* selection) {
+  Screen* s = &t->Scr;
   if (cols && hovered) {
     Style fill = HoverStyle(StyleDefault());
     Screen_Fill(s, 0, y, (u16)(cols - 1), y, fill);
   }
 
-  u16 x = 0;
-  u16 leftLimit = cols;
-  u32 rightWidth = ln->HasRight ? TextWidth(ln->Right.Text) : 0;
-  bool drawRight = ln->HasRight && rightWidth < cols;
-  bool drawHidden = ln->HasHiddenContent && cols != 0;
-  if (drawHidden && drawRight && rightWidth + 2u >= cols) drawRight = false;
-  if (drawRight) leftLimit = (u16)(cols - rightWidth - 1u);
+  DisplayRowLayout layout = LineModel_LayoutDisplayRow(ln, cols);
+  DisplayRowIterator iterator = {};
+  DisplayRowRun run;
+  while (LineModel_NextDisplayRowRun(&layout, &iterator, &run))
+    Screen_PutText(s, run.Column, y, run.Text, RowTextStyle(run.St, hovered),
+                   (u16)(run.Column + run.CellWidth));
 
-  u16 hiddenX = cols;
-  if (drawHidden) {
-    hiddenX = drawRight ? (u16)(cols - rightWidth - 2u) : (u16)(cols - 1u);
-    if (hiddenX < leftLimit) leftLimit = hiddenX;
-  }
-
-  for (u32 i = 0; i < ln->Spans.Count && x < leftLimit; i++) {
-    Style style = RowTextStyle(ln->Spans.Data[i].St, hovered);
-    x = Screen_PutText(s, x, y, ln->Spans.Data[i].Text, style, leftLimit);
-  }
-  if (drawHidden) {
-    Style style = RowTextStyle(St(244, ATTR_DIM), hovered);
-    Screen_PutText(s, hiddenX, y, SVL("\xe2\x80\xa6"), style, (u16)(hiddenX + 1u));
-  }
-  if (drawRight) {
-    Style style = RowTextStyle(ln->Right.St, hovered);
-    Screen_PutText(s, (u16)(cols - rightWidth), y, ln->Right.Text, style, cols);
-  }
+  DisplayRowRange selected;
+  if (TranscriptRangeForRow(selection, row, &layout, &selected))
+    ApplySelectedCells(s, y, selected);
 }
 
 void ComposeStatus(Tui* t, u16 statusY, u16 cols) {
@@ -299,6 +427,28 @@ void DrawInputBox(Tui* t, u16 topY, u16 bottomY, u16 innerTop, u16 innerH, u16 c
   for (u16 y = innerTop; y < innerTop + innerH; y++) {
     Screen_PutText(&t->Scr, 0, y, SVL("\xe2\x94\x82"), border, cols);
     Screen_PutText(&t->Scr, (u16)(cols - 1), y, SVL("\xe2\x94\x82"), border, cols);
+  }
+}
+
+void HighlightInputSelection(Tui* t, u16 y, StrView row, StrView text, u16 x) {
+  u32 selectionStart, selectionEnd;
+  if (!LineEdit_SelectionBounds(&t->Edit, &selectionStart, &selectionEnd)) return;
+  u32 rowStart = (u32)(row.Data - text.Data);
+  u32 rowEnd = rowStart + row.Length;
+  u32 start = selectionStart > rowStart ? selectionStart : rowStart;
+  u32 end = selectionEnd < rowEnd ? selectionEnd : rowEnd;
+  if (start < end) {
+    u16 startCol = (u16)InputTextWidth(StrView{text.Data + rowStart, start - rowStart});
+    u16 endCol = (u16)InputTextWidth(StrView{text.Data + rowStart, end - rowStart});
+    ApplySelectedCells(&t->Scr, y,
+                       DisplayRowRange{(u16)(x + startCol), (u16)(x + endCol)});
+  }
+  if (rowEnd < text.Length && text.Data[rowEnd] == '\n' && selectionStart <= rowEnd &&
+      selectionEnd > rowEnd) {
+    u16 newlineCol = (u16)InputTextWidth(row);
+    ApplySelectedCells(
+        &t->Scr, y,
+        DisplayRowRange{(u16)(x + newlineCol), (u16)(x + newlineCol + 1u)});
   }
 }
 
@@ -431,21 +581,26 @@ bool PumpDisplay(Tui* t, u64 nowMs) {
   return changed;
 }
 
-void Compose(Tui* t) {
-  u16 cols = 0, rows = 0;
-  Term_Size(&t->Trm, &cols, &rows);
+bool AdvanceSelectionTick(Tui* t, u64 nowMs);
+
+void ComposeSized(Tui* t, u16 cols, u16 rows, u64 nowMs) {
   if (cols != t->Scr.Cols || rows != t->Scr.Rows) {
     ViewportAnchor anchor = CaptureViewportAnchor(t);
+    ClearTranscriptSelection(t);
     Screen_Resize(&t->Scr, cols, rows);
     LineModel_SetWidth(&t->Model, cols);
     RestoreViewportAnchor(t, anchor);
   }
+  t->LastCols = cols;
   if (cols < 6 || rows < 6) {
+    t->LastPaneH = 0;
+    t->LastInputH = 0;
     Screen_BeginFrame(&t->Scr);
     return;
   }
 
-  PumpDisplay(t, MonotonicMillis());
+  PumpDisplay(t, nowMs);
+  AdvanceSelectionTick(t, nowMs);
   if (t->State != TuiState::Idle) t->Spinner++;
 
   // Input box layout: left/right border column + one padding column each side.
@@ -471,6 +626,8 @@ void Compose(Tui* t) {
   u16 cwdY = (u16)(topBorderY - 1);
   u16 paneH = cwdY;  // rows [0, cwdY)
   t->LastPaneH = paneH;
+  t->LastInputTop = inputTop;
+  t->LastInputH = inputH;
 
   Screen_BeginFrame(&t->Scr);
 
@@ -490,6 +647,8 @@ void Compose(Tui* t) {
   } else {
     t->HoveredEntryId = 0;
   }
+  TranscriptSelection selection;
+  bool hasSelection = GetTranscriptSelection(t, &selection);
 
   for (u16 r = 0; r < paneH; r++) {
     u32 idx = top + r;
@@ -497,7 +656,8 @@ void Compose(Tui* t) {
     const SpanLine* line = LineModel_At(&t->Model, idx);
     bool hovered =
         line->IsEntryStart && line->EntryId != 0 && line->EntryId == t->HoveredEntryId;
-    RenderSpanLine(&t->Scr, r, line, cols, hovered);
+    RenderSpanLine(t, r, idx, line, cols, hovered,
+                   hasSelection ? &selection : nullptr);
   }
 
   // Status.
@@ -506,10 +666,17 @@ void Compose(Tui* t) {
   // Composer box (scroll within if taller than the box).
   DrawInputBox(t, topBorderY, bottomBorderY, inputTop, inputH, cols);
   u32 firstRow = il.CurRow >= inputH ? il.CurRow - inputH + 1 : 0;
+  if (t->DragDomain == TuiDragDomain::Composer) {
+    u32 maxFirstRow = il.RowCount > inputH ? il.RowCount - inputH : 0;
+    firstRow = t->LastInputFirstRow < maxFirstRow ? t->LastInputFirstRow : maxFirstRow;
+  }
+  t->LastInputFirstRow = firstRow;
+  StrView inputText = LineEdit_Text(&t->Edit);
   for (u16 i = 0; i < inputH; i++) {
     u32 rr = firstRow + i;
     if (rr >= il.RowCount) break;
     Screen_PutText(&t->Scr, 2, (u16)(inputTop + i), il.Rows[rr], StyleDefault(), (u16)(cols - 1));
+    HighlightInputSelection(t, (u16)(inputTop + i), il.Rows[rr], inputText, 2);
   }
   u16 curScreenRow = (u16)(inputTop + (il.CurRow - firstRow));
   u16 curScreenCol = (u16)(2 + il.CurCol);
@@ -518,6 +685,12 @@ void Compose(Tui* t) {
 
   // Sticky context line above the prompt.
   ComposeCwd(t, cwdY, cols);
+}
+
+void Compose(Tui* t) {
+  u16 cols = 0, rows = 0;
+  Term_Size(&t->Trm, &cols, &rows);
+  ComposeSized(t, cols, rows, MonotonicMillis());
 }
 
 // ---- key handling (lock held) ----
@@ -544,6 +717,46 @@ u64 HitTestEntry(const Tui* t, u16 y) {
   return line && line->IsEntryStart ? line->EntryId : 0;
 }
 
+bool HitComposer(const Tui* t, u16 x, u16 y) {
+  return t->LastInputH != 0 && y >= t->LastInputTop &&
+         y < (u16)(t->LastInputTop + t->LastInputH) && x > 0 &&
+         (u32)x + 1u < t->LastCols;
+}
+
+void SetComposerMouseCursor(Tui* t, u16 x, u16 y, bool extend = false) {
+  if (t->LastInputH == 0 || t->LastCols < 6) return;
+  u16 screenRow = y;
+  if (screenRow < t->LastInputTop) screenRow = t->LastInputTop;
+  u16 lastRow = (u16)(t->LastInputTop + t->LastInputH - 1u);
+  if (screenRow > lastRow) screenRow = lastRow;
+  u32 row = t->LastInputFirstRow + screenRow - t->LastInputTop;
+  u32 col = x > 2 ? x - 2u : 0;
+  u16 textW = (u16)(t->LastCols - 4u);
+  if (col > textW) col = textW;
+  LineEdit_SetCursorAt(&t->Edit, textW, row, col, extend);
+}
+
+u16 TranscriptMouseCell(const Tui* t, u16 x) {
+  return x < t->LastCols ? x : (u16)(t->LastCols - 1u);
+}
+
+bool TranscriptMousePoint(const Tui* t, u16 x, u16 y, u32* row, u16* cell) {
+  u32 count = LineModel_Count(&t->Model);
+  if (count == 0 || t->LastPaneH == 0 || y >= t->LastPaneH) return false;
+  u32 pointRow = t->LastTop + y;
+  if (pointRow < count) {
+    *row = pointRow;
+    *cell = TranscriptMouseCell(t, x);
+    return true;
+  }
+
+  *row = count - 1u;
+  DisplayRowLayout layout =
+      LineModel_LayoutDisplayRow(LineModel_At(&t->Model, *row), t->LastCols);
+  *cell = layout.ContentEnd ? (u16)(layout.ContentEnd - 1u) : 0;
+  return true;
+}
+
 void UpdateMouse(Tui* t, const Key& key) {
   t->MouseX = key.MouseX;
   t->MouseY = key.MouseY;
@@ -562,69 +775,276 @@ void ScrollBy(Tui* t, i32 delta) {
   t->Follow = (t->Top >= maxTop);
 }
 
+void UpdateMouseDrag(Tui* t) {
+  if (t->DragDomain == TuiDragDomain::None && t->PressedEntryId == 0) return;
+  if (t->MouseX != t->MouseDownX || t->MouseY != t->MouseDownY) {
+    t->MouseDragMoved = true;
+    t->PressedEntryId = 0;
+  }
+  if (!t->MouseDragMoved) return;
+  if (t->DragDomain == TuiDragDomain::None) return;
+
+  if (t->DragDomain == TuiDragDomain::Composer) {
+    SetComposerMouseCursor(t, t->MouseX, t->MouseY, true);
+    return;
+  }
+
+  t->Top = t->LastTop;
+  t->Follow = false;
+  if (!ValidateTranscriptSelection(t) || t->LastPaneH == 0) return;
+  u16 screenRow =
+      t->MouseY < t->LastPaneH ? t->MouseY : (u16)(t->LastPaneH - 1u);
+  TranscriptMousePoint(t, t->MouseX, screenRow, &t->TranscriptFocusRow,
+                       &t->TranscriptFocusCell);
+  RefreshTranscriptSelectionHash(t);
+
+  i32 direction = 0;
+  if (t->MouseY == 0)
+    direction = -1;
+  else if (t->MouseY >= (u16)(t->LastPaneH - 1u))
+    direction = 1;
+  if (direction != t->SelectionEdgeDirection) t->NextSelectionScrollMs = 0;
+  t->SelectionEdgeDirection = direction;
+}
+
+bool AdvanceSelectionTick(Tui* t, u64 nowMs) {
+  if (t->DragDomain != TuiDragDomain::Transcript || t->SelectionEdgeDirection == 0 ||
+      t->LastPaneH == 0 || !ValidateTranscriptSelection(t))
+    return false;
+  if (t->NextSelectionScrollMs != 0 && nowMs < t->NextSelectionScrollMs) return false;
+  t->NextSelectionScrollMs = nowMs + 50;
+
+  u32 oldTop = t->Top;
+  ScrollBy(t, t->SelectionEdgeDirection);
+  t->Follow = false;
+  if (t->Top == oldTop) return false;
+
+  u32 count = LineModel_Count(&t->Model);
+  if (count == 0) return false;
+  u32 screenRow = t->SelectionEdgeDirection < 0 ? 0 : t->LastPaneH - 1u;
+  t->TranscriptFocusRow = t->Top + screenRow;
+  if (t->TranscriptFocusRow >= count) t->TranscriptFocusRow = count - 1u;
+  t->TranscriptFocusCell = TranscriptMouseCell(t, t->MouseX);
+  RefreshTranscriptSelectionHash(t);
+  return true;
+}
+
+void QueueClipboard(Tui* t, StrView text) {
+  StrBuf_Clear(&t->ClipboardRaw);
+  StrBuf_Append(&t->ClipboardRaw, text);
+}
+
+bool QueueTranscriptClipboard(Tui* t) {
+  TranscriptSelection selection;
+  if (!GetTranscriptSelection(t, &selection)) return false;
+  u32 count = LineModel_Count(&t->Model);
+  if (count == 0 || selection.FirstRow >= count) return false;
+  if (selection.LastRow >= count) selection.LastRow = count - 1u;
+
+  Arena scratch = ArenaCreate();
+  StrBuf_Clear(&t->ClipboardRaw);
+  for (u32 row = selection.FirstRow; row <= selection.LastRow; row++) {
+    const SpanLine* line = LineModel_At(&t->Model, row);
+    DisplayRowLayout layout = LineModel_LayoutDisplayRow(line, t->LastCols);
+    DisplayRowRange range;
+    if (TranscriptRangeForRow(&selection, row, &layout, &range)) {
+      StrView text = LineModel_ExtractDisplayRow(&scratch, &layout, range.Start, range.End);
+      StrBuf_Append(&t->ClipboardRaw, text);
+    }
+    if (row != selection.LastRow) StrBuf_AppendChar(&t->ClipboardRaw, '\n');
+  }
+  ArenaRelease(&scratch);
+  return true;
+}
+
+bool PrepareClipboardOutput(Tui* t) {
+  if (t->ClipboardRaw.Length == 0) return false;
+  StrBuf_Clear(&t->ClipboardOsc);
+  Term_AppendOSC52(&t->ClipboardOsc, StrBuf_View(&t->ClipboardRaw));
+  StrBuf_Clear(&t->ClipboardRaw);
+  return true;
+}
+
+void WriteTermOutput(void*, const char* data, u32 n) { Term_Write(data, n); }
+
+bool DrainShutdownOutput(Tui* t, ScreenWriter write, void* user) {
+  Mutex_Lock(&t->Lock);
+  if (!t->Stop) {
+    Mutex_Unlock(&t->Lock);
+    return false;
+  }
+  bool writeClipboard = PrepareClipboardOutput(t);
+  StrView clipboard = StrBuf_View(&t->ClipboardOsc);
+  Mutex_Unlock(&t->Lock);
+  if (writeClipboard && write) write(user, clipboard.Data, clipboard.Length);
+  return true;
+}
+
 void HandleKey(Tui* t, const Key& k) {
+  ValidateTranscriptSelection(t);
   switch (k.Kind) {
     case KeyKind::Char:
-      if (!k.Alt && k.Codepoint >= 0x20) LineEdit_InsertChar(&t->Edit, k.Codepoint);
+      if (!k.Alt && k.Codepoint >= 0x20) {
+        FocusComposer(t);
+        LineEdit_InsertChar(&t->Edit, k.Codepoint);
+      }
       break;
-    case KeyKind::Enter: DoSubmit(t); break;
-    case KeyKind::Newline: LineEdit_Newline(&t->Edit); break;
-    case KeyKind::Backspace: LineEdit_Backspace(&t->Edit); break;
-    case KeyKind::Delete: LineEdit_Delete(&t->Edit); break;
-    case KeyKind::Left: LineEdit_Left(&t->Edit); break;
-    case KeyKind::Right: LineEdit_Right(&t->Edit); break;
+    case KeyKind::Enter:
+      FocusComposer(t);
+      DoSubmit(t);
+      break;
+    case KeyKind::Newline:
+      FocusComposer(t);
+      LineEdit_Newline(&t->Edit);
+      break;
+    case KeyKind::Backspace:
+      FocusComposer(t);
+      LineEdit_Backspace(&t->Edit);
+      break;
+    case KeyKind::Delete:
+      FocusComposer(t);
+      LineEdit_Delete(&t->Edit);
+      break;
+    case KeyKind::Left:
+      FocusComposer(t);
+      LineEdit_Left(&t->Edit, k.Shift);
+      break;
+    case KeyKind::Right:
+      FocusComposer(t);
+      LineEdit_Right(&t->Edit, k.Shift);
+      break;
     case KeyKind::Up:
-      if (LineEdit_OnFirstLine(&t->Edit) || !LineEdit_Up(&t->Edit))
+      FocusComposer(t);
+      if (k.Shift)
+        LineEdit_Up(&t->Edit, true);
+      else if (!LineEdit_Up(&t->Edit))
         LineEdit_HistoryPrev(&t->Edit);
       break;
     case KeyKind::Down:
-      if (LineEdit_OnLastLine(&t->Edit) || !LineEdit_Down(&t->Edit))
+      FocusComposer(t);
+      if (k.Shift)
+        LineEdit_Down(&t->Edit, true);
+      else if (!LineEdit_Down(&t->Edit))
         LineEdit_HistoryNext(&t->Edit);
       break;
-    case KeyKind::Home: LineEdit_Home(&t->Edit); break;
-    case KeyKind::End: LineEdit_End(&t->Edit); break;
-    case KeyKind::WordLeft: LineEdit_WordLeft(&t->Edit); break;
-    case KeyKind::WordRight: LineEdit_WordRight(&t->Edit); break;
-    case KeyKind::CtrlW: LineEdit_DeleteWordBack(&t->Edit); break;
-    case KeyKind::CtrlU: LineEdit_KillToStart(&t->Edit); break;
-    case KeyKind::CtrlK: LineEdit_KillToEnd(&t->Edit); break;
+    case KeyKind::Home:
+      FocusComposer(t);
+      LineEdit_Home(&t->Edit, k.Shift);
+      break;
+    case KeyKind::End:
+      FocusComposer(t);
+      LineEdit_End(&t->Edit, k.Shift);
+      break;
+    case KeyKind::WordLeft:
+      FocusComposer(t);
+      LineEdit_WordLeft(&t->Edit, k.Shift);
+      break;
+    case KeyKind::WordRight:
+      FocusComposer(t);
+      LineEdit_WordRight(&t->Edit, k.Shift);
+      break;
+    case KeyKind::CtrlW:
+      FocusComposer(t);
+      LineEdit_DeleteWordBack(&t->Edit);
+      break;
+    case KeyKind::CtrlU:
+      FocusComposer(t);
+      LineEdit_KillToStart(&t->Edit);
+      break;
+    case KeyKind::CtrlK:
+      FocusComposer(t);
+      LineEdit_KillToEnd(&t->Edit);
+      break;
     case KeyKind::CtrlL: t->Scr.ForceRepaint = true; break;
     case KeyKind::CtrlO: {
       ViewportAnchor anchor = CaptureViewportAnchor(t);
-      if (LineModel_ToggleAllTools(&t->Model)) RestoreViewportAnchor(t, anchor);
+      if (LineModel_ToggleAllTools(&t->Model)) {
+        RestoreViewportAnchor(t, anchor);
+        ClearTranscriptSelection(t);
+      }
       break;
     }
     case KeyKind::ScrollUp: ScrollBy(t, -kWheelStep); break;
     case KeyKind::ScrollDown: ScrollBy(t, kWheelStep); break;
     case KeyKind::MouseMove:
       UpdateMouse(t, k);
-      if (t->PressedEntryId != 0 && t->PressedEntryId != t->HoveredEntryId)
+      UpdateMouseDrag(t);
+      break;
+    case KeyKind::MouseLeftDown: {
+      UpdateMouse(t, k);
+      t->MouseDragMoved = false;
+      t->MouseDownX = t->MouseX;
+      t->MouseDownY = t->MouseY;
+      if (HitComposer(t, t->MouseX, t->MouseY)) {
+        ClearTranscriptSelection(t);
+        SetComposerMouseCursor(t, t->MouseX, t->MouseY);
+        t->DragDomain = TuiDragDomain::Composer;
         t->PressedEntryId = 0;
-      break;
-    case KeyKind::MouseLeftDown:
-      UpdateMouse(t, k);
-      t->PressedEntryId = t->HoveredEntryId;
-      break;
-    case KeyKind::MouseLeftUp: {
-      UpdateMouse(t, k);
-      u64 pressed = t->PressedEntryId;
-      t->PressedEntryId = 0;
-      if (pressed == 0 || pressed != t->HoveredEntryId) break;
-      ViewportAnchor anchor = CaptureViewportAnchor(t);
-      if (LineModel_ToggleEntry(&t->Model, pressed)) RestoreViewportAnchor(t, anchor);
+      } else if (TranscriptMousePoint(
+                     t, t->MouseX, t->MouseY, &t->TranscriptAnchorRow,
+                     &t->TranscriptAnchorCell)) {
+        LineEdit_ClearSelection(&t->Edit);
+        ClearTranscriptSelection(t);
+        t->Top = t->LastTop;
+        t->TranscriptFocusRow = t->TranscriptAnchorRow;
+        t->TranscriptFocusCell = t->TranscriptAnchorCell;
+        t->TranscriptSelectionRevision = LineModel_DisplayRevision(&t->Model);
+        RefreshTranscriptSelectionHash(t);
+        t->DragDomain = TuiDragDomain::Transcript;
+        t->PressedEntryId = t->HoveredEntryId;
+      } else {
+        LineEdit_ClearSelection(&t->Edit);
+        ClearTranscriptSelection(t);
+        t->DragDomain = TuiDragDomain::None;
+        t->PressedEntryId = 0;
+      }
       break;
     }
-    case KeyKind::CtrlC:
+    case KeyKind::MouseLeftUp: {
+      UpdateMouse(t, k);
+      UpdateMouseDrag(t);
+      TuiDragDomain dragDomain = t->DragDomain;
+      u64 pressed = t->PressedEntryId;
+      t->PressedEntryId = 0;
+      bool activate =
+          !t->MouseDragMoved && pressed != 0 && pressed == t->HoveredEntryId;
+      t->DragDomain = TuiDragDomain::None;
+      t->SelectionEdgeDirection = 0;
+      t->NextSelectionScrollMs = 0;
+      if (activate) {
+        ViewportAnchor anchor = CaptureViewportAnchor(t);
+        if (LineModel_ToggleEntry(&t->Model, pressed)) RestoreViewportAnchor(t, anchor);
+        ClearTranscriptSelection(t);
+      } else if (dragDomain == TuiDragDomain::Transcript &&
+                 (!t->MouseDragMoved || !TranscriptPointsDiffer(t))) {
+        ClearTranscriptSelection(t);
+      }
+      break;
+    }
+    case KeyKind::CtrlC: {
+      bool copied = false;
+      if (LineEdit_HasSelection(&t->Edit)) {
+        QueueClipboard(t, LineEdit_SelectedText(&t->Edit));
+        copied = true;
+      } else {
+        copied = QueueTranscriptClipboard(t);
+      }
+      if (copied) break;
       if (t->AgentRunning)
         t->AbortFlag = 1;
-      else if (!LineEdit_Empty(&t->Edit))
+      else if (!LineEdit_Empty(&t->Edit)) {
         LineEdit_Clear(&t->Edit);
-      else {
+      } else {
         t->Quit = true;
         t->Stop = true;
         Cond_Signal(&t->SubmitCv);
       }
       break;
+    }
+    case KeyKind::PasteStart:
+      FocusComposer(t);
+      break;
+    case KeyKind::PasteEnd: break;
     case KeyKind::CtrlD:
       t->AbortFlag = 1;
       t->Quit = true;
@@ -664,19 +1084,27 @@ const u32 kMinFrameMs = 16;
 void RenderLoop(void* arg) {
   Tui* t = (Tui*)arg;
   for (;;) {
+    if (DrainShutdownOutput(t, WriteTermOutput, nullptr)) break;
     Mutex_Lock(&t->Lock);
     if (t->Stop) {
       Mutex_Unlock(&t->Lock);
-      break;
+      continue;
     }
     Compose(t);
+    bool writeClipboard = PrepareClipboardOutput(t);
     Mutex_Unlock(&t->Lock);
     Screen_Flush(&t->Scr);
+    if (writeClipboard) Term_Write(t->ClipboardOsc.Data, t->ClipboardOsc.Length);
     u64 lastFrame = MonotonicMillis();
 
     Mutex_Lock(&t->Lock);
-    u32 interval =
-        Tui_HasPendingDisplay(t) ? kMinFrameMs : ((t->State != TuiState::Idle) ? 60 : 200);
+    bool edgeDragging = t->DragDomain == TuiDragDomain::Transcript &&
+                        t->SelectionEdgeDirection != 0;
+    u32 interval = edgeDragging
+                       ? kMinFrameMs
+                       : (Tui_HasPendingDisplay(t)
+                              ? kMinFrameMs
+                              : ((t->State != TuiState::Idle) ? 60 : 200));
     if (!t->Dirty && !t->Stop) Cond_WaitTimeout(&t->RenderCv, &t->Lock, interval);
     t->Dirty = false;
     while (!t->Stop) {
@@ -690,10 +1118,23 @@ void RenderLoop(void* arg) {
 
 }  // namespace
 
-bool Tui_AdvanceStream(Tui* t, u64 nowMs) { return PumpDisplay(t, nowMs); }
+bool Tui_AdvanceStream(Tui* t, u64 nowMs) {
+  bool changed = PumpDisplay(t, nowMs);
+  ValidateTranscriptSelection(t);
+  return changed;
+}
 
 bool Tui_HasPendingDisplay(const Tui* t) {
   return StreamReveal_HasPending(&t->Reveal) || HasQueuedDisplayEvents(t);
+}
+
+void Tui_TestCompose(Tui* t, u16 cols, u16 rows, u64 nowMs) {
+  if (!t->Scr.Mem) Screen_Init(&t->Scr, t->Mem, nullptr, nullptr);
+  ComposeSized(t, cols, rows, nowMs ? nowMs : MonotonicMillis());
+}
+
+bool Tui_TestDrainShutdown(Tui* t, ScreenWriter write, void* user) {
+  return DrainShutdownOutput(t, write, user);
 }
 
 bool Tui_Start(Tui* t, Arena* mem, TuiOpts opts) {
@@ -731,6 +1172,8 @@ void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts) {
   KeyDecoder_Init(&t->Dec);
   StreamReveal_Init(&t->Reveal, mem);
   t->DisplayEvents = Array_Make<TuiDisplayEvent>(mem, 16);
+  t->ClipboardRaw = StrBuf_Make(mem, 256);
+  t->ClipboardOsc = StrBuf_Make(mem, 384);
   Mutex_Init(&t->Lock);
   Cond_Init(&t->SubmitCv);
   Cond_Init(&t->RenderCv);

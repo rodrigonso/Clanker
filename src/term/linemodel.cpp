@@ -22,6 +22,20 @@ bool g_lmColor = true;
 
 StrView BufView(const StrBuf& buf) { return StrView{buf.Data, buf.Length}; }
 
+u32 LineCellWidth(u32 cp) {
+  u32 width = CharWidth(cp);
+  return width < 1 ? 1 : width;
+}
+
+u32 LineTextWidth(StrView text) {
+  u32 width = 0;
+  u32 i = 0;
+  while (i < text.Length) width += LineCellWidth(Utf8Decode(text, &i));
+  return width;
+}
+
+void WrapSpanLine(Arena* a, const SpanLine* in, u16 width, Array<SpanLine>* out);
+
 Style LStyle(u8 fg, u8 attr) {
   return Style{g_lmColor ? fg : COL_DEFAULT, COL_DEFAULT, attr};
 }
@@ -40,7 +54,7 @@ StrView Spaces(Arena* arena, u32 count) {
 }
 
 u32 IconFieldWidth(StrView marker) {
-  u32 width = TextWidth(marker);
+  u32 width = LineTextWidth(marker);
   return width < ICON_FIELD_CELLS ? ICON_FIELD_CELLS : width;
 }
 
@@ -50,7 +64,7 @@ StrView IconIndent(Arena* arena, StrView marker) {
 
 void PushIcon(Arena* arena, Array<Span>* spans, StrView marker, Style style) {
   Array_Push(spans, Span{marker, style});
-  u32 markerWidth = TextWidth(marker);
+  u32 markerWidth = LineTextWidth(marker);
   u32 gap = (markerWidth < ICON_FIELD_CELLS ? ICON_FIELD_CELLS : markerWidth) - markerWidth + 1u;
   Array_Push(spans, Span{Spaces(arena, gap), style, true});
 }
@@ -61,7 +75,7 @@ void InitRow(Arena* a, SpanLine* row, u32 spanCap = 4) {
 }
 
 void StartWrappedRow(Arena* a, const SpanLine* in, SpanLine* row, bool first, bool showRight,
-                     u16 width, u16* col, u16* limit) {
+                     u32 rightWidth, u16 width, u16* col, u16* limit) {
   InitRow(a, row);
   if (first && showRight) {
     row->Right = in->Right;
@@ -69,14 +83,11 @@ void StartWrappedRow(Arena* a, const SpanLine* in, SpanLine* row, bool first, bo
   }
 
   *limit = width;
-  if (first && showRight) {
-    u32 rightWidth = TextWidth(in->Right.Text);
-    *limit = (u16)(width - rightWidth - 1u);
-  }
+  if (first && showRight) *limit = (u16)(width - rightWidth - 1u);
 
   *col = 0;
   if (!first && in->HasContinuation) {
-    u32 continuationWidth = TextWidth(in->Continuation.Text);
+    u32 continuationWidth = LineTextWidth(in->Continuation.Text);
     if (continuationWidth < *limit) {
       Array_Push(&row->Spans, in->Continuation);
       *col = (u16)continuationWidth;
@@ -323,12 +334,23 @@ void BuildEntryRows(LineModel* m, u32 idx, u32 expandedStart) {
 }
 
 void CropDisplayToCap(LineModel* m) {
-  if (m->Lines.Count <= m->Cap) return;
+  if (m->Lines.Count <= m->Cap) {
+    if (m->HasAssistant) m->AssistantRowOffset = 0;
+    return;
+  }
   u32 drop = m->Lines.Count - m->Cap;
+  u32 assistantStart = m->AssistantStart;
   memmove(m->Lines.Data, m->Lines.Data + drop, m->Cap * sizeof(SpanLine));
   m->Lines.Count = m->Cap;
-  if (m->HasAssistant)
-    m->AssistantStart = m->AssistantStart > drop ? m->AssistantStart - drop : 0;
+  if (m->HasAssistant) {
+    m->AssistantRowOffset = drop > assistantStart ? drop - assistantStart : 0;
+    m->AssistantStart = assistantStart > drop ? assistantStart - drop : 0;
+  }
+}
+
+void AdvanceDisplayRevision(LineModel* m) {
+  m->DisplayRevision++;
+  if (m->DisplayRevision == 0) m->DisplayRevision++;
 }
 
 u32 PreviewRowCount(LineModel* m, const Entry* entry) {
@@ -372,28 +394,75 @@ void RebuildAll(LineModel* m, bool crop) {
   if (crop) CropDisplayToCap(m);
 }
 
-void TrimToCap(LineModel* m) {
+bool TrimToCap(LineModel* m) {
+  bool removedEntries = false;
   RebuildAll(m, false);
   while (m->Lines.Count > m->Cap && m->Entries.Count > 1) {
     memmove(m->Entries.Data, m->Entries.Data + 1, (m->Entries.Count - 1) * sizeof(Entry));
     m->Entries.Count--;
+    removedEntries = true;
     RebuildAll(m, false);
   }
   CropDisplayToCap(m);
+  return removedEntries;
 }
 
 }  // namespace
 
+namespace {
+
+StrView PrefixWithinCells(StrView text, u16 room, u16* width) {
+  u32 i = 0;
+  u16 cells = 0;
+  while (i < text.Length) {
+    u32 next = i;
+    u32 cp = Utf8Decode(text, &next);
+    u32 charWidth = LineCellWidth(cp);
+    if ((u32)cells + charWidth > room) break;
+    cells = (u16)(cells + charWidth);
+    i = next;
+  }
+  *width = cells;
+  return StrView{text.Data, i};
+}
+
+void AppendSpaces(StrBuf* out, u16 count) {
+  while (count--) StrBuf_AppendChar(out, ' ');
+}
+
+u16 SnapDisplayBoundary(const DisplayRowLayout* layout, u16 column, bool towardEnd) {
+  DisplayRowIterator iterator = {};
+  DisplayRowRun run;
+  while (LineModel_NextDisplayRowRun(layout, &iterator, &run)) {
+    u32 i = 0;
+    u16 runColumn = run.Column;
+    while (i < run.Text.Length) {
+      u32 next = i;
+      u32 cp = Utf8Decode(run.Text, &next);
+      u16 width = (u16)LineCellWidth(cp);
+      u16 end = (u16)(runColumn + width);
+      if (column > runColumn && column < end) return towardEnd ? end : runColumn;
+      runColumn = end;
+      i = next;
+    }
+  }
+  return column;
+}
+
+}  // namespace
+
+namespace {
+
 void WrapSpanLine(Arena* a, const SpanLine* in, u16 width, Array<SpanLine>* out) {
   if (width < 1) width = 1;
-  u32 rightWidth = in->HasRight ? TextWidth(in->Right.Text) : 0;
+  u32 rightWidth = in->HasRight ? LineTextWidth(in->Right.Text) : 0;
   bool showRight = in->HasRight && rightWidth + 3u < width;
 
   SpanLine current;
   u16 col = 0;
   u16 limit = width;
   bool first = true;
-  StartWrappedRow(a, in, &current, first, showRight, width, &col, &limit);
+  StartWrappedRow(a, in, &current, first, showRight, rightWidth, width, &col, &limit);
 
   for (u32 s = 0; s < in->Spans.Count; s++) {
     Span span = in->Spans.Data[s];
@@ -410,7 +479,7 @@ void WrapSpanLine(Arena* a, const SpanLine* in, u16 width, Array<SpanLine>* out)
         if (col >= limit) {
           Array_Push(out, current);
           first = false;
-          StartWrappedRow(a, in, &current, first, showRight, width, &col, &limit);
+          StartWrappedRow(a, in, &current, first, showRight, rightWidth, width, &col, &limit);
           continue;
         }
         u32 room = (u32)limit - col;
@@ -420,11 +489,11 @@ void WrapSpanLine(Arena* a, const SpanLine* in, u16 width, Array<SpanLine>* out)
         continue;
       }
 
-      u32 wordWidth = TextWidth(token);
+      u32 wordWidth = LineTextWidth(token);
       if (col > 0 && (u32)col + wordWidth > limit) {
         Array_Push(out, current);
         first = false;
-        StartWrappedRow(a, in, &current, first, showRight, width, &col, &limit);
+        StartWrappedRow(a, in, &current, first, showRight, rightWidth, width, &col, &limit);
       }
       if ((u32)col + wordWidth <= limit) {
         Array_Push(&current.Spans, Span{token, span.St});
@@ -437,8 +506,7 @@ void WrapSpanLine(Arena* a, const SpanLine* in, u16 width, Array<SpanLine>* out)
           while (j < token.Length) {
             u32 next = j;
             u32 cp = Utf8Decode(token, &next);
-            u32 charWidth = CharWidth(cp);
-            if (charWidth < 1) charWidth = 1;
+            u32 charWidth = LineCellWidth(cp);
             bool fresh = col == 0 && segmentWidth == 0;
             if (!fresh && (u32)col + segmentWidth + charWidth > limit) {
               if (segmentWidth == 0) {
@@ -458,7 +526,7 @@ void WrapSpanLine(Arena* a, const SpanLine* in, u16 width, Array<SpanLine>* out)
           if (j < token.Length) {
             Array_Push(out, current);
             first = false;
-            StartWrappedRow(a, in, &current, first, showRight, width, &col, &limit);
+            StartWrappedRow(a, in, &current, first, showRight, rightWidth, width, &col, &limit);
           }
         }
       }
@@ -466,6 +534,8 @@ void WrapSpanLine(Arena* a, const SpanLine* in, u16 width, Array<SpanLine>* out)
   }
   Array_Push(out, current);
 }
+
+}  // namespace
 
 void LineModel_SetColorEnabled(bool on) {
   g_lmColor = on;
@@ -480,8 +550,10 @@ void LineModel_Init(LineModel* m, Arena* mem, u16 width, u32 cap) {
   m->Width = width ? width : 80;
   m->Cap = cap ? cap : 5000;
   m->AssistantStart = 0;
+  m->AssistantRowOffset = 0;
   m->AssistantRowsMark = 0;
   m->NextEntryId = 1;
+  m->DisplayRevision = 1;
   m->HasAssistant = false;
 }
 
@@ -497,6 +569,243 @@ u64 LineModel_RowEntryId(const LineModel* m, u32 row) {
   const SpanLine* line = LineModel_At(m, row);
   return line ? line->EntryId : 0;
 }
+
+u64 LineModel_DisplayRevision(const LineModel* m) { return m->DisplayRevision; }
+
+DisplayRowLayout LineModel_LayoutDisplayRow(const SpanLine* line, u16 columns) {
+  DisplayRowLayout layout = {};
+  layout.Line = line;
+  layout.Columns = columns;
+  layout.LeftLimit = columns;
+  layout.HiddenColumn = columns;
+  layout.RightColumn = columns;
+  if (!line || columns == 0) return layout;
+
+  u32 rightWidth = line->HasRight ? LineTextWidth(line->Right.Text) : 0;
+  bool drawRight = line->HasRight && rightWidth < columns;
+  bool drawHidden = line->HasHiddenContent;
+  if (drawHidden && drawRight && rightWidth + 2u >= columns) drawRight = false;
+  if (drawRight) {
+    layout.RightColumn = (u16)(columns - rightWidth);
+    layout.LeftLimit = (u16)(layout.RightColumn - 1u);
+  }
+  if (drawHidden) {
+    layout.HiddenColumn = drawRight ? (u16)(layout.RightColumn - 2u) : (u16)(columns - 1u);
+    if (layout.HiddenColumn < layout.LeftLimit) layout.LeftLimit = layout.HiddenColumn;
+  }
+
+  DisplayRowIterator iterator = {};
+  DisplayRowRun run;
+  while (LineModel_NextDisplayRowRun(&layout, &iterator, &run)) {
+    u16 end = (u16)(run.Column + run.CellWidth);
+    if (layout.ContentEnd < end) layout.ContentEnd = end;
+  }
+  return layout;
+}
+
+bool LineModel_NextDisplayRowRun(const DisplayRowLayout* layout, DisplayRowIterator* iterator,
+                                 DisplayRowRun* run) {
+  if (!layout || !layout->Line || !iterator || !run) return false;
+  const SpanLine* line = layout->Line;
+  while (iterator->SpanIndex < line->Spans.Count) {
+    if (iterator->Column >= layout->LeftLimit) {
+      iterator->SpanIndex = line->Spans.Count;
+      break;
+    }
+    Span span = line->Spans.Data[iterator->SpanIndex++];
+    u16 width = 0;
+    StrView text =
+        PrefixWithinCells(span.Text, (u16)(layout->LeftLimit - iterator->Column), &width);
+    if (text.Length == 0) continue;
+    *run = DisplayRowRun{text, span.St, iterator->Column, width};
+    iterator->Column = (u16)(iterator->Column + width);
+    return true;
+  }
+  if (iterator->SpanIndex == line->Spans.Count) {
+    iterator->SpanIndex++;
+    if (layout->HiddenColumn < layout->Columns) {
+      *run =
+          DisplayRowRun{SVL("\xe2\x80\xa6"), LStyle(244, ATTR_DIM), layout->HiddenColumn, 1};
+      return true;
+    }
+  }
+  if (iterator->SpanIndex == line->Spans.Count + 1u) {
+    iterator->SpanIndex++;
+    if (layout->RightColumn < layout->Columns) {
+      *run = DisplayRowRun{line->Right.Text, line->Right.St, layout->RightColumn,
+                           (u16)(layout->Columns - layout->RightColumn)};
+      return true;
+    }
+  }
+  return false;
+}
+
+DisplayRowRange LineModel_NormalizeDisplayRowRange(const DisplayRowLayout* layout, u16 anchor,
+                                                   u16 focus) {
+  DisplayRowRange range = {};
+  if (!layout) return range;
+  if (anchor > layout->Columns) anchor = layout->Columns;
+  if (focus > layout->Columns) focus = layout->Columns;
+  range.Start = anchor < focus ? anchor : focus;
+  range.End = anchor < focus ? focus : anchor;
+  if (range.Start == range.End) return range;
+  range.Start = SnapDisplayBoundary(layout, range.Start, false);
+  range.End = SnapDisplayBoundary(layout, range.End, true);
+  return range;
+}
+
+namespace {
+
+void AccumulateDisplayBytes(StrBuf* out, u64* hash, StrView text) {
+  if (out) StrBuf_Append(out, text);
+  if (!hash) return;
+  for (u32 i = 0; i < text.Length; i++) {
+    *hash ^= (u8)text.Data[i];
+    *hash *= 1099511628211ull;
+  }
+}
+
+void AccumulateDisplaySpaces(StrBuf* out, u64* hash, u16 count) {
+  if (out) AppendSpaces(out, count);
+  if (!hash) return;
+  while (count--) {
+    *hash ^= (u8)' ';
+    *hash *= 1099511628211ull;
+  }
+}
+
+void AccumulateDisplayRow(const DisplayRowLayout* layout, DisplayRowRange range,
+                          StrBuf* out, u64* hash) {
+  u16 outputColumn = range.Start;
+  DisplayRowIterator iterator = {};
+  DisplayRowRun run;
+  while (LineModel_NextDisplayRowRun(layout, &iterator, &run)) {
+    if (run.Column >= range.End) break;
+    u32 i = 0;
+    u16 column = run.Column;
+    while (i < run.Text.Length) {
+      u32 start = i;
+      u32 cp = Utf8Decode(run.Text, &i);
+      u16 width = (u16)LineCellWidth(cp);
+      u16 end = (u16)(column + width);
+      if (end <= range.Start || end <= outputColumn) {
+        column = end;
+        continue;
+      }
+      if (column >= range.End) break;
+      if (column > outputColumn)
+        AccumulateDisplaySpaces(
+            out, hash, (u16)((column < range.End ? column : range.End) - outputColumn));
+      if (column < range.End) {
+        AccumulateDisplayBytes(out, hash, StrView{run.Text.Data + start, i - start});
+        outputColumn = end;
+      }
+      column = end;
+    }
+  }
+  if (outputColumn < range.End)
+    AccumulateDisplaySpaces(out, hash, (u16)(range.End - outputColumn));
+}
+
+}  // namespace
+
+StrView LineModel_ExtractDisplayRow(Arena* arena, const DisplayRowLayout* layout, u16 anchor,
+                                    u16 focus) {
+  if (!arena || !layout) return StrView{};
+  DisplayRowRange range = LineModel_NormalizeDisplayRowRange(layout, anchor, focus);
+  if (range.Start == range.End) return StrView{"", 0};
+
+  StrBuf out = StrBuf_Make(arena, (u32)(range.End - range.Start) * 4u + 1u);
+  AccumulateDisplayRow(layout, range, &out, nullptr);
+  return StrBuf_View(&out);
+}
+
+u64 LineModel_HashDisplayRow(const DisplayRowLayout* layout, u16 anchor, u16 focus) {
+  if (!layout) return 0;
+  DisplayRowRange range = LineModel_NormalizeDisplayRowRange(layout, anchor, focus);
+  u64 hash = 1469598103934665603ull;
+  AccumulateDisplayRow(layout, range, nullptr, &hash);
+  return hash;
+}
+
+namespace {
+
+u64 HashDisplayValue(u64 hash, u64 value) {
+  for (u32 i = 0; i < 8; i++) {
+    hash ^= (u8)(value >> (i * 8));
+    hash *= 1099511628211ull;
+  }
+  return hash;
+}
+
+u64 DisplayRowPrefixHash(const SpanLine* line, u16 columns, u16 limit) {
+  DisplayRowLayout layout = LineModel_LayoutDisplayRow(line, columns);
+  u64 hash = 1469598103934665603ull;
+  DisplayRowIterator iterator = {};
+  DisplayRowRun run;
+  while (LineModel_NextDisplayRowRun(&layout, &iterator, &run)) {
+    if (run.Column >= limit) break;
+    u16 width = 0;
+    StrView text = PrefixWithinCells(run.Text, (u16)(limit - run.Column), &width);
+    if (text.Length == 0) continue;
+    hash = HashDisplayValue(hash, run.Column);
+    hash = HashDisplayValue(hash, width);
+    for (u32 i = 0; i < text.Length; i++) {
+      hash ^= (u8)text.Data[i];
+      hash *= 1099511628211ull;
+    }
+  }
+  return hash;
+}
+
+struct AssistantPrefixFingerprint {
+  u32 RowCount;
+  u16 LastEnd;
+  u64 FixedRows;
+  u64 LastRow;
+};
+
+AssistantPrefixFingerprint CaptureAssistantPrefix(const LineModel* m) {
+  AssistantPrefixFingerprint result = {};
+  result.FixedRows = 1469598103934665603ull;
+  if (m->Lines.Count <= m->AssistantStart) return result;
+  result.RowCount = m->Lines.Count - m->AssistantStart;
+  for (u32 i = 0; i + 1 < result.RowCount; i++) {
+    const SpanLine* line = &m->Lines.Data[m->AssistantStart + i];
+    DisplayRowLayout layout = LineModel_LayoutDisplayRow(line, m->Width);
+    result.FixedRows = HashDisplayValue(result.FixedRows, layout.ContentEnd);
+    result.FixedRows =
+        HashDisplayValue(result.FixedRows,
+                         DisplayRowPrefixHash(line, m->Width, layout.ContentEnd));
+  }
+  const SpanLine* last = &m->Lines.Data[m->Lines.Count - 1u];
+  DisplayRowLayout layout = LineModel_LayoutDisplayRow(last, m->Width);
+  result.LastEnd = layout.ContentEnd;
+  result.LastRow = DisplayRowPrefixHash(last, m->Width, result.LastEnd);
+  return result;
+}
+
+bool AssistantPrefixIsStable(const LineModel* m,
+                             const AssistantPrefixFingerprint& previous) {
+  if (previous.RowCount == 0) return true;
+  if (m->Lines.Count < m->AssistantStart + previous.RowCount) return false;
+  u64 fixedRows = 1469598103934665603ull;
+  for (u32 i = 0; i + 1 < previous.RowCount; i++) {
+    const SpanLine* line = &m->Lines.Data[m->AssistantStart + i];
+    DisplayRowLayout layout = LineModel_LayoutDisplayRow(line, m->Width);
+    fixedRows = HashDisplayValue(fixedRows, layout.ContentEnd);
+    fixedRows =
+        HashDisplayValue(fixedRows,
+                         DisplayRowPrefixHash(line, m->Width, layout.ContentEnd));
+  }
+  if (fixedRows != previous.FixedRows) return false;
+  const SpanLine* last = &m->Lines.Data[m->AssistantStart + previous.RowCount - 1u];
+  DisplayRowLayout layout = LineModel_LayoutDisplayRow(last, m->Width);
+  return layout.ContentEnd >= previous.LastEnd &&
+         DisplayRowPrefixHash(last, m->Width, previous.LastEnd) == previous.LastRow;
+}
+
+}  // namespace
 
 bool LineModel_FindEntryRows(const LineModel* m, u64 entryId, u32* firstRow, u32* rowCount) {
   if (entryId == 0) return false;
@@ -524,6 +833,7 @@ void LineModel_SetWidth(LineModel* m, u16 width) {
   if (width == m->Width) return;
   m->Width = width;
   TrimToCap(m);
+  AdvanceDisplayRevision(m);
 }
 
 bool LineModel_ToggleEntry(LineModel* m, u64 entryId) {
@@ -532,6 +842,7 @@ bool LineModel_ToggleEntry(LineModel* m, u64 entryId) {
     if (entry->Id != entryId) continue;
     entry->Collapsed = !entry->Collapsed;
     RebuildAll(m, true);
+    AdvanceDisplayRevision(m);
     return true;
   }
   return false;
@@ -556,7 +867,10 @@ bool LineModel_ToggleAllTools(LineModel* m) {
     entry->Collapsed = collapsed;
     changed = true;
   }
-  if (changed) RebuildAll(m, true);
+  if (changed) {
+    RebuildAll(m, true);
+    AdvanceDisplayRevision(m);
+  }
   return changed;
 }
 
@@ -569,23 +883,34 @@ void LineModel_BeginAssistant(LineModel* m) {
   entry.Text.Content = StrBuf_Make(m->Mem, 64);
   Array_Push(&m->Entries, entry);
   m->HasAssistant = true;
-  RebuildAll(m, true);
+  m->AssistantStart = m->Lines.Count;
+  m->AssistantRowOffset = 0;
+  m->AssistantRowsMark = m->RowsMem.Used;
 }
 
 void LineModel_AppendAssistant(LineModel* m, StrView delta) {
   FFI(!m->HasAssistant || m->Entries.Count == 0);
+  if (delta.Length == 0) return;
+  u32 previousAssistantStart = m->AssistantStart;
+  u32 previousAssistantRowOffset = m->AssistantRowOffset;
+  AssistantPrefixFingerprint previous = CaptureAssistantPrefix(m);
   Entry* entry = &m->Entries.Data[m->Entries.Count - 1];
   StrBuf_Append(&entry->Text.Content, delta);
   ArenaRestore(&m->RowsMem, m->AssistantRowsMark);
   m->Lines.Count = m->AssistantStart;
   BuildEntryRows(m, m->Entries.Count - 1, m->Entries.Count);
   CropDisplayToCap(m);
+  if (m->AssistantStart != previousAssistantStart ||
+      m->AssistantRowOffset != previousAssistantRowOffset ||
+      !AssistantPrefixIsStable(m, previous))
+    AdvanceDisplayRevision(m);
 }
 
 void LineModel_EndAssistant(LineModel* m) {
   FFI(!m->HasAssistant);
   m->HasAssistant = false;
-  TrimToCap(m);
+  m->AssistantRowOffset = 0;
+  if (TrimToCap(m)) AdvanceDisplayRevision(m);
 }
 
 void LineModel_AddNotice(LineModel* m, EntryKind kind, StrView text) {
@@ -599,6 +924,7 @@ void LineModel_AddNotice(LineModel* m, EntryKind kind, StrView text) {
   StrBuf_Append(&entry.Text.Content, text);
   Array_Push(&m->Entries, entry);
   TrimToCap(m);
+  AdvanceDisplayRevision(m);
 }
 
 void LineModel_AddUser(LineModel* m, StrView text, u64 timestampMs) {
@@ -612,6 +938,7 @@ void LineModel_AddUser(LineModel* m, StrView text, u64 timestampMs) {
   entry.Text.Timestamp = FormatTimestamp(m->Mem, timestampMs);
   Array_Push(&m->Entries, entry);
   TrimToCap(m);
+  AdvanceDisplayRevision(m);
 }
 
 void LineModel_AddTool(LineModel* m, StrView toolId, StrView name, StrView argsJson) {
@@ -626,6 +953,7 @@ void LineModel_AddTool(LineModel* m, StrView toolId, StrView name, StrView argsJ
   ToolView_Init(m->Mem, &entry.Tool.View, name, argsJson);
   Array_Push(&m->Entries, entry);
   TrimToCap(m);
+  AdvanceDisplayRevision(m);
 }
 
 bool LineModel_FinishTool(LineModel* m, StrView toolId, StrView result, StrView preview, bool isError) {
@@ -639,6 +967,7 @@ bool LineModel_FinishTool(LineModel* m, StrView toolId, StrView result, StrView 
     StrBuf_Append(&entry->Tool.Preview, preview);
     ToolView_Finish(&entry->Tool.View, result, isError);
     RebuildAll(m, true);
+    AdvanceDisplayRevision(m);
     return true;
   }
   return false;

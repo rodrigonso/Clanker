@@ -15,6 +15,7 @@
 // events through Tui_AgentEvent / drains user input via Tui_WaitForSubmit.
 
 enum class TuiState : u8 { Idle, Thinking, Streaming, Tool };
+enum class TuiDragDomain : u8 { None, Transcript, Composer };
 
 enum class TuiDisplayEventKind : u8 {
   Text,
@@ -94,7 +95,32 @@ struct Tui {
   u64 PressedEntryId;
   u16 MouseX;
   u16 MouseY;
+  u16 MouseDownX;
+  u16 MouseDownY;
   bool HasMouse;
+  bool MouseDragMoved;
+  TuiDragDomain DragDomain;
+
+  // Selection state. Transcript points are absolute display-row/cell
+  // coordinates in the LineModel revision captured when the drag began.
+  u32 TranscriptAnchorRow;
+  u32 TranscriptFocusRow;
+  u16 TranscriptAnchorCell;
+  u16 TranscriptFocusCell;
+  u64 TranscriptSelectionRevision;
+  u64 TranscriptSelectionHash;
+  i32 SelectionEdgeDirection;
+  u64 NextSelectionScrollMs;
+
+  // Geometry from the last composed frame, used for composer mouse hit-testing.
+  u16 LastCols;
+  u16 LastInputTop;
+  u16 LastInputH;
+  u32 LastInputFirstRow;
+
+  // Clipboard text is queued under Lock, then encoded by the render/shutdown path.
+  StrBuf ClipboardRaw;
+  StrBuf ClipboardOsc;
 
   // Received assistant text paced across render frames.
   StreamReveal Reveal;
@@ -126,5 +152,9 @@ void Tui_AgentEvent(void* user, const AgentEvent& ev);
 // TUI lock; headless tests call it directly when no TUI threads are running.
 bool Tui_AdvanceStream(Tui* t, u64 nowMs);
 bool Tui_HasPendingDisplay(const Tui* t);
+
+// Narrow headless inspection helpers.
+void Tui_TestCompose(Tui* t, u16 cols, u16 rows, u64 nowMs = 0);
+bool Tui_TestDrainShutdown(Tui* t, ScreenWriter write, void* user);
 
 volatile i32* Tui_Abort(Tui* t);

@@ -105,7 +105,8 @@ its module tree; the orchestrator has no equivalent.
 |---|---|---|
 | Extensions (register tools / commands / shortcuts / flags / renderers / providers; UI hooks; MCP) | ❌ | |
 | Trust / project-trust · `settings.json` · `keybindings.json` | ❌ | |
-| Export HTML · import · share-as-gist · copy | ❌ | |
+| Selection / clipboard copy | ✅ | transcript and composer; `Ctrl+C` sends OSC 52 |
+| Export HTML · import · share-as-gist | ❌ | |
 | Orchestrator (multi-instance IPC: serve/spawn/list/stop/rpc) | ❌ | |
 | Telemetry / diagnostics | ❌ | |
 
