@@ -50,7 +50,7 @@ its module tree; the orchestrator has no equivalent.
 | Prompt caching (`cache_control`) | ❌ | not emitted |
 | Thinking / reasoning streaming | 🟡 | Anthropic thinking deltas parsed; no thinking-level control |
 | Cross-provider message normalization (`transform-messages`) | ❌ | n/a with a single provider |
-| Model registry · `--list-models` · pricing/cost · scoped models | ❌ | `Anthropic_Model` builds static defaults |
+| Model registry · `--list-models` · pricing/cost · scoped models | 🟡 | provider registry + live Anthropic `/v1/models` discovery; no pricing or list flag |
 
 ## Tools
 
@@ -95,8 +95,8 @@ its module tree; the orchestrator has no equivalent.
 | JSON output mode · RPC (JSONL) mode | ❌ | |
 | CLI flags | 🟡 | ~7 (`-m -p --login --logout --no-open --faux --help`) vs pi's ~45 |
 | TUI core: differential renderer, markdown, multi-line editor, status line, scroll, steering, abort, `NO_COLOR` | ✅ | |
-| TUI selectors/dialogs (model / session / theme / settings / login / oauth / extension / thinking / trust / diff / image / first-run) | ❌ | |
-| Slash commands | ❌ | 0 vs ~25 (`/model`, `/compact`, `/session`, `/tree`, `/fork`, `/export`, `/login`, …) |
+| TUI selectors/dialogs (model / session / theme / settings / login / oauth / extension / thinking / trust / diff / image / first-run) | 🟡 | generic list/text modals power login and model selection |
+| Slash commands | 🟡 | `/login`, `/model`, `/clear`, `/exit` (`/quit` alias) |
 | Themes · configurable keybindings | ❌ | |
 
 ## Platform features
@@ -104,7 +104,7 @@ its module tree; the orchestrator has no equivalent.
 | capability | status | notes |
 |---|---|---|
 | Extensions (register tools / commands / shortcuts / flags / renderers / providers; UI hooks; MCP) | ❌ | |
-| Trust / project-trust · `settings.json` · `keybindings.json` | ❌ | |
+| Trust / project-trust · `settings.json` · `keybindings.json` | 🟡 | atomic provider/model settings; no trust or keybindings |
 | Export HTML · import · share-as-gist · copy | ❌ | |
 | Orchestrator (multi-instance IPC: serve/spawn/list/stop/rpc) | ❌ | |
 | Telemetry / diagnostics | ❌ | |

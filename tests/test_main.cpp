@@ -18,7 +18,10 @@ int main() {
   TestInfra();
   TestCrypto();
   TestAuth();
+  TestCommand();
   TestLoopback();
+  TestProviderRegistry();
+  TestSettings();
   TestThread();
   TestKeys();
   TestScreen();

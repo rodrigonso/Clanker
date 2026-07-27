@@ -8,7 +8,6 @@
 // each provider's Stream, not here.
 struct OAuthConfig {
   StrView Id;
-  StrView Name;
   StrView ClientId;
   StrView AuthorizeUrl;
   StrView TokenUrl;
@@ -31,10 +30,9 @@ struct OAuthCode {
   StrView State;
 };
 
-// Parsed redirect URI ("http://host:port/path"). Host/Path are views into the
-// input string (stable for the config's lifetime).
+// Parsed redirect URI ("http://host:port/path"). Path is a view into the input
+// string (stable for the config's lifetime).
 struct OAuthRedirect {
-  StrView Host;
   u16 Port;
   StrView Path;  // e.g. "/callback"
 };
@@ -56,7 +54,9 @@ bool OAuth_WaitForCallback(Arena* arena, const OAuthConfig* cfg, StrView authUrl
 // Parse a token-endpoint JSON response into an OAuth credential (testable offline).
 bool OAuth_ParseTokenResponse(Arena* arena, StrView json, Credential* out);
 
-// Network calls (require clank_http). Fill `out` and return true, else write `err`.
+// Network calls (require clank_http). Fill `out` and return true, else write
+// `err`. Optional abort is polled by the HTTP transport.
 bool OAuth_ExchangeCode(Arena* arena, const OAuthConfig* cfg, StrView code, StrView state, StrView verifier,
-                        Credential* out, StrBuf* err);
-bool OAuth_Refresh(Arena* arena, const OAuthConfig* cfg, StrView refresh, Credential* out, StrBuf* err);
+                        Credential* out, StrBuf* err, volatile i32* abort = nullptr);
+bool OAuth_Refresh(Arena* arena, const OAuthConfig* cfg, StrView refresh, Credential* out,
+                   StrBuf* err, volatile i32* abort = nullptr);

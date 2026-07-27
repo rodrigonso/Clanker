@@ -32,6 +32,7 @@ else()
 endif()
 add_library(clank_base STATIC
   src/base/arena.cpp
+  src/base/config_file.cpp
   src/base/sysinfo.cpp
   ${CLANK_THREAD_SRC})
 target_include_directories(clank_base PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -152,9 +153,17 @@ add_library(clank_tools STATIC
   src/tools/bash.cpp)
 target_link_libraries(clank_tools PUBLIC clank_json clank_agent)
 
+# ---- app support (settings, provider registry, interactive commands) ------
+add_library(clank_app STATIC
+  src/app/command.cpp
+  src/app/plain_select.cpp
+  src/app/provider_registry.cpp
+  src/app/settings.cpp)
+target_link_libraries(clank_app PUBLIC clank_anthropic clank_auth clank_term)
+
 # ---- executables ---------------------------------------------------------
 add_executable(clank src/app/main.cpp)
-target_link_libraries(clank PRIVATE clank_anthropic clank_tools clank_agent clank_auth clank_term)
+target_link_libraries(clank PRIVATE clank_app clank_anthropic clank_tools clank_agent clank_auth clank_term)
 
 add_executable(clank_http_smoke src/app/http_smoke.cpp)
 target_link_libraries(clank_http_smoke PRIVATE clank_http)
@@ -172,7 +181,10 @@ add_executable(clank_tests
   tests/test_infra.cpp
   tests/test_crypto.cpp
   tests/test_auth.cpp
+  tests/test_command.cpp
   tests/test_loopback.cpp
+  tests/test_provider_registry.cpp
+  tests/test_settings.cpp
   tests/test_thread.cpp
   tests/test_keys.cpp
   tests/test_screen.cpp
@@ -182,5 +194,5 @@ add_executable(clank_tests
   tests/test_linemodel.cpp
   tests/test_lineedit.cpp
   tests/test_tui.cpp)
-target_link_libraries(clank_tests PRIVATE clank_proto clank_agent clank_tools clank_crypto clank_auth clank_loopback clank_term)
+target_link_libraries(clank_tests PRIVATE clank_app clank_proto clank_agent clank_tools clank_crypto clank_auth clank_loopback clank_term)
 add_test(NAME unit COMMAND clank_tests)

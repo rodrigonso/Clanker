@@ -35,6 +35,21 @@ void DrainDisplay(Tui* t, u64 startMs = 1000) {
   CHECK(!Tui_HasPendingDisplay(t));
 }
 
+struct BlockingSelect {
+  Tui* Controller;
+  const StrView* Options;
+  u32 OptionCount;
+  u32 Selected;
+  bool Confirmed;
+};
+
+void RunBlockingSelect(void* user) {
+  BlockingSelect* select = (BlockingSelect*)user;
+  select->Confirmed =
+      Tui_Select(select->Controller, SVL("Blocking"), select->Options, select->OptionCount,
+                 &select->Selected);
+}
+
 }  // namespace
 
 void TestTui() {
@@ -192,8 +207,9 @@ void TestTui() {
   for (u32 i = 0; i < 20; i++) Feed(&t, "\x1b[<65;1;1M");  // wheel down to the bottom
   CHECK(t.Follow);
 
-  // Submit routing: while a turn is running, a submitted line steers the agent;
-  // while idle, it becomes the next prompt (Tui_WaitForSubmit queue).
+  // Submit routing: commands always queue for the main thread, with a notice when
+  // queued behind an active turn. Ordinary text steers an active turn or waits
+  // for application preflight before an idle prompt is rendered.
   {
     Arena a2 = ArenaCreate();
     Model model = {};
@@ -210,16 +226,56 @@ void TestTui() {
     t2.AgentRunning = true;  // a turn is running
     Feed(&t2, "steer me\r");
     CHECK(ag.Steer.Count == 1);
-    CHECK(t2.QCount == 0);  // did not land in the idle prompt queue
+    CHECK(t2.QCount == 0);
     DrainDisplay(&t2);
     CHECK(!AnyRow(&a2, &t2, "you"));
     CHECK(AnyRow(&a2, &t2, "steer me"));
     CHECK(t2.Model.Entries.Data[t2.Model.Entries.Count - 1].Text.Timestamp.Length == 5);
 
+    u32 entriesAfterSteer = t2.Model.Entries.Count;
+    Feed(&t2, "  /model  \r");
+    CHECK(t2.QCount == 1);
+    CHECK(ag.Steer.Count == 1);
+    DrainDisplay(&t2);
+    CHECK(t2.Model.Entries.Count == entriesAfterSteer + 1);
+    CHECK(AnyRow(&a2, &t2, "Queued command:"));
+    CHECK(AnyRow(&a2, &t2, "/model"));
+
+    TuiSubmission submission = {};
+    CHECK(Tui_WaitForSubmit(&t2, &submission));
+    CHECK(submission.Kind == TuiSubmissionKind::Command);
+    CHECK(StrView_Eq(submission.Text, SVL("  /model  ")));
+
     t2.AgentRunning = false;  // between turns
     Feed(&t2, "next prompt\r");
     CHECK(t2.QCount == 1);
     CHECK(ag.Steer.Count == 1);  // unchanged
+    CHECK(Tui_WaitForSubmit(&t2, &submission));
+    CHECK(submission.Kind == TuiSubmissionKind::Prompt);
+    CHECK(StrView_Eq(submission.Text, SVL("next prompt")));
+    DrainDisplay(&t2);
+    CHECK(!AnyRow(&a2, &t2, "next prompt"));
+    CHECK(Tui_AcceptPrompt(&t2, submission.Text));
+    DrainDisplay(&t2);
+    CHECK(AnyRow(&a2, &t2, "next prompt"));
+    t2.AgentRunning = false;
+
+    u32 entriesAfterPrompt = t2.Model.Entries.Count;
+    Feed(&t2, "/unknown\r");
+    CHECK(t2.QCount == 1);
+    CHECK(Tui_WaitForSubmit(&t2, &submission));
+    CHECK(submission.Kind == TuiSubmissionKind::Command);
+    CHECK(StrView_Eq(submission.Text, SVL("/unknown")));
+    DrainDisplay(&t2);
+    CHECK(t2.Model.Entries.Count == entriesAfterPrompt);
+    CHECK(!AnyRow(&a2, &t2, "/unknown"));
+
+    for (u32 i = 0; i < 64; i++) Feed(&t2, "queued prompt\r");
+    CHECK(t2.QCount == 64);
+    Feed(&t2, "/exit\r");
+    CHECK(t2.QCount == 64);
+    DrainDisplay(&t2);
+    CHECK(AnyRow(&a2, &t2, "Submission queue is full"));
 
     Tui_Stop(&t2);
     ArenaRelease(&a2);
@@ -444,6 +500,200 @@ void TestTui() {
 
     Tui_Stop(&t6);
     ArenaRelease(&a6);
+  }
+
+  // Modal selectors route navigation/confirmation away from the composer and
+  // preserve a cancellable manual text-entry path.
+  {
+    Arena am = ArenaCreate();
+    TuiOpts om;
+    om.ModelName = SVL("old-model");
+    om.Color = false;
+    Tui tm;
+    Tui_InitModel(&tm, &am, om);
+
+    StrView options[] = {SVL("first"), SVL("second"), SVL("third")};
+    CHECK(Tui_BeginSelection(&tm, SVL("Choose"), options, 3));
+    CHECK(Tui_GetModalResult(&tm, nullptr, nullptr) == TuiModalResult::Pending);
+    Feed(&tm, "\x1b[B\x1b[B\r");
+    u32 selected = 0;
+    CHECK(Tui_GetModalResult(&tm, &selected, nullptr) == TuiModalResult::Confirmed);
+    CHECK(selected == 2);
+    CHECK(LineEdit_Empty(&tm.Edit));
+
+    CHECK(Tui_BeginSelection(&tm, SVL("Cancel"), options, 3, 1));
+    Feed(&tm, "\x1b");
+    CHECK(Tui_GetModalResult(&tm, nullptr, nullptr) == TuiModalResult::Cancelled);
+
+    CHECK(Tui_BeginTextEntry(&tm, SVL("Model"), SVL("Enter model ID")));
+    Feed(&tm, "claude-manual\r");
+    StrView entered = {};
+    CHECK(Tui_GetModalResult(&tm, nullptr, &entered) == TuiModalResult::Confirmed);
+    CHECK(StrView_Eq(entered, SVL("claude-manual")));
+
+    BlockingSelect blocking = {};
+    blocking.Controller = &tm;
+    blocking.Options = options;
+    blocking.OptionCount = 3;
+    Thread waiter = {};
+    CHECK(Thread_Start(&waiter, RunBlockingSelect, &blocking));
+    for (u32 i = 0; i < 100 &&
+                    Tui_GetModalResult(&tm, nullptr, nullptr) != TuiModalResult::Pending;
+         i++)
+      Sleep_Ms(1);
+    CHECK(Tui_GetModalResult(&tm, nullptr, nullptr) == TuiModalResult::Pending);
+    Feed(&tm, "\x1b[B\r");
+    Thread_Join(&waiter);
+    CHECK(blocking.Confirmed);
+    CHECK(blocking.Selected == 1);
+
+    Tui_Stop(&tm);
+    ArenaRelease(&am);
+  }
+
+  // Command notices/errors, model status, and operation cancellation are
+  // thread-safe state updates. Ctrl+C cancels an operation without exiting.
+  {
+    Arena ac = ArenaCreate();
+    TuiOpts oc;
+    oc.ModelName = SVL("before");
+    oc.Color = false;
+    Tui tc;
+    Tui_InitModel(&tc, &ac, oc);
+
+    Tui_CommandNotice(&tc, SVL("model discovery unavailable; using fallback"));
+    Tui_CommandError(&tc, SVL("settings write failed"));
+    DrainDisplay(&tc);
+    CHECK(AnyRow(&ac, &tc, "model discovery unavailable"));
+    CHECK(AnyRow(&ac, &tc, "settings write failed"));
+
+    Tui_SetModelName(&tc, SVL("after"));
+    CHECK(StrView_Eq(tc.ModelName, SVL("after")));
+
+    Tui_BeginOperation(&tc, SVL("login"));
+    Tui_SetOperationStatus(&tc, SVL("waiting for approval"));
+    CHECK(tc.OperationActive);
+    CHECK(StrView_Eq(tc.OperationLabel, SVL("login")));
+    CHECK(StrView_Eq(tc.OperationStatus, SVL("waiting for approval")));
+    CHECK(*Tui_OperationAbort(&tc) == 0);
+    Feed(&tc, "\x03");
+    CHECK(*Tui_OperationAbort(&tc) == 1);
+    CHECK(!tc.Quit);
+    CHECK(!tc.Stop);
+    CHECK(Tui_EndOperation(&tc));
+    CHECK(!tc.OperationActive);
+    Tui_BeginOperation(&tc, SVL("models"));
+    CHECK(*Tui_OperationAbort(&tc) == 0);
+    StrView stopOptions[] = {SVL("one"), SVL("two")};
+    CHECK(Tui_BeginSelection(&tc, SVL("Stop"), stopOptions, 2));
+    Feed(&tc, "\x04");
+    CHECK(*Tui_OperationAbort(&tc) == 1);
+    CHECK(tc.Quit);
+    CHECK(tc.Stop);
+    CHECK(Tui_GetModalResult(&tc, nullptr, nullptr) == TuiModalResult::Cancelled);
+    CHECK(Tui_EndOperation(&tc));
+    Tui_BeginOperation(&tc, SVL("must not restart"));
+    CHECK(!tc.OperationActive);
+    CHECK(*Tui_OperationAbort(&tc) == 1);
+    CHECK(!Tui_BeginSelection(&tc, SVL("Stopped"), stopOptions, 2));
+
+    Tui_Stop(&tc);
+    ArenaRelease(&ac);
+  }
+
+  // Session clear reclaims the resettable arena and returns all conversation/UI
+  // state to idle while preserving terminal context, agent binding, and model.
+  {
+    Arena ar = ArenaCreate();
+    TuiOpts orr;
+    orr.ModelName = SVL("kept-model");
+    orr.Color = false;
+    Tui resetTui;
+    Tui_InitModel(&resetTui, &ar, orr);
+    Agent ag = Agent_Make(&ar, Model{}, SVL("sys"));
+    Agent_InitQueues(&ag);
+    resetTui.Ag = &ag;
+    resetTui.Cwd = SVL("kept-cwd");
+    resetTui.Branch = SVL("kept-branch");
+
+    LineModel_AddNotice(&resetTui.Model, EntryKind::Info, SVL("old transcript"));
+    LineEdit_InsertText(&resetTui.Edit, SVL("draft"));
+    CHECK(LineEdit_Submit(&resetTui.Edit).Length == 5);
+    Feed(&resetTui, "/queued\r");
+    CHECK(resetTui.QCount == 1);
+    LineEdit_InsertText(&resetTui.Edit, SVL("second draft"));
+    Tui_CommandNotice(&resetTui, SVL("pending display"));
+    StreamReveal_Push(&resetTui.Reveal, SVL("pending reveal"));
+    resetTui.Use.Input = 11;
+    resetTui.Use.Output = 7;
+    resetTui.State = TuiState::Streaming;
+    resetTui.StateTool = SVL("old tool");
+    resetTui.TurnStartMs = 99;
+    resetTui.QueuedCount = 3;
+    resetTui.Top = 4;
+    resetTui.LastTop = 3;
+    resetTui.LastPaneH = 10;
+    resetTui.Follow = false;
+    resetTui.HoveredEntryId = 4;
+    resetTui.PressedEntryId = 4;
+    resetTui.HasMouse = true;
+    Tui_BeginOperation(&resetTui, SVL("old operation"));
+    StrView options[] = {SVL("one"), SVL("two")};
+    CHECK(Tui_BeginSelection(&resetTui, SVL("old modal"), options, 2));
+    usize usedBeforeClear = resetTui.SessionMem.Used;
+
+    resetTui.AgentRunning = true;
+    CHECK(!Tui_ClearSession(&resetTui));
+    CHECK(resetTui.Model.Entries.Count != 0);
+    resetTui.AgentRunning = false;
+
+    CHECK(Agent_ResetSession(&ag));
+    CHECK(Tui_ClearSession(&resetTui));
+    CHECK(resetTui.SessionMem.Base != nullptr);
+    CHECK(resetTui.SessionMem.Used > 0);
+    CHECK(resetTui.SessionMem.Used < usedBeforeClear);
+    CHECK(resetTui.Model.Entries.Count == 0);
+    CHECK(LineModel_Count(&resetTui.Model) == 0);
+    CHECK(LineEdit_Empty(&resetTui.Edit));
+    CHECK(resetTui.Edit.History.Count == 0);
+    CHECK(LineEdit_Empty(&resetTui.ModalEdit));
+    CHECK(resetTui.ModalEdit.History.Count == 0);
+    CHECK(resetTui.QCount == 1);
+    CHECK(!Tui_HasPendingDisplay(&resetTui));
+    CHECK(resetTui.DisplayHead == 0);
+    CHECK(resetTui.Use.Input == 0 && resetTui.Use.Output == 0);
+    CHECK(resetTui.State == TuiState::Idle);
+    CHECK(resetTui.StateTool.Length == 0);
+    CHECK(resetTui.TurnStartMs == 0);
+    CHECK(resetTui.QueuedCount == 0);
+    CHECK(resetTui.Follow);
+    CHECK(resetTui.Top == 0 && resetTui.LastTop == 0 && resetTui.LastPaneH == 0);
+    CHECK(resetTui.HoveredEntryId == 0 && resetTui.PressedEntryId == 0);
+    CHECK(!resetTui.HasMouse);
+    CHECK(!resetTui.OperationActive);
+    CHECK(resetTui.ModalKind == TuiModalKind::None);
+    CHECK(resetTui.ModalResult == TuiModalResult::None);
+    CHECK(StrView_Eq(resetTui.ModelName, SVL("kept-model")));
+    CHECK(StrView_Eq(resetTui.Cwd, SVL("kept-cwd")));
+    CHECK(StrView_Eq(resetTui.Branch, SVL("kept-branch")));
+    CHECK(resetTui.Ag == &ag);
+
+    TuiSubmission preserved = {};
+    CHECK(Tui_WaitForSubmit(&resetTui, &preserved));
+    CHECK(preserved.Kind == TuiSubmissionKind::Command);
+    CHECK(StrView_Eq(preserved.Text, SVL("/queued")));
+
+    LineEdit_InsertText(&resetTui.Edit, SVL("new prompt"));
+    CHECK(Tui_BeginSelection(&resetTui, SVL("new modal"), options, 2));
+    Feed(&resetTui, "\r");
+    CHECK(Tui_GetModalResult(&resetTui, nullptr, nullptr) == TuiModalResult::Confirmed);
+    Tui_EndOperation(&resetTui);
+    CHECK(Agent_Release(&ag));
+    Tui_Stop(&resetTui);
+    CHECK(!resetTui.SessionUp);
+    CHECK(!resetTui.SyncUp);
+    Tui_Stop(&resetTui);  // final cleanup is idempotent
+    ArenaRelease(&ar);
   }
 
   Tui_Stop(&t);

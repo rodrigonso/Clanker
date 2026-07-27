@@ -83,7 +83,8 @@ struct Agent {
   // each provider stream so expiring OAuth tokens refresh mid-session. Returns
   // false to fall back to the static Stream.ApiKey.
   void* AuthUser;
-  bool (*ResolveAuth)(void* user, Arena* arena, StrView provider, StrView* outToken);
+  bool (*ResolveAuth)(void* user, Arena* arena, StrView provider, volatile i32* abort,
+                      StrView* outToken);
 
   bool Streaming;
 };
@@ -95,6 +96,17 @@ void Agent_AddTool(Agent* a, Tool t);
 // Agent address before pushing while idle (the loop also inits lazily).
 void Agent_InitQueues(Agent* a);
 
+// Clear conversation-only state at an idle boundary while preserving the
+// provider, model, tools, hooks, retry policy, and stream configuration. Returns
+// false if a turn is active. Transcript allocations remain in Mem until the
+// host arena is released; this avoids invalidating preserved configuration that
+// currently shares that arena.
+bool Agent_ResetSession(Agent* a);
+
+// Final idle-only cleanup for Agent-owned synchronization. Returns false if a
+// turn is active. The host still owns Mem and all provider/model/tool storage.
+bool Agent_Release(Agent* a);
+
 // Thread-safe message producers (pi parity: steer / followUp / nextTurn). Text
 // must stay valid until the agent drains it. No-op until queues are initialized.
 void Agent_Steer(Agent* a, StrView text);     // inject before the next assistant response
@@ -103,7 +115,3 @@ void Agent_NextTurn(Agent* a, StrView text);  // prepend at the start of the nex
 
 // Add a user message and run the loop to completion.
 void Agent_Prompt(Agent* a, StrView userText);
-
-// Run the loop from the current transcript (last message must be user or
-// toolResult).
-void Agent_Continue(Agent* a);

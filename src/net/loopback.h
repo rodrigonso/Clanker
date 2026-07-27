@@ -19,11 +19,8 @@ struct LoopbackCapture {
 };
 
 // Bind 127.0.0.1:port and listen. port==0 picks an ephemeral port (read it back
-// with Loopback_Port). Returns false and writes `err` on failure.
+// from LoopbackServer::Port). Returns false and writes `err` on failure.
 bool Loopback_Open(LoopbackServer* s, u16 port, StrBuf* err);
-
-// The actual bound port (useful when opened with port==0).
-u16 Loopback_Port(const LoopbackServer* s);
 
 // Block until a request hits `path` carrying code+state (validating
 // state == expectedState), the user aborts (*abort becomes non-zero), or a

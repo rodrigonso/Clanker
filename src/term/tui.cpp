@@ -57,18 +57,30 @@ void PutScaled(char* buf, u32 cap, u32* len, u32 v) {
 }
 
 // ---- queue ----
-void QPush(Tui* t, StrView line) {
-  if (t->QCount >= 64) return;
-  t->Queue[t->QTail] = line;
+bool QPush(Tui* t, TuiSubmission submission) {
+  if (t->QCount >= 64) return false;
+  t->Queue[t->QTail] = submission;
   t->QTail = (t->QTail + 1) % 64;
   t->QCount++;
+  return true;
 }
-bool QPop(Tui* t, StrView* out) {
+bool QPop(Tui* t, TuiSubmission* out) {
   if (t->QCount == 0) return false;
   *out = t->Queue[t->QHead];
   t->QHead = (t->QHead + 1) % 64;
   t->QCount--;
   return true;
+}
+
+bool IsSlashCommand(StrView line) {
+  u32 i = 0;
+  while (i < line.Length) {
+    char c = line.Data[i];
+    if (c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != '\f' && c != '\v')
+      break;
+    i++;
+  }
+  return i < line.Length && line.Data[i] == '/';
 }
 
 void Wake(Tui* t) {
@@ -103,7 +115,7 @@ TuiDisplayEvent* QueueDisplayEvent(Tui* t, TuiDisplayEventKind kind) {
 }
 
 void SetDisplayPayload(Tui* t, TuiDisplayEvent* ev, StrView text) {
-  ev->Payload = StrBuf_Make(t->Mem, text.Length + 1);
+  ev->Payload = StrBuf_Make(&t->SessionMem, text.Length + 1);
   StrBuf_Append(&ev->Payload, text);
 }
 
@@ -238,7 +250,17 @@ void ComposeStatus(Tui* t, u16 statusY, u16 cols) {
   // Left: agent state.
   char left[256];
   u32 ll = 0;
-  if (t->State == TuiState::Idle) {
+  if (t->OperationActive) {
+    Put(left, sizeof(left), &ll, kSpinner[t->Spinner % 10]);
+    Put(left, sizeof(left), &ll, " ");
+    for (u32 i = 0; i < t->OperationLabel.Length && ll < sizeof(left) - 1; i++)
+      left[ll++] = t->OperationLabel.Data[i];
+    if (t->OperationStatus.Length) {
+      Put(left, sizeof(left), &ll, ": ");
+      for (u32 i = 0; i < t->OperationStatus.Length && ll < sizeof(left) - 1; i++)
+        left[ll++] = t->OperationStatus.Data[i];
+    }
+  } else if (t->State == TuiState::Idle) {
     Put(left, sizeof(left), &ll, "ready");
   } else {
     Put(left, sizeof(left), &ll, kSpinner[t->Spinner % 10]);
@@ -386,6 +408,14 @@ void ApplyDisplayEvent(Tui* t, const TuiDisplayEvent& ev) {
       if (t->Model.HasAssistant) LineModel_EndAssistant(&t->Model);
       LineModel_AddUser(&t->Model, DisplayPayload(ev), ev.Timestamp);
       break;
+    case TuiDisplayEventKind::Notice:
+      if (t->Model.HasAssistant) LineModel_EndAssistant(&t->Model);
+      LineModel_AddNotice(&t->Model, EntryKind::Info, DisplayPayload(ev));
+      break;
+    case TuiDisplayEventKind::Error:
+      if (t->Model.HasAssistant) LineModel_EndAssistant(&t->Model);
+      LineModel_AddNotice(&t->Model, EntryKind::Error, DisplayPayload(ev));
+      break;
     case TuiDisplayEventKind::AgentEnd:
       t->State = t->AgentRunning ? TuiState::Thinking : TuiState::Idle;
       break;
@@ -431,6 +461,89 @@ bool PumpDisplay(Tui* t, u64 nowMs) {
   return changed;
 }
 
+void DrawPanelBorder(Tui* t, u16 x0, u16 y0, u16 x1, u16 y1, Style style) {
+  if (x1 <= x0 || y1 <= y0) return;
+  Screen_Fill(&t->Scr, x0, y0, x1, y1, style);
+  Screen_PutText(&t->Scr, x0, y0, SVL("\xe2\x95\xad"), style, (u16)(x0 + 1));
+  Screen_PutText(&t->Scr, x1, y0, SVL("\xe2\x95\xae"), style, (u16)(x1 + 1));
+  Screen_PutText(&t->Scr, x0, y1, SVL("\xe2\x95\xb0"), style, (u16)(x0 + 1));
+  Screen_PutText(&t->Scr, x1, y1, SVL("\xe2\x95\xaf"), style, (u16)(x1 + 1));
+  for (u16 x = (u16)(x0 + 1); x < x1; x++) {
+    Screen_PutText(&t->Scr, x, y0, SVL("\xe2\x94\x80"), style, (u16)(x + 1));
+    Screen_PutText(&t->Scr, x, y1, SVL("\xe2\x94\x80"), style, (u16)(x + 1));
+  }
+  for (u16 y = (u16)(y0 + 1); y < y1; y++) {
+    Screen_PutText(&t->Scr, x0, y, SVL("\xe2\x94\x82"), style, (u16)(x0 + 1));
+    Screen_PutText(&t->Scr, x1, y, SVL("\xe2\x94\x82"), style, (u16)(x1 + 1));
+  }
+}
+
+void ComposeModal(Tui* t, u16 cols, u16 rows) {
+  if (t->ModalKind == TuiModalKind::None || t->ModalResult != TuiModalResult::Pending)
+    return;
+
+  u16 panelW = cols > 76 ? 72 : (u16)(cols - 4);
+  if (panelW < 10) panelW = (u16)(cols - 2);
+  u16 desiredH =
+      t->ModalKind == TuiModalKind::Select
+          ? (u16)((t->ModalOptionCount < 12 ? t->ModalOptionCount : 12) + 4)
+          : 7;
+  u16 panelH = desiredH < (u16)(rows - 2) ? desiredH : (u16)(rows - 2);
+  if (panelH < 5) panelH = 5;
+  u16 x0 = (u16)((cols - panelW) / 2);
+  u16 y0 = (u16)((rows - panelH) / 2);
+  u16 x1 = (u16)(x0 + panelW - 1);
+  u16 y1 = (u16)(y0 + panelH - 1);
+  Style panel = St(g_color ? 252 : COL_DEFAULT, ATTR_NONE);
+  if (g_color) panel.Bg = 235;
+  DrawPanelBorder(t, x0, y0, x1, y1, panel);
+
+  Style title = panel;
+  title.Attr |= ATTR_BOLD;
+  Screen_PutText(&t->Scr, (u16)(x0 + 2), (u16)(y0 + 1), t->ModalTitle, title,
+                 (u16)(x1 - 1));
+
+  if (t->ModalKind == TuiModalKind::Select) {
+    u32 visible = panelH > 3 ? panelH - 3 : 1;
+    if (t->ModalSelected < t->ModalFirst) t->ModalFirst = t->ModalSelected;
+    if (t->ModalSelected >= t->ModalFirst + visible)
+      t->ModalFirst = t->ModalSelected - visible + 1;
+    u32 maxFirst = t->ModalOptionCount > visible ? t->ModalOptionCount - visible : 0;
+    if (t->ModalFirst > maxFirst) t->ModalFirst = maxFirst;
+
+    for (u32 row = 0; row < visible; row++) {
+      u32 index = t->ModalFirst + row;
+      if (index >= t->ModalOptionCount) break;
+      u16 y = (u16)(y0 + 2 + row);
+      bool selected = index == t->ModalSelected;
+      Style option = panel;
+      if (selected) option.Attr |= ATTR_REVERSE;
+      if (selected) Screen_Fill(&t->Scr, (u16)(x0 + 1), y, (u16)(x1 - 1), y, option);
+      Screen_PutText(&t->Scr, (u16)(x0 + 2), y, selected ? SVL("\xe2\x80\xba ") : SVL("  "),
+                     option, (u16)(x1 - 1));
+      Screen_PutText(&t->Scr, (u16)(x0 + 4), y, t->ModalOptions[index], option,
+                     (u16)(x1 - 1));
+    }
+    Screen_SetCursor(&t->Scr, false, 0, 0);
+    return;
+  }
+
+  Style prompt = panel;
+  prompt.Attr |= ATTR_DIM;
+  Screen_PutText(&t->Scr, (u16)(x0 + 2), (u16)(y0 + 2), t->ModalPrompt, prompt,
+                 (u16)(x1 - 1));
+  u16 editY = (u16)(y1 - 1);
+  Style edit = panel;
+  edit.Attr |= ATTR_REVERSE;
+  Screen_Fill(&t->Scr, (u16)(x0 + 2), editY, (u16)(x1 - 2), editY, edit);
+  StrView text = LineEdit_Text(&t->ModalEdit);
+  Screen_PutText(&t->Scr, (u16)(x0 + 3), editY, text, edit, (u16)(x1 - 2));
+  u32 cursorW = TextWidth(StrView{text.Data, LineEdit_Cursor(&t->ModalEdit)});
+  u16 cursorX = (u16)(x0 + 3 + cursorW);
+  if (cursorX >= x1 - 2) cursorX = (u16)(x1 - 3);
+  Screen_SetCursor(&t->Scr, true, cursorX, editY);
+}
+
 void Compose(Tui* t) {
   u16 cols = 0, rows = 0;
   Term_Size(&t->Trm, &cols, &rows);
@@ -446,7 +559,7 @@ void Compose(Tui* t) {
   }
 
   PumpDisplay(t, MonotonicMillis());
-  if (t->State != TuiState::Idle) t->Spinner++;
+  if (t->State != TuiState::Idle || t->OperationActive) t->Spinner++;
 
   // Input box layout: left/right border column + one padding column each side.
   u16 textW = (u16)(cols > 4 ? cols - 4 : 1);
@@ -518,20 +631,51 @@ void Compose(Tui* t) {
 
   // Sticky context line above the prompt.
   ComposeCwd(t, cwdY, cols);
+  ComposeModal(t, cols, rows);
 }
 
 // ---- key handling (lock held) ----
-void DoSubmit(Tui* t) {
-  StrView line = LineEdit_Submit(&t->Edit);
-  if (line.Length == 0) return;
+void QueueUserDisplayLocked(Tui* t, StrView line) {
   TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::User);
   SetDisplayPayload(t, display, line);
   display->Timestamp = NowMillis();
   t->Follow = true;
+}
+
+void DoSubmit(Tui* t) {
+  StrView line = LineEdit_Submit(&t->Edit);
+  if (line.Length == 0) return;
+  if (IsSlashCommand(line)) {
+    if (!QPush(t, TuiSubmission{TuiSubmissionKind::Command, line})) {
+      TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::Error);
+      SetDisplayPayload(t, display, SVL("Submission queue is full; command was not queued."));
+      t->Follow = true;
+      Wake(t);
+      return;
+    }
+    if (t->AgentRunning) {
+      TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::Notice);
+      display->Payload = StrBuf_Make(&t->SessionMem, line.Length + 24);
+      StrBuf_AppendCStr(&display->Payload, "Queued command: ");
+      StrBuf_Append(&display->Payload, line);
+      t->Follow = true;
+      Wake(t);
+    }
+    Cond_Signal(&t->SubmitCv);
+    return;
+  }
+
   if (t->AgentRunning && t->Ag) {
+    QueueUserDisplayLocked(t, line);
     Agent_Steer(t->Ag, line);  // mid-turn submit -> steer the running agent
   } else {
-    QPush(t, line);  // idle -> next prompt for Tui_WaitForSubmit
+    if (!QPush(t, TuiSubmission{TuiSubmissionKind::Prompt, line})) {
+      TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::Error);
+      SetDisplayPayload(t, display, SVL("Submission queue is full; prompt was not queued."));
+      t->Follow = true;
+      Wake(t);
+      return;
+    }
     Cond_Signal(&t->SubmitCv);
   }
 }
@@ -562,7 +706,90 @@ void ScrollBy(Tui* t, i32 delta) {
   t->Follow = (t->Top >= maxTop);
 }
 
+void FinishModal(Tui* t, TuiModalResult result) {
+  t->ModalResult = result;
+  Cond_Broadcast(&t->ModalCv);
+}
+
+void RequestStopLocked(Tui* t) {
+  t->AbortFlag = 1;
+  t->OperationAbortFlag = 1;
+  t->Quit = true;
+  t->Stop = true;
+  if (t->ModalResult == TuiModalResult::Pending)
+    t->ModalResult = TuiModalResult::Cancelled;
+  Cond_Signal(&t->SubmitCv);
+  Cond_Broadcast(&t->ModalCv);
+  Wake(t);
+}
+
+void HandleSelectKey(Tui* t, const Key& k) {
+  switch (k.Kind) {
+    case KeyKind::Up:
+      if (t->ModalSelected > 0) t->ModalSelected--;
+      break;
+    case KeyKind::Down:
+      if (t->ModalSelected + 1 < t->ModalOptionCount) t->ModalSelected++;
+      break;
+    case KeyKind::Home: t->ModalSelected = 0; break;
+    case KeyKind::End:
+      if (t->ModalOptionCount) t->ModalSelected = t->ModalOptionCount - 1;
+      break;
+    case KeyKind::Enter: FinishModal(t, TuiModalResult::Confirmed); break;
+    case KeyKind::Escape: FinishModal(t, TuiModalResult::Cancelled); break;
+    case KeyKind::CtrlC:
+      if (t->OperationActive) t->OperationAbortFlag = 1;
+      FinishModal(t, TuiModalResult::Cancelled);
+      break;
+    default: break;
+  }
+}
+
+void HandleTextKey(Tui* t, const Key& k) {
+  switch (k.Kind) {
+    case KeyKind::Char:
+      if (!k.Alt && k.Codepoint >= 0x20) LineEdit_InsertChar(&t->ModalEdit, k.Codepoint);
+      break;
+    case KeyKind::Enter:
+      if (!LineEdit_Empty(&t->ModalEdit)) {
+        t->ModalTextResult = StrView_Dup(&t->SessionMem, LineEdit_Text(&t->ModalEdit));
+        FinishModal(t, TuiModalResult::Confirmed);
+      }
+      break;
+    case KeyKind::Backspace: LineEdit_Backspace(&t->ModalEdit); break;
+    case KeyKind::Delete: LineEdit_Delete(&t->ModalEdit); break;
+    case KeyKind::Left: LineEdit_Left(&t->ModalEdit); break;
+    case KeyKind::Right: LineEdit_Right(&t->ModalEdit); break;
+    case KeyKind::Home: LineEdit_Home(&t->ModalEdit); break;
+    case KeyKind::End: LineEdit_End(&t->ModalEdit); break;
+    case KeyKind::WordLeft: LineEdit_WordLeft(&t->ModalEdit); break;
+    case KeyKind::WordRight: LineEdit_WordRight(&t->ModalEdit); break;
+    case KeyKind::CtrlW: LineEdit_DeleteWordBack(&t->ModalEdit); break;
+    case KeyKind::CtrlU: LineEdit_KillToStart(&t->ModalEdit); break;
+    case KeyKind::CtrlK: LineEdit_KillToEnd(&t->ModalEdit); break;
+    case KeyKind::Escape: FinishModal(t, TuiModalResult::Cancelled); break;
+    case KeyKind::CtrlC:
+      if (t->OperationActive) t->OperationAbortFlag = 1;
+      FinishModal(t, TuiModalResult::Cancelled);
+      break;
+    default: break;
+  }
+}
+
 void HandleKey(Tui* t, const Key& k) {
+  if (k.Kind == KeyKind::CtrlD) {
+    RequestStopLocked(t);
+    return;
+  }
+
+  if (t->ModalResult == TuiModalResult::Pending) {
+    if (t->ModalKind == TuiModalKind::Select)
+      HandleSelectKey(t, k);
+    else if (t->ModalKind == TuiModalKind::Text)
+      HandleTextKey(t, k);
+    return;
+  }
+
   switch (k.Kind) {
     case KeyKind::Char:
       if (!k.Alt && k.Codepoint >= 0x20) LineEdit_InsertChar(&t->Edit, k.Codepoint);
@@ -615,21 +842,14 @@ void HandleKey(Tui* t, const Key& k) {
       break;
     }
     case KeyKind::CtrlC:
-      if (t->AgentRunning)
+      if (t->OperationActive)
+        t->OperationAbortFlag = 1;
+      else if (t->AgentRunning)
         t->AbortFlag = 1;
       else if (!LineEdit_Empty(&t->Edit))
         LineEdit_Clear(&t->Edit);
-      else {
-        t->Quit = true;
-        t->Stop = true;
-        Cond_Signal(&t->SubmitCv);
-      }
-      break;
-    case KeyKind::CtrlD:
-      t->AbortFlag = 1;
-      t->Quit = true;
-      t->Stop = true;
-      Cond_Signal(&t->SubmitCv);
+      else
+        RequestStopLocked(t);
       break;
     default: break;
   }
@@ -640,21 +860,28 @@ void InputLoop(void* arg) {
   Tui* t = (Tui*)arg;
   char buf[1024];
   for (;;) {
-    u32 n = Term_ReadInput(&t->Trm, buf, sizeof(buf));
-    if (n == 0) {
-      Mutex_Lock(&t->Lock);
-      t->Quit = true;
-      t->Stop = true;
-      Cond_Signal(&t->SubmitCv);
-      Wake(t);
-      Mutex_Unlock(&t->Lock);
-      break;
-    }
-    Tui_FeedInput(t, buf, n);
     Mutex_Lock(&t->Lock);
     bool stop = t->Stop;
     Mutex_Unlock(&t->Lock);
     if (stop) break;
+    if (!Term_WaitInput(&t->Trm, 50)) continue;
+
+    u32 n = Term_ReadInput(&t->Trm, buf, sizeof(buf));
+    if (n == 0) {
+      Mutex_Lock(&t->Lock);
+      if (t->Stop) {
+        Mutex_Unlock(&t->Lock);
+        break;
+      }
+      RequestStopLocked(t);
+      Mutex_Unlock(&t->Lock);
+      break;
+    }
+    Mutex_Lock(&t->Lock);
+    stop = t->Stop;
+    Mutex_Unlock(&t->Lock);
+    if (stop) break;
+    Tui_FeedInput(t, buf, n);
   }
 }
 
@@ -675,8 +902,9 @@ void RenderLoop(void* arg) {
     u64 lastFrame = MonotonicMillis();
 
     Mutex_Lock(&t->Lock);
-    u32 interval =
-        Tui_HasPendingDisplay(t) ? kMinFrameMs : ((t->State != TuiState::Idle) ? 60 : 200);
+    u32 interval = Tui_HasPendingDisplay(t)
+                       ? kMinFrameMs
+                       : ((t->State != TuiState::Idle || t->OperationActive) ? 60 : 200);
     if (!t->Dirty && !t->Stop) Cond_WaitTimeout(&t->RenderCv, &t->Lock, interval);
     t->Dirty = false;
     while (!t->Stop) {
@@ -700,13 +928,20 @@ bool Tui_Start(Tui* t, Arena* mem, TuiOpts opts) {
   if (!Term_IsInteractive()) return false;
   Tui_InitModel(t, mem, opts);
   if (!Term_Enter(&t->Trm)) {
-    LineModel_Release(&t->Model);
+    Tui_Stop(t);
     return false;
   }
 
   u16 cols = 80, rows = 24;
   Term_Size(&t->Trm, &cols, &rows);
-  Screen_Init(&t->Scr, mem, [](void* u, const char* d, u32 n) { (void)u; Term_Write(d, n); }, nullptr);
+  t->ScreenMem = ArenaCreate();
+  t->ScreenUp = true;
+  Screen_Init(&t->Scr, &t->ScreenMem,
+              [](void* u, const char* d, u32 n) {
+                (void)u;
+                Term_Write(d, n);
+              },
+              nullptr);
   Screen_Resize(&t->Scr, cols, rows);
   LineModel_SetWidth(&t->Model, cols);
 
@@ -725,54 +960,310 @@ void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts) {
   t->Mem = mem;
   g_color = opts.Color;
   LineModel_SetColorEnabled(opts.Color);
-  t->ModelName = opts.ModelName;
-  LineModel_Init(&t->Model, mem, 80, 5000);
-  LineEdit_Init(&t->Edit, mem);
+  t->ModelName = StrView_Dup(mem, opts.ModelName);
+  t->SessionMem = ArenaCreate();
+  LineModel_Init(&t->Model, &t->SessionMem, 80, 5000);
+  LineEdit_Init(&t->Edit, &t->SessionMem);
+  LineEdit_Init(&t->ModalEdit, &t->SessionMem);
   KeyDecoder_Init(&t->Dec);
-  StreamReveal_Init(&t->Reveal, mem);
-  t->DisplayEvents = Array_Make<TuiDisplayEvent>(mem, 16);
+  StreamReveal_Init(&t->Reveal, &t->SessionMem);
+  t->DisplayEvents = Array_Make<TuiDisplayEvent>(&t->SessionMem, 16);
   Mutex_Init(&t->Lock);
   Cond_Init(&t->SubmitCv);
+  Cond_Init(&t->ModalCv);
   Cond_Init(&t->RenderCv);
+  t->SyncUp = true;
+  t->SessionUp = true;
   t->Follow = true;
   t->State = TuiState::Idle;
 }
 
-void Tui_Stop(Tui* t) {
-  if (t->ThreadsUp) {
-    Mutex_Lock(&t->Lock);
-    t->Stop = true;
-    Cond_Signal(&t->SubmitCv);
-    Cond_Signal(&t->RenderCv);
+bool Tui_ClearSession(Tui* t) {
+  Mutex_Lock(&t->Lock);
+  if (t->AgentRunning || (t->Ag && t->Ag->Streaming) || t->Stop || t->Quit) {
     Mutex_Unlock(&t->Lock);
+    return false;
+  }
+
+  bool cancelModal = t->ModalResult == TuiModalResult::Pending;
+  u16 width = t->Model.Width;
+  u32 cap = t->Model.Cap;
+  Arena nextSession = ArenaCreate();
+  TuiSubmission preserved[64] = {};
+  u32 preservedCount = t->QCount;
+  for (u32 i = 0; i < preservedCount; i++) {
+    const TuiSubmission& queued = t->Queue[(t->QHead + i) % 64];
+    preserved[i].Kind = queued.Kind;
+    preserved[i].Text = StrView_Dup(&nextSession, queued.Text);
+  }
+
+  LineModel_Release(&t->Model);
+  ArenaRelease(&t->SessionMem);
+  t->SessionMem = nextSession;
+  LineModel_Init(&t->Model, &t->SessionMem, width, cap);
+  LineEdit_Init(&t->Edit, &t->SessionMem);
+  LineEdit_Init(&t->ModalEdit, &t->SessionMem);
+  KeyDecoder_Init(&t->Dec);
+  StreamReveal_Init(&t->Reveal, &t->SessionMem);
+  t->DisplayEvents = Array_Make<TuiDisplayEvent>(&t->SessionMem, 16);
+  t->DisplayHead = 0;
+
+  memset(t->Queue, 0, sizeof(t->Queue));
+  for (u32 i = 0; i < preservedCount; i++) t->Queue[i] = preserved[i];
+  t->QHead = 0;
+  t->QTail = preservedCount % 64;
+  t->QCount = preservedCount;
+  t->AgentRunning = false;
+  t->AbortFlag = 0;
+  t->State = TuiState::Idle;
+  t->StateTool = {};
+  t->TurnStartMs = 0;
+  t->Use = {};
+  t->Spinner = 0;
+  t->QueuedCount = 0;
+  t->OperationActive = false;
+  t->OperationLabel = {};
+  t->OperationStatus = {};
+  t->OperationAbortFlag = 0;
+  t->ModalKind = TuiModalKind::None;
+  t->ModalResult = TuiModalResult::None;
+  t->ModalTitle = {};
+  t->ModalPrompt = {};
+  t->ModalOptions = nullptr;
+  t->ModalOptionCount = 0;
+  t->ModalSelected = 0;
+  t->ModalFirst = 0;
+  t->ModalTextResult = {};
+  t->Follow = true;
+  t->Top = 0;
+  t->LastTop = 0;
+  t->LastPaneH = 0;
+  t->HoveredEntryId = 0;
+  t->PressedEntryId = 0;
+  t->MouseX = 0;
+  t->MouseY = 0;
+  t->HasMouse = false;
+
+  if (cancelModal) Cond_Broadcast(&t->ModalCv);
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+  return true;
+}
+
+void Tui_Stop(Tui* t) {
+  if (t->SyncUp) {
+    Mutex_Lock(&t->Lock);
+    RequestStopLocked(t);
+    Mutex_Unlock(&t->Lock);
+  }
+  if (t->ThreadsUp) {
+    Term_WakeInput(&t->Trm);
     Thread_Join(&t->RenderThread);
     Thread_Join(&t->InputThread);
     t->ThreadsUp = false;
     Term_Exit(&t->Trm);
   }
-  LineModel_Release(&t->Model);
+  if (t->ScreenUp) {
+    ArenaRelease(&t->ScreenMem);
+    t->ScreenUp = false;
+  }
+  if (t->SessionUp) {
+    LineModel_Release(&t->Model);
+    ArenaRelease(&t->SessionMem);
+    t->SessionUp = false;
+  }
+  if (t->SyncUp) {
+    Cond_Destroy(&t->RenderCv);
+    Cond_Destroy(&t->ModalCv);
+    Cond_Destroy(&t->SubmitCv);
+    Mutex_Destroy(&t->Lock);
+    t->SyncUp = false;
+  }
 }
 
-bool Tui_WaitForSubmit(Tui* t, StrView* out) {
+bool Tui_WaitForSubmit(Tui* t, TuiSubmission* out) {
   Mutex_Lock(&t->Lock);
   for (;;) {
-    if (QPop(t, out)) {
-      Mutex_Unlock(&t->Lock);
-      return true;
-    }
     if (t->Quit || t->Stop) {
       Mutex_Unlock(&t->Lock);
       return false;
+    }
+    if (QPop(t, out)) {
+      Mutex_Unlock(&t->Lock);
+      return true;
     }
     Cond_Wait(&t->SubmitCv, &t->Lock);
   }
 }
 
+bool Tui_AcceptPrompt(Tui* t, StrView text) {
+  Mutex_Lock(&t->Lock);
+  if (t->Stop || t->Quit) {
+    Mutex_Unlock(&t->Lock);
+    return false;
+  }
+  t->AgentRunning = true;
+  QueueUserDisplayLocked(t, text);
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+  return true;
+}
+
+void Tui_CommandNotice(Tui* t, StrView text) {
+  Mutex_Lock(&t->Lock);
+  TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::Notice);
+  SetDisplayPayload(t, display, text);
+  t->Follow = true;
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+}
+
+void Tui_CommandError(Tui* t, StrView text) {
+  Mutex_Lock(&t->Lock);
+  TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::Error);
+  SetDisplayPayload(t, display, text);
+  t->Follow = true;
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+}
+
+void Tui_SetModelName(Tui* t, StrView modelName) {
+  Mutex_Lock(&t->Lock);
+  t->ModelName = StrView_Dup(t->Mem, modelName);
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+}
+
+void Tui_BeginOperation(Tui* t, StrView label) {
+  Mutex_Lock(&t->Lock);
+  if (t->Stop || t->Quit) {
+    t->OperationActive = false;
+    t->OperationLabel = {};
+    t->OperationStatus = {};
+    t->OperationAbortFlag = 1;
+    Mutex_Unlock(&t->Lock);
+    return;
+  }
+  t->OperationActive = true;
+  t->OperationLabel = StrView_Dup(&t->SessionMem, label);
+  t->OperationStatus = {};
+  t->OperationAbortFlag = 0;
+  t->Spinner = 0;
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+}
+
+void Tui_SetOperationStatus(Tui* t, StrView status) {
+  Mutex_Lock(&t->Lock);
+  if (t->OperationActive) t->OperationStatus = StrView_Dup(&t->SessionMem, status);
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+}
+
+bool Tui_EndOperation(Tui* t) {
+  Mutex_Lock(&t->Lock);
+  bool cancelled = t->OperationAbortFlag != 0 || t->Stop || t->Quit;
+  t->OperationActive = false;
+  t->OperationLabel = {};
+  t->OperationStatus = {};
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+  return cancelled;
+}
+
+volatile i32* Tui_OperationAbort(Tui* t) { return &t->OperationAbortFlag; }
+
+bool Tui_BeginSelection(Tui* t, StrView title, const StrView* options, u32 optionCount,
+                        u32 initialSelection) {
+  if (!options || optionCount == 0) return false;
+  Mutex_Lock(&t->Lock);
+  if (t->Stop || t->Quit || t->ModalResult == TuiModalResult::Pending) {
+    Mutex_Unlock(&t->Lock);
+    return false;
+  }
+  t->ModalOptions = ArenaPushArray(&t->SessionMem, StrView, optionCount);
+  for (u32 i = 0; i < optionCount; i++)
+    t->ModalOptions[i] = StrView_Dup(&t->SessionMem, options[i]);
+  t->ModalOptionCount = optionCount;
+  t->ModalSelected = initialSelection < optionCount ? initialSelection : optionCount - 1;
+  t->ModalFirst = 0;
+  t->ModalTitle = StrView_Dup(&t->SessionMem, title);
+  t->ModalPrompt = {};
+  t->ModalTextResult = {};
+  t->ModalKind = TuiModalKind::Select;
+  t->ModalResult = TuiModalResult::Pending;
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+  return true;
+}
+
+bool Tui_BeginTextEntry(Tui* t, StrView title, StrView prompt, StrView initial) {
+  Mutex_Lock(&t->Lock);
+  if (t->Stop || t->Quit || t->ModalResult == TuiModalResult::Pending) {
+    Mutex_Unlock(&t->Lock);
+    return false;
+  }
+  LineEdit_Clear(&t->ModalEdit);
+  LineEdit_InsertText(&t->ModalEdit, initial);
+  t->ModalTitle = StrView_Dup(&t->SessionMem, title);
+  t->ModalPrompt = StrView_Dup(&t->SessionMem, prompt);
+  t->ModalOptions = nullptr;
+  t->ModalOptionCount = 0;
+  t->ModalSelected = 0;
+  t->ModalFirst = 0;
+  t->ModalTextResult = {};
+  t->ModalKind = TuiModalKind::Text;
+  t->ModalResult = TuiModalResult::Pending;
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+  return true;
+}
+
+TuiModalResult Tui_GetModalResult(Tui* t, u32* selected, StrView* text) {
+  Mutex_Lock(&t->Lock);
+  TuiModalResult result = t->ModalResult;
+  if (selected) *selected = t->ModalSelected;
+  if (text) *text = t->ModalTextResult;
+  Mutex_Unlock(&t->Lock);
+  return result;
+}
+
+bool Tui_Select(Tui* t, StrView title, const StrView* options, u32 optionCount,
+                u32* selected, u32 initialSelection) {
+  if (!Tui_BeginSelection(t, title, options, optionCount, initialSelection)) return false;
+  Mutex_Lock(&t->Lock);
+  while (t->ModalResult == TuiModalResult::Pending && !t->Stop)
+    Cond_Wait(&t->ModalCv, &t->Lock);
+  bool confirmed = t->ModalResult == TuiModalResult::Confirmed;
+  if (selected) *selected = t->ModalSelected;
+  Mutex_Unlock(&t->Lock);
+  return confirmed;
+}
+
+bool Tui_ReadText(Tui* t, StrView title, StrView prompt, StrView initial, StrView* out) {
+  if (!Tui_BeginTextEntry(t, title, prompt, initial)) return false;
+  Mutex_Lock(&t->Lock);
+  while (t->ModalResult == TuiModalResult::Pending && !t->Stop)
+    Cond_Wait(&t->ModalCv, &t->Lock);
+  bool confirmed = t->ModalResult == TuiModalResult::Confirmed;
+  if (out) *out = confirmed ? t->ModalTextResult : StrView{};
+  Mutex_Unlock(&t->Lock);
+  return confirmed;
+}
+
 volatile i32* Tui_Abort(Tui* t) { return &t->AbortFlag; }
 
 void Tui_FeedInput(Tui* t, const char* data, u32 n) {
-  KeyDecoder_Push(&t->Dec, data, n);
   Mutex_Lock(&t->Lock);
+  if (n == 1 && data[0] == '\x1b' && t->Dec.Len == 0) {
+    Key escape = {};
+    escape.Kind = KeyKind::Escape;
+    HandleKey(t, escape);
+    Wake(t);
+    Mutex_Unlock(&t->Lock);
+    return;
+  }
+  KeyDecoder_Push(&t->Dec, data, n);
   Key k;
   while (KeyDecoder_Next(&t->Dec, &k)) HandleKey(t, k);
   Wake(t);
@@ -809,17 +1300,17 @@ void Tui_AgentEvent(void* user, const AgentEvent& ev) {
     }
     case AgentEventKind::ToolStart: {
       TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::ToolStart);
-      display->ToolCallId = StrView_Dup(t->Mem, ev.ToolCallId);
-      display->ToolName = StrView_Dup(t->Mem, ev.ToolName);
-      display->ToolArgsJson = StrView_Dup(t->Mem, ev.ToolArgsJson);
+      display->ToolCallId = StrView_Dup(&t->SessionMem, ev.ToolCallId);
+      display->ToolName = StrView_Dup(&t->SessionMem, ev.ToolName);
+      display->ToolArgsJson = StrView_Dup(&t->SessionMem, ev.ToolArgsJson);
       break;
     }
     case AgentEventKind::ToolEnd: {
       StrView preview = StrView{nullptr, 0};
       if (ev.Result && ev.Result->Content.Count > 0) preview = ev.Result->Content.Data[0].Text;
       TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::ToolEnd);
-      display->ToolCallId = StrView_Dup(t->Mem, ev.ToolCallId);
-      display->Payload = StrBuf_Make(t->Mem, preview.Length + 1);
+      display->ToolCallId = StrView_Dup(&t->SessionMem, ev.ToolCallId);
+      display->Payload = StrBuf_Make(&t->SessionMem, preview.Length + 1);
       Sanitize_Display(&display->Payload, preview);
       display->IsError = ev.IsError;
       break;

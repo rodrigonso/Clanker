@@ -24,6 +24,118 @@ Model Anthropic_Model(StrView id) {
   return m;
 }
 
+static bool ModelU32(JsonValue* object, const char* key, u32* value, bool* present) {
+  JsonValue* field = Json_Get(object, key);
+  *present = field != nullptr;
+  if (!field) return true;
+  if (field->Kind != JsonKind::Number || field->Number < 0.0 || field->Number > 4294967295.0) {
+    return false;
+  }
+  u32 number = (u32)field->Number;
+  if ((f64)number != field->Number) return false;
+  *value = number;
+  return true;
+}
+
+bool Anthropic_ParseModelsResponse(Arena* arena, StrView response, AnthropicModelPage* out) {
+  *out = {};
+  StrBuf input = StrBuf_Make(arena, response.Length + 1);
+  StrBuf_Append(&input, response);
+  JsonValue* root = Json_Parse(arena, StrBuf_View(&input));
+  if (!Json_IsObject(root)) {
+    out->Error = SVL("Anthropic models response is not a JSON object");
+    return false;
+  }
+
+  JsonValue* data = Json_Get(root, "data");
+  if (!Json_IsArray(data)) {
+    out->Error = SVL("Anthropic models response has no data array");
+    return false;
+  }
+  JsonValue* hasMore = Json_Get(root, "has_more");
+  if (!hasMore || hasMore->Kind != JsonKind::Bool) {
+    out->Error = SVL("Anthropic models response has no boolean has_more");
+    return false;
+  }
+
+  out->Models = data->Count ? ArenaPushArray(arena, Model, data->Count) : nullptr;
+  for (u32 i = 0; i < data->Count; i++) {
+    JsonValue* item = data->Items[i];
+    if (!Json_IsObject(item)) {
+      out->Error = SVL("Anthropic models response contains a non-object model");
+      return false;
+    }
+
+    JsonValue* id = Json_Get(item, "id");
+    if (!Json_IsString(id) || id->Str.Length == 0) {
+      out->Error = SVL("Anthropic model is missing a non-empty id");
+      return false;
+    }
+    JsonValue* type = Json_Get(item, "type");
+    if (type && (!Json_IsString(type) || !EqC(type->Str, "model"))) {
+      out->Error = SVL("Anthropic model has an invalid type");
+      return false;
+    }
+
+    Model model = Anthropic_Model(id->Str);
+    JsonValue* displayName = Json_Get(item, "display_name");
+    if (displayName) {
+      if (!Json_IsString(displayName)) {
+        out->Error = SVL("Anthropic model has an invalid display_name");
+        return false;
+      }
+      if (displayName->Str.Length) model.Name = displayName->Str;
+    }
+
+    u32 maxInput = 0;
+    u32 maxOutput = 0;
+    bool hasMaxInput = false;
+    bool hasMaxOutput = false;
+    if (!ModelU32(item, "max_input_tokens", &maxInput, &hasMaxInput) ||
+        !ModelU32(item, "max_tokens", &maxOutput, &hasMaxOutput)) {
+      out->Error = SVL("Anthropic model has invalid token limits");
+      return false;
+    }
+    if (hasMaxInput && maxInput) model.ContextWindow = maxInput;
+    if (hasMaxOutput && maxOutput) model.MaxTokens = maxOutput;
+
+    JsonValue* capabilities = Json_Get(item, "capabilities");
+    if (capabilities) {
+      if (!Json_IsObject(capabilities)) {
+        out->Error = SVL("Anthropic model has invalid capabilities");
+        return false;
+      }
+      JsonValue* thinking = Json_Get(capabilities, "thinking");
+      if (thinking) {
+        if (!Json_IsObject(thinking)) {
+          out->Error = SVL("Anthropic model has invalid thinking capability");
+          return false;
+        }
+        JsonValue* supported = Json_Get(thinking, "supported");
+        if (!supported || supported->Kind != JsonKind::Bool) {
+          out->Error = SVL("Anthropic model has invalid thinking support");
+          return false;
+        }
+        model.Reasoning = supported->Bool;
+      }
+    }
+    out->Models[out->Count++] = model;
+  }
+
+  out->HasMore = hasMore->Bool;
+  JsonValue* lastId = Json_Get(root, "last_id");
+  if (lastId && lastId->Kind != JsonKind::Null && !Json_IsString(lastId)) {
+    out->Error = SVL("Anthropic models response has an invalid last_id");
+    return false;
+  }
+  if (Json_IsString(lastId)) out->LastId = lastId->Str;
+  if (out->HasMore && out->LastId.Length == 0) {
+    out->Error = SVL("Anthropic models response cannot continue without last_id");
+    return false;
+  }
+  return true;
+}
+
 // ---- request building ----------------------------------------------------
 
 // Attach a cache breakpoint to the JSON object just written.
@@ -106,7 +218,7 @@ StrBuf Anthropic_BuildRequest(Arena* arena, const Model* model, const LlmContext
 
   // OAuth (subscription) tokens require the Claude Code identity as the first
   // system block, with the caller's system prompt appended after it.
-  bool isOAuth = opt && StrView_Contains(opt->ApiKey, "sk-ant-oat");
+  bool isOAuth = opt && Anthropic_IsOAuthToken(opt->ApiKey);
   bool haveSystem = isOAuth || ctx->SystemPrompt.Length != 0;
   if (isOAuth) {
     StrBuf_AppendCStr(&b, ",\"system\":[{\"type\":\"text\",\"text\":");

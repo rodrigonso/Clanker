@@ -1,6 +1,7 @@
 #include <stdio.h>
 
 #include "auth/oauth.h"
+#include "auth/resolve.h"
 #include "auth/store.h"
 #include "base/arena.h"
 #include "base/str.h"
@@ -34,6 +35,8 @@ static void TestStore() {
   CHECK(StrView_EqCStr(r2.Access, "acc"));
   CHECK(StrView_EqCStr(r2.Refresh, "ref"));
   CHECK(r2.ExpiresMs == 1234567890123ull);
+  volatile i32 abort = 1;
+  CHECK(Auth_ResolveToken(&a, path, SVL("anthropic"), nullptr, &abort).Length == 0);
 
   // Both providers coexist.
   Credential chk = {};
@@ -76,6 +79,16 @@ static void TestOAuth() {
   CHECK(tr.Kind == CredKind::OAuth);
   CHECK(StrView_EqCStr(tr.Access, "at") && StrView_EqCStr(tr.Refresh, "rt"));
   CHECK(tr.ExpiresMs > NowMillis());
+
+  volatile i32 abort = 1;
+  Credential cancelled = {};
+  StrBuf error = StrBuf_Make(&a, 64);
+  CHECK(!OAuth_ExchangeCode(&a, cfg, SVL("code"), SVL("state"), SVL("verifier"),
+                            &cancelled, &error, &abort));
+  CHECK(StrView_Contains(StrBuf_View(&error), "cancelled"));
+  StrBuf_Clear(&error);
+  CHECK(!OAuth_Refresh(&a, cfg, SVL("refresh"), &cancelled, &error, &abort));
+  CHECK(StrView_Contains(StrBuf_View(&error), "cancelled"));
 
   ArenaRelease(&a);
 }
