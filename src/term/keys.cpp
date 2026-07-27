@@ -5,6 +5,7 @@
 void KeyDecoder_Init(KeyDecoder* d) {
   d->Len = 0;
   d->InPaste = false;
+  d->PendingEscape = false;
 }
 
 void KeyDecoder_Push(KeyDecoder* d, const char* data, u32 n) {
@@ -193,6 +194,11 @@ static bool ParseMouse(KeyDecoder* d, Key* out) {
 
 bool KeyDecoder_Next(KeyDecoder* d, Key* out) {
   Clear(out);
+  if (d->PendingEscape) {
+    d->PendingEscape = false;
+    out->Kind = KeyKind::Escape;
+    return true;
+  }
   if (d->Len == 0) return false;
   unsigned char c = (unsigned char)d->Buf[0];
 
@@ -246,6 +252,17 @@ bool KeyDecoder_Next(KeyDecoder* d, Key* out) {
   // ESC ...
   if (d->Len < 2) return false;  // lone ESC pends until the next byte
   unsigned char c1 = (unsigned char)d->Buf[1];
+  if (c1 == 0x1b) {
+    if (d->Len == 2) {
+      Consume(d, 2);
+      d->PendingEscape = true;
+    } else {
+      // Leave the second ESC to decode a following CSI/Alt sequence.
+      Consume(d, 1);
+    }
+    out->Kind = KeyKind::Escape;
+    return true;
+  }
   if (c1 == '[' || c1 == 'O') {
     if (c1 == '[' && d->Len >= 3 && d->Buf[2] == '<') return ParseMouse(d, out);
     return ParseCsi(d, out);

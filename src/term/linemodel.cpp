@@ -311,7 +311,7 @@ void BuildEntryRows(LineModel* m, u32 idx, u32 expandedStart) {
       break;
     }
     case EntryKind::Info:
-      BuildPlainTurn(m, entry, SVL("\xe2\x97\x8f"), LStyle(ACCENT_FG, ATTR_BOLD),
+      BuildPlainTurn(m, entry, SquareMarker(), LStyle(ACCENT_FG, ATTR_BOLD),
                      LStyle(244, ATTR_NONE));
       break;
     case EntryKind::Error:

@@ -445,7 +445,7 @@ void TestLineModel() {
     LineModel simpleTurns;
     LineModel_Init(&simpleTurns, &a, 12, 5000);
     LineModel_AddNotice(&simpleTurns, EntryKind::Info, SVL("info message wraps more"));
-    CHECK(RowStartsWith(&a, LineModel_At(&simpleTurns, 0), "\xe2\x97\x8f  "));
+    CHECK(RowStartsWith(&a, LineModel_At(&simpleTurns, 0), "\xe2\x96\xa0  "));
     CHECK(RowStartsWith(&a, LineModel_At(&simpleTurns, 1), "   "));
     LineModel_AddNotice(&simpleTurns, EntryKind::Error, SVL("error message wraps"));
     const SpanLine* error = FindRow(&a, &simpleTurns, "error");

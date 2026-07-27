@@ -99,6 +99,8 @@ struct Tui {
   bool Quit;
   bool AgentRunning;
   volatile i32 AbortFlag;
+  u64 LastEscapeMs;
+  bool EscapeArmed;
 
   // Status.
   TuiState State;

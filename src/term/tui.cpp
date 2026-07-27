@@ -12,6 +12,7 @@ namespace {
 const char* kSpinner[10] = {"\xe2\xa0\x8b", "\xe2\xa0\x99", "\xe2\xa0\xb9", "\xe2\xa0\xb8",
                             "\xe2\xa0\xbc", "\xe2\xa0\xb4", "\xe2\xa0\xa6", "\xe2\xa0\xa7",
                             "\xe2\xa0\x87", "\xe2\xa0\x8f"};
+constexpr u64 kDoubleEscapeMs = 500;
 
 bool g_color = true;
 Style St(u8 fg, u8 attr) { return Style{g_color ? fg : COL_DEFAULT, COL_DEFAULT, attr}; }
@@ -637,7 +638,7 @@ void ApplyDisplayEvent(Tui* t, const TuiDisplayEvent& ev) {
       if (ev.Stop == StopReason::Error)
         LineModel_AddNotice(&t->Model, EntryKind::Error, DisplayPayload(ev));
       else if (ev.Stop == StopReason::Aborted)
-        LineModel_AddNotice(&t->Model, EntryKind::Info, SVL("[interrupted]"));
+        LineModel_AddNotice(&t->Model, EntryKind::Info, SVL("Interrupted by user."));
       break;
     case TuiDisplayEventKind::ToolStart:
       LineModel_AddTool(&t->Model, ev.ToolCallId, ev.ToolName, ev.ToolArgsJson);
@@ -1381,6 +1382,23 @@ bool DrainShutdownOutput(Tui* t, ScreenWriter write, void* user) {
 
 void HandleKey(Tui* t, const Key& k) {
   ValidateTranscriptSelection(t);
+  if (k.Kind == KeyKind::Escape) {
+    if (t->AgentRunning && !t->AbortFlag) {
+      u64 now = MonotonicMillis();
+      bool doubleEscape =
+          t->EscapeArmed && now - t->LastEscapeMs <= kDoubleEscapeMs;
+      t->LastEscapeMs = now;
+      t->EscapeArmed = !doubleEscape;
+      if (doubleEscape) t->AbortFlag = 1;
+    } else {
+      t->EscapeArmed = false;
+      t->LastEscapeMs = 0;
+    }
+  } else if (k.Kind != KeyKind::None) {
+    t->EscapeArmed = false;
+    t->LastEscapeMs = 0;
+  }
+
   if (k.Kind == KeyKind::CtrlD) {
     RequestStopLocked(t);
     return;
@@ -1799,6 +1817,8 @@ bool Tui_ClearSession(Tui* t) {
   t->QCount = preservedCount;
   t->AgentRunning = false;
   t->AbortFlag = 0;
+  t->LastEscapeMs = 0;
+  t->EscapeArmed = false;
   t->State = TuiState::Idle;
   t->StateTool = {};
   t->TurnStartMs = 0;
@@ -2098,6 +2118,8 @@ void Tui_AgentEvent(void* user, const AgentEvent& ev) {
   switch (ev.Kind) {
     case AgentEventKind::AgentStart:
       t->AgentRunning = true;
+      t->LastEscapeMs = 0;
+      t->EscapeArmed = false;
       if (!Tui_HasPendingDisplay(t)) t->State = TuiState::Thinking;
       t->TurnStartMs = NowMillis();
       t->Spinner = 0;
@@ -2139,6 +2161,8 @@ void Tui_AgentEvent(void* user, const AgentEvent& ev) {
     }
     case AgentEventKind::AgentEnd:
       t->AgentRunning = false;
+      t->LastEscapeMs = 0;
+      t->EscapeArmed = false;
       QueueDisplayEvent(t, TuiDisplayEventKind::AgentEnd);
       break;
     case AgentEventKind::QueueUpdate:

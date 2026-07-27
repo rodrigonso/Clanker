@@ -51,6 +51,17 @@ void TestKeys() {
   Push(&d, "\x0f");
   CHECK(Next(&d).Kind == KeyKind::CtrlO);
 
+  // Consecutive Escape bytes are two standalone presses, including when an
+  // Escape is immediately followed by an arrow sequence.
+  KeyDecoder_Init(&d);
+  Push(&d, "\x1b\x1b");
+  CHECK(Next(&d).Kind == KeyKind::Escape);
+  CHECK(Next(&d).Kind == KeyKind::Escape);
+  CHECK(!KeyDecoder_Next(&d, &k));
+  Push(&d, "\x1b\x1b[A");
+  CHECK(Next(&d).Kind == KeyKind::Escape);
+  CHECK(Next(&d).Kind == KeyKind::Up);
+
   // Arrows + Home/End + Delete.
   KeyDecoder_Init(&d);
   Push(&d, "\x1b[A\x1b[B\x1b[C\x1b[D");

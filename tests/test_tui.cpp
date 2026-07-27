@@ -452,6 +452,62 @@ void TestTui() {
     ArenaRelease(&a2);
   }
 
+  // Double Escape cancels only an active agent turn. The presses may arrive
+  // separately or in one terminal read; expired/interrupted sequences re-arm.
+  {
+    Arena ae = ArenaCreate();
+    TuiOpts oe;
+    oe.ModelName = SVL("m");
+    oe.Color = false;
+    Tui te;
+    Tui_InitModel(&te, &ae, oe);
+
+    Feed(&te, "\x1b\x1b");
+    CHECK(*Tui_Abort(&te) == 0);
+    CHECK(!te.EscapeArmed);
+
+    te.AgentRunning = true;
+    Feed(&te, "\x1b");
+    CHECK(*Tui_Abort(&te) == 0);
+    CHECK(te.EscapeArmed);
+    te.LastEscapeMs = MonotonicMillis() - 501;
+    Feed(&te, "\x1b");
+    CHECK(*Tui_Abort(&te) == 0);
+    CHECK(te.EscapeArmed);
+
+    Feed(&te, "x");
+    CHECK(!te.EscapeArmed);
+    Feed(&te, "\x1b");
+    CHECK(*Tui_Abort(&te) == 0);
+    Feed(&te, "\x1b");
+    CHECK(*Tui_Abort(&te) == 1);
+    CHECK(!te.EscapeArmed);
+
+    *Tui_Abort(&te) = 0;
+    Feed(&te, "\x1b\x1b");
+    CHECK(*Tui_Abort(&te) == 1);
+
+    *Tui_Abort(&te) = 0;
+    te.AgentRunning = false;
+    Tui_BeginOperation(&te, SVL("preflight"));
+    Feed(&te, "\x1b\x1b");
+    CHECK(*Tui_OperationAbort(&te) == 0);
+    CHECK(!Tui_EndOperation(&te));
+
+    Message interrupted = {};
+    interrupted.Kind = Role::Assistant;
+    interrupted.Stop = StopReason::Aborted;
+    AgentEvent event = {};
+    event.Kind = AgentEventKind::MessageEnd;
+    event.Msg = &interrupted;
+    Tui_AgentEvent(&te, event);
+    DrainDisplay(&te);
+    CHECK(AnyRow(&ae, &te, "Interrupted by user."));
+
+    Tui_Stop(&te);
+    ArenaRelease(&ae);
+  }
+
   // Slash input opens a prefix-filtered command palette. Arrow keys select a
   // command, Enter submits its canonical name, and Escape dismisses the flyout
   // without modifying the composer.
@@ -489,9 +545,15 @@ void TestTui() {
     CHECK(StrView_Eq(paletteSubmission.Text, SVL("/unknown")));
 
     Feed(&tp, "/");
+    tp.AgentRunning = true;
     Feed(&tp, "\x1b");
     CHECK(tp.CommandPaletteDismissed);
     CHECK(StrView_Eq(LineEdit_Text(&tp.Edit), SVL("/")));
+    CHECK(*Tui_Abort(&tp) == 0);
+    Feed(&tp, "\x1b");
+    CHECK(*Tui_Abort(&tp) == 1);
+    tp.AgentRunning = false;
+    *Tui_Abort(&tp) = 0;
     Feed(&tp, "m\r");
     CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
     CHECK(StrView_Eq(paletteSubmission.Text, SVL("/model")));

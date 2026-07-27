@@ -52,6 +52,7 @@ struct KeyDecoder {
   char Buf[4096];
   u32 Len;
   bool InPaste;
+  bool PendingEscape;
 };
 
 void KeyDecoder_Init(KeyDecoder* d);
