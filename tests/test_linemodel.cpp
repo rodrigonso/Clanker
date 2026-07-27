@@ -73,7 +73,6 @@ void TestLineModel() {
     CHECK(model.Entries.Data[0].Text.Timestamp.Data[2] == ':');
     CHECK(LineModel_Count(&model) == 1);
     const SpanLine* prompt = LineModel_At(&model, 0);
-    CHECK(prompt->HasFill);
     CHECK(prompt->HasRight);
     CHECK(prompt->EntryId == model.Entries.Data[0].Id);
     CHECK(prompt->IsEntryStart);
@@ -85,7 +84,7 @@ void TestLineModel() {
     LineModel_EndAssistant(&model);
     CHECK(model.Entries.Data[1].Id != model.Entries.Data[0].Id);
     CHECK(!model.Entries.Data[1].Collapsed);
-    CHECK(AnyRowHas(&a, &model, "\xe2\x97\x8f "));
+    CHECK(AnyRowHas(&a, &model, "\xe2\x96\xa0 "));
     CHECK(AnyRowHas(&a, &model, "Hello world"));
     CHECK(!AnyRowHas(&a, &model, "assistant"));
 
@@ -152,10 +151,9 @@ void TestLineModel() {
     LineModel_AddUser(&narrow, SVL("long prompt"), 0);
     CHECK(LineModel_Count(&narrow) > 1);
     CHECK(!LineModel_At(&narrow, 0)->HasRight);
-    CHECK(RowStartsWith(&a, LineModel_At(&narrow, 0), "\xe2\x9d\xaf  "));
+    CHECK(RowStartsWith(&a, LineModel_At(&narrow, 0), "\xe2\x96\xa0  "));
     CHECK(RowStartsWith(&a, LineModel_At(&narrow, 1), "   "));
     for (u32 i = 0; i < LineModel_Count(&narrow); i++) {
-      CHECK(LineModel_At(&narrow, i)->HasFill);
       CHECK(RowWidth(LineModel_At(&narrow, i)) <= 7);
     }
     LineModel_Release(&narrow);
@@ -191,7 +189,7 @@ void TestLineModel() {
     CHECK(tools.Entries.Data[0].Tool.Done);
     CHECK(!tools.Entries.Data[1].Tool.Done);
     Finish(&tools, SVL("read-id"), SVL("alpha-preview\nbeta-preview\ngamma-preview"));
-    CHECK(AnyRowHas(&a, &tools, "$  echo hi"));
+    CHECK(AnyRowHas(&a, &tools, "\xe2\x96\xa0  echo hi"));
     CHECK(AnyRowHas(&a, &tools, "Read src/main.cpp L10:14"));
     CHECK(AnyRowHas(&a, &tools, "3 lines read"));
     CHECK(!AnyRowHas(&a, &tools, "alpha-preview"));
@@ -229,7 +227,7 @@ void TestLineModel() {
     LineModel_AddTool(
         &tools, SVL("control-id"), SVL("bash"),
         SVL("{\"command\":\"first line\\n\\u001b[31msecond line\\u001b[0m\"}"));
-    CHECK(AnyRowHas(&a, &tools, "$  first line second line"));
+    CHECK(AnyRowHas(&a, &tools, "\xe2\x96\xa0  first line second line"));
     CHECK(!StrView_Contains(StrBuf_View(&tools.Entries.Data[2].Tool.View.Detail), "\n"));
     CHECK(!StrView_Contains(StrBuf_View(&tools.Entries.Data[2].Tool.View.Detail), "\x1b"));
     LineModel_Release(&tools);
@@ -241,7 +239,7 @@ void TestLineModel() {
     LineModel_AddTool(&toolWrap, SVL("bash"), SVL("bash"),
                       SVL("{\"command\":\"echo this command wraps\"}"));
     u64 bashId = toolWrap.Entries.Data[0].Id;
-    CHECK(RowStartsWith(&a, LineModel_At(&toolWrap, 0), "$  "));
+    CHECK(RowStartsWith(&a, LineModel_At(&toolWrap, 0), "\xe2\x96\xa0  "));
     CHECK(LineModel_Count(&toolWrap) == 1);
     CHECK(LineModel_At(&toolWrap, 0)->HasHiddenContent);
     CHECK(LineModel_ToggleEntry(&toolWrap, bashId));
@@ -314,7 +312,7 @@ void TestLineModel() {
                       SVL("{\"path\":\"config.json\"}"));
     CHECK(
         StrView_Eq(summaries.Entries.Data[summaries.Entries.Count - 1].Tool.View.Marker, SVL("J")));
-    CHECK(AnyRowHas(&a, &summaries, "J  Read config.json"));
+    CHECK(AnyRowHas(&a, &summaries, "\xe2\x96\xa0  Read config.json"));
 
     LineModel_AddTool(&summaries, SVL("unknown"), SVL("custom"), SVL("{\"value\":1}"));
     Finish(&summaries, SVL("unknown"), SVL("done"));
@@ -335,10 +333,10 @@ void TestLineModel() {
     LineModel_SetColorEnabled(false);
     LineModel_Init(&noColor, &a, 40, 5000);
     LineModel_AddUser(&noColor, SVL("plain"), 0);
-    CHECK(LineModel_At(&noColor, 0)->Fill.Bg == COL_DEFAULT);
+    CHECK(LineModel_At(&noColor, 0)->Spans.Data[0].St.Fg == COL_DEFAULT);
     LineModel_AddTool(&noColor, SVL("id"), SVL("bash"), SVL("{\"command\":\"echo\"}"));
     Finish(&noColor, SVL("id"), SVL("ok"));
-    const SpanLine* row = FindRow(&a, &noColor, "$  echo");
+    const SpanLine* row = FindRow(&a, &noColor, "\xe2\x96\xa0  echo");
     CHECK(row != nullptr);
     CHECK(row->Spans.Data[0].St.Fg == COL_DEFAULT);
     LineModel_Release(&noColor);

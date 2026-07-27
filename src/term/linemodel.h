@@ -13,11 +13,9 @@ struct Span {
 
 struct SpanLine {
   Array<Span> Spans;
-  Style Fill;
   Span Right;
   Span Continuation;
   u64 EntryId;
-  bool HasFill;
   bool HasRight;
   bool HasContinuation;
   bool HasHiddenContent;

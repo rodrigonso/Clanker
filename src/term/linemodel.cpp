@@ -10,16 +10,20 @@ namespace {
 const usize LINE_ROWS_RESERVE = (usize)64 * 1024 * 1024;
 const u32 ICON_FIELD_CELLS = 2;
 
+// Bullet color scheme: a bright accent for user messages, a subtler (dim)
+// shade of the same accent for tool calls, and near-white for assistant
+// responses. Red is reserved strictly for error state. All bullets share the
+// same square glyph.
+const u8 ACCENT_FG = 214;
+const u8 ASSISTANT_FG = 255;
+StrView SquareMarker() { return SVL("\xe2\x96\xa0"); }
+
 bool g_lmColor = true;
 
 StrView BufView(const StrBuf& buf) { return StrView{buf.Data, buf.Length}; }
 
 Style LStyle(u8 fg, u8 attr) {
   return Style{g_lmColor ? fg : COL_DEFAULT, COL_DEFAULT, attr};
-}
-
-Style PromptFill() {
-  return Style{COL_DEFAULT, g_lmColor ? (u8)234 : COL_DEFAULT, ATTR_NONE};
 }
 
 StrView Spaces(Arena* arena, u32 count) {
@@ -59,8 +63,6 @@ void InitRow(Arena* a, SpanLine* row, u32 spanCap = 4) {
 void StartWrappedRow(Arena* a, const SpanLine* in, SpanLine* row, bool first, bool showRight,
                      u16 width, u16* col, u16* limit) {
   InitRow(a, row);
-  row->Fill = in->Fill;
-  row->HasFill = in->HasFill;
   if (first && showRight) {
     row->Right = in->Right;
     row->HasRight = true;
@@ -159,7 +161,7 @@ StrView FormatTimestamp(Arena* arena, u64 timestampMs) {
 
 void BuildUser(LineModel* m, const Entry* entry) {
   StrView text = BufView(entry->Text.Content);
-  StrView marker = SVL("\xe2\x9d\xaf");
+  StrView marker = SquareMarker();
   StrView indent = IconIndent(&m->RowsMem, marker);
   u32 i = 0;
   bool firstLine = true;
@@ -172,10 +174,8 @@ void BuildUser(LineModel* m, const Entry* entry) {
 
     SpanLine logical;
     InitRow(&m->RowsMem, &logical, 3);
-    logical.Fill = PromptFill();
-    logical.HasFill = true;
     if (firstLine) {
-      PushIcon(&m->RowsMem, &logical.Spans, marker, LStyle(39, ATTR_BOLD));
+      PushIcon(&m->RowsMem, &logical.Spans, marker, LStyle(ACCENT_FG, ATTR_BOLD));
     } else {
       Array_Push(&logical.Spans, Span{indent, StyleDefault(), true});
     }
@@ -195,7 +195,7 @@ void BuildUser(LineModel* m, const Entry* entry) {
 void BuildAssistant(LineModel* m, const Entry* entry) {
   StrView text = BufView(entry->Text.Content);
   if (text.Length == 0) return;
-  StrView marker = SVL("\xe2\x97\x8f");
+  StrView marker = SquareMarker();
   StrView indent = IconIndent(&m->RowsMem, marker);
 
   Array<SpanLine> logical = Array_Make<SpanLine>(&m->RowsMem, 8);
@@ -204,7 +204,7 @@ void BuildAssistant(LineModel* m, const Entry* entry) {
     SpanLine prefixed;
     InitRow(&m->RowsMem, &prefixed, logical.Data[i].Spans.Count + 2);
     if (i == 0) {
-      PushIcon(&m->RowsMem, &prefixed.Spans, marker, LStyle(39, ATTR_BOLD));
+      PushIcon(&m->RowsMem, &prefixed.Spans, marker, LStyle(ASSISTANT_FG, ATTR_BOLD));
     } else {
       Array_Push(&prefixed.Spans, Span{indent, StyleDefault(), true});
     }
@@ -217,18 +217,15 @@ void BuildAssistant(LineModel* m, const Entry* entry) {
 }
 
 void BuildTool(LineModel* m, const Entry* entry, bool expandPreview) {
-  Style marker = entry->Tool.Error
-                     ? LStyle(196, ATTR_BOLD)
-                     : (entry->Tool.Done ? LStyle(80, ATTR_BOLD) : LStyle(244, ATTR_DIM));
+  StrView marker = SquareMarker();
+  Style markerSt = entry->Tool.Error ? LStyle(196, ATTR_BOLD) : LStyle(ACCENT_FG, ATTR_DIM);
   Style label = entry->Tool.Error ? LStyle(196, ATTR_BOLD) : LStyle(252, ATTR_BOLD);
   Style detail = entry->Tool.Error ? LStyle(196, ATTR_NONE) : LStyle(252, ATTR_NONE);
-  StrView indent = IconIndent(&m->RowsMem, entry->Tool.View.Marker);
+  StrView indent = IconIndent(&m->RowsMem, marker);
 
   SpanLine logical;
   InitRow(&m->RowsMem, &logical, 7);
-  if (entry->Tool.View.Marker.Length) {
-    PushIcon(&m->RowsMem, &logical.Spans, entry->Tool.View.Marker, marker);
-  }
+  PushIcon(&m->RowsMem, &logical.Spans, marker, markerSt);
   if (entry->Tool.View.Label.Length) {
     Array_Push(&logical.Spans, Span{entry->Tool.View.Label, label});
     if (entry->Tool.View.Detail.Length) Array_Push(&logical.Spans, Span{SVL(" "), detail});
@@ -303,7 +300,7 @@ void BuildEntryRows(LineModel* m, u32 idx, u32 expandedStart) {
       break;
     }
     case EntryKind::Info:
-      BuildPlainTurn(m, entry, SVL("\xe2\x97\x8f"), LStyle(39, ATTR_BOLD),
+      BuildPlainTurn(m, entry, SVL("\xe2\x97\x8f"), LStyle(ACCENT_FG, ATTR_BOLD),
                      LStyle(244, ATTR_NONE));
       break;
     case EntryKind::Error:
@@ -337,7 +334,7 @@ void CropDisplayToCap(LineModel* m) {
 u32 PreviewRowCount(LineModel* m, const Entry* entry) {
   usize mark = m->RowsMem.Used;
   Array<SpanLine> rows = Array_Make<SpanLine>(&m->RowsMem, 8);
-  StrView indent = IconIndent(&m->RowsMem, entry->Tool.View.Marker);
+  StrView indent = IconIndent(&m->RowsMem, SquareMarker());
   AppendPlainRows(&m->RowsMem, &rows, m->Width, BufView(entry->Tool.Preview),
                   LStyle(244, ATTR_DIM), indent, indent);
   u32 count = rows.Count;

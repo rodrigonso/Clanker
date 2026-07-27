@@ -31,6 +31,31 @@ void PutNum(char* buf, u32 cap, u32* len, u32 v) {
   while (n && *len < cap - 1) buf[(*len)++] = tmp[--n];
 }
 
+// Format a count using best-fit byte-style unit scaling (B/KiB/MiB/GiB,
+// 1024-based). Sub-unit values print one decimal place (e.g. "3.4KiB").
+void PutScaled(char* buf, u32 cap, u32* len, u32 v) {
+  const char* units[4] = {"B", "KiB", "MiB", "GiB"};
+  u32 unit = 0;
+  u64 whole = v;
+  u64 scaled10 = whole * 10;  // one decimal digit while unit == 0 (bytes)
+  while (whole >= 1024 && unit < 3) {
+    scaled10 = (scaled10 + 512) / 1024;  // carry a rounded decimal digit through the shift
+    whole /= 1024;
+    unit++;
+  }
+  if (unit == 0) {
+    PutNum(buf, cap, len, (u32)whole);
+  } else {
+    u32 intPart = (u32)(scaled10 / 10);
+    u32 frac = (u32)(scaled10 % 10);
+    PutNum(buf, cap, len, intPart);
+    Put(buf, cap, len, ".");
+    char d[2] = {(char)('0' + frac), 0};
+    Put(buf, cap, len, d);
+  }
+  Put(buf, cap, len, units[unit]);
+}
+
 // ---- queue ----
 void QPush(Tui* t, StrView line) {
   if (t->QCount >= 64) return;
@@ -121,15 +146,14 @@ Style HoverStyle(Style style) {
   return style;
 }
 
-Style RowTextStyle(Style style, const SpanLine* line, bool hovered) {
+Style RowTextStyle(Style style, bool hovered) {
   if (hovered) return HoverStyle(style);
-  if (line->HasFill) style.Bg = line->Fill.Bg;
   return style;
 }
 
 void RenderSpanLine(Screen* s, u16 y, const SpanLine* ln, u16 cols, bool hovered) {
-  if (cols && (ln->HasFill || hovered)) {
-    Style fill = hovered ? HoverStyle(StyleDefault()) : ln->Fill;
+  if (cols && hovered) {
+    Style fill = HoverStyle(StyleDefault());
     Screen_Fill(s, 0, y, (u16)(cols - 1), y, fill);
   }
 
@@ -148,26 +172,23 @@ void RenderSpanLine(Screen* s, u16 y, const SpanLine* ln, u16 cols, bool hovered
   }
 
   for (u32 i = 0; i < ln->Spans.Count && x < leftLimit; i++) {
-    Style style = RowTextStyle(ln->Spans.Data[i].St, ln, hovered);
+    Style style = RowTextStyle(ln->Spans.Data[i].St, hovered);
     x = Screen_PutText(s, x, y, ln->Spans.Data[i].Text, style, leftLimit);
   }
   if (drawHidden) {
-    Style style = RowTextStyle(St(244, ATTR_DIM), ln, hovered);
+    Style style = RowTextStyle(St(244, ATTR_DIM), hovered);
     Screen_PutText(s, hiddenX, y, SVL("\xe2\x80\xa6"), style, (u16)(hiddenX + 1u));
   }
   if (drawRight) {
-    Style style = RowTextStyle(ln->Right.St, ln, hovered);
+    Style style = RowTextStyle(ln->Right.St, hovered);
     Screen_PutText(s, (u16)(cols - rightWidth), y, ln->Right.Text, style, cols);
   }
 }
 
 void ComposeStatus(Tui* t, u16 statusY, u16 cols) {
-  Style bg = St(COL_DEFAULT, ATTR_NONE);
-  bg.Bg = g_color ? 236 : COL_DEFAULT;
-  Screen_Fill(&t->Scr, 0, statusY, (u16)(cols ? cols - 1 : 0), statusY, bg);
-
-  Style st = bg;
-  st.Fg = g_color ? 250 : COL_DEFAULT;
+  // No background fill: this row reads as ambient/muted text on the default
+  // background, matching the sticky cwd line above the composer box.
+  Style st = St(g_color ? 244 : COL_DEFAULT, ATTR_NONE);
 
   // Left: agent state.
   char left[256];
@@ -193,9 +214,9 @@ void ComposeStatus(Tui* t, u16 statusY, u16 cols) {
   for (u32 i = 0; i < t->ModelName.Length && rl < sizeof(right) - 1; i++) right[rl++] = t->ModelName.Data[i];
   if (t->Use.Input || t->Use.Output) {
     Put(right, sizeof(right), &rl, "  \xe2\x86\x91");
-    PutNum(right, sizeof(right), &rl, t->Use.Input);
+    PutScaled(right, sizeof(right), &rl, t->Use.Input);
     Put(right, sizeof(right), &rl, " \xe2\x86\x93");
-    PutNum(right, sizeof(right), &rl, t->Use.Output);
+    PutScaled(right, sizeof(right), &rl, t->Use.Output);
   }
 
   StrView rightView{right, rl};
@@ -207,6 +228,35 @@ void ComposeStatus(Tui* t, u16 statusY, u16 cols) {
   Screen_PutText(&t->Scr, rightX, statusY, rightView, st, cols);
 }
 
+// Composer input box: a rounded border (no background fill) drawn around the
+// input row(s). `innerTop`/`innerH` is the text area; the border occupies the
+// row just above and below it plus the first/last column of every row.
+void DrawInputBox(Tui* t, u16 topY, u16 bottomY, u16 innerTop, u16 innerH, u16 cols) {
+  if (cols < 2) return;
+  Style border = St(g_color ? 250 : COL_DEFAULT, ATTR_NONE);  // default bg: border only, no fill
+
+  const u32 kMaxRule = 512;
+  char rule[kMaxRule * 3];
+  u32 rl = 0;
+  u16 innerW = (u16)(cols - 2);
+  u16 ruleLen = innerW < kMaxRule ? innerW : kMaxRule;
+  for (u16 i = 0; i < ruleLen; i++) Put(rule, sizeof(rule), &rl, "\xe2\x94\x80");
+  StrView ruleView{rule, rl};
+
+  Screen_PutText(&t->Scr, 0, topY, SVL("\xe2\x95\xad"), border, cols);
+  Screen_PutText(&t->Scr, 1, topY, ruleView, border, (u16)(cols - 1));
+  Screen_PutText(&t->Scr, (u16)(cols - 1), topY, SVL("\xe2\x95\xae"), border, cols);
+
+  Screen_PutText(&t->Scr, 0, bottomY, SVL("\xe2\x95\xb0"), border, cols);
+  Screen_PutText(&t->Scr, 1, bottomY, ruleView, border, (u16)(cols - 1));
+  Screen_PutText(&t->Scr, (u16)(cols - 1), bottomY, SVL("\xe2\x95\xaf"), border, cols);
+
+  for (u16 y = innerTop; y < innerTop + innerH; y++) {
+    Screen_PutText(&t->Scr, 0, y, SVL("\xe2\x94\x82"), border, cols);
+    Screen_PutText(&t->Scr, (u16)(cols - 1), y, SVL("\xe2\x94\x82"), border, cols);
+  }
+}
+
 // Sticky working-directory + git-branch line, drawn on the row just above the
 // prompt. Muted so it reads as ambient context, not transcript content.
 void ComposeCwd(Tui* t, u16 cwdY, u16 cols) {
@@ -214,7 +264,7 @@ void ComposeCwd(Tui* t, u16 cwdY, u16 cols) {
   Style st = St(g_color ? 244 : COL_DEFAULT, ATTR_NONE);
   u16 x = Screen_PutText(&t->Scr, 0, cwdY, t->Cwd, st, cols);
   if (t->Branch.Length) {
-    x = Screen_PutText(&t->Scr, x, cwdY, SVL("  ("), st, cols);
+    x = Screen_PutText(&t->Scr, x, cwdY, SVL("  (\xe2\x8e\x87 "), st, cols);
     x = Screen_PutText(&t->Scr, x, cwdY, t->Branch, st, cols);
     Screen_PutText(&t->Scr, x, cwdY, SVL(")"), st, cols);
   }
@@ -271,7 +321,7 @@ void Compose(Tui* t) {
     LineModel_SetWidth(&t->Model, cols);
     RestoreViewportAnchor(t, anchor);
   }
-  if (cols < 4 || rows < 4) {
+  if (cols < 6 || rows < 6) {
     Screen_BeginFrame(&t->Scr);
     return;
   }
@@ -281,8 +331,8 @@ void Compose(Tui* t) {
   RestoreViewportAnchor(t, pendingAnchor);
   if (t->State != TuiState::Idle) t->Spinner++;
 
-  // Input box layout.
-  u16 textW = (u16)(cols > 2 ? cols - 2 : 1);
+  // Input box layout: left/right border column + one padding column each side.
+  u16 textW = (u16)(cols > 4 ? cols - 4 : 1);
   InputLayout il;
   LayoutInput(LineEdit_Text(&t->Edit), LineEdit_Cursor(&t->Edit), textW, &il);
   u16 maxInputH = (u16)(rows / 2);
@@ -291,15 +341,17 @@ void Compose(Tui* t) {
   u16 inputH = (u16)(il.RowCount < maxInputH ? il.RowCount : maxInputH);
   if (inputH < 1) inputH = 1;
 
-  // Reserve the bottom row for the status bar and the row just above the prompt
-  // for the sticky cwd/branch line; keep at least one transcript row (rows >= 4
-  // is guaranteed above).
+  // Reserve the bottom row for the status bar, a top/bottom border row for the
+  // composer box, and the row just above the box for the sticky cwd/branch
+  // line; keep at least one transcript row (rows >= 6 is guaranteed above).
   u16 statusY = (u16)(rows - 1);
-  u16 maxInput = (u16)(rows - 3);
+  u16 maxInput = (u16)(rows - 5);
   if (inputH > maxInput) inputH = maxInput;
   if (inputH < 1) inputH = 1;
-  u16 inputTop = (u16)(statusY - inputH);
-  u16 cwdY = (u16)(inputTop - 1);
+  u16 bottomBorderY = (u16)(statusY - 1);
+  u16 inputTop = (u16)(bottomBorderY - inputH);
+  u16 topBorderY = (u16)(inputTop - 1);
+  u16 cwdY = (u16)(topBorderY - 1);
   u16 paneH = cwdY;  // rows [0, cwdY)
   t->LastPaneH = paneH;
 
@@ -334,18 +386,17 @@ void Compose(Tui* t) {
   // Status.
   ComposeStatus(t, statusY, cols);
 
-  // Input box (scroll within if taller than the box).
+  // Composer box (scroll within if taller than the box).
+  DrawInputBox(t, topBorderY, bottomBorderY, inputTop, inputH, cols);
   u32 firstRow = il.CurRow >= inputH ? il.CurRow - inputH + 1 : 0;
   for (u16 i = 0; i < inputH; i++) {
     u32 rr = firstRow + i;
     if (rr >= il.RowCount) break;
-    StrView prefix = (rr == 0) ? SVL("\xe2\x9d\xaf ") : SVL("  ");
-    u16 x = Screen_PutText(&t->Scr, 0, (u16)(inputTop + i), prefix, St(39, ATTR_BOLD), cols);
-    Screen_PutText(&t->Scr, x, (u16)(inputTop + i), il.Rows[rr], StyleDefault(), cols);
+    Screen_PutText(&t->Scr, 2, (u16)(inputTop + i), il.Rows[rr], StyleDefault(), (u16)(cols - 1));
   }
   u16 curScreenRow = (u16)(inputTop + (il.CurRow - firstRow));
   u16 curScreenCol = (u16)(2 + il.CurCol);
-  if (curScreenCol >= cols) curScreenCol = (u16)(cols - 1);
+  if (curScreenCol >= (u16)(cols - 1)) curScreenCol = (u16)(cols - 2);
   Screen_SetCursor(&t->Scr, true, curScreenCol, curScreenRow);
 
   // Sticky context line above the prompt.

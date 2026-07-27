@@ -94,7 +94,7 @@ void TestTui() {
   // The transcript captured the unlabeled assistant text and compact tool row.
   CHECK(!AnyRow(&a, &t, "assistant"));
   CHECK(AnyRow(&a, &t, "Hello world"));
-  CHECK(AnyRow(&a, &t, "$  ls"));
+  CHECK(AnyRow(&a, &t, "\xe2\x96\xa0  ls"));
   CHECK(!AnyRow(&a, &t, "hello-from-bash"));
   CHECK(t.State == TuiState::Idle);
   CHECK(t.Use.Output == 7);
