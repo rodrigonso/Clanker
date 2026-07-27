@@ -88,6 +88,11 @@ struct Tui {
   u32 Top;
   u32 LastTop;
   u16 LastPaneH;
+  bool ScrollbarVisible;
+  bool ScrollbarDragging;
+  u16 LastScrollbarThumbTop;
+  u16 LastScrollbarThumbH;
+  u16 ScrollbarDragOffset;
 
   // Mouse interaction with the last rendered transcript viewport.
   u64 HoveredEntryId;
@@ -126,5 +131,9 @@ void Tui_AgentEvent(void* user, const AgentEvent& ev);
 // TUI lock; headless tests call it directly when no TUI threads are running.
 bool Tui_AdvanceStream(Tui* t, u64 nowMs);
 bool Tui_HasPendingDisplay(const Tui* t);
+
+// Compose one frame at a supplied size. Production rendering queries the
+// terminal and calls this; headless tests use it to inspect the back buffer.
+void Tui_ComposeFrame(Tui* t, u16 cols, u16 rows);
 
 volatile i32* Tui_Abort(Tui* t);

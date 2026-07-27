@@ -321,12 +321,24 @@ struct ViewportAnchor {
   u32 ScreenRow;
 };
 
+u32 MaxTop(u32 count, u16 paneH) { return count > paneH ? count - paneH : 0; }
+
+u16 ScrollbarX(const Tui* t) { return t->Scr.Cols ? (u16)(t->Scr.Cols - 1) : 0; }
+
+void ResetScrollbar(Tui* t) {
+  t->ScrollbarVisible = false;
+  t->ScrollbarDragging = false;
+  t->LastScrollbarThumbTop = 0;
+  t->LastScrollbarThumbH = 0;
+  t->ScrollbarDragOffset = 0;
+}
+
 ViewportAnchor CaptureViewportAnchor(const Tui* t) {
   ViewportAnchor anchor = {};
   if (t->Follow) return anchor;
 
   u32 count = LineModel_Count(&t->Model);
-  u32 maxTop = count > t->LastPaneH ? count - t->LastPaneH : 0;
+  u32 maxTop = MaxTop(count, t->LastPaneH);
   u32 top = t->Top < maxTop ? t->Top : maxTop;
   for (u32 row = top; row < count; row++) {
     u64 id = LineModel_RowEntryId(&t->Model, row);
@@ -353,8 +365,48 @@ void RestoreViewportAnchor(Tui* t, ViewportAnchor anchor) {
   }
 
   u32 lineCount = LineModel_Count(&t->Model);
-  u32 maxTop = lineCount > t->LastPaneH ? lineCount - t->LastPaneH : 0;
+  u32 maxTop = MaxTop(lineCount, t->LastPaneH);
   if (t->Top > maxTop) t->Top = maxTop;
+}
+
+struct ScrollbarGeometry {
+  u16 ThumbTop;
+  u16 ThumbH;
+};
+
+ScrollbarGeometry CalcScrollbarGeometry(u32 count, u16 paneH, u32 top) {
+  ScrollbarGeometry out = {};
+  u32 maxTop = count - paneH;
+  u32 thumbH = (u32)(((u64)paneH * paneH) / count);
+  if (thumbH < 1) thumbH = 1;
+  if (thumbH > paneH) thumbH = paneH;
+  u32 travel = paneH - thumbH;
+  u32 clampedTop = top < maxTop ? top : maxTop;
+  u32 thumbTop =
+      travel ? (u32)(((u64)clampedTop * travel + maxTop / 2u) / maxTop) : 0;
+  out.ThumbTop = (u16)thumbTop;
+  out.ThumbH = (u16)thumbH;
+  return out;
+}
+
+void DrawScrollbar(Tui* t, u16 paneH, u32 count, u32 top) {
+  t->LastScrollbarThumbTop = 0;
+  t->LastScrollbarThumbH = 0;
+  if (!t->ScrollbarVisible || paneH == 0 || count <= paneH) return;
+
+  ScrollbarGeometry geometry = CalcScrollbarGeometry(count, paneH, top);
+  t->LastScrollbarThumbTop = geometry.ThumbTop;
+  t->LastScrollbarThumbH = geometry.ThumbH;
+
+  u16 x = ScrollbarX(t);
+  Style track = g_color ? StyleMake(238, COL_DEFAULT, ATTR_NONE)
+                        : StyleMake(COL_DEFAULT, COL_DEFAULT, ATTR_DIM);
+  Style thumb = g_color ? StyleMake(250, COL_DEFAULT, ATTR_NONE)
+                        : StyleMake(COL_DEFAULT, COL_DEFAULT, ATTR_BOLD);
+  for (u16 y = 0; y < paneH; y++)
+    Screen_PutChar(&t->Scr, x, y, 0x2595, track);
+  for (u16 y = 0; y < geometry.ThumbH; y++)
+    Screen_PutChar(&t->Scr, x, (u16)(geometry.ThumbTop + y), 0x2595, thumb);
 }
 
 void ApplyDisplayEvent(Tui* t, const TuiDisplayEvent& ev) {
@@ -431,16 +483,49 @@ bool PumpDisplay(Tui* t, u64 nowMs) {
   return changed;
 }
 
-void Compose(Tui* t) {
-  u16 cols = 0, rows = 0;
-  Term_Size(&t->Trm, &cols, &rows);
-  if (cols != t->Scr.Cols || rows != t->Scr.Rows) {
+struct TranscriptLayout {
+  u16 Cols;
+  u32 Count;
+  u32 Top;
+};
+
+TranscriptLayout LayoutTranscript(Tui* t, u16 cols, u16 paneH, bool geometryChanged) {
+  ViewportAnchor anchor = CaptureViewportAnchor(t);
+  if (geometryChanged) t->ScrollbarDragging = false;
+
+  u16 contentCols = t->ScrollbarVisible ? (u16)(cols - 1) : cols;
+  LineModel_SetWidth(&t->Model, contentCols);
+  u32 count = LineModel_Count(&t->Model);
+  if (!t->ScrollbarVisible && count > paneH) {
+    t->ScrollbarVisible = true;
+    contentCols = (u16)(cols - 1);
+    LineModel_SetWidth(&t->Model, contentCols);
+    count = LineModel_Count(&t->Model);
+  } else if (t->ScrollbarVisible && LineModel_FitsAtWidth(&t->Model, cols, paneH)) {
+    ResetScrollbar(t);
+    contentCols = cols;
+    LineModel_SetWidth(&t->Model, contentCols);
+    count = LineModel_Count(&t->Model);
+  }
+
+  t->LastPaneH = paneH;
+  RestoreViewportAnchor(t, anchor);
+  u32 maxTop = MaxTop(count, paneH);
+  u32 top = t->Follow ? maxTop : t->Top;
+  t->LastTop = top;
+  return TranscriptLayout{contentCols, count, top};
+}
+
+void ComposeAtSize(Tui* t, u16 cols, u16 rows) {
+  bool sizeChanged = cols != t->Scr.Cols || rows != t->Scr.Rows;
+  if (sizeChanged) Screen_Resize(&t->Scr, cols, rows);
+  if (cols < 6 || rows < 6) {
     ViewportAnchor anchor = CaptureViewportAnchor(t);
-    Screen_Resize(&t->Scr, cols, rows);
+    ResetScrollbar(t);
+    t->LastPaneH = 0;
+    t->LastTop = 0;
     LineModel_SetWidth(&t->Model, cols);
     RestoreViewportAnchor(t, anchor);
-  }
-  if (cols < 6 || rows < 6) {
     Screen_BeginFrame(&t->Scr);
     return;
   }
@@ -470,35 +555,30 @@ void Compose(Tui* t) {
   u16 topBorderY = (u16)(inputTop - 1);
   u16 cwdY = (u16)(topBorderY - 1);
   u16 paneH = cwdY;  // rows [0, cwdY)
-  t->LastPaneH = paneH;
+
+  TranscriptLayout transcript =
+      LayoutTranscript(t, cols, paneH, sizeChanged || paneH != t->LastPaneH);
 
   Screen_BeginFrame(&t->Scr);
 
   // Transcript.
-  u32 count = LineModel_Count(&t->Model);
-  u32 top;
-  if (t->Follow) {
-    top = count > paneH ? count - paneH : 0;
-  } else {
-    u32 maxTop = count > paneH ? count - paneH : 0;
-    top = t->Top > maxTop ? maxTop : t->Top;
-  }
-  t->LastTop = top;
-  if (t->HasMouse && t->MouseY < paneH) {
-    const SpanLine* hoverLine = LineModel_At(&t->Model, top + t->MouseY);
+  if (t->HasMouse && t->MouseY < paneH &&
+      (!t->ScrollbarVisible || t->MouseX != ScrollbarX(t))) {
+    const SpanLine* hoverLine = LineModel_At(&t->Model, transcript.Top + t->MouseY);
     t->HoveredEntryId = hoverLine && hoverLine->IsEntryStart ? hoverLine->EntryId : 0;
   } else {
     t->HoveredEntryId = 0;
   }
 
   for (u16 r = 0; r < paneH; r++) {
-    u32 idx = top + r;
-    if (idx >= count) break;
+    u32 idx = transcript.Top + r;
+    if (idx >= transcript.Count) break;
     const SpanLine* line = LineModel_At(&t->Model, idx);
     bool hovered =
         line->IsEntryStart && line->EntryId != 0 && line->EntryId == t->HoveredEntryId;
-    RenderSpanLine(&t->Scr, r, line, cols, hovered);
+    RenderSpanLine(&t->Scr, r, line, transcript.Cols, hovered);
   }
+  DrawScrollbar(t, paneH, transcript.Count, transcript.Top);
 
   // Status.
   ComposeStatus(t, statusY, cols);
@@ -520,6 +600,12 @@ void Compose(Tui* t) {
   ComposeCwd(t, cwdY, cols);
 }
 
+void Compose(Tui* t) {
+  u16 cols = 0, rows = 0;
+  Term_Size(&t->Trm, &cols, &rows);
+  ComposeAtSize(t, cols, rows);
+}
+
 // ---- key handling (lock held) ----
 void DoSubmit(Tui* t) {
   StrView line = LineEdit_Submit(&t->Edit);
@@ -538,28 +624,75 @@ void DoSubmit(Tui* t) {
 
 const i32 kWheelStep = 3;  // transcript rows per mouse-wheel notch
 
-u64 HitTestEntry(const Tui* t, u16 y) {
+u64 HitTestEntry(const Tui* t, u16 x, u16 y) {
   if (y >= t->LastPaneH) return 0;
+  if (t->ScrollbarVisible && x == ScrollbarX(t)) return 0;
   const SpanLine* line = LineModel_At(&t->Model, t->LastTop + y);
   return line && line->IsEntryStart ? line->EntryId : 0;
 }
 
-void UpdateMouse(Tui* t, const Key& key) {
+void UpdateMousePosition(Tui* t, const Key& key) {
   t->MouseX = key.MouseX;
   t->MouseY = key.MouseY;
   t->HasMouse = true;
-  t->HoveredEntryId = HitTestEntry(t, key.MouseY);
+}
+
+void UpdateMouse(Tui* t, const Key& key) {
+  UpdateMousePosition(t, key);
+  t->HoveredEntryId = HitTestEntry(t, key.MouseX, key.MouseY);
+}
+
+void SetScrollTop(Tui* t, i64 value, u32 maxTop) {
+  if (value < 0) value = 0;
+  if (value > (i64)maxTop) value = maxTop;
+  t->Top = (u32)value;
+  t->Follow = (t->Top >= maxTop);
 }
 
 void ScrollBy(Tui* t, i32 delta) {
   u32 count = LineModel_Count(&t->Model);
-  u32 maxTop = count > t->LastPaneH ? count - t->LastPaneH : 0;
+  u32 maxTop = MaxTop(count, t->LastPaneH);
   u32 cur = t->Follow ? maxTop : t->Top;
-  i64 nv = (i64)cur + delta;
-  if (nv < 0) nv = 0;
-  if (nv > (i64)maxTop) nv = maxTop;
-  t->Top = (u32)nv;
-  t->Follow = (t->Top >= maxTop);
+  SetScrollTop(t, (i64)cur + delta, maxTop);
+}
+
+bool IsScrollbarHit(const Tui* t, const Key& key) {
+  return t->ScrollbarVisible && t->LastScrollbarThumbH != 0 &&
+         key.MouseX == ScrollbarX(t) && key.MouseY < t->LastPaneH;
+}
+
+void ScrollToThumb(Tui* t, i32 thumbTop) {
+  u32 count = LineModel_Count(&t->Model);
+  if (t->LastPaneH == 0 || count <= t->LastPaneH) return;
+  u32 travel = t->LastPaneH - t->LastScrollbarThumbH;
+  if (travel == 0) return;
+  if (thumbTop < 0) thumbTop = 0;
+  if (thumbTop > (i32)travel) thumbTop = (i32)travel;
+  u32 maxTop = MaxTop(count, t->LastPaneH);
+  u32 top = (u32)(((u64)(u32)thumbTop * maxTop + travel / 2u) / travel);
+  SetScrollTop(t, top, maxTop);
+}
+
+void BeginScrollbarDrag(Tui* t, const Key& key) {
+  UpdateMousePosition(t, key);
+  t->HoveredEntryId = 0;
+  t->PressedEntryId = 0;
+
+  u16 thumbBottom = (u16)(t->LastScrollbarThumbTop + t->LastScrollbarThumbH);
+  if (key.MouseY >= t->LastScrollbarThumbTop && key.MouseY < thumbBottom) {
+    t->ScrollbarDragOffset = (u16)(key.MouseY - t->LastScrollbarThumbTop);
+  } else {
+    t->ScrollbarDragOffset = (u16)(t->LastScrollbarThumbH / 2);
+    ScrollToThumb(t, (i32)key.MouseY - t->ScrollbarDragOffset);
+  }
+  t->ScrollbarDragging = true;
+}
+
+void DragScrollbar(Tui* t, const Key& key) {
+  UpdateMousePosition(t, key);
+  t->HoveredEntryId = 0;
+  t->PressedEntryId = 0;
+  ScrollToThumb(t, (i32)key.MouseY - t->ScrollbarDragOffset);
 }
 
 void HandleKey(Tui* t, const Key& k) {
@@ -591,27 +724,45 @@ void HandleKey(Tui* t, const Key& k) {
     case KeyKind::CtrlL: t->Scr.ForceRepaint = true; break;
     case KeyKind::CtrlO: {
       ViewportAnchor anchor = CaptureViewportAnchor(t);
-      if (LineModel_ToggleAllTools(&t->Model)) RestoreViewportAnchor(t, anchor);
+      if (LineModel_ToggleAllTools(&t->Model)) {
+        RestoreViewportAnchor(t, anchor);
+        t->ScrollbarDragging = false;
+      }
       break;
     }
     case KeyKind::ScrollUp: ScrollBy(t, -kWheelStep); break;
     case KeyKind::ScrollDown: ScrollBy(t, kWheelStep); break;
     case KeyKind::MouseMove:
+      if (t->ScrollbarDragging) {
+        DragScrollbar(t, k);
+        break;
+      }
       UpdateMouse(t, k);
       if (t->PressedEntryId != 0 && t->PressedEntryId != t->HoveredEntryId)
         t->PressedEntryId = 0;
       break;
     case KeyKind::MouseLeftDown:
+      if (IsScrollbarHit(t, k)) {
+        BeginScrollbarDrag(t, k);
+        break;
+      }
       UpdateMouse(t, k);
       t->PressedEntryId = t->HoveredEntryId;
       break;
     case KeyKind::MouseLeftUp: {
+      if (t->ScrollbarDragging) {
+        DragScrollbar(t, k);
+        t->ScrollbarDragging = false;
+        break;
+      }
       UpdateMouse(t, k);
       u64 pressed = t->PressedEntryId;
       t->PressedEntryId = 0;
       if (pressed == 0 || pressed != t->HoveredEntryId) break;
       ViewportAnchor anchor = CaptureViewportAnchor(t);
-      if (LineModel_ToggleEntry(&t->Model, pressed)) RestoreViewportAnchor(t, anchor);
+      if (LineModel_ToggleEntry(&t->Model, pressed)) {
+        RestoreViewportAnchor(t, anchor);
+      }
       break;
     }
     case KeyKind::CtrlC:
@@ -690,6 +841,8 @@ void RenderLoop(void* arg) {
 
 }  // namespace
 
+void Tui_ComposeFrame(Tui* t, u16 cols, u16 rows) { ComposeAtSize(t, cols, rows); }
+
 bool Tui_AdvanceStream(Tui* t, u64 nowMs) { return PumpDisplay(t, nowMs); }
 
 bool Tui_HasPendingDisplay(const Tui* t) {
@@ -706,7 +859,7 @@ bool Tui_Start(Tui* t, Arena* mem, TuiOpts opts) {
 
   u16 cols = 80, rows = 24;
   Term_Size(&t->Trm, &cols, &rows);
-  Screen_Init(&t->Scr, mem, [](void* u, const char* d, u32 n) { (void)u; Term_Write(d, n); }, nullptr);
+  t->Scr.Write = [](void* u, const char* d, u32 n) { (void)u; Term_Write(d, n); };
   Screen_Resize(&t->Scr, cols, rows);
   LineModel_SetWidth(&t->Model, cols);
 
@@ -726,6 +879,7 @@ void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts) {
   g_color = opts.Color;
   LineModel_SetColorEnabled(opts.Color);
   t->ModelName = opts.ModelName;
+  Screen_Init(&t->Scr, mem, nullptr, nullptr);
   LineModel_Init(&t->Model, mem, 80, 5000);
   LineEdit_Init(&t->Edit, mem);
   KeyDecoder_Init(&t->Dec);

@@ -35,6 +35,20 @@ void DrainDisplay(Tui* t, u64 startMs = 1000) {
   CHECK(!Tui_HasPendingDisplay(t));
 }
 
+void InitHeadlessTui(Tui* t, Arena* a, bool color) {
+  TuiOpts opts = {};
+  opts.ModelName = SVL("m");
+  opts.Color = color;
+  Tui_InitModel(t, a, opts);
+}
+
+u16 ScrollbarColumn(const Tui* t) { return (u16)(t->Scr.Cols - 1); }
+
+u32 ScrollMaxTop(const Tui* t) {
+  u32 count = LineModel_Count(&t->Model);
+  return count > t->LastPaneH ? count - t->LastPaneH : 0;
+}
+
 }  // namespace
 
 void TestTui() {
@@ -191,6 +205,163 @@ void TestTui() {
   CHECK(t.Top < afterUp);
   for (u32 i = 0; i < 20; i++) Feed(&t, "\x1b[<65;1;1M");  // wheel down to the bottom
   CHECK(t.Follow);
+
+  // The scrollbar appears only on overflow, reserves the transcript's rightmost
+  // column, maps track clicks, and keeps dragging outside the scrollbar column.
+  {
+    Arena as = ArenaCreate();
+    Tui ts;
+    InitHeadlessTui(&ts, &as, false);
+    for (u32 i = 0; i < 18; i++)
+      LineModel_AddNotice(&ts.Model, EntryKind::Info,
+                          SVL("scroll row with enough text to wrap when narrowed"));
+
+    Tui_ComposeFrame(&ts, 20, 12);
+    u16 scrollbarX = ScrollbarColumn(&ts);
+    CHECK(ts.ScrollbarVisible);
+    CHECK(ts.Model.Width == 19);
+    CHECK(ts.LastPaneH == 7);
+    CHECK(scrollbarX == 19);
+    CHECK(ts.LastScrollbarThumbH > 0 && ts.LastScrollbarThumbH < ts.LastPaneH);
+    CHECK(ts.LastScrollbarThumbTop + ts.LastScrollbarThumbH == ts.LastPaneH);
+    CHECK(Screen_BackAt(&ts.Scr, scrollbarX, ts.LastScrollbarThumbTop).Ch ==
+          0x2595);
+    CHECK((Screen_BackAt(&ts.Scr, scrollbarX, ts.LastScrollbarThumbTop).St.Attr &
+           ATTR_BOLD) != 0);
+    u16 trackY =
+        ts.LastScrollbarThumbTop == 0 ? ts.LastScrollbarThumbH : (u16)0;
+    CHECK(Screen_BackAt(&ts.Scr, scrollbarX, trackY).Ch == 0x2595);
+    CHECK((Screen_BackAt(&ts.Scr, scrollbarX, trackY).St.Attr & ATTR_DIM) != 0);
+
+    // Clicking the track centers the thumb near the clicked row and cannot
+    // toggle the transcript entry under that screen row.
+    u64 clickedId = LineModel_RowEntryId(&ts.Model, ts.LastTop + 3);
+    CHECK(clickedId != 0);
+    Feed(&ts, "\x1b[<0;20;4M\x1b[<0;20;4m");
+    CHECK(!LineModel_IsEntryCollapsed(&ts.Model, clickedId));
+    CHECK(!ts.ScrollbarDragging);
+    CHECK(!ts.Follow);
+    Tui_ComposeFrame(&ts, 20, 12);
+    u16 thumbCenter =
+        (u16)(ts.LastScrollbarThumbTop + ts.LastScrollbarThumbH / 2);
+    CHECK(thumbCenter >= 2 && thumbCenter <= 4);
+
+    // Hovering the reserved column is never transcript hover.
+    Feed(&ts, "\x1b[<35;20;4M");
+    CHECK(ts.HoveredEntryId == 0);
+
+    // A top track click clamps to the beginning. Dragging the thumb to the
+    // bottom continues after the pointer leaves the scrollbar column.
+    Feed(&ts, "\x1b[<0;20;1M\x1b[<0;20;1m");
+    CHECK(ts.Top == 0);
+    CHECK(!ts.Follow);
+    Tui_ComposeFrame(&ts, 20, 12);
+    Feed(&ts, "\x1b[<0;20;1M\x1b[<32;10;7M\x1b[<0;10;7m");
+    CHECK(!ts.ScrollbarDragging);
+    CHECK(ts.Follow);
+    CHECK(ts.Top == ScrollMaxTop(&ts));
+
+    // The release position itself is applied even if no final motion event is
+    // delivered.
+    Feed(&ts, "\x1b[<0;20;1M\x1b[<0;20;1m");
+    Tui_ComposeFrame(&ts, 20, 12);
+    Feed(&ts, "\x1b[<0;20;1M\x1b[<0;10;7m");
+    CHECK(ts.Follow);
+    CHECK(ts.Top == ScrollMaxTop(&ts));
+
+    // A detached logical top remains anchored when a resize rewraps the model.
+    u64 resizeAnchorId = ts.Model.Entries.Data[6].Id;
+    u32 resizeAnchorRow = 0;
+    CHECK(LineModel_FindEntryRows(&ts.Model, resizeAnchorId, &resizeAnchorRow, nullptr));
+    ts.Follow = false;
+    ts.Top = resizeAnchorRow;
+    Tui_ComposeFrame(&ts, 20, 12);
+    Tui_ComposeFrame(&ts, 14, 12);
+    CHECK(ts.ScrollbarVisible);
+    CHECK(ts.Model.Width == 13);
+    CHECK(LineModel_RowEntryId(&ts.Model, ts.Top) == resizeAnchorId);
+    Tui_ComposeFrame(&ts, 14, 10);
+    CHECK(ts.LastPaneH == 5);
+    CHECK(LineModel_RowEntryId(&ts.Model, ts.Top) == resizeAnchorId);
+    Tui_ComposeFrame(&ts, 5, 5);
+    Tui_ComposeFrame(&ts, 14, 10);
+    CHECK(LineModel_RowEntryId(&ts.Model, ts.Top) == resizeAnchorId);
+
+    Tui_Stop(&ts);
+    ArenaRelease(&as);
+  }
+
+  // Collapsing enough content to fit removes the scrollbar and restores the
+  // full transcript width. Tiny terminals also clear all scrollbar state.
+  {
+    Arena as = ArenaCreate();
+    Tui ts;
+    InitHeadlessTui(&ts, &as, true);
+    LineModel_AddNotice(
+        &ts.Model, EntryKind::Info,
+        SVL("one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten"));
+    u64 entryId = ts.Model.Entries.Data[0].Id;
+
+    Tui_ComposeFrame(&ts, 20, 12);
+    u16 scrollbarX = ScrollbarColumn(&ts);
+    CHECK(ts.ScrollbarVisible);
+    CHECK(Screen_BackAt(&ts.Scr, scrollbarX, ts.LastScrollbarThumbTop).St.Fg == 250);
+    u16 colorTrackY =
+        ts.LastScrollbarThumbTop == 0 ? ts.LastScrollbarThumbH : (u16)0;
+    CHECK(Screen_BackAt(&ts.Scr, scrollbarX, colorTrackY).St.Fg == 238);
+    ts.Follow = false;
+    ts.Top = 0;
+    Tui_ComposeFrame(&ts, 20, 12);
+    Feed(&ts, "\x1b[<0;2;1M\x1b[<0;2;1m");
+    CHECK(LineModel_IsEntryCollapsed(&ts.Model, entryId));
+    Tui_ComposeFrame(&ts, 20, 12);
+    CHECK(!ts.ScrollbarVisible);
+    CHECK(ts.Model.Width == 20);
+    CHECK(ts.LastScrollbarThumbH == 0);
+
+    Tui_ComposeFrame(&ts, 5, 5);
+    CHECK(!ts.ScrollbarVisible);
+    CHECK(!ts.ScrollbarDragging);
+    CHECK(ts.LastPaneH == 0);
+
+    Tui_Stop(&ts);
+    ArenaRelease(&as);
+  }
+
+  // Resizing from a narrower overflowing layout rechecks the full width, so a
+  // one-column wrap boundary cannot leave a history-dependent scrollbar.
+  {
+    Arena as = ArenaCreate();
+    Tui ts;
+    InitHeadlessTui(&ts, &as, true);
+    LineModel_AddNotice(
+        &ts.Model, EntryKind::Info,
+        SVL("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"));
+
+    u16 boundaryCols = 0;
+    for (u16 cols = 7; cols <= 80; cols++) {
+      LineModel_SetWidth(&ts.Model, cols);
+      u32 fullCount = LineModel_Count(&ts.Model);
+      LineModel_SetWidth(&ts.Model, (u16)(cols - 1));
+      u32 narrowCount = LineModel_Count(&ts.Model);
+      if (fullCount <= 7 && narrowCount > 7) {
+        boundaryCols = cols;
+        break;
+      }
+    }
+    CHECK(boundaryCols != 0);
+    if (boundaryCols != 0) {
+      Tui_ComposeFrame(&ts, (u16)(boundaryCols - 1), 12);
+      CHECK(ts.ScrollbarVisible);
+      Tui_ComposeFrame(&ts, boundaryCols, 12);
+      CHECK(!ts.ScrollbarVisible);
+      CHECK(ts.Model.Width == boundaryCols);
+    }
+
+    Tui_Stop(&ts);
+    ArenaRelease(&as);
+  }
 
   // Submit routing: while a turn is running, a submitted line steers the agent;
   // while idle, it becomes the next prompt (Tui_WaitForSubmit queue).
