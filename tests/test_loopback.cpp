@@ -3,6 +3,7 @@
 #include "auth/oauth.h"
 #include "base/arena.h"
 #include "base/str.h"
+#include "base/thread.h"
 #include "check.h"
 #include "net/loopback.h"
 
@@ -74,12 +75,10 @@ static void TestParseHelpers() {
 
 static void TestParseRedirect() {
   OAuthRedirect rd = OAuth_ParseRedirect(SVL("http://localhost:53692/callback"));
-  CHECK(StrView_EqCStr(rd.Host, "localhost"));
   CHECK(rd.Port == 53692);
   CHECK(StrView_EqCStr(rd.Path, "/callback"));
 
   OAuthRedirect rd2 = OAuth_ParseRedirect(SVL("https://example.com/cb"));
-  CHECK(StrView_EqCStr(rd2.Host, "example.com"));
   CHECK(rd2.Port == 443);
   CHECK(StrView_EqCStr(rd2.Path, "/cb"));
 }
@@ -93,7 +92,7 @@ static void TestCaptureRoundTrip() {
 
   LoopbackServer srv;
   CHECK(Loopback_Open(&srv, 0, &err));  // 0 = ephemeral port
-  u16 port = Loopback_Port(&srv);
+  u16 port = srv.Port;
   CHECK(port != 0);
 
   SOCKET cs = ConnectLoopback(port);
@@ -128,7 +127,7 @@ static void TestStateMismatch() {
 
   LoopbackServer srv;
   CHECK(Loopback_Open(&srv, 0, &err));
-  u16 port = Loopback_Port(&srv);
+  u16 port = srv.Port;
 
   SOCKET cs = ConnectLoopback(port);
   CHECK(cs != INVALID_SOCKET);
@@ -153,9 +152,49 @@ static void TestStateMismatch() {
   ArenaRelease(&a);
 }
 
+struct CancelWaitContext {
+  Arena* Mem;
+  LoopbackServer* Server;
+  volatile i32* Abort;
+  LoopbackCapture Capture;
+};
+
+static void RunCancelledWait(void* user) {
+  CancelWaitContext* ctx = (CancelWaitContext*)user;
+  ctx->Capture =
+      Loopback_WaitForCode(ctx->Mem, ctx->Server, SVL("/callback"), SVL("expected"), ctx->Abort);
+}
+
+// A client that connects without sending a request must not trap the callback
+// server inside a blocking recv; cancellation still completes promptly.
+static void TestCancelStalledClient() {
+  Arena a = ArenaCreate();
+  StrBuf err = StrBuf_Make(&a, 64);
+  LoopbackServer srv;
+  CHECK(Loopback_Open(&srv, 0, &err));
+
+  SOCKET cs = ConnectLoopback(srv.Port);
+  CHECK(cs != INVALID_SOCKET);
+
+  volatile i32 abort = 0;
+  CancelWaitContext ctx = {&a, &srv, &abort, LoopbackCapture{}};
+  Thread waiter = {};
+  CHECK(Thread_Start(&waiter, RunCancelledWait, &ctx));
+  Sleep_Ms(100);
+  abort = 1;
+  Thread_Join(&waiter);
+
+  CHECK(!ctx.Capture.Ok);
+  CHECK(StrView_Contains(ctx.Capture.Error, "cancelled"));
+  CloseClient(cs);
+  Loopback_Close(&srv);
+  ArenaRelease(&a);
+}
+
 void TestLoopback() {
   TestParseHelpers();
   TestParseRedirect();
   TestCaptureRoundTrip();
   TestStateMismatch();
+  TestCancelStalledClient();
 }

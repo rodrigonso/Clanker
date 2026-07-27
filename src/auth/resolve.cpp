@@ -5,7 +5,9 @@
 #include "auth/oauth.h"
 #include "auth/store.h"
 
-StrView Auth_ResolveToken(Arena* a, StrView authPath, StrView providerId, const char* envVar) {
+StrView Auth_ResolveToken(Arena* a, StrView authPath, StrView providerId, const char* envVar,
+                          volatile i32* abort) {
+  if (abort && *abort) return StrView{};
   Credential c;
   if (AuthStore_Read(a, authPath, providerId, &c)) {
     if (c.Kind == CredKind::ApiKey && c.ApiKey.Length) return c.ApiKey;
@@ -15,10 +17,11 @@ StrView Auth_ResolveToken(Arena* a, StrView authPath, StrView providerId, const 
       if (cfg && c.Refresh.Length) {
         Credential nc;
         StrBuf err = StrBuf_Make(a, 64);
-        if (OAuth_Refresh(a, cfg, c.Refresh, &nc, &err)) {
+        if (OAuth_Refresh(a, cfg, c.Refresh, &nc, &err, abort)) {
           AuthStore_Write(a, authPath, providerId, &nc);
           return nc.Access;
         }
+        if (abort && *abort) return StrView{};
       }
       if (c.Access.Length) return c.Access;  // stale; let the provider surface a 401
     }

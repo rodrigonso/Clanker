@@ -82,7 +82,7 @@ use the VS-bundled CMake/Ninja).
 
 # Live:
 ./build/clank --login anthropic     # OAuth (Claude Pro/Max), or set ANTHROPIC_API_KEY
-./build/clank                        # full-screen TUI (interactive)
+./build/clank                        # full-screen TUI; login can also happen inside it
 ./build/clank -m claude-sonnet-4-6 -p "summarize README.md"
 ```
 
@@ -105,18 +105,42 @@ Keys: **Enter** sends · **Ctrl+J** / Alt+Enter inserts a newline · arrows move
 Home/End · **Shift** + movement selects composer text ·
 **Ctrl+W/U/K** delete word / to start / to end · **mouse wheel** scrolls the
 transcript · **left-drag** selects transcript or composer text (and auto-scrolls
-the transcript) · type during a turn to **steer** · **Ctrl+C** copies selections
-via OSC 52; otherwise it interrupts, clears the composer, or quits · hover or
-**left click** a turn's first row to highlight or collapse/expand it · **Ctrl+O**
-expands or collapses all tools · **Ctrl+D** quits · **Ctrl+L** repaints. Honors
-`NO_COLOR`. Bracketed paste inserts literal multi-line text and replaces a
-composer selection.
+the transcript) · an overflow-only scrollbar can be clicked or dragged (track
+clicks center its thumb) · type during a turn to **steer** · **Ctrl+C** copies
+selections via OSC 52; otherwise it interrupts a turn, cancels a command
+operation, clears the composer, or quits · hover or **left click** a turn's first
+row to highlight or collapse/expand it · **Ctrl+O** expands all tools when any is
+collapsed, otherwise collapses all · **Ctrl+D** quits · **Ctrl+L** repaints.
+Honors `NO_COLOR`. Bracketed paste inserts literal multi-line text and replaces
+a composer selection.
 
 When stdin/stdout isn't a TTY (pipes, redirected) or with `-p`, it falls back to
 a plain line renderer. Plain and piped output write provider deltas immediately
-without display pacing.
+without display pacing. Piped sessions support `/clear` and `/exit`; interactive
+selectors such as `/login` and `/model` require a TTY.
 
-In interactive mode, `/exit` also quits.
+Interactive commands:
+
+- `/login` — choose an OAuth-capable provider, authenticate, then choose a model.
+- `/model` — choose a provider and a live-discovered, fallback, or manual model ID.
+- `/clear` — clear the conversation while preserving provider, model, and credentials.
+- `/exit` (or `/quit`) — close Clank and return to the shell.
+
+In the TUI, typing `/` opens a prefix-filtered command flyout over the content
+directly above the composer. Provider, model, and manual-entry choices drill down
+as pages in the same surface. Use Up/Down to select, Enter to continue or run the
+command, Backspace on an empty page to go back, or Escape to dismiss the current
+choice.
+
+Commands entered during a TUI turn run afterward; ordinary text still steers the
+active turn. In `--faux` mode, `/clear` and `/exit` work while `/login` and
+`/model` are unavailable.
+
+The selected provider/model is written atomically to `~/.clank/settings.json`.
+Startup precedence is built-in defaults, then settings, then the runtime-only
+`-m` override. Interactive mode may start without credentials and blocks prompts
+with `/login` guidance; `-p` remains fail-fast.
+
 Set `CLANK_PRINT_MEM=1` to print peak RSS at exit.
 
 ## Authentication
@@ -131,7 +155,8 @@ Existing `~/.mini-agent/auth.json` credentials are migrated automatically:
   local callback server on `http://localhost:53692/callback` captures the
   redirect automatically (no copy/paste). The browser shows a success page; the
   access/refresh tokens are saved and auto-refreshed. Pass `--no-open` to print
-  the URL instead of launching a browser. `--logout <provider>` removes them.
+  the URL instead of launching a browser. Interactive `/login` uses the same
+  flow. `--logout <provider>` removes credentials.
 
 The OAuth flow/storage is **provider-generic** (`src/auth/`): a config table
 (`OAuthConfig`) plus generic PKCE/exchange/refresh. Only how the token is applied
@@ -146,7 +171,8 @@ Resolution priority: stored api_key → stored OAuth (refresh) → env var.
 ```sh
 ./build/clank_tests       # unit tests: base, json, loop, anthropic, tools, crypto,
                           #   auth, loopback, threads, keys, screen, markdown,
-                          #   linemodel, lineedit, tui
+                          #   linemodel, lineedit, tui, commands, settings,
+                          #   provider registry/model discovery
 ./build/clank_http_smoke  # TLS/HTTP smoke against https://example.com
 ```
 
@@ -167,7 +193,7 @@ leaves seams for them):
 - Device-code OAuth (e.g. GitHub Copilot) — the loopback callback flow is done.
 - TUI niceties: visual-row (vs logical-line) Up/Down, syntax highlighting,
   images, undo. The full-screen differential TUI itself is done.
-- Compaction, on-disk sessions, skills, slash commands, and extensions.
+- Compaction, on-disk sessions, skills, additional slash commands, and extensions.
 
 ## License
 

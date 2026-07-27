@@ -1,16 +1,34 @@
 #pragma once
 #include "base/arena.h"
 #include "base/str.h"
+#include "llm/model_list.h"
 #include "llm/types.h"
+#include "net/http.h"
 
 // Anthropic Messages API provider. Split into protocol logic (request building
 // + SSE parsing, no networking; testable offline) and the HTTP glue.
+
+inline bool Anthropic_IsOAuthToken(StrView token) {
+  return StrView_Contains(token, "sk-ant-oat");
+}
 
 // ---- protocol (anthropic_proto.cpp) --------------------------------------
 
 // Build the Anthropic /v1/messages streaming request body from a context.
 StrBuf Anthropic_BuildRequest(Arena* arena, const Model* model, const LlmContext* ctx,
                               const StreamOptions* opt);
+
+struct AnthropicModelPage {
+  Model* Models;
+  u32 Count;
+  bool HasMore;
+  StrView LastId;
+  StrView Error;
+};
+
+// Parse one GET /v1/models response. The response and all returned metadata are
+// copied into `arena`; false means the response did not match the API schema.
+bool Anthropic_ParseModelsResponse(Arena* arena, StrView response, AnthropicModelPage* out);
 
 // Incremental SSE parser state. Feed raw response bytes; it builds `Msg` (an
 // assistant message whose Content array lives in `arena`) and emits StreamEvents.
@@ -40,3 +58,11 @@ Model Anthropic_Model(StrView id);
 
 // Provider that streams over HTTP. Requires libcurl (clank_http).
 Provider Anthropic_Provider();
+
+typedef HttpResponse (*AnthropicModelsFetchFn)(void* user, Arena* arena, const HttpRequest* request,
+                                               volatile i32* abort);
+
+// Live GET /v1/models discovery. The injected form is used by offline tests.
+ProviderModelList Anthropic_ListModels(Arena* arena, StrView token, volatile i32* abort);
+ProviderModelList Anthropic_ListModelsWithFetch(Arena* arena, StrView token, volatile i32* abort,
+                                                AnthropicModelsFetchFn fetch, void* fetchUser);

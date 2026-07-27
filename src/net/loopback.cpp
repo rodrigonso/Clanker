@@ -207,8 +207,6 @@ bool Loopback_Open(LoopbackServer* s, u16 port, StrBuf* err) {
   return true;
 }
 
-u16 Loopback_Port(const LoopbackServer* s) { return s->Port; }
-
 void Loopback_Close(LoopbackServer* s) {
   if (s->Sock >= 0) {
     CloseSock((SOCKET)s->Sock);
@@ -246,7 +244,26 @@ LoopbackCapture Loopback_WaitForCode(Arena* a, LoopbackServer* s, StrView path, 
 
     char buf[8192];
     u32 total = 0;
+    u32 idleTicks = 0;
     while (total < sizeof(buf) - 1) {
+      if (abort && *abort) {
+        CloseSock(c);
+        cap.Error = SVL("login cancelled");
+        return cap;
+      }
+      fd_set clientRead;
+      FD_ZERO(&clientRead);
+      FD_SET(c, &clientRead);
+      timeval clientTimeout;
+      clientTimeout.tv_sec = 0;
+      clientTimeout.tv_usec = 250000;
+      int ready = select((int)c + 1, &clientRead, nullptr, nullptr, &clientTimeout);
+      if (ready < 0) continue;
+      if (ready == 0) {
+        if (++idleTicks < 40) continue;
+        break;
+      }
+      idleTicks = 0;
       int n = (int)recv(c, buf + total, (int)(sizeof(buf) - 1 - total), 0);
       if (n <= 0) break;
       total += (u32)n;

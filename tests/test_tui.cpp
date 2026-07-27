@@ -35,6 +35,35 @@ void DrainDisplay(Tui* t, u64 startMs = 1000) {
   CHECK(!Tui_HasPendingDisplay(t));
 }
 
+struct BlockingSelect {
+  Tui* Controller;
+  const StrView* Options;
+  u32 OptionCount;
+  u32 Selected;
+  bool Confirmed;
+};
+
+void RunBlockingSelect(void* user) {
+  BlockingSelect* select = (BlockingSelect*)user;
+  select->Confirmed =
+      Tui_Select(select->Controller, SVL("Blocking"), select->Options, select->OptionCount,
+                 &select->Selected) == TuiModalResult::Confirmed;
+}
+
+void InitHeadlessTui(Tui* t, Arena* a, bool color) {
+  TuiOpts opts = {};
+  opts.ModelName = SVL("m");
+  opts.Color = color;
+  Tui_InitModel(t, a, opts);
+}
+
+u16 ScrollbarColumn(const Tui* t) { return (u16)(t->Scr.Cols - 1); }
+
+u32 ScrollMaxTop(const Tui* t) {
+  u32 count = LineModel_Count(&t->Model);
+  return count > t->LastPaneH ? count - t->LastPaneH : 0;
+}
+
 }  // namespace
 
 void TestTui() {
@@ -192,8 +221,166 @@ void TestTui() {
   for (u32 i = 0; i < 20; i++) Feed(&t, "\x1b[<65;1;1M");  // wheel down to the bottom
   CHECK(t.Follow);
 
-  // Submit routing: while a turn is running, a submitted line steers the agent;
-  // while idle, it becomes the next prompt (Tui_WaitForSubmit queue).
+  // The scrollbar appears only on overflow, reserves the transcript's rightmost
+  // column, maps track clicks, and keeps dragging outside the scrollbar column.
+  {
+    Arena as = ArenaCreate();
+    Tui ts;
+    InitHeadlessTui(&ts, &as, false);
+    for (u32 i = 0; i < 18; i++)
+      LineModel_AddNotice(&ts.Model, EntryKind::Info,
+                          SVL("scroll row with enough text to wrap when narrowed"));
+
+    Tui_ComposeFrame(&ts, 20, 12);
+    u16 scrollbarX = ScrollbarColumn(&ts);
+    CHECK(ts.ScrollbarVisible);
+    CHECK(ts.Model.Width == 19);
+    CHECK(ts.LastPaneH == 7);
+    CHECK(scrollbarX == 19);
+    CHECK(ts.LastScrollbarThumbH > 0 && ts.LastScrollbarThumbH < ts.LastPaneH);
+    CHECK(ts.LastScrollbarThumbTop + ts.LastScrollbarThumbH == ts.LastPaneH);
+    CHECK(Screen_BackAt(&ts.Scr, scrollbarX, ts.LastScrollbarThumbTop).Ch ==
+          0x2595);
+    CHECK((Screen_BackAt(&ts.Scr, scrollbarX, ts.LastScrollbarThumbTop).St.Attr &
+           ATTR_BOLD) != 0);
+    u16 trackY =
+        ts.LastScrollbarThumbTop == 0 ? ts.LastScrollbarThumbH : (u16)0;
+    CHECK(Screen_BackAt(&ts.Scr, scrollbarX, trackY).Ch == 0x2595);
+    CHECK((Screen_BackAt(&ts.Scr, scrollbarX, trackY).St.Attr & ATTR_DIM) != 0);
+
+    // Clicking the track centers the thumb near the clicked row and cannot
+    // toggle the transcript entry under that screen row.
+    u64 clickedId = LineModel_RowEntryId(&ts.Model, ts.LastTop + 3);
+    CHECK(clickedId != 0);
+    Feed(&ts, "\x1b[<0;20;4M\x1b[<0;20;4m");
+    CHECK(!LineModel_IsEntryCollapsed(&ts.Model, clickedId));
+    CHECK(!ts.ScrollbarDragging);
+    CHECK(!ts.Follow);
+    Tui_ComposeFrame(&ts, 20, 12);
+    u16 thumbCenter =
+        (u16)(ts.LastScrollbarThumbTop + ts.LastScrollbarThumbH / 2);
+    CHECK(thumbCenter >= 2 && thumbCenter <= 4);
+
+    // Hovering the reserved column is never transcript hover.
+    Feed(&ts, "\x1b[<35;20;4M");
+    CHECK(ts.HoveredEntryId == 0);
+
+    // A top track click clamps to the beginning. Dragging the thumb to the
+    // bottom continues after the pointer leaves the scrollbar column.
+    Feed(&ts, "\x1b[<0;20;1M\x1b[<0;20;1m");
+    CHECK(ts.Top == 0);
+    CHECK(!ts.Follow);
+    Tui_ComposeFrame(&ts, 20, 12);
+    Feed(&ts, "\x1b[<0;20;1M\x1b[<32;10;7M\x1b[<0;10;7m");
+    CHECK(!ts.ScrollbarDragging);
+    CHECK(ts.Follow);
+    CHECK(ts.Top == ScrollMaxTop(&ts));
+
+    // The release position itself is applied even if no final motion event is
+    // delivered.
+    Feed(&ts, "\x1b[<0;20;1M\x1b[<0;20;1m");
+    Tui_ComposeFrame(&ts, 20, 12);
+    Feed(&ts, "\x1b[<0;20;1M\x1b[<0;10;7m");
+    CHECK(ts.Follow);
+    CHECK(ts.Top == ScrollMaxTop(&ts));
+
+    // A detached logical top remains anchored when a resize rewraps the model.
+    u64 resizeAnchorId = ts.Model.Entries.Data[6].Id;
+    u32 resizeAnchorRow = 0;
+    CHECK(LineModel_FindEntryRows(&ts.Model, resizeAnchorId, &resizeAnchorRow, nullptr));
+    ts.Follow = false;
+    ts.Top = resizeAnchorRow;
+    Tui_ComposeFrame(&ts, 20, 12);
+    Tui_ComposeFrame(&ts, 14, 12);
+    CHECK(ts.ScrollbarVisible);
+    CHECK(ts.Model.Width == 13);
+    CHECK(LineModel_RowEntryId(&ts.Model, ts.Top) == resizeAnchorId);
+    Tui_ComposeFrame(&ts, 14, 10);
+    CHECK(ts.LastPaneH == 5);
+    CHECK(LineModel_RowEntryId(&ts.Model, ts.Top) == resizeAnchorId);
+    Tui_ComposeFrame(&ts, 5, 5);
+    Tui_ComposeFrame(&ts, 14, 10);
+    CHECK(LineModel_RowEntryId(&ts.Model, ts.Top) == resizeAnchorId);
+
+    Tui_Stop(&ts);
+    ArenaRelease(&as);
+  }
+
+  // Collapsing enough content to fit removes the scrollbar and restores the
+  // full transcript width. Tiny terminals also clear all scrollbar state.
+  {
+    Arena as = ArenaCreate();
+    Tui ts;
+    InitHeadlessTui(&ts, &as, true);
+    LineModel_AddNotice(
+        &ts.Model, EntryKind::Info,
+        SVL("one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten"));
+    u64 entryId = ts.Model.Entries.Data[0].Id;
+
+    Tui_ComposeFrame(&ts, 20, 12);
+    u16 scrollbarX = ScrollbarColumn(&ts);
+    CHECK(ts.ScrollbarVisible);
+    CHECK(Screen_BackAt(&ts.Scr, scrollbarX, ts.LastScrollbarThumbTop).St.Fg == 250);
+    u16 colorTrackY =
+        ts.LastScrollbarThumbTop == 0 ? ts.LastScrollbarThumbH : (u16)0;
+    CHECK(Screen_BackAt(&ts.Scr, scrollbarX, colorTrackY).St.Fg == 238);
+    ts.Follow = false;
+    ts.Top = 0;
+    Tui_ComposeFrame(&ts, 20, 12);
+    Feed(&ts, "\x1b[<0;2;1M\x1b[<0;2;1m");
+    CHECK(LineModel_IsEntryCollapsed(&ts.Model, entryId));
+    Tui_ComposeFrame(&ts, 20, 12);
+    CHECK(!ts.ScrollbarVisible);
+    CHECK(ts.Model.Width == 20);
+    CHECK(ts.LastScrollbarThumbH == 0);
+
+    Tui_ComposeFrame(&ts, 5, 5);
+    CHECK(!ts.ScrollbarVisible);
+    CHECK(!ts.ScrollbarDragging);
+    CHECK(ts.LastPaneH == 0);
+
+    Tui_Stop(&ts);
+    ArenaRelease(&as);
+  }
+
+  // Resizing from a narrower overflowing layout rechecks the full width, so a
+  // one-column wrap boundary cannot leave a history-dependent scrollbar.
+  {
+    Arena as = ArenaCreate();
+    Tui ts;
+    InitHeadlessTui(&ts, &as, true);
+    LineModel_AddNotice(
+        &ts.Model, EntryKind::Info,
+        SVL("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"));
+
+    u16 boundaryCols = 0;
+    for (u16 cols = 7; cols <= 80; cols++) {
+      LineModel_SetWidth(&ts.Model, cols);
+      u32 fullCount = LineModel_Count(&ts.Model);
+      LineModel_SetWidth(&ts.Model, (u16)(cols - 1));
+      u32 narrowCount = LineModel_Count(&ts.Model);
+      if (fullCount <= 7 && narrowCount > 7) {
+        boundaryCols = cols;
+        break;
+      }
+    }
+    CHECK(boundaryCols != 0);
+    if (boundaryCols != 0) {
+      Tui_ComposeFrame(&ts, (u16)(boundaryCols - 1), 12);
+      CHECK(ts.ScrollbarVisible);
+      Tui_ComposeFrame(&ts, boundaryCols, 12);
+      CHECK(!ts.ScrollbarVisible);
+      CHECK(ts.Model.Width == boundaryCols);
+    }
+
+    Tui_Stop(&ts);
+    ArenaRelease(&as);
+  }
+
+  // Submit routing: commands always queue for the main thread, with a notice when
+  // queued behind an active turn. Ordinary text steers an active turn or waits
+  // for application preflight before an idle prompt is rendered.
   {
     Arena a2 = ArenaCreate();
     Model model = {};
@@ -210,19 +397,114 @@ void TestTui() {
     t2.AgentRunning = true;  // a turn is running
     Feed(&t2, "steer me\r");
     CHECK(ag.Steer.Count == 1);
-    CHECK(t2.QCount == 0);  // did not land in the idle prompt queue
+    CHECK(t2.QCount == 0);
     DrainDisplay(&t2);
     CHECK(!AnyRow(&a2, &t2, "you"));
     CHECK(AnyRow(&a2, &t2, "steer me"));
     CHECK(t2.Model.Entries.Data[t2.Model.Entries.Count - 1].Text.Timestamp.Length == 5);
 
+    u32 entriesAfterSteer = t2.Model.Entries.Count;
+    Feed(&t2, "  /model  \r");
+    CHECK(t2.QCount == 1);
+    CHECK(ag.Steer.Count == 1);
+    DrainDisplay(&t2);
+    CHECK(t2.Model.Entries.Count == entriesAfterSteer + 1);
+    CHECK(AnyRow(&a2, &t2, "Queued command:"));
+    CHECK(AnyRow(&a2, &t2, "/model"));
+
+    TuiSubmission submission = {};
+    CHECK(Tui_WaitForSubmit(&t2, &submission));
+    CHECK(submission.Kind == TuiSubmissionKind::Command);
+    CHECK(StrView_Eq(submission.Text, SVL("  /model  ")));
+
     t2.AgentRunning = false;  // between turns
     Feed(&t2, "next prompt\r");
     CHECK(t2.QCount == 1);
     CHECK(ag.Steer.Count == 1);  // unchanged
+    CHECK(Tui_WaitForSubmit(&t2, &submission));
+    CHECK(submission.Kind == TuiSubmissionKind::Prompt);
+    CHECK(StrView_Eq(submission.Text, SVL("next prompt")));
+    DrainDisplay(&t2);
+    CHECK(!AnyRow(&a2, &t2, "next prompt"));
+    CHECK(Tui_AcceptPrompt(&t2, submission.Text));
+    DrainDisplay(&t2);
+    CHECK(AnyRow(&a2, &t2, "next prompt"));
+    t2.AgentRunning = false;
+
+    u32 entriesAfterPrompt = t2.Model.Entries.Count;
+    Feed(&t2, "/unknown\r");
+    CHECK(t2.QCount == 1);
+    CHECK(Tui_WaitForSubmit(&t2, &submission));
+    CHECK(submission.Kind == TuiSubmissionKind::Command);
+    CHECK(StrView_Eq(submission.Text, SVL("/unknown")));
+    DrainDisplay(&t2);
+    CHECK(t2.Model.Entries.Count == entriesAfterPrompt);
+    CHECK(!AnyRow(&a2, &t2, "/unknown"));
+
+    for (u32 i = 0; i < 64; i++) Feed(&t2, "queued prompt\r");
+    CHECK(t2.QCount == 64);
+    Feed(&t2, "/exit\r");
+    CHECK(t2.QCount == 64);
+    DrainDisplay(&t2);
+    CHECK(AnyRow(&a2, &t2, "Submission queue is full"));
 
     Tui_Stop(&t2);
     ArenaRelease(&a2);
+  }
+
+  // Slash input opens a prefix-filtered command palette. Arrow keys select a
+  // command, Enter submits its canonical name, and Escape dismisses the flyout
+  // without modifying the composer.
+  {
+    Arena ap = ArenaCreate();
+    TuiCommandSpec commands[] = {
+        {SVL("login"), {}, SVL("Sign in")},
+        {SVL("model"), {}, SVL("Change model")},
+        {SVL("clear"), {}, SVL("Clear conversation")},
+        {SVL("exit"), SVL("quit"), SVL("Exit")},
+    };
+    TuiOpts op;
+    op.ModelName = SVL("m");
+    op.Color = false;
+    op.Commands = commands;
+    op.CommandCount = 4;
+    Tui tp;
+    Tui_InitModel(&tp, &ap, op);
+
+    Feed(&tp, "/");
+    CHECK(StrView_Eq(LineEdit_Text(&tp.Edit), SVL("/")));
+    CHECK(tp.CommandPaletteSelected == 0);
+    Feed(&tp, "\x1b[B\x1b[B\r");
+    TuiSubmission paletteSubmission = {};
+    CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
+    CHECK(paletteSubmission.Kind == TuiSubmissionKind::Command);
+    CHECK(StrView_Eq(paletteSubmission.Text, SVL("/clear")));
+
+    Feed(&tp, "/q\r");
+    CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
+    CHECK(StrView_Eq(paletteSubmission.Text, SVL("/exit")));
+
+    Feed(&tp, "/unknown\r");
+    CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
+    CHECK(StrView_Eq(paletteSubmission.Text, SVL("/unknown")));
+
+    Feed(&tp, "/");
+    Feed(&tp, "\x1b");
+    CHECK(tp.CommandPaletteDismissed);
+    CHECK(StrView_Eq(LineEdit_Text(&tp.Edit), SVL("/")));
+    Feed(&tp, "m\r");
+    CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
+    CHECK(StrView_Eq(paletteSubmission.Text, SVL("/model")));
+
+    CHECK(Tui_ClearSession(&tp));
+    CHECK(tp.CommandCount == 4);
+    CHECK(!tp.CommandPaletteDismissed);
+    Feed(&tp, "/c\r");
+    CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
+    CHECK(StrView_Eq(paletteSubmission.Text, SVL("/clear")));
+
+    Tui_Stop(&tp);
+    ArenaRelease(&ap);
   }
 
   // End-to-end: a real agent turn (faux provider) must surface the assistant's
@@ -912,6 +1194,217 @@ void TestTui() {
 
     Tui_Stop(&ts);
     ArenaRelease(&as);
+  }
+
+  // Modal selectors route navigation/confirmation away from the composer and
+  // preserve a cancellable manual text-entry path.
+  {
+    Arena am = ArenaCreate();
+    TuiOpts om;
+    om.ModelName = SVL("old-model");
+    om.Color = false;
+    Tui tm;
+    Tui_InitModel(&tm, &am, om);
+
+    StrView options[] = {SVL("first"), SVL("second"), SVL("third")};
+    CHECK(Tui_BeginSelection(&tm, SVL("Choose"), options, 3));
+    CHECK(Tui_GetModalResult(&tm, nullptr, nullptr) == TuiModalResult::Pending);
+    Feed(&tm, "\x1b[B\x1b[B\r");
+    u32 selected = 0;
+    CHECK(Tui_GetModalResult(&tm, &selected, nullptr) == TuiModalResult::Confirmed);
+    CHECK(selected == 2);
+    CHECK(LineEdit_Empty(&tm.Edit));
+
+    CHECK(Tui_BeginSelection(&tm, SVL("Cancel"), options, 3, 1));
+    Feed(&tm, "\x1b");
+    CHECK(Tui_GetModalResult(&tm, nullptr, nullptr) == TuiModalResult::Cancelled);
+
+    CHECK(Tui_BeginSelection(&tm, SVL("Back"), options, 3, 1));
+    Feed(&tm, "\x7f");
+    CHECK(Tui_GetModalResult(&tm, nullptr, nullptr) == TuiModalResult::Back);
+
+    CHECK(Tui_BeginTextEntry(&tm, SVL("Model"), SVL("Enter model ID")));
+    Feed(&tm, "claude-manual\r");
+    StrView entered = {};
+    CHECK(Tui_GetModalResult(&tm, nullptr, &entered) == TuiModalResult::Confirmed);
+    CHECK(StrView_Eq(entered, SVL("claude-manual")));
+
+    CHECK(Tui_BeginTextEntry(&tm, SVL("Model"), SVL("Enter model ID"),
+                             SVL("x")));
+    Feed(&tm, "\x7f");
+    CHECK(Tui_GetModalResult(&tm, nullptr, nullptr) == TuiModalResult::Pending);
+    CHECK(LineEdit_Empty(&tm.ModalEdit));
+    Feed(&tm, "\x7f");
+    CHECK(Tui_GetModalResult(&tm, nullptr, nullptr) == TuiModalResult::Back);
+
+    Tui_OpenCommandPalette(&tm);
+    CHECK(StrView_Eq(LineEdit_Text(&tm.Edit), SVL("/")));
+    CHECK(tm.ModalKind == TuiModalKind::None);
+    CHECK(tm.ModalResult == TuiModalResult::None);
+
+    BlockingSelect blocking = {};
+    blocking.Controller = &tm;
+    blocking.Options = options;
+    blocking.OptionCount = 3;
+    Thread waiter = {};
+    CHECK(Thread_Start(&waiter, RunBlockingSelect, &blocking));
+    for (u32 i = 0; i < 100 &&
+                    Tui_GetModalResult(&tm, nullptr, nullptr) != TuiModalResult::Pending;
+         i++)
+      Sleep_Ms(1);
+    CHECK(Tui_GetModalResult(&tm, nullptr, nullptr) == TuiModalResult::Pending);
+    Feed(&tm, "\x1b[B\r");
+    Thread_Join(&waiter);
+    CHECK(blocking.Confirmed);
+    CHECK(blocking.Selected == 1);
+
+    Tui_Stop(&tm);
+    ArenaRelease(&am);
+  }
+
+  // Command notices/errors, model status, and operation cancellation are
+  // thread-safe state updates. Ctrl+C cancels an operation without exiting.
+  {
+    Arena ac = ArenaCreate();
+    TuiOpts oc;
+    oc.ModelName = SVL("before");
+    oc.Color = false;
+    Tui tc;
+    Tui_InitModel(&tc, &ac, oc);
+
+    Tui_CommandNotice(&tc, SVL("model discovery unavailable; using fallback"));
+    Tui_CommandError(&tc, SVL("settings write failed"));
+    DrainDisplay(&tc);
+    CHECK(AnyRow(&ac, &tc, "model discovery unavailable"));
+    CHECK(AnyRow(&ac, &tc, "settings write failed"));
+
+    Tui_SetModelName(&tc, SVL("after"));
+    CHECK(StrView_Eq(tc.ModelName, SVL("after")));
+
+    Tui_BeginOperation(&tc, SVL("login"));
+    Tui_SetOperationStatus(&tc, SVL("waiting for approval"));
+    CHECK(tc.OperationActive);
+    CHECK(StrView_Eq(tc.OperationLabel, SVL("login")));
+    CHECK(StrView_Eq(tc.OperationStatus, SVL("waiting for approval")));
+    CHECK(*Tui_OperationAbort(&tc) == 0);
+    Feed(&tc, "\x03");
+    CHECK(*Tui_OperationAbort(&tc) == 1);
+    CHECK(!tc.Quit);
+    CHECK(!tc.Stop);
+    CHECK(Tui_EndOperation(&tc));
+    CHECK(!tc.OperationActive);
+    Tui_BeginOperation(&tc, SVL("models"));
+    CHECK(*Tui_OperationAbort(&tc) == 0);
+    StrView stopOptions[] = {SVL("one"), SVL("two")};
+    CHECK(Tui_BeginSelection(&tc, SVL("Stop"), stopOptions, 2));
+    Feed(&tc, "\x04");
+    CHECK(*Tui_OperationAbort(&tc) == 1);
+    CHECK(tc.Quit);
+    CHECK(tc.Stop);
+    CHECK(Tui_GetModalResult(&tc, nullptr, nullptr) == TuiModalResult::Cancelled);
+    CHECK(Tui_EndOperation(&tc));
+    Tui_BeginOperation(&tc, SVL("must not restart"));
+    CHECK(!tc.OperationActive);
+    CHECK(*Tui_OperationAbort(&tc) == 1);
+    CHECK(!Tui_BeginSelection(&tc, SVL("Stopped"), stopOptions, 2));
+
+    Tui_Stop(&tc);
+    ArenaRelease(&ac);
+  }
+
+  // Session clear reclaims the resettable arena and returns all conversation/UI
+  // state to idle while preserving terminal context, agent binding, and model.
+  {
+    Arena ar = ArenaCreate();
+    TuiOpts orr;
+    orr.ModelName = SVL("kept-model");
+    orr.Color = false;
+    Tui resetTui;
+    Tui_InitModel(&resetTui, &ar, orr);
+    Agent ag = Agent_Make(&ar, Model{}, SVL("sys"));
+    Agent_InitQueues(&ag);
+    resetTui.Ag = &ag;
+    resetTui.Cwd = SVL("kept-cwd");
+    resetTui.Branch = SVL("kept-branch");
+
+    LineModel_AddNotice(&resetTui.Model, EntryKind::Info, SVL("old transcript"));
+    LineEdit_InsertText(&resetTui.Edit, SVL("draft"));
+    CHECK(LineEdit_Submit(&resetTui.Edit).Length == 5);
+    Feed(&resetTui, "/queued\r");
+    CHECK(resetTui.QCount == 1);
+    LineEdit_InsertText(&resetTui.Edit, SVL("second draft"));
+    Tui_CommandNotice(&resetTui, SVL("pending display"));
+    StreamReveal_Push(&resetTui.Reveal, SVL("pending reveal"));
+    resetTui.Use.Input = 11;
+    resetTui.Use.Output = 7;
+    resetTui.State = TuiState::Streaming;
+    resetTui.StateTool = SVL("old tool");
+    resetTui.TurnStartMs = 99;
+    resetTui.QueuedCount = 3;
+    resetTui.Top = 4;
+    resetTui.LastTop = 3;
+    resetTui.LastPaneH = 10;
+    resetTui.Follow = false;
+    resetTui.HoveredEntryId = 4;
+    resetTui.PressedEntryId = 4;
+    resetTui.HasMouse = true;
+    Tui_BeginOperation(&resetTui, SVL("old operation"));
+    StrView options[] = {SVL("one"), SVL("two")};
+    CHECK(Tui_BeginSelection(&resetTui, SVL("old modal"), options, 2));
+    usize usedBeforeClear = resetTui.SessionMem.Used;
+
+    resetTui.AgentRunning = true;
+    CHECK(!Tui_ClearSession(&resetTui));
+    CHECK(resetTui.Model.Entries.Count != 0);
+    resetTui.AgentRunning = false;
+
+    CHECK(Agent_ResetSession(&ag));
+    CHECK(Tui_ClearSession(&resetTui));
+    CHECK(resetTui.SessionMem.Base != nullptr);
+    CHECK(resetTui.SessionMem.Used > 0);
+    CHECK(resetTui.SessionMem.Used < usedBeforeClear);
+    CHECK(resetTui.Model.Entries.Count == 0);
+    CHECK(LineModel_Count(&resetTui.Model) == 0);
+    CHECK(LineEdit_Empty(&resetTui.Edit));
+    CHECK(resetTui.Edit.History.Count == 0);
+    CHECK(LineEdit_Empty(&resetTui.ModalEdit));
+    CHECK(resetTui.ModalEdit.History.Count == 0);
+    CHECK(resetTui.QCount == 1);
+    CHECK(!Tui_HasPendingDisplay(&resetTui));
+    CHECK(resetTui.DisplayHead == 0);
+    CHECK(resetTui.Use.Input == 0 && resetTui.Use.Output == 0);
+    CHECK(resetTui.State == TuiState::Idle);
+    CHECK(resetTui.StateTool.Length == 0);
+    CHECK(resetTui.TurnStartMs == 0);
+    CHECK(resetTui.QueuedCount == 0);
+    CHECK(resetTui.Follow);
+    CHECK(resetTui.Top == 0 && resetTui.LastTop == 0 && resetTui.LastPaneH == 0);
+    CHECK(resetTui.HoveredEntryId == 0 && resetTui.PressedEntryId == 0);
+    CHECK(!resetTui.HasMouse);
+    CHECK(!resetTui.OperationActive);
+    CHECK(resetTui.ModalKind == TuiModalKind::None);
+    CHECK(resetTui.ModalResult == TuiModalResult::None);
+    CHECK(StrView_Eq(resetTui.ModelName, SVL("kept-model")));
+    CHECK(StrView_Eq(resetTui.Cwd, SVL("kept-cwd")));
+    CHECK(StrView_Eq(resetTui.Branch, SVL("kept-branch")));
+    CHECK(resetTui.Ag == &ag);
+
+    TuiSubmission preserved = {};
+    CHECK(Tui_WaitForSubmit(&resetTui, &preserved));
+    CHECK(preserved.Kind == TuiSubmissionKind::Command);
+    CHECK(StrView_Eq(preserved.Text, SVL("/queued")));
+
+    LineEdit_InsertText(&resetTui.Edit, SVL("new prompt"));
+    CHECK(Tui_BeginSelection(&resetTui, SVL("new modal"), options, 2));
+    Feed(&resetTui, "\r");
+    CHECK(Tui_GetModalResult(&resetTui, nullptr, nullptr) == TuiModalResult::Confirmed);
+    Tui_EndOperation(&resetTui);
+    CHECK(Agent_Release(&ag));
+    Tui_Stop(&resetTui);
+    CHECK(!resetTui.SessionUp);
+    CHECK(!resetTui.SyncUp);
+    Tui_Stop(&resetTui);  // final cleanup is idempotent
+    ArenaRelease(&ar);
   }
 
   Tui_Stop(&t);

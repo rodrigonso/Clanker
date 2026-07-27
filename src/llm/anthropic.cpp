@@ -9,6 +9,25 @@ static bool OnHttpData(void* user, StrView chunk) {
   return true;
 }
 
+static u32 Anthropic_BuildHeaders(Arena* arena, StrView token, HttpHeader* headers) {
+  u32 count = 0;
+  headers[count++] = HttpHeader{SVL("anthropic-version"), SVL("2023-06-01")};
+  headers[count++] = HttpHeader{SVL("content-type"), SVL("application/json")};
+  if (Anthropic_IsOAuthToken(token)) {
+    StrBuf bearer = StrBuf_Make(arena, token.Length + 8);
+    StrBuf_AppendCStr(&bearer, "Bearer ");
+    StrBuf_Append(&bearer, token);
+    headers[count++] = HttpHeader{SVL("authorization"), StrBuf_View(&bearer)};
+    headers[count++] =
+        HttpHeader{SVL("anthropic-beta"), SVL("claude-code-20250219,oauth-2025-04-20")};
+    headers[count++] = HttpHeader{SVL("user-agent"), SVL("claude-cli/2.1.75")};
+    headers[count++] = HttpHeader{SVL("x-app"), SVL("cli")};
+  } else {
+    headers[count++] = HttpHeader{SVL("x-api-key"), token};
+  }
+  return count;
+}
+
 static bool Anthropic_Stream(void* ctx, Arena* arena, const Model* model, const LlmContext* context,
                              const StreamOptions* options, StreamSink sink, Message* out) {
   (void)ctx;
@@ -19,23 +38,9 @@ static bool Anthropic_Stream(void* ctx, Arena* arena, const Model* model, const 
   StrBuf_AppendCStr(&url, "/v1/messages");
 
   StrView token = options ? options->ApiKey : StrView{"", 0};
-  bool isOAuth = StrView_Contains(token, "sk-ant-oat");
 
   HttpHeader headers[6];
-  u32 hc = 0;
-  headers[hc++] = HttpHeader{SVL("anthropic-version"), SVL("2023-06-01")};
-  headers[hc++] = HttpHeader{SVL("content-type"), SVL("application/json")};
-  if (isOAuth) {
-    StrBuf bearer = StrBuf_Make(arena, token.Length + 8);
-    StrBuf_AppendCStr(&bearer, "Bearer ");
-    StrBuf_Append(&bearer, token);
-    headers[hc++] = HttpHeader{SVL("authorization"), StrBuf_View(&bearer)};
-    headers[hc++] = HttpHeader{SVL("anthropic-beta"), SVL("claude-code-20250219,oauth-2025-04-20")};
-    headers[hc++] = HttpHeader{SVL("user-agent"), SVL("claude-cli/2.1.75")};
-    headers[hc++] = HttpHeader{SVL("x-app"), SVL("cli")};
-  } else {
-    headers[hc++] = HttpHeader{SVL("x-api-key"), token};
-  }
+  u32 hc = Anthropic_BuildHeaders(arena, token, headers);
 
   Message m = Message_AssistantEmpty(arena);
   m.Model = model->Id;
@@ -94,6 +99,119 @@ static bool Anthropic_Stream(void* ctx, Arena* arena, const Model* model, const 
   StreamSink_Emit(sink, done);
   *out = m;
   return true;
+}
+
+static ProviderModelList AnthropicModelListError(Arena* arena, ProviderModelListStatus status,
+                                                 StrView error) {
+  ProviderModelList result = {};
+  result.Status = status;
+  result.Error = StrView_Dup(arena, error);
+  return result;
+}
+
+static void AppendQueryValue(StrBuf* url, StrView value) {
+  static const char HEX[] = "0123456789ABCDEF";
+  for (u32 i = 0; i < value.Length; i++) {
+    u8 c = (u8)value.Data[i];
+    bool plain = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                 (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~';
+    if (plain) {
+      StrBuf_AppendChar(url, (char)c);
+    } else {
+      StrBuf_AppendChar(url, '%');
+      StrBuf_AppendChar(url, HEX[c >> 4]);
+      StrBuf_AppendChar(url, HEX[c & 15]);
+    }
+  }
+}
+
+static StrView HttpStatusError(Arena* arena, i32 status) {
+  StrBuf error = StrBuf_Make(arena, 64);
+  StrBuf_AppendCStr(&error, "Anthropic models request failed with HTTP ");
+  StrBuf_AppendU64(&error, (u64)status);
+  return StrBuf_View(&error);
+}
+
+static HttpResponse AnthropicHttpFetch(void* user, Arena* arena, const HttpRequest* request,
+                                      volatile i32* abort) {
+  (void)user;
+  return Http_Fetch(arena, request, abort);
+}
+
+ProviderModelList Anthropic_ListModelsWithFetch(Arena* arena, StrView token, volatile i32* abort,
+                                                AnthropicModelsFetchFn fetch, void* fetchUser) {
+  if (token.Length == 0) {
+    return AnthropicModelListError(arena, ProviderModelListStatus::Unavailable,
+                                   SVL("Anthropic credentials are unavailable"));
+  }
+  if (!fetch) {
+    return AnthropicModelListError(arena, ProviderModelListStatus::Unavailable,
+                                   SVL("Anthropic model transport is unavailable"));
+  }
+  if (abort && *abort) {
+    return AnthropicModelListError(arena, ProviderModelListStatus::Unavailable,
+                                   SVL("Anthropic model discovery was aborted"));
+  }
+
+  Array<Model> models = Array_Make<Model>(arena, 16);
+  Array<StrView> cursors = Array_Make<StrView>(arena, 4);
+  StrView afterId = {};
+
+  for (u32 pageNumber = 0; pageNumber < 100; pageNumber++) {
+    StrBuf url = StrBuf_Make(arena, 96 + afterId.Length * 3);
+    StrBuf_AppendCStr(&url, "https://api.anthropic.com/v1/models?limit=1000");
+    if (afterId.Length) {
+      StrBuf_AppendCStr(&url, "&after_id=");
+      AppendQueryValue(&url, afterId);
+    }
+
+    HttpHeader headers[6];
+    u32 headerCount = Anthropic_BuildHeaders(arena, token, headers);
+    HttpRequest request = {};
+    request.Method = SVL("GET");
+    request.Url = StrBuf_View(&url);
+    request.Headers = headers;
+    request.HeaderCount = headerCount;
+
+    HttpResponse response = fetch(fetchUser, arena, &request, abort);
+    if (response.Status < 0) {
+      StrView error = response.Error.Length ? response.Error : SVL("Anthropic model request failed");
+      return AnthropicModelListError(arena, ProviderModelListStatus::Unavailable, error);
+    }
+    if (response.Status < 200 || response.Status >= 300) {
+      return AnthropicModelListError(arena, ProviderModelListStatus::Failed,
+                                     HttpStatusError(arena, response.Status));
+    }
+
+    AnthropicModelPage page = {};
+    if (!Anthropic_ParseModelsResponse(arena, response.Body, &page)) {
+      return AnthropicModelListError(arena, ProviderModelListStatus::Failed, page.Error);
+    }
+    for (u32 i = 0; i < page.Count; i++) Array_Push(&models, page.Models[i]);
+    if (!page.HasMore) {
+      ProviderModelList live = {};
+      live.Status = ProviderModelListStatus::Success;
+      live.Models = models.Data;
+      live.Count = models.Count;
+      return ProviderModelList_Merge(arena, live, nullptr, 0);
+    }
+
+    for (u32 i = 0; i < cursors.Count; i++) {
+      if (StrView_Eq(cursors.Data[i], page.LastId)) {
+        return AnthropicModelListError(arena, ProviderModelListStatus::Failed,
+                                       SVL("Anthropic model pagination repeated a cursor"));
+      }
+    }
+    afterId = StrView_Dup(arena, page.LastId);
+    Array_Push(&cursors, afterId);
+  }
+
+  return AnthropicModelListError(arena, ProviderModelListStatus::Failed,
+                                 SVL("Anthropic model pagination exceeded 100 pages"));
+}
+
+ProviderModelList Anthropic_ListModels(Arena* arena, StrView token, volatile i32* abort) {
+  return Anthropic_ListModelsWithFetch(arena, token, abort, AnthropicHttpFetch, nullptr);
 }
 
 Provider Anthropic_Provider() {

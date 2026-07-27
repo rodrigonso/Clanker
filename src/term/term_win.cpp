@@ -42,6 +42,7 @@ bool Term_Enter(Term* t) {
 void Term_Exit(Term* t) {
   if (!t->Active) return;
   Term_WriteStr("\x1b[?1006l\x1b[?1003l\x1b[?2004l\x1b[?25h\x1b[?1049l");
+  FlushConsoleInputBuffer((HANDLE)t->HIn);
   SetConsoleMode((HANDLE)t->HOut, t->SavedOutMode);
   SetConsoleMode((HANDLE)t->HIn, t->SavedInMode);
   SetConsoleOutputCP(t->SavedCP);
@@ -59,10 +60,24 @@ void Term_Size(const Term* t, u16* cols, u16* rows) {
   }
 }
 
-void* Term_InHandle(const Term* t) { return t->HIn; }
-
 u32 Term_ReadInput(const Term* t, char* buf, u32 cap) {
   DWORD got = 0;
   if (!ReadFile((HANDLE)t->HIn, buf, cap, &got, nullptr)) return 0;
   return (u32)got;
+}
+
+bool Term_WaitInput(const Term* t, u32 timeoutMs) {
+  return WaitForSingleObject((HANDLE)t->HIn, timeoutMs) == WAIT_OBJECT_0;
+}
+
+void Term_WakeInput(const Term* t) {
+  if (!t->Active || !t->HIn) return;
+  INPUT_RECORD record = {};
+  record.EventType = KEY_EVENT;
+  record.Event.KeyEvent.bKeyDown = TRUE;
+  record.Event.KeyEvent.wRepeatCount = 1;
+  record.Event.KeyEvent.wVirtualKeyCode = VK_RETURN;
+  record.Event.KeyEvent.uChar.UnicodeChar = L'\r';
+  DWORD written = 0;
+  WriteConsoleInputW((HANDLE)t->HIn, &record, 1, &written);
 }

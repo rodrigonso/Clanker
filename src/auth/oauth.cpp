@@ -10,7 +10,6 @@
 static const OAuthConfig CONFIGS[] = {
     {
         SVL("anthropic"),
-        SVL("Anthropic (Claude Pro/Max)"),
         SVL("9d1c250a-e61b-44d9-88ed-5944d1962f5e"),
         SVL("https://claude.ai/oauth/authorize"),
         SVL("https://platform.claude.com/v1/oauth/token"),
@@ -62,7 +61,6 @@ OAuthBegin OAuth_BeginAuthCode(Arena* a, const OAuthConfig* cfg) {
 
 OAuthRedirect OAuth_ParseRedirect(StrView uri) {
   OAuthRedirect r;
-  r.Host = StrView{nullptr, 0};
   r.Port = 0;
   r.Path = SVL("/");
 
@@ -80,9 +78,7 @@ OAuthRedirect OAuth_ParseRedirect(StrView uri) {
     if (StrView_EqCStr(StrView{uri.Data, sep}, "https")) https = true;
     i = sep + 3;
   }
-  u32 hostStart = i;
   while (i < uri.Length && uri.Data[i] != ':' && uri.Data[i] != '/') i++;
-  r.Host = StrView{uri.Data + hostStart, i - hostStart};
   u32 port = https ? 443u : 80u;
   if (i < uri.Length && uri.Data[i] == ':') {
     i++;
@@ -133,7 +129,12 @@ bool OAuth_ParseTokenResponse(Arena* a, StrView json, Credential* out) {
   return true;
 }
 
-static bool PostToken(Arena* a, StrView url, StrView body, Credential* out, StrBuf* err) {
+static bool PostToken(Arena* a, StrView url, StrView body, Credential* out, StrBuf* err,
+                      volatile i32* abort) {
+  if (abort && *abort) {
+    StrBuf_AppendCStr(err, "login cancelled");
+    return false;
+  }
   HttpHeader h[2] = {{SVL("content-type"), SVL("application/json")}, {SVL("accept"), SVL("application/json")}};
   HttpRequest req = {};
   req.Method = SVL("POST");
@@ -141,7 +142,11 @@ static bool PostToken(Arena* a, StrView url, StrView body, Credential* out, StrB
   req.Headers = h;
   req.HeaderCount = 2;
   req.Body = body;
-  HttpResponse r = Http_Fetch(a, &req, nullptr);
+  HttpResponse r = Http_Fetch(a, &req, abort);
+  if (abort && *abort) {
+    StrBuf_AppendCStr(err, "login cancelled");
+    return false;
+  }
   if (r.Status < 200 || r.Status >= 300) {
     StrBuf_AppendCStr(err, "token endpoint HTTP ");
     StrBuf_AppendI64(err, r.Status);
@@ -163,7 +168,7 @@ static bool PostToken(Arena* a, StrView url, StrView body, Credential* out, StrB
 }
 
 bool OAuth_ExchangeCode(Arena* a, const OAuthConfig* cfg, StrView code, StrView state, StrView verifier,
-                        Credential* out, StrBuf* err) {
+                        Credential* out, StrBuf* err, volatile i32* abort) {
   StrBuf body = StrBuf_Make(a, 256);
   StrBuf_AppendCStr(&body, "{\"grant_type\":\"authorization_code\",\"client_id\":");
   Json_WriteString(&body, cfg->ClientId);
@@ -176,15 +181,16 @@ bool OAuth_ExchangeCode(Arena* a, const OAuthConfig* cfg, StrView code, StrView 
   StrBuf_AppendCStr(&body, ",\"code_verifier\":");
   Json_WriteString(&body, verifier);
   StrBuf_AppendChar(&body, '}');
-  return PostToken(a, cfg->TokenUrl, StrBuf_View(&body), out, err);
+  return PostToken(a, cfg->TokenUrl, StrBuf_View(&body), out, err, abort);
 }
 
-bool OAuth_Refresh(Arena* a, const OAuthConfig* cfg, StrView refresh, Credential* out, StrBuf* err) {
+bool OAuth_Refresh(Arena* a, const OAuthConfig* cfg, StrView refresh, Credential* out, StrBuf* err,
+                   volatile i32* abort) {
   StrBuf body = StrBuf_Make(a, 256);
   StrBuf_AppendCStr(&body, "{\"grant_type\":\"refresh_token\",\"client_id\":");
   Json_WriteString(&body, cfg->ClientId);
   StrBuf_AppendCStr(&body, ",\"refresh_token\":");
   Json_WriteString(&body, refresh);
   StrBuf_AppendChar(&body, '}');
-  return PostToken(a, cfg->TokenUrl, StrBuf_View(&body), out, err);
+  return PostToken(a, cfg->TokenUrl, StrBuf_View(&body), out, err, abort);
 }

@@ -15,6 +15,8 @@ struct Term {
 #else
   int InFd;
   int OutFd;
+  int WakeReadFd;
+  int WakeWriteFd;
   alignas(8) unsigned char SavedTermios[64];
 #endif
 };
@@ -46,11 +48,12 @@ void Term_AppendOSC52(StrBuf* out, StrView data);
 // number of bytes read, or 0 on EOF/error.
 u32 Term_ReadInput(const Term* t, char* buf, u32 cap);
 
+// Wait until raw input can be read without blocking, bounded by timeoutMs.
+// Used by the TUI input thread so shutdown cannot hang behind a blocking read.
+bool Term_WaitInput(const Term* t, u32 timeoutMs);
+
+// Wake a pending input wait/read during shutdown. Safe to call when inactive.
+void Term_WakeInput(const Term* t);
+
 // Internal: arrange Term_Exit to run on normal process exit.
 void Term_TrackForRestore(Term* t);
-
-#if defined(_WIN32)
-void* Term_InHandle(const Term* t);
-#else
-int Term_InFd(const Term* t);
-#endif

@@ -53,6 +53,23 @@ bool HasKind(Recorder* r, AgentEventKind k) {
   return false;
 }
 
+struct AbortAuthContext {
+  volatile i32* SeenAbort;
+  u32 Calls;
+};
+
+bool AbortDuringAuth(void* user, Arena* arena, StrView provider, volatile i32* abort,
+                     StrView* outToken) {
+  (void)arena;
+  (void)provider;
+  (void)outToken;
+  AbortAuthContext* ctx = (AbortAuthContext*)user;
+  ctx->SeenAbort = abort;
+  ctx->Calls++;
+  if (abort) *abort = 1;
+  return false;
+}
+
 u32 CountKind(Recorder* r, AgentEventKind k) {
   u32 c = 0;
   for (u32 i = 0; i < r->Kinds.Count; i++)
@@ -536,8 +553,8 @@ void TestAgent() {
     ArenaRelease(&a);
   }
 
-  // Auto-retry: a pre-set abort short-circuits the backoff (no long sleep, no
-  // re-stream) so cancellation stays responsive.
+  // Auto-retry: a pre-set abort prevents the provider request entirely so
+  // cancellation stays responsive.
   {
     Arena a = ArenaCreate();
     Model model = {};
@@ -566,8 +583,9 @@ void TestAgent() {
     Agent_Prompt(&ag, SV("go"));
     u64 elapsed = NowMillis() - t0;
     CHECK(elapsed < 5000);  // did not actually sleep 100s
-    CHECK(CountKind(&rec, AgentEventKind::RetryStart) == 1);
-    CHECK(f.Index == 1);  // backoff aborted before any re-stream
+    CHECK(CountKind(&rec, AgentEventKind::RetryStart) == 0);
+    CHECK(f.Index == 0);
+    CHECK(ag.Messages.Data[1].Stop == StopReason::Aborted);
     ArenaRelease(&a);
   }
 
@@ -701,6 +719,86 @@ void TestAgent() {
     CHECK(ag.Messages.Data[2].Kind == Role::User);
     CHECK(StrView_EqCStr(ag.Messages.Data[2].Content.Data[0].Text, "follow"));
     CHECK(StrView_EqCStr(ag.Messages.Data[3].Content.Data[0].Text, "second"));
+    ArenaRelease(&a);
+  }
+
+  // Idle session reset clears transcript/queues/runtime flags while preserving
+  // provider/model/tools/config, and final release destroys the queue mutex.
+  {
+    Arena a = ArenaCreate();
+    Model model = {};
+    model.Id = SVL("kept-model");
+    Agent ag = Agent_Make(&a, model, SV("kept-system"));
+    Agent_InitQueues(&ag);
+    Tool echo = {};
+    echo.Name = SVL("echo");
+    echo.Execute = EchoExec;
+    Agent_AddTool(&ag, echo);
+    Provider provider = ag.Prov;
+    volatile i32 abort = 1;
+    ag.Stream.Abort = &abort;
+    ag.Messages.Count = 1;
+    ag.Messages.Data[0] = Message_User(&a, SVL("old message"));
+    Agent_Steer(&ag, SVL("steer"));
+    Agent_FollowUp(&ag, SVL("follow"));
+    Agent_NextTurn(&ag, SVL("next"));
+
+    ag.Streaming = true;
+    CHECK(!Agent_ResetSession(&ag));
+    CHECK(ag.Messages.Count == 1);
+    CHECK(!Agent_Release(&ag));
+    CHECK(ag.QueueInit);
+
+    ag.Streaming = false;
+    CHECK(Agent_ResetSession(&ag));
+    CHECK(ag.Messages.Count == 0);
+    CHECK(ag.Steer.Count == 0);
+    CHECK(ag.FollowUp.Count == 0);
+    CHECK(ag.NextTurn.Count == 0);
+    CHECK(!ag.QueuesDirty);
+    CHECK(ag.Stream.Abort == &abort);
+    CHECK(abort == 1);
+    CHECK(StrView_Eq(ag.Model.Id, SVL("kept-model")));
+    CHECK(StrView_Eq(ag.SystemPrompt, SVL("kept-system")));
+    CHECK(ag.Tools.Count == 1);
+    CHECK(ag.Prov.Stream == provider.Stream);
+
+    Agent_Steer(&ag, SVL("after reset"));
+    CHECK(ag.Steer.Count == 1);
+    CHECK(Agent_Release(&ag));
+    CHECK(!ag.QueueInit);
+    CHECK(ag.Steer.Count == 0);
+    ArenaRelease(&a);
+  }
+
+  // Cancellation raised during per-stream auth resolution prevents the provider
+  // request and records an aborted assistant turn.
+  {
+    Arena a = ArenaCreate();
+    Model model = {};
+    model.Provider = SVL("faux");
+    Agent ag = Agent_Make(&a, model, SVL("sys"));
+    volatile i32 abort = 0;
+    ag.Stream.Abort = &abort;
+    AbortAuthContext auth = {};
+    ag.AuthUser = &auth;
+    ag.ResolveAuth = AbortDuringAuth;
+
+    FauxStep step = {};
+    step.Text = SVL("must not stream");
+    step.Stop = StopReason::Stop;
+    Faux faux = {};
+    faux.Steps = &step;
+    faux.Count = 1;
+    ag.Prov = Faux_Provider(&faux);
+
+    Agent_Prompt(&ag, SVL("go"));
+    CHECK(auth.Calls == 1);
+    CHECK(auth.SeenAbort == &abort);
+    CHECK(faux.Index == 0);
+    CHECK(ag.Messages.Count == 2);
+    CHECK(ag.Messages.Data[1].Kind == Role::Assistant);
+    CHECK(ag.Messages.Data[1].Stop == StopReason::Aborted);
     ArenaRelease(&a);
   }
 }

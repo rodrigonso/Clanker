@@ -1,5 +1,7 @@
 #include "agent/agent.h"
 
+#include <string.h>
+
 #include "base/str.h"
 #include "base/thread.h"
 #include "llm/retry.h"
@@ -108,12 +110,18 @@ static bool StreamAssistant(Agent* a, Message* outAssistant) {
   bool ok = false;
   for (u32 attempt = 0;; attempt++) {
     StreamOptions opts = a->Stream;
+    assistant = Message{};
     if (a->ResolveAuth) {
-      StrView token;
-      if (a->ResolveAuth(a->AuthUser, a->Mem, a->Model.Provider, &token)) opts.ApiKey = token;
+      StrView token = {};
+      if (a->ResolveAuth(a->AuthUser, a->Mem, a->Model.Provider, opts.Abort, &token))
+        opts.ApiKey = token;
+    }
+    if (opts.Abort && *opts.Abort) {
+      assistant.Kind = Role::Assistant;
+      assistant.Stop = StopReason::Aborted;
+      break;
     }
 
-    assistant = Message{};
     ok = a->Prov.Stream(a->Prov.Ctx, a->Mem, &a->Model, &ctx, &opts, sink, &assistant);
 
     bool isError = (!ok || assistant.Stop == StopReason::Error);
@@ -400,6 +408,40 @@ void Agent_InitQueues(Agent* a) {
   a->QueueInit = true;
 }
 
+static void ClearQueuesLocked(Agent* a) {
+  a->Steer = MsgQueue{};
+  a->FollowUp = MsgQueue{};
+  a->NextTurn = MsgQueue{};
+  a->QueuesDirty = false;
+}
+
+bool Agent_ResetSession(Agent* a) {
+  if (a->Streaming) return false;
+
+  if (a->Messages.Count)
+    memset(a->Messages.Data, 0, sizeof(Message) * (usize)a->Messages.Count);
+  a->Messages.Count = 0;
+
+  if (a->QueueInit) {
+    Mutex_Lock(&a->QueueLock);
+    ClearQueuesLocked(a);
+    Mutex_Unlock(&a->QueueLock);
+  } else {
+    ClearQueuesLocked(a);
+  }
+  a->Streaming = false;
+  return true;
+}
+
+bool Agent_Release(Agent* a) {
+  if (!Agent_ResetSession(a)) return false;
+  if (a->QueueInit) {
+    Mutex_Destroy(&a->QueueLock);
+    a->QueueInit = false;
+  }
+  return true;
+}
+
 static void QueuePushLocked(MsgQueue* q, StrView text) {
   if (q->Count >= 64) return;  // drop on overflow
   q->Items[q->Tail] = text;
@@ -568,10 +610,3 @@ static void RunLoop(Agent* a, const StrView* promptText) {
 }
 
 void Agent_Prompt(Agent* a, StrView userText) { RunLoop(a, &userText); }
-
-void Agent_Continue(Agent* a) {
-  FFI(a->Messages.Count == 0);
-  Message* last = Array_Last(&a->Messages);
-  FFI(last->Kind == Role::Assistant);
-  RunLoop(a, nullptr);
-}

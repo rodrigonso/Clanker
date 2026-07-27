@@ -380,9 +380,7 @@ u32 ExpandedStart(LineModel* m) {
   return start;
 }
 
-void RebuildAll(LineModel* m, bool crop) {
-  ArenaReset(&m->RowsMem);
-  m->Lines.Count = 0;
+void BuildRows(LineModel* m, u32 stopAfter) {
   u32 expandedStart = ExpandedStart(m);
   for (u32 i = 0; i < m->Entries.Count; i++) {
     if (i == m->Entries.Count - 1 && m->HasAssistant) {
@@ -390,7 +388,14 @@ void RebuildAll(LineModel* m, bool crop) {
       m->AssistantRowsMark = m->RowsMem.Used;
     }
     BuildEntryRows(m, i, expandedStart);
+    if (m->Lines.Count > stopAfter) break;
   }
+}
+
+void RebuildAll(LineModel* m, bool crop) {
+  ArenaReset(&m->RowsMem);
+  m->Lines.Count = 0;
+  BuildRows(m, 0xffffffffu);
   if (crop) CropDisplayToCap(m);
 }
 
@@ -560,6 +565,30 @@ void LineModel_Init(LineModel* m, Arena* mem, u16 width, u32 cap) {
 void LineModel_Release(LineModel* m) { ArenaRelease(&m->RowsMem); }
 
 u32 LineModel_Count(const LineModel* m) { return m->Lines.Count; }
+
+bool LineModel_FitsAtWidth(LineModel* m, u16 width, u32 maxRows) {
+  if (maxRows >= m->Cap) return true;
+  if (width < 1) width = 1;
+  if (width == m->Width) return m->Lines.Count <= maxRows;
+
+  usize rowsMark = m->RowsMem.Used;
+  u16 savedWidth = m->Width;
+  Array<SpanLine> savedLines = m->Lines;
+  u32 savedAssistantStart = m->AssistantStart;
+  usize savedAssistantRowsMark = m->AssistantRowsMark;
+
+  m->Width = width;
+  m->Lines = Array_Make<SpanLine>(&m->RowsMem, 32);
+  BuildRows(m, maxRows);
+  bool fits = m->Lines.Count <= maxRows;
+
+  ArenaRestore(&m->RowsMem, rowsMark);
+  m->Width = savedWidth;
+  m->Lines = savedLines;
+  m->AssistantStart = savedAssistantStart;
+  m->AssistantRowsMark = savedAssistantRowsMark;
+  return fits;
+}
 
 const SpanLine* LineModel_At(const LineModel* m, u32 i) {
   return i < m->Lines.Count ? &m->Lines.Data[i] : nullptr;

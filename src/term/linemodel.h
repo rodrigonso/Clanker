@@ -104,6 +104,9 @@ void LineModel_Release(LineModel* m);
 void LineModel_SetWidth(LineModel* m, u16 width);  // re-wrap everything
 void LineModel_SetColorEnabled(bool on);
 u32 LineModel_Count(const LineModel* m);
+// Check whether another width fits within `maxRows` without changing the
+// current rendered rows.
+bool LineModel_FitsAtWidth(LineModel* m, u16 width, u32 maxRows);
 const SpanLine* LineModel_At(const LineModel* m, u32 i);
 u64 LineModel_RowEntryId(const LineModel* m, u32 row);
 u64 LineModel_DisplayRevision(const LineModel* m);
