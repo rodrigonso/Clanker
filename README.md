@@ -103,12 +103,13 @@ blocking the agent or tool execution.
 Keys: **Enter** sends · **Ctrl+J** / Alt+Enter inserts a newline · arrows move
 (↑/↓ across lines, then through history at the edges) · **Ctrl+←/→** word jump ·
 Home/End · **Ctrl+W/U/K** delete word / to start / to end · **mouse wheel**
-scrolls the transcript · type during a turn to **steer** · **Ctrl+C** interrupts a
-turn, cancels a command operation, or quits when idle · hover or **left click**
-the first row of a transcript turn to highlight or collapse/expand it ·
-**Ctrl+O** expands all tools when any
-is collapsed, otherwise collapses all · **Ctrl+D** quits · **Ctrl+L** repaints.
-Honors `NO_COLOR`. Pasted multi-line text is inserted literally (bracketed paste).
+scrolls the transcript · an overflow-only scrollbar can be clicked or dragged
+(track clicks center its thumb) · type during a turn to **steer** · **Ctrl+C**
+interrupts a turn, cancels a command operation, or quits when idle · hover or
+**left click** the first row of a transcript turn to highlight or
+collapse/expand it · **Ctrl+O** expands all tools when any is collapsed,
+otherwise collapses all · **Ctrl+D** quits · **Ctrl+L** repaints. Honors
+`NO_COLOR`. Pasted multi-line text is inserted literally (bracketed paste).
 
 When stdin/stdout isn't a TTY (pipes, redirected) or with `-p`, it falls back to
 a plain line renderer. Plain and piped output write provider deltas immediately
