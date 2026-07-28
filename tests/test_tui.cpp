@@ -192,20 +192,20 @@ void TestTui() {
     LineModel_AddNotice(&tf.Model, EntryKind::Info, SVL("fixture transcript"));
     Feed(&tf, "hello");
     Tui_ComposeFrame(&tf, 20, 12);
-    CHECK(FrameHash(&tf) == 341164753521852848ull);
+    CHECK(FrameHash(&tf) == 17203574560423216616ull);
 
     LineEdit_Clear(&tf.Edit);
     Feed(&tf, "/");
     Tui_ComposeFrame(&tf, 20, 12);
-    CHECK(FrameHash(&tf) == 15422722240356324109ull);
+    CHECK(FrameHash(&tf) == 6276729356697869733ull);
 
     StrView options[] = {SVL("first"), SVL("second"), SVL("third")};
     CHECK(Tui_BeginSelection(&tf, SVL("Choose"), options, 3, 1));
     Tui_ComposeFrame(&tf, 20, 12);
-    CHECK(FrameHash(&tf) == 5659820654767030695ull);
+    CHECK(FrameHash(&tf) == 2455385379269386559ull);
 
     Tui_ComposeFrame(&tf, 28, 15);
-    CHECK(FrameHash(&tf) == 3140326830571842231ull);
+    CHECK(FrameHash(&tf) == 16195661565015970235ull);
     Tui_Stop(&tf);
     ArenaRelease(&af);
   }
@@ -217,7 +217,7 @@ void TestTui() {
     LineModel_AddNotice(&tf.Model, EntryKind::Info, SVL("fixture transcript"));
     Feed(&tf, "hello");
     Tui_ComposeFrame(&tf, 20, 12);
-    CHECK(FrameHash(&tf) == 8250882380115578081ull);
+    CHECK(FrameHash(&tf) == 11317252277812289717ull);
     Tui_Stop(&tf);
     ArenaRelease(&af);
   }
@@ -287,7 +287,7 @@ void TestTui() {
 
   // The transcript captured the unlabeled assistant text and compact tool row.
   CHECK_ALL(!AnyRow(&a, &t, "assistant"), AnyRow(&a, &t, "Hello world"),
-            AnyRow(&a, &t, "\xe2\x96\xa0  Shell ls"),
+            AnyRow(&a, &t, " \xe2\x97\xbb  Shell ls"),
             !AnyRow(&a, &t, "hello-from-shell"), t.State == TuiState::Idle,
             t.Use.Output == 7);
 
@@ -927,7 +927,7 @@ void TestTui() {
     Feed(&tc, "\x1b[<0;2;1m");
     CHECK_ALL(LineModel_IsEntryCollapsed(&tc.Model, targetId), tc.Follow);
 
-    Feed(&tc, "\x1b[<0;4;3M\x1b[<32;9;3M\x1b[<0;9;3m");
+    Feed(&tc, "\x1b[<0;5;3M\x1b[<32;10;3M\x1b[<0;10;3m");
     CHECK(tc.TranscriptSelectionRevision != 0);
     LineModel_AppendAssistant(&tc.Model, SVL(" more"));
     Tui_ComposeFrame(&tc, 20, 12);
@@ -1106,9 +1106,9 @@ void TestTui() {
     LineModel_AppendAssistant(&ts.Model, SVL("[link](https://example.com)"));
     LineModel_EndAssistant(&ts.Model);
     Tui_ComposeFrame(&ts, 20, 12);
-    Feed(&ts, "\x1b[<0;4;1M\x1b[<32;7;1M\x1b[<0;7;1m");
+    Feed(&ts, "\x1b[<0;5;1M\x1b[<32;8;1M\x1b[<0;8;1m");
     Tui_ComposeFrame(&ts, 20, 12);
-    Style selectedLink = Screen_BackAt(&ts.Scr, 3, 0).St;
+    Style selectedLink = Screen_BackAt(&ts.Scr, 4, 0).St;
     CHECK((selectedLink.Attr & ATTR_UNDERLINE) != 0);
     CHECK((selectedLink.Attr & ATTR_REVERSE) != 0);
     Tui_Stop(&ts);
@@ -1127,30 +1127,30 @@ void TestTui() {
     LineModel_AddNotice(&ts.Model, EntryKind::Info, SVL("alpha\nbravo\ncharlie"));
     Tui_ComposeFrame(&ts, 20, 12);
 
-    Feed(&ts, "\x1b[<0;4;1M\x1b[<32;6;3M\x1b[<0;6;3m");
+    Feed(&ts, "\x1b[<0;5;1M\x1b[<32;7;3M\x1b[<0;7;3m");
     CHECK_ALL(ts.TranscriptSelectionRevision != 0, !ts.Follow);
     Tui_ComposeFrame(&ts, 20, 12);
-    CHECK_ALL(Screen_BackAt(&ts.Scr, 3, 0).St.Bg == 238,
+    CHECK_ALL(Screen_BackAt(&ts.Scr, 4, 0).St.Bg == 238,
               Screen_BackAt(&ts.Scr, 0, 1).St.Bg == 238,
-              Screen_BackAt(&ts.Scr, 4, 2).St.Bg == 238,
               Screen_BackAt(&ts.Scr, 5, 2).St.Bg == 238,
-              Screen_BackAt(&ts.Scr, 6, 2).St.Bg != 238);
+              Screen_BackAt(&ts.Scr, 6, 2).St.Bg == 238,
+              Screen_BackAt(&ts.Scr, 7, 2).St.Bg != 238);
 
     ts.AgentRunning = true;
     ts.AbortFlag = 0;
     Feed(&ts, "\x03");
     CHECK_ALL(ts.AbortFlag == 0,
               StrView_Eq(StrBuf_View(&ts.ClipboardRaw),
-                         SVL("alpha\n   bravo\n   cha")),
+                         SVL("alpha\n    bravo\n    cha")),
               ts.TranscriptSelectionRevision != 0);
 
-    Feed(&ts, "\x1b[<0;6;3M\x1b[<32;4;1M\x1b[<0;4;1m");
+    Feed(&ts, "\x1b[<0;7;3M\x1b[<32;5;1M\x1b[<0;5;1m");
     Feed(&ts, "\x03");
-    CHECK(StrView_Eq(StrBuf_View(&ts.ClipboardRaw), SVL("alpha\n   bravo\n   cha")));
+    CHECK(StrView_Eq(StrBuf_View(&ts.ClipboardRaw), SVL("alpha\n    bravo\n    cha")));
 
     // Moving away and back still cancels activation, but leaves no non-empty
     // range, so Ctrl+C falls back to interrupt.
-    Feed(&ts, "\x1b[<0;4;1M\x1b[<32;5;1M\x1b[<32;4;1M\x1b[<0;4;1m");
+    Feed(&ts, "\x1b[<0;5;1M\x1b[<32;6;1M\x1b[<32;5;1M\x1b[<0;5;1m");
     CHECK(ts.TranscriptSelectionRevision == 0);
     ts.AbortFlag = 0;
     Feed(&ts, "\x03");
@@ -1163,7 +1163,7 @@ void TestTui() {
               StrView_Eq(LineEdit_Text(&ts.Edit), SVL("x")));
     Feed(&ts, "\x1b[1;2D");
     CHECK(LineEdit_HasSelection(&ts.Edit));
-    Feed(&ts, "\x1b[<0;4;1M\x1b[<32;5;2M\x1b[<0;5;2m");
+    Feed(&ts, "\x1b[<0;5;1M\x1b[<32;6;2M\x1b[<0;6;2m");
     CHECK_ALL(ts.TranscriptSelectionRevision != 0,
               !LineEdit_HasSelection(&ts.Edit));
     Tui_ComposeFrame(&ts, 20, 12);
@@ -1187,8 +1187,8 @@ void TestTui() {
     Tui_ComposeFrame(&ts, 20, 12);
     CHECK(ts.LastPaneH > LineModel_Count(&ts.Model));
 
-    Feed(&ts, "\x1b[<0;20;5M\x1b[<32;4;1M\x1b[<0;4;1m\x03");
-    CHECK(StrView_Eq(StrBuf_View(&ts.ClipboardRaw), SVL("alpha\n   bravo")));
+    Feed(&ts, "\x1b[<0;20;5M\x1b[<32;5;1M\x1b[<0;5;1m\x03");
+    CHECK(StrView_Eq(StrBuf_View(&ts.ClipboardRaw), SVL("alpha\n    bravo")));
 
     Tui_Stop(&ts);
     ArenaRelease(&as);
@@ -1203,12 +1203,12 @@ void TestTui() {
     os.Color = false;
     Tui ts;
     Tui_InitModel(&ts, &as, os);
-    LineModel_AddNotice(&ts.Model, EntryKind::Info, SVL("abcdefghijklmnopq"));
+    LineModel_AddNotice(&ts.Model, EntryKind::Info, SVL("abcdefghijklmnop"));
     Tui_ComposeFrame(&ts, 20, 12);
-    Feed(&ts, "\x1b[<0;4;1M\x1b[<32;20;1M\x1b[<0;20;1m\x03");
-    CHECK(StrView_Eq(StrBuf_View(&ts.ClipboardRaw), SVL("abcdefghijklmnopq")));
-    Feed(&ts, "\x1b[<0;20;1M\x1b[<32;4;1M\x1b[<0;4;1m\x03");
-    CHECK(StrView_Eq(StrBuf_View(&ts.ClipboardRaw), SVL("abcdefghijklmnopq")));
+    Feed(&ts, "\x1b[<0;5;1M\x1b[<32;20;1M\x1b[<0;20;1m\x03");
+    CHECK(StrView_Eq(StrBuf_View(&ts.ClipboardRaw), SVL("abcdefghijklmnop")));
+    Feed(&ts, "\x1b[<0;20;1M\x1b[<32;5;1M\x1b[<0;5;1m\x03");
+    CHECK(StrView_Eq(StrBuf_View(&ts.ClipboardRaw), SVL("abcdefghijklmnop")));
     Tui_Stop(&ts);
     ArenaRelease(&as);
   }
@@ -1223,7 +1223,7 @@ void TestTui() {
     Tui_InitModel(&ts, &as, os);
     LineModel_AddNotice(&ts.Model, EntryKind::Info, SVL("wide \xe5\xa5\xbdx"));
     Tui_ComposeFrame(&ts, 20, 12);
-    Feed(&ts, "\x1b[<0;10;1M\x1b[<32;9;1M\x1b[<0;9;1m\x03");
+    Feed(&ts, "\x1b[<0;11;1M\x1b[<32;10;1M\x1b[<0;10;1m\x03");
     CHECK(StrView_Eq(StrBuf_View(&ts.ClipboardRaw), SVL("\xe5\xa5\xbd")));
     Tui_Stop(&ts);
     ArenaRelease(&as);
@@ -1319,13 +1319,13 @@ void TestTui() {
     Tui_InitModel(&ts, &as, os);
     LineModel_AddNotice(&ts.Model, EntryKind::Info, SVL("one\ntwo"));
     Tui_ComposeFrame(&ts, 20, 12);
-    Feed(&ts, "\x1b[<0;4;1M\x1b[<32;5;2M\x1b[<0;5;2m");
+    Feed(&ts, "\x1b[<0;5;1M\x1b[<32;6;2M\x1b[<0;6;2m");
     CHECK(ts.TranscriptSelectionRevision != 0);
     LineModel_AddNotice(&ts.Model, EntryKind::Info, SVL("changed"));
     Tui_ComposeFrame(&ts, 20, 12);
     CHECK(ts.TranscriptSelectionRevision == 0);
 
-    Feed(&ts, "\x1b[<0;4;1M\x1b[<32;5;2M\x1b[<0;5;2m");
+    Feed(&ts, "\x1b[<0;5;1M\x1b[<32;6;2M\x1b[<0;6;2m");
     CHECK(ts.TranscriptSelectionRevision != 0);
     Tui_ComposeFrame(&ts, 20, 13);
     CHECK(ts.TranscriptSelectionRevision == 0);

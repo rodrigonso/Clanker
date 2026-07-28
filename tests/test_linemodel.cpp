@@ -98,13 +98,15 @@ void TestLineModel() {
     const SpanLine* prompt = LineModel_At(&model, 0);
     CHECK_ALL(prompt->HasRight, prompt->EntryId == model.Entries.Data[0].Id,
               prompt->IsEntryStart, RowHas(&a, prompt, "hello world"),
-              !AnyRowHas(&a, &model, "you"));
+              !AnyRowHas(&a, &model, "you"),
+              TextEq(prompt->Spans.Data[1].Text, SVL("\xe2\x97\xbc")),
+              prompt->Spans.Data[1].St.Fg == 214);
 
     LineModel_BeginAssistant(&model);
     LineModel_AppendAssistant(&model, SVL("Hello **world**"));
     LineModel_EndAssistant(&model);
     CHECK_ALL(model.Entries.Data[1].Id != model.Entries.Data[0].Id,
-              !model.Entries.Data[1].Collapsed, AnyRowHas(&a, &model, "\xe2\x96\xa0 "),
+              !model.Entries.Data[1].Collapsed, AnyRowHas(&a, &model, " \xe2\x97\xbc "),
               AnyRowHas(&a, &model, "Hello world"),
               !AnyRowHas(&a, &model, "assistant"));
 
@@ -113,9 +115,11 @@ void TestLineModel() {
     const SpanLine* assistantContinuation = FindRow(&a, &model, "world");
     const SpanLine* assistantFirst = FindRow(&a, &model, "Hello");
     CHECK(assistantFirst != nullptr && assistantContinuation != nullptr);
-    CHECK_ALL(AllRowsFit(&model, 10), RowStartsWith(&a, assistantContinuation, "   "),
-              TextEq(ExtractRow(&a, assistantFirst, 10, 0, 8), SVL("\xe2\x96\xa0  Hello")),
-              TextEq(ExtractRow(&a, assistantContinuation, 10, 0, 8), SVL("   world")));
+    CHECK_ALL(AllRowsFit(&model, 10), RowStartsWith(&a, assistantContinuation, "    "),
+              TextEq(assistantFirst->Spans.Data[1].Text, SVL("\xe2\x97\xbc")),
+              assistantFirst->Spans.Data[1].St.Fg == 255,
+              TextEq(ExtractRow(&a, assistantFirst, 10, 0, 9), SVL(" \xe2\x97\xbc  Hello")),
+              TextEq(ExtractRow(&a, assistantContinuation, 10, 0, 9), SVL("    world")));
     LineModel_Release(&model);
   }
 
@@ -128,16 +132,16 @@ void TestLineModel() {
     CHECK_ALL(layout.RightColumn == 15, layout.ContentEnd == 20);
 
     StrBuf expected = StrBuf_Make(&a, 32);
-    StrBuf_AppendCStr(&expected, "\xe2\x96\xa0  hi          ");
+    StrBuf_AppendCStr(&expected, " \xe2\x97\xbc  hi         ");
     StrBuf_Append(&expected, row->Right.Text);
     StrBuf partial = StrBuf_Make(&a, 24);
-    StrBuf_AppendCStr(&partial, "hi          ");
+    StrBuf_AppendCStr(&partial, "hi         ");
     StrBuf_Append(&partial, StrView{row->Right.Text.Data, 2});
     CHECK_ALL(
         TextEq(LineModel_ExtractDisplayRow(&a, &layout, 0, layout.ContentEnd),
                StrBuf_View(&expected)),
-        TextEq(LineModel_ExtractDisplayRow(&a, &layout, 3, 17), StrBuf_View(&partial)),
-        TextEq(LineModel_ExtractDisplayRow(&a, &layout, 17, 3), StrBuf_View(&partial)));
+        TextEq(LineModel_ExtractDisplayRow(&a, &layout, 4, 17), StrBuf_View(&partial)),
+        TextEq(LineModel_ExtractDisplayRow(&a, &layout, 17, 4), StrBuf_View(&partial)));
     LineModel_Release(&visual);
   }
 
@@ -151,7 +155,7 @@ void TestLineModel() {
     CHECK_ALL(layout.HiddenColumn == 13, layout.RightColumn == 15);
 
     StrBuf expected = StrBuf_Make(&a, 32);
-    StrBuf_AppendCStr(&expected, "\xe2\x96\xa0  first line\xe2\x80\xa6 ");
+    StrBuf_AppendCStr(&expected, " \xe2\x97\xbc  first lin\xe2\x80\xa6 ");
     StrBuf_Append(&expected, row->Right.Text);
     CHECK(TextEq(LineModel_ExtractDisplayRow(&a, &layout, 0, 20), StrBuf_View(&expected)));
     LineModel_Release(&hidden);
@@ -208,14 +212,15 @@ void TestLineModel() {
     LineModel_BeginAssistant(&combining);
     LineModel_AppendAssistant(&combining, SVL("a\xcc\x81" "bc"));
     LineModel_EndAssistant(&combining);
-    CHECK_ALL(
-        LineModel_Count(&combining) == 3,
-        TextEq(ExtractRow(&a, LineModel_At(&combining, 0), 6, 0, 3),
-               SVL("\xe2\x96\xa0  ")),
-        TextEq(ExtractRow(&a, LineModel_At(&combining, 1), 6, 0, 6),
-               SVL("   a\xcc\x81" "b")),
-        TextEq(ExtractRow(&a, LineModel_At(&combining, 1), 6, 4, 5), SVL("\xcc\x81")),
-        TextEq(ExtractRow(&a, LineModel_At(&combining, 2), 6, 0, 4), SVL("   c")));
+    CHECK(LineModel_Count(&combining) == 3);
+    CHECK(TextEq(ExtractRow(&a, LineModel_At(&combining, 0), 6, 0, 4),
+                 SVL(" \xe2\x97\xbc  ")));
+    CHECK(TextEq(ExtractRow(&a, LineModel_At(&combining, 1), 6, 0, 6),
+                 SVL("    a\xcc\x81")));
+    CHECK(TextEq(ExtractRow(&a, LineModel_At(&combining, 1), 6, 5, 6),
+                 SVL("\xcc\x81")));
+    CHECK(TextEq(ExtractRow(&a, LineModel_At(&combining, 2), 6, 0, 6),
+                 SVL("    bc")));
     LineModel_Release(&combining);
   }
 
@@ -286,9 +291,9 @@ void TestLineModel() {
     LineModel reflow;
     LineModel_Init(&reflow, &a, 20, 5000);
     LineModel_BeginAssistant(&reflow);
-    LineModel_AppendAssistant(&reflow, SVL("abcdefghijklmnopq"));
+    LineModel_AppendAssistant(&reflow, SVL("abcdefghijklmnop"));
     rev = LineModel_DisplayRevision(&reflow);
-    LineModel_AppendAssistant(&reflow, SVL("r"));
+    LineModel_AppendAssistant(&reflow, SVL("q"));
     CHECK(LineModel_DisplayRevision(&reflow) != rev);
     LineModel_Release(&reflow);
   }
@@ -340,8 +345,8 @@ void TestLineModel() {
     LineModel_Init(&narrow, &a, 7, 5000);
     LineModel_AddUser(&narrow, SVL("long prompt"), 0);
     CHECK_ALL(LineModel_Count(&narrow) > 1, !LineModel_At(&narrow, 0)->HasRight,
-              RowStartsWith(&a, LineModel_At(&narrow, 0), "\xe2\x96\xa0  "),
-              RowStartsWith(&a, LineModel_At(&narrow, 1), "   "), AllRowsFit(&narrow, 7));
+              RowStartsWith(&a, LineModel_At(&narrow, 0), " \xe2\x97\xbc  "),
+              RowStartsWith(&a, LineModel_At(&narrow, 1), "    "), AllRowsFit(&narrow, 7));
     LineModel_Release(&narrow);
   }
 
@@ -369,7 +374,12 @@ void TestLineModel() {
     CHECK(Finish(&tools, SVL("shell-id"), SVL("hi")));
     CHECK_ALL(tools.Entries.Data[0].Tool.Done, !tools.Entries.Data[1].Tool.Done);
     CHECK(Finish(&tools, SVL("read-id"), SVL("alpha-preview\nbeta-preview\ngamma-preview")));
-    CHECK_ALL(AnyRowHas(&a, &tools, "\xe2\x96\xa0  Shell echo hi"),
+    const SpanLine* shellRow = FindRow(&a, &tools, "Shell echo hi");
+    CHECK(shellRow != nullptr);
+    CHECK_ALL(TextEq(shellRow->Spans.Data[1].Text, SVL("\xe2\x97\xbb")),
+              shellRow->Spans.Data[1].St.Fg == 255,
+              shellRow->Spans.Data[1].St.Attr == ATTR_NONE,
+              AnyRowHas(&a, &tools, " \xe2\x97\xbb  Shell echo hi"),
               AnyRowHas(&a, &tools, "Read src/main.cpp L10:14"),
               AnyRowHas(&a, &tools, "3 lines read"),
               !AnyRowHas(&a, &tools, "alpha-preview"));
@@ -388,7 +398,7 @@ void TestLineModel() {
               AnyRowHas(&a, &tools, "gamma-preview"));
     const SpanLine* readPreview = FindRow(&a, &tools, "alpha-preview");
     CHECK(readPreview != nullptr);
-    CHECK_ALL(RowStartsWith(&a, readPreview, "   "), readPreview->EntryId == readEntryId);
+    CHECK_ALL(RowStartsWith(&a, readPreview, "    "), readPreview->EntryId == readEntryId);
     CHECK(LineModel_ToggleAllTools(&tools));
     CHECK_ALL(LineModel_IsEntryCollapsed(&tools, shellEntryId),
               LineModel_IsEntryCollapsed(&tools, readEntryId),
@@ -405,7 +415,7 @@ void TestLineModel() {
     LineModel_AddTool(
         &tools, SVL("control-id"), SVL("shell"),
         SVL("{\"command\":\"first line\\n\\u001b[31msecond line\\u001b[0m\"}"));
-    CHECK_ALL(AnyRowHas(&a, &tools, "\xe2\x96\xa0  Shell first line second line"),
+    CHECK_ALL(AnyRowHas(&a, &tools, " \xe2\x97\xbb  Shell first line second line"),
               !StrView_Contains(StrBuf_View(&tools.Entries.Data[2].Tool.View.Detail), "\n"),
               !StrView_Contains(StrBuf_View(&tools.Entries.Data[2].Tool.View.Detail), "\x1b"));
     LineModel_Release(&tools);
@@ -417,11 +427,11 @@ void TestLineModel() {
     LineModel_AddTool(&toolWrap, SVL("shell"), SVL("shell"),
                       SVL("{\"command\":\"echo this command wraps\"}"));
     u64 shellId = toolWrap.Entries.Data[0].Id;
-    CHECK_ALL(RowStartsWith(&a, LineModel_At(&toolWrap, 0), "\xe2\x96\xa0  "),
+    CHECK_ALL(RowStartsWith(&a, LineModel_At(&toolWrap, 0), " \xe2\x97\xbb  "),
               LineModel_Count(&toolWrap) == 1,
               LineModel_At(&toolWrap, 0)->HasHiddenContent);
     CHECK(LineModel_ToggleEntry(&toolWrap, shellId));
-    CHECK(RowStartsWith(&a, LineModel_At(&toolWrap, 1), "   "));
+    CHECK(RowStartsWith(&a, LineModel_At(&toolWrap, 1), "    "));
 
     LineModel_AddTool(&toolWrap, SVL("read"), SVL("read"),
                       SVL("{\"path\":\"src/very_long_file.cpp\"}"));
@@ -429,7 +439,7 @@ void TestLineModel() {
     CHECK(LineModel_ToggleEntry(&toolWrap, readId));
     const SpanLine* readPath = FindRow(&a, &toolWrap, "src/");
     CHECK(readPath != nullptr);
-    CHECK(RowStartsWith(&a, readPath, "   "));
+    CHECK(RowStartsWith(&a, readPath, "    "));
     LineModel_Release(&toolWrap);
   }
 
@@ -437,8 +447,8 @@ void TestLineModel() {
     LineModel simpleTurns;
     LineModel_Init(&simpleTurns, &a, 12, 5000);
     LineModel_AddNotice(&simpleTurns, EntryKind::Info, SVL("info message wraps more"));
-    CHECK_ALL(RowStartsWith(&a, LineModel_At(&simpleTurns, 0), "\xe2\x96\xa0  "),
-              RowStartsWith(&a, LineModel_At(&simpleTurns, 1), "   "));
+    CHECK_ALL(RowStartsWith(&a, LineModel_At(&simpleTurns, 0), " \xe2\x97\xbc  "),
+              RowStartsWith(&a, LineModel_At(&simpleTurns, 1), "    "));
     LineModel_AddNotice(&simpleTurns, EntryKind::Error, SVL("error message wraps"));
     const SpanLine* error = FindRow(&a, &simpleTurns, "error");
     CHECK(error != nullptr);
@@ -512,7 +522,7 @@ void TestLineModel() {
                       SVL("{\"path\":\"config.json\"}"));
     CHECK_ALL(
         StrView_Eq(summaries.Entries.Data[summaries.Entries.Count - 1].Tool.View.Marker, SVL("J")),
-        AnyRowHas(&a, &summaries, "\xe2\x96\xa0  Read config.json"));
+        AnyRowHas(&a, &summaries, " \xe2\x97\xbb  Read config.json"));
 
     LineModel_AddTool(&summaries, SVL("unknown"), SVL("custom"), SVL("{\"value\":1}"));
     bool unknownFinished = Finish(&summaries, SVL("unknown"), SVL("done"));
@@ -547,7 +557,7 @@ void TestLineModel() {
     CHECK(Finish(&summaries, SVL("error"), SVL("Command exited with code 1"), true));
     const SpanLine* failed = FindRow(&a, &summaries, "failed");
     CHECK(failed != nullptr);
-    CHECK(failed->Spans.Data[0].St.Fg == 196);
+    CHECK(failed->Spans.Data[1].St.Fg == 196);
     LineModel_Release(&summaries);
   }
 
@@ -555,12 +565,12 @@ void TestLineModel() {
     LineModel noColor;
     LineModel_Init(&noColor, &a, 40, 5000, false);
     LineModel_AddUser(&noColor, SVL("plain"), 0);
-    CHECK(LineModel_At(&noColor, 0)->Spans.Data[0].St.Fg == COL_DEFAULT);
+    CHECK(LineModel_At(&noColor, 0)->Spans.Data[1].St.Fg == COL_DEFAULT);
     LineModel_AddTool(&noColor, SVL("id"), SVL("shell"), SVL("{\"command\":\"echo\"}"));
     CHECK(Finish(&noColor, SVL("id"), SVL("ok")));
-    const SpanLine* row = FindRow(&a, &noColor, "\xe2\x96\xa0  Shell echo");
+    const SpanLine* row = FindRow(&a, &noColor, " \xe2\x97\xbb  Shell echo");
     CHECK(row != nullptr);
-    CHECK(row->Spans.Data[0].St.Fg == COL_DEFAULT);
+    CHECK(row->Spans.Data[1].St.Fg == COL_DEFAULT);
 
     // Diff stat colours must also collapse to the terminal default.
     LineModel_AddTool(&noColor, SVL("nc-edit"), SVL("edit"),

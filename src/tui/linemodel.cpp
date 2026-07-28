@@ -9,18 +9,19 @@ namespace {
 
 const usize LINE_ROWS_RESERVE = (usize)64 * 1024 * 1024;
 const u32 ICON_FIELD_CELLS = 2;
+const u32 SQUARE_LEFT_PADDING = 1;
 
-// Bullet color scheme: a bright accent for user messages, a subtler (dim)
-// shade of the same accent for tool calls, and near-white for assistant
-// responses. Bullets never use red outside of error state. All bullets share
-// the same square glyph.
+// Bullet color scheme: orange for user messages and white for assistant
+// responses and tool calls. Tool calls use an outlined marker; failed tool
+// calls keep the outline but turn red.
 const u8 ACCENT_FG = 214;
 const u8 ASSISTANT_FG = 255;
 // Diff stats are the one non-error place red appears: it is paired with green
 // and reads as "lines removed", not as a failure. Errors still own bold 196.
 const u8 DIFF_ADD_FG = 71;
 const u8 DIFF_DEL_FG = 167;
-StrView SquareMarker() { return SVL("\xe2\x96\xa0"); }
+StrView FilledSquareMarker() { return SVL("\xe2\x97\xbc"); }
+StrView OutlineSquareMarker() { return SVL("\xe2\x97\xbb"); }
 
 StrView BufView(const StrBuf& buf) { return StrView{buf.Data, buf.Length}; }
 
@@ -60,11 +61,14 @@ u32 IconFieldWidth(StrView marker) {
   return width < ICON_FIELD_CELLS ? ICON_FIELD_CELLS : width;
 }
 
-StrView IconIndent(Arena* arena, StrView marker) {
-  return Spaces(arena, IconFieldWidth(marker) + 1u);
+StrView IconIndent(Arena* arena, StrView marker, u32 leftPadding = 0) {
+  return Spaces(arena, leftPadding + IconFieldWidth(marker) + 1u);
 }
 
-void PushIcon(Arena* arena, Array<Span>* spans, StrView marker, Style style) {
+void PushIcon(Arena* arena, Array<Span>* spans, StrView marker, Style style,
+              u32 leftPadding = 0) {
+  if (leftPadding)
+    Array_Push(spans, Span{Spaces(arena, leftPadding), StyleDefault(), true});
   Array_Push(spans, Span{marker, style});
   u32 markerWidth = LineTextWidth(marker);
   u32 gap = (markerWidth < ICON_FIELD_CELLS ? ICON_FIELD_CELLS : markerWidth) - markerWidth + 1u;
@@ -174,8 +178,8 @@ StrView FormatTimestamp(Arena* arena, u64 timestampMs) {
 
 void BuildUser(LineModel* m, const Entry* entry) {
   StrView text = BufView(entry->Text.Content);
-  StrView marker = SquareMarker();
-  StrView indent = IconIndent(&m->RowsMem, marker);
+  StrView marker = FilledSquareMarker();
+  StrView indent = IconIndent(&m->RowsMem, marker, SQUARE_LEFT_PADDING);
   u32 i = 0;
   bool firstLine = true;
   while (i <= text.Length) {
@@ -189,7 +193,7 @@ void BuildUser(LineModel* m, const Entry* entry) {
     InitRow(&m->RowsMem, &logical, 3);
     if (firstLine) {
       PushIcon(&m->RowsMem, &logical.Spans, marker,
-               LStyle(m, ACCENT_FG, ATTR_BOLD));
+               LStyle(m, ACCENT_FG, ATTR_BOLD), SQUARE_LEFT_PADDING);
     } else {
       Array_Push(&logical.Spans, Span{indent, StyleDefault(), true});
     }
@@ -210,8 +214,8 @@ void BuildUser(LineModel* m, const Entry* entry) {
 void BuildAssistant(LineModel* m, const Entry* entry) {
   StrView text = BufView(entry->Text.Content);
   if (text.Length == 0) return;
-  StrView marker = SquareMarker();
-  StrView indent = IconIndent(&m->RowsMem, marker);
+  StrView marker = FilledSquareMarker();
+  StrView indent = IconIndent(&m->RowsMem, marker, SQUARE_LEFT_PADDING);
 
   Array<SpanLine> logical = Array_Make<SpanLine>(&m->RowsMem, 8);
   Markdown_Render(&m->RowsMem, text, &logical, m->Color);
@@ -220,7 +224,7 @@ void BuildAssistant(LineModel* m, const Entry* entry) {
     InitRow(&m->RowsMem, &prefixed, logical.Data[i].Spans.Count + 2);
     if (i == 0) {
       PushIcon(&m->RowsMem, &prefixed.Spans, marker,
-               LStyle(m, ASSISTANT_FG, ATTR_BOLD));
+               LStyle(m, ASSISTANT_FG, ATTR_BOLD), SQUARE_LEFT_PADDING);
     } else {
       Array_Push(&prefixed.Spans, Span{indent, StyleDefault(), true});
     }
@@ -233,18 +237,19 @@ void BuildAssistant(LineModel* m, const Entry* entry) {
 }
 
 void BuildTool(LineModel* m, const Entry* entry, bool expandPreview) {
-  StrView marker = SquareMarker();
+  StrView marker = OutlineSquareMarker();
   Style markerSt = entry->Tool.Error ? LStyle(m, 196, ATTR_BOLD)
-                                     : LStyle(m, ACCENT_FG, ATTR_DIM);
+                                     : LStyle(m, ASSISTANT_FG, ATTR_NONE);
   Style label = entry->Tool.Error ? LStyle(m, 196, ATTR_BOLD)
                                   : LStyle(m, 252, ATTR_BOLD);
   Style detail = entry->Tool.Error ? LStyle(m, 196, ATTR_NONE)
                                    : LStyle(m, 252, ATTR_NONE);
-  StrView indent = IconIndent(&m->RowsMem, marker);
+  StrView indent = IconIndent(&m->RowsMem, marker, SQUARE_LEFT_PADDING);
 
   SpanLine logical;
   InitRow(&m->RowsMem, &logical, 7);
-  PushIcon(&m->RowsMem, &logical.Spans, marker, markerSt);
+  PushIcon(&m->RowsMem, &logical.Spans, marker, markerSt,
+           SQUARE_LEFT_PADDING);
   if (entry->Tool.View.Label.Length) {
     Array_Push(&logical.Spans, Span{entry->Tool.View.Label, label});
     if (entry->Tool.View.Detail.Length) Array_Push(&logical.Spans, Span{SVL(" "), detail});
@@ -284,9 +289,9 @@ void BuildTool(LineModel* m, const Entry* entry, bool expandPreview) {
 }
 
 void BuildPlainTurn(LineModel* m, const Entry* entry, StrView marker, Style markerStyle,
-                    Style textStyle) {
+                    Style textStyle, u32 markerLeftPadding = 0) {
   StrView text = BufView(entry->Text.Content);
-  StrView indent = IconIndent(&m->RowsMem, marker);
+  StrView indent = IconIndent(&m->RowsMem, marker, markerLeftPadding);
   u32 i = 0;
   bool firstLine = true;
   while (i <= text.Length) {
@@ -299,7 +304,8 @@ void BuildPlainTurn(LineModel* m, const Entry* entry, StrView marker, Style mark
     SpanLine logical;
     InitRow(&m->RowsMem, &logical, 3);
     if (firstLine) {
-      PushIcon(&m->RowsMem, &logical.Spans, marker, markerStyle);
+      PushIcon(&m->RowsMem, &logical.Spans, marker, markerStyle,
+               markerLeftPadding);
     } else {
       Array_Push(&logical.Spans, Span{indent, textStyle, true});
     }
@@ -335,9 +341,9 @@ void BuildEntryRows(LineModel* m, u32 idx, u32 expandedStart) {
       break;
     }
     case EntryKind::Info:
-      BuildPlainTurn(m, entry, SquareMarker(),
+      BuildPlainTurn(m, entry, FilledSquareMarker(),
                      LStyle(m, ACCENT_FG, ATTR_BOLD),
-                     LStyle(m, 244, ATTR_NONE));
+                     LStyle(m, 244, ATTR_NONE), SQUARE_LEFT_PADDING);
       break;
     case EntryKind::Error:
       BuildPlainTurn(m, entry, SVL("!"), LStyle(m, 196, ATTR_BOLD),
@@ -386,7 +392,8 @@ void AdvanceDisplayRevision(LineModel* m) {
 u32 PreviewRowCount(LineModel* m, const Entry* entry) {
   usize mark = m->RowsMem.Used;
   Array<SpanLine> rows = Array_Make<SpanLine>(&m->RowsMem, 8);
-  StrView indent = IconIndent(&m->RowsMem, SquareMarker());
+  StrView indent =
+      IconIndent(&m->RowsMem, OutlineSquareMarker(), SQUARE_LEFT_PADDING);
   AppendPlainRows(&m->RowsMem, &rows, m->Width, BufView(entry->Tool.Preview),
                   LStyle(m, 244, ATTR_DIM), indent, indent);
   u32 count = rows.Count;
