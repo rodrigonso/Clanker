@@ -69,7 +69,7 @@ u32 ScrollMaxTop(const Tui* t) {
 
 bool ScrollbarRendered(const Tui* t, u16 x) {
   u16 trackY = t->LastScrollbarThumbTop == 0 ? t->LastScrollbarThumbH : (u16)0;
-  return t->ScrollbarVisible && t->Model.Width == 19 && t->LastPaneH == 7 && x == 19 &&
+  return t->ScrollbarVisible && t->Model.Width == 19 && t->LastPaneH == 6 && x == 19 &&
          t->LastScrollbarThumbH > 0 && t->LastScrollbarThumbH < t->LastPaneH &&
          t->LastScrollbarThumbTop + t->LastScrollbarThumbH == t->LastPaneH &&
          Screen_BackAt(&t->Scr, x, t->LastScrollbarThumbTop).Ch == 0x2595 &&
@@ -275,6 +275,28 @@ void TestTui() {
   for (u32 i = 0; i < 20; i++) Feed(&t, "\x1b[<65;1;1M");  // wheel down to the bottom
   CHECK(t.Follow);
 
+  // A blank row separates the transcript viewport from the sticky cwd/branch
+  // context line above the composer.
+  {
+    Arena as = ArenaCreate();
+    Tui ts;
+    InitHeadlessTui(&ts, &as, false);
+    LineModel_AddNotice(&ts.Model, EntryKind::Info,
+                        SVL("one\ntwo\nthree\nfour\nfive\nsix\nseven"));
+    Tui_SetStartupContext(&ts, SVL("cwd"), SVL("branch"));
+
+    Tui_ComposeFrame(&ts, 20, 12);
+    bool gapBlank = true;
+    for (u16 x = 0; x < ts.Scr.Cols; x++) {
+      if (Screen_BackAt(&ts.Scr, x, ts.LastPaneH).Ch != 0) gapBlank = false;
+    }
+    CHECK_ALL(ts.LastPaneH == 6, gapBlank,
+              Screen_BackAt(&ts.Scr, 1, (u16)(ts.LastPaneH + 1)).Ch == 'c');
+
+    Tui_Stop(&ts);
+    ArenaRelease(&as);
+  }
+
   // The scrollbar appears only on overflow, reserves the transcript's rightmost
   // column, maps track clicks, and keeps dragging outside the scrollbar column.
   {
@@ -331,7 +353,7 @@ void TestTui() {
     CHECK_ALL(ts.ScrollbarVisible, ts.Model.Width == 13,
               LineModel_RowEntryId(&ts.Model, ts.Top) == resizeAnchorId);
     Tui_ComposeFrame(&ts, 14, 10);
-    CHECK_ALL(ts.LastPaneH == 5,
+    CHECK_ALL(ts.LastPaneH == 4,
               LineModel_RowEntryId(&ts.Model, ts.Top) == resizeAnchorId);
     Tui_ComposeFrame(&ts, 5, 5);
     Tui_ComposeFrame(&ts, 14, 10);
@@ -392,7 +414,7 @@ void TestTui() {
       u32 fullCount = LineModel_Count(&ts.Model);
       LineModel_SetWidth(&ts.Model, (u16)(cols - 1));
       u32 narrowCount = LineModel_Count(&ts.Model);
-      if (fullCount <= 7 && narrowCount > 7) {
+      if (fullCount <= 6 && narrowCount > 6) {
         boundaryCols = cols;
         break;
       }

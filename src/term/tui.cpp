@@ -958,7 +958,9 @@ void ComposeAtSize(Tui* t, u16 cols, u16 rows, u64 nowMs) {
     if (topBorderY >= 4) paletteH = desired < topBorderY ? desired : topBorderY;
   }
   u16 cwdY = (u16)(topBorderY - 1);
-  u16 paneH = cwdY;  // rows [0, cwdY)
+  // Leave a blank row between the transcript and the sticky context line when
+  // the terminal is tall enough to retain at least one transcript row.
+  u16 paneH = cwdY > 1 ? (u16)(cwdY - 1) : cwdY;  // rows [0, paneH)
   t->LastInputTop = inputTop;
   t->LastInputH = inputH;
 
