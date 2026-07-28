@@ -124,6 +124,33 @@ bool IsGrepMatchLine(StrView line) {
   return false;
 }
 
+// Edit results embed a Diff_Make display where every line is
+// "<prefix><lineNo><pad> <text>" and prefix is '+', '-' or ' '. Counting lines
+// whose prefix is '+'/'-' followed by a digit yields the added/removed totals
+// without re-diffing. The digit check keeps prose lines (e.g. a body line that
+// happens to start with '-') from being miscounted.
+void CountDiffLines(StrView text, u32* added, u32* removed) {
+  *added = 0;
+  *removed = 0;
+  u32 i = 0;
+  while (i < text.Length) {
+    u32 start = i;
+    while (i < text.Length && text.Data[i] != '\n') i++;
+    u32 end = i;
+    if (end > start && text.Data[end - 1] == '\r') end--;
+    if (end - start >= 2) {
+      char prefix = text.Data[start];
+      char next = text.Data[start + 1];
+      if (next >= '0' && next <= '9') {
+        if (prefix == '+') (*added)++;
+        else if (prefix == '-') (*removed)++;
+      }
+    }
+    if (i >= text.Length) break;
+    i++;
+  }
+}
+
 u32 CountGrepMatches(StrView text) {
   u32 count = 0;
   u32 i = 0;
@@ -271,6 +298,7 @@ void ToolView_Init(Arena* arena, ToolView* view, StrView name, StrView argsJson)
 
 void ToolView_Finish(ToolView* view, StrView result, bool isError) {
   StrBuf_Clear(&view->Outcome);
+  view->OutcomeSplit = 0;
   if (isError) {
     StrBuf_AppendCStr(&view->Outcome, "failed");
     return;
@@ -314,9 +342,23 @@ void ToolView_Finish(ToolView* view, StrView result, bool isError) {
     case ToolViewKind::Write:
       AppendCount(&view->Outcome, view->CountHint, "byte written", "bytes written");
       break;
-    case ToolViewKind::Edit:
-      AppendCount(&view->Outcome, view->CountHint, "block replaced", "blocks replaced");
-      break;
+    case ToolViewKind::Edit: {
+      u32 added = 0;
+      u32 removed = 0;
+      CountDiffLines(result, &added, &removed);
+      if (added == 0 && removed == 0) {
+        // No parsable diff (unexpected result shape); fall back to block count.
+        AppendCount(&view->Outcome, view->CountHint, "block replaced", "blocks replaced");
+        break;
+      }
+      StrBuf_AppendChar(&view->Outcome, '+');
+      StrBuf_AppendU64(&view->Outcome, added);
+      StrBuf_AppendChar(&view->Outcome, ' ');
+      // Everything from here on is the removal half; the renderer colours it red.
+      view->OutcomeSplit = view->Outcome.Length;
+      StrBuf_AppendChar(&view->Outcome, '-');
+      StrBuf_AppendU64(&view->Outcome, removed);
+    } break;
     case ToolViewKind::Unknown:
       StrBuf_AppendCStr(&view->Outcome, "completed");
       break;

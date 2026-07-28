@@ -12,10 +12,14 @@ const u32 ICON_FIELD_CELLS = 2;
 
 // Bullet color scheme: a bright accent for user messages, a subtler (dim)
 // shade of the same accent for tool calls, and near-white for assistant
-// responses. Red is reserved strictly for error state. All bullets share the
-// same square glyph.
+// responses. Bullets never use red outside of error state. All bullets share
+// the same square glyph.
 const u8 ACCENT_FG = 214;
 const u8 ASSISTANT_FG = 255;
+// Diff stats are the one non-error place red appears: it is paired with green
+// and reads as "lines removed", not as a failure. Errors still own bold 196.
+const u8 DIFF_ADD_FG = 71;
+const u8 DIFF_DEL_FG = 167;
 StrView SquareMarker() { return SVL("\xe2\x96\xa0"); }
 
 bool g_lmColor = true;
@@ -245,9 +249,19 @@ void BuildTool(LineModel* m, const Entry* entry, bool expandPreview) {
     Array_Push(&logical.Spans, Span{BufView(entry->Tool.View.Detail), detail});
   if (entry->Tool.View.Outcome.Length) {
     Array_Push(&logical.Spans, Span{SVL("  "), detail});
-    Array_Push(&logical.Spans,
-               Span{BufView(entry->Tool.View.Outcome),
-                    entry->Tool.Error ? LStyle(196, ATTR_NONE) : LStyle(244, ATTR_NONE)});
+    StrView outcome = BufView(entry->Tool.View.Outcome);
+    u32 split = entry->Tool.View.OutcomeSplit;
+    if (!entry->Tool.Error && split != 0 && split < outcome.Length) {
+      // Diff stat: "+N " in green, "-M" in red.
+      Array_Push(&logical.Spans,
+                 Span{StrView{outcome.Data, split}, LStyle(DIFF_ADD_FG, ATTR_NONE)});
+      Array_Push(&logical.Spans, Span{StrView{outcome.Data + split, outcome.Length - split},
+                                      LStyle(DIFF_DEL_FG, ATTR_NONE)});
+    } else {
+      Array_Push(&logical.Spans,
+                 Span{outcome,
+                      entry->Tool.Error ? LStyle(196, ATTR_NONE) : LStyle(244, ATTR_NONE)});
+    }
   }
   logical.Continuation = Span{indent, StyleDefault(), true};
   logical.HasContinuation = true;

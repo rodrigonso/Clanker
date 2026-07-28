@@ -69,6 +69,17 @@ bool Finish(LineModel* model, StrView id, StrView result, bool isError = false) 
   return LineModel_FinishTool(model, id, result, result, isError);
 }
 
+// Concatenated text of every span in `row` painted with foreground `fg`.
+// Wrapping can split one styled run across spans, so colour assertions compare
+// the joined text instead of individual span boundaries.
+StrView SpansWithFg(Arena* a, const SpanLine* row, u8 fg) {
+  StrBuf out = StrBuf_Make(a, 64);
+  for (u32 i = 0; i < row->Spans.Count; i++) {
+    if (row->Spans.Data[i].St.Fg == fg) StrBuf_Append(&out, row->Spans.Data[i].Text);
+  }
+  return StrBuf_View(&out);
+}
+
 }  // namespace
 
 void TestLineModel() {
@@ -460,10 +471,30 @@ void TestLineModel() {
          SVL("Successfully wrote 3 bytes to out.txt"), "3 bytes written", nullptr},
         {SVL("edit"), SVL("edit"),
          SVL("{\"path\":\"a.cpp\",\"edits\":[{\"oldText\":\"a\",\"newText\":\"b\"},{\"oldText\":\"c\",\"newText\":\"d\"}]}"),
-         SVL("Successfully replaced 2 blocks"), "2 blocks replaced", nullptr},
+         SVL("Successfully replaced 2 block(s) in a.cpp.\n\n"
+             " 1 context\n-2 old one\n+2 new one\n-3 old two\n+3 new two\n+4 added\n"),
+         "+3 -2", nullptr},
         {SVL("single-edit"), SVL("edit"),
          SVL("{\"path\":\"b.cpp\",\"oldText\":\"a\",\"newText\":\"b\"}"),
-         SVL("Successfully replaced 1 block"), "1 block replaced", nullptr},
+         SVL("Successfully replaced 1 block(s) in b.cpp.\n\n"
+             " 1 context\n-2 old\n+2 new\n"),
+         "+1 -1", nullptr},
+        // Pure addition and pure removal keep the zero side visible.
+        {SVL("add-only-edit"), SVL("edit"),
+         SVL("{\"path\":\"c.cpp\",\"oldText\":\"a\",\"newText\":\"b\"}"),
+         SVL("Successfully replaced 1 block(s) in c.cpp.\n\n"
+             " 1 context\n+2 added one\n+3 added two\n"),
+         "+2 -0", nullptr},
+        // Body text starting with '-' must not be counted as a removal.
+        {SVL("dash-body-edit"), SVL("edit"),
+         SVL("{\"path\":\"d.md\",\"oldText\":\"a\",\"newText\":\"b\"}"),
+         SVL("Successfully replaced 1 block(s) in d.md.\n\n"
+             " 1 intro\n+2 - bullet added\n- not a diff line\n"),
+         "+1 -0", nullptr},
+        // Unparsable result shape falls back to the block count.
+        {SVL("fallback-edit"), SVL("edit"),
+         SVL("{\"path\":\"e.cpp\",\"oldText\":\"a\",\"newText\":\"b\"}"),
+         SVL("Successfully replaced 1 block(s) in e.cpp."), "1 block replaced", nullptr},
         {SVL("bracket-read"), SVL("read"), SVL("{\"path\":\"notes.txt\"}"),
          SVL("first\n\n[section]\nlast"), "4 lines read", nullptr},
     };
@@ -489,6 +520,30 @@ void TestLineModel() {
     CHECK_ALL(unknownFinished, AnyRowHas(&a, &summaries, "custom"),
               AnyRowHas(&a, &summaries, "completed"));
 
+    // Diff stats colour the added half green and the removed half red, as two
+    // separate spans; the surrounding detail stays neutral.
+    LineModel_AddTool(&summaries, SVL("colour-edit"), SVL("edit"),
+                      SVL("{\"path\":\"f.cpp\",\"oldText\":\"a\",\"newText\":\"b\"}"));
+    CHECK(Finish(&summaries, SVL("colour-edit"),
+                 SVL("Successfully replaced 1 block(s) in f.cpp.\n\n"
+                     " 1 ctx\n-2 gone\n+2 kept\n+3 more\n")));
+    const SpanLine* statRow = FindRow(&a, &summaries, "+2 -1");
+    CHECK(statRow != nullptr);
+    if (statRow != nullptr) {
+      // Wrapping may split a run into several spans, so compare the text
+      // accumulated per colour rather than matching individual spans.
+      CHECK_ALL(TextEq(SpansWithFg(&a, statRow, 71), SVL("+2 ")),
+                TextEq(SpansWithFg(&a, statRow, 167), SVL("-1")));
+    }
+
+    // A non-diff outcome carries no diff colouring at all.
+    const SpanLine* plainOutcome = FindRow(&a, &summaries, "3 bytes written");
+    CHECK(plainOutcome != nullptr);
+    if (plainOutcome != nullptr) {
+      CHECK_ALL(SpansWithFg(&a, plainOutcome, 71).Length == 0,
+                SpansWithFg(&a, plainOutcome, 167).Length == 0);
+    }
+
     LineModel_AddTool(&summaries, SVL("error"), SVL("bash"), SVL("{\"command\":\"false\"}"));
     CHECK(Finish(&summaries, SVL("error"), SVL("Command exited with code 1"), true));
     const SpanLine* failed = FindRow(&a, &summaries, "failed");
@@ -508,6 +563,20 @@ void TestLineModel() {
     const SpanLine* row = FindRow(&a, &noColor, "\xe2\x96\xa0  echo");
     CHECK(row != nullptr);
     CHECK(row->Spans.Data[0].St.Fg == COL_DEFAULT);
+
+    // Diff stat colours must also collapse to the terminal default.
+    LineModel_AddTool(&noColor, SVL("nc-edit"), SVL("edit"),
+                      SVL("{\"path\":\"g.cpp\",\"oldText\":\"a\",\"newText\":\"b\"}"));
+    CHECK(Finish(&noColor, SVL("nc-edit"),
+                 SVL("Successfully replaced 1 block(s) in g.cpp.\n\n"
+                     " 1 ctx\n-2 gone\n+2 kept\n")));
+    const SpanLine* ncStat = FindRow(&a, &noColor, "+1 -1");
+    CHECK(ncStat != nullptr);
+    if (ncStat != nullptr) {
+      CHECK_ALL(SpansWithFg(&a, ncStat, 71).Length == 0,
+                SpansWithFg(&a, ncStat, 167).Length == 0,
+                SpansWithFg(&a, ncStat, COL_DEFAULT).Length == RowText(&a, ncStat).Length);
+    }
     LineModel_Release(&noColor);
     LineModel_SetColorEnabled(true);
   }
