@@ -5,7 +5,6 @@
 #include "tools/filelock.h"
 #include "tools/fs.h"
 #include "tools/glob.h"
-#include "tools/regex.h"
 #include "tools/truncate.h"
 
 static void TestGlob() {
@@ -35,37 +34,6 @@ static void TestGlob() {
     matched = (result == cases[i].Expected) && matched;
   }
   CHECK(matched);
-}
-
-static void TestRegex(Arena* a) {
-  StrBuf err = StrBuf_Make(a, 64);
-
-  Regex* re = Regex_Compile(a, SVL("a.c"), false, &err);
-  CHECK(re != nullptr);
-  CHECK_ALL(Regex_Test(re, SVL("xabcx")), !Regex_Test(re, SVL("axxc")));
-
-  re = Regex_Compile(a, SVL("a+"), false, &err);
-  CHECK(Regex_Test(re, SVL("baaa")));
-
-  re = Regex_Compile(a, SVL("\\d+"), false, &err);
-  u32 s = 0, l = 0;
-  CHECK(Regex_Search(re, SVL("ab123cd"), &s, &l));
-  CHECK(s == 2 && l == 3);
-
-  re = Regex_Compile(a, SVL("foo|bar"), false, &err);
-  CHECK(Regex_Test(re, SVL("xxbaryy")));
-
-  re = Regex_Compile(a, SVL("^hello$"), false, &err);
-  CHECK_ALL(Regex_Test(re, SVL("hello")), !Regex_Test(re, SVL("hello world")));
-
-  re = Regex_Compile(a, SVL("[a-z]+"), false, &err);
-  CHECK(Regex_Test(re, SVL("ABCdef")));
-
-  re = Regex_Compile(a, SVL("Foo"), true, &err);
-  CHECK(Regex_Test(re, SVL("xxFOOyy")));
-
-  re = Regex_Compile(a, SVL("(ab)+c"), false, &err);
-  CHECK(Regex_Test(re, SVL("zababcz")));
 }
 
 static void TestDiff(Arena* a) {
@@ -115,7 +83,6 @@ static void TestFileLock() {
 void TestInfra() {
   Arena a = ArenaCreate();
   TestGlob();
-  TestRegex(&a);
   TestDiff(&a);
   TestTruncate(&a);
   TestFsPaths(&a);

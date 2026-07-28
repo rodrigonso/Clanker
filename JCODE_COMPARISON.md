@@ -44,9 +44,9 @@ not committed physical memory.
   their results in the original call order.
 - jcode uses a shared server process, asynchronous Tokio execution, background
   commands, MCP connection pooling, and swarm workers.
-- jcode's ripgrep-backed `agentgrep` and adaptive result truncation should scale
-  better on large repositories than Clank's serial native grep, which reads
-  each searched file fully.
+- Both projects use ripgrep for repository search. jcode adds adaptive result
+  truncation, while Clank follows pi's fixed match/byte/line limits and reads
+  source files only when context lines are requested.
 - Clank starts with a substantially smaller resident footprint. Durable history
   lives in JSONL, per-operation working arenas are reset, and manual compaction
   bounds model context; jcode adds automatic and semantic policies.
@@ -61,7 +61,7 @@ not committed physical memory.
 | Authentication | Anthropic API keys and OAuth with automatic refresh | Multiple OAuth providers, API keys, custom endpoints, and multi-account switching |
 | Coding tools | `read`, `write`, `edit`, `ls`, `find`, `grep`, `shell` | 30+ tools including patching, browser/web access, background jobs, memory, skills, MCP, todo, session search, and swarm |
 | Editing | Exact and whitespace-tolerant multi-edit with unified diff | Edit, multiedit, unified patch, and Codex-compatible `apply_patch` |
-| Code intelligence | Native grep/find | Ripgrep-backed grep/find plus outline, trace, smart search, and context-aware result truncation |
+| Code intelligence | Ripgrep-backed grep plus native find | Ripgrep-backed grep/find plus outline, trace, smart search, and context-aware result truncation |
 | LSP/tree-sitter | None | None found |
 | Sessions | Append-only JSONL sessions with continue/resume, branches, tree checkout, forks, and explicit recovery | Persistent server sessions, resume/import, journals, and crash recovery |
 | Context management | Durable manual branch compaction | Reactive, proactive, and semantic compaction |

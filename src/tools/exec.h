@@ -14,3 +14,22 @@ struct ExecResult {
 // on POSIX). Aborts the whole process tree if `abort` becomes non-zero or
 // `timeoutMs` elapses.
 ExecResult Exec_Run(Arena* arena, StrView command, u32 timeoutMs, volatile i32* abort);
+
+typedef bool (*ExecChunkFn)(void* user, StrView chunk);
+
+struct ExecArgvSink {
+  void* User;
+  ExecChunkFn OnStdout;
+  ExecChunkFn OnStderr;
+};
+
+struct ExecArgvResult {
+  i32 ExitCode;
+  bool TimedOut;
+  bool Spawned;
+};
+
+// Run a program directly without a shell. Arguments are passed verbatim,
+// stdout and stderr stay separate, and either sink may stop the process tree.
+ExecArgvResult Exec_RunArgv(Arena* arena, StrView program, const StrView* args, u32 argCount,
+                            u32 timeoutMs, volatile i32* abort, ExecArgvSink sink);

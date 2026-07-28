@@ -174,10 +174,10 @@ target_link_libraries(clank_auth PUBLIC clank_json clank_crypto clank_http clank
 # ---- tools ---------------------------------------------------------------
 add_library(clank_tools STATIC
   src/tools/exec.cpp
+  src/tools/tools_manager.cpp
   src/tools/fs.cpp
   src/tools/truncate.cpp
   src/tools/glob.cpp
-  src/tools/regex.cpp
   src/tools/diff.cpp
   src/tools/filelock.cpp
   src/tools/read.cpp
@@ -187,7 +187,7 @@ add_library(clank_tools STATIC
   src/tools/find.cpp
   src/tools/grep.cpp
   src/tools/shell.cpp)
-target_link_libraries(clank_tools PUBLIC clank_json clank_agent)
+target_link_libraries(clank_tools PUBLIC clank_json clank_agent clank_http)
 
 # ---- app support (settings, provider registry, interactive commands) ------
 add_library(clank_app STATIC

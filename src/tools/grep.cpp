@@ -2,301 +2,424 @@
 #include <string.h>
 
 #include "json/json.h"
+#include "tools/exec.h"
 #include "tools/fs.h"
-#include "tools/glob.h"
-#include "tools/regex.h"
 #include "tools/tools.h"
+#include "tools/tools_manager.h"
 #include "tools/truncate.h"
 
+static const u32 GREP_DEFAULT_LIMIT = 100;
 static const u32 GREP_MAX_LINE_LENGTH = 500;
 
-struct GrepState {
-  Arena* Arena;
-  StrBuf* Output;
-  StrBuf* Err;
-  const Regex* Re;
-  StrView Pattern;
-  StrView Glob;
-  volatile i32* Abort;
-  bool Literal;
-  bool IgnoreCase;
-  bool HasGlob;
-  bool AnyLineTruncated;
-  bool LimitHit;
-  bool Aborted;
-  u32 Context;
-  u32 Limit;
-  u32 MatchCount;
+struct GrepMatch {
+  StrView FilePath;
+  StrView LineText;
+  u32 LineNumber;
+  bool HasLineText;
 };
 
-static char Grep_LowerAscii(char c) {
-  return (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c;
-}
+struct GrepCapture {
+  Arena* Arena;
+  Array<GrepMatch> Matches;
+  StrBuf Pending;
+  StrBuf Stderr;
+  u32 Limit;
+  u32 MatchCount;
+  bool LimitHit;
+};
 
-static bool Grep_LiteralSearch(StrView hay, StrView needle, bool ignoreCase) {
-  if (needle.Length == 0) return true;
-  if (needle.Length > hay.Length) return false;
-  for (u32 i = 0; i + needle.Length <= hay.Length; i++) {
-    bool same = true;
-    for (u32 j = 0; j < needle.Length; j++) {
-      char a = hay.Data[i + j];
-      char b = needle.Data[j];
-      if (ignoreCase) {
-        a = Grep_LowerAscii(a);
-        b = Grep_LowerAscii(b);
-      }
-      if (a != b) {
-        same = false;
-        break;
-      }
-    }
-    if (same) return true;
-  }
-  return false;
-}
+struct GrepFileCacheEntry {
+  StrView Path;
+  Array<StrView> Lines;
+  bool ReadOk;
+};
 
-static bool Grep_MatchesLine(const GrepState* s, StrView line) {
-  if (s->Literal) return Grep_LiteralSearch(line, s->Pattern, s->IgnoreCase);
-  return Regex_Test(s->Re, line);
-}
+struct GrepFormatter {
+  Arena* Arena;
+  StrBuf* Output;
+  Array<GrepFileCacheEntry> Cache;
+  StrView SearchPath;
+  bool SearchIsDirectory;
+  bool LinesTruncated;
+  u32 Context;
+};
 
-static bool Grep_IsBinary(StrView bytes) {
-  u32 n = ClankMin(bytes.Length, 8192u);
-  for (u32 i = 0; i < n; i++) {
-    if (bytes.Data[i] == '\0') return true;
-  }
-  return false;
-}
-
-static Array<StrView> Grep_SplitLines(Arena* arena, StrView bytes) {
-  Array<StrView> lines = Array_Make<StrView>(arena, 128);
+static StrView Grep_Trim(StrView text) {
   u32 start = 0;
-  for (u32 i = 0; i <= bytes.Length; i++) {
-    if (i == bytes.Length || bytes.Data[i] == '\n') {
-      if (i != bytes.Length || start < bytes.Length) {
-        u32 end = i;
-        if (end > start && bytes.Data[end - 1] == '\r') end--;
-        Array_Push(&lines, StrView{bytes.Data + start, end - start});
-      }
-      start = i + 1;
+  u32 end = text.Length;
+  while (start < end &&
+         (text.Data[start] == ' ' || text.Data[start] == '\t' || text.Data[start] == '\r' ||
+          text.Data[start] == '\n'))
+    start++;
+  while (end > start &&
+         (text.Data[end - 1] == ' ' || text.Data[end - 1] == '\t' ||
+          text.Data[end - 1] == '\r' || text.Data[end - 1] == '\n'))
+    end--;
+  return StrView{text.Data + start, end - start};
+}
+
+static bool Grep_ProcessJsonLine(GrepCapture* capture, StrView line) {
+  if (line.Length == 0) return true;
+  StrBuf json = StrBuf_Make(capture->Arena, line.Length + 1);
+  StrBuf_Append(&json, line);
+  JsonValue* event = Json_Parse(capture->Arena, StrBuf_View(&json));
+  if (!event || !StrView_EqCStr(Json_GetStr(event, "type"), "match")) return true;
+
+  JsonValue* data = Json_Get(event, "data");
+  JsonValue* path = Json_Get(data, "path");
+  JsonValue* lineData = Json_Get(data, "lines");
+  JsonValue* lineNumber = Json_Get(data, "line_number");
+  StrView filePath = Json_GetStr(path, "text");
+  if (filePath.Length == 0 || !lineNumber || lineNumber->Kind != JsonKind::Number ||
+      lineNumber->Number < 1 || lineNumber->Number > 4294967295.0)
+    return true;
+
+  GrepMatch match = {};
+  match.FilePath = filePath;
+  match.LineNumber = (u32)lineNumber->Number;
+  JsonValue* lineText = Json_Get(lineData, "text");
+  if (Json_IsString(lineText)) {
+    match.LineText = lineText->Str;
+    match.HasLineText = true;
+  }
+  Array_Push(&capture->Matches, match);
+  capture->MatchCount++;
+  if (capture->MatchCount >= capture->Limit) {
+    capture->LimitHit = true;
+    return false;
+  }
+  return true;
+}
+
+static bool Grep_OnStdout(void* user, StrView chunk) {
+  GrepCapture* capture = (GrepCapture*)user;
+  if (capture->LimitHit) return false;
+  StrBuf_Append(&capture->Pending, chunk);
+
+  u32 consumed = 0;
+  for (u32 i = 0; i < capture->Pending.Length; i++) {
+    if (capture->Pending.Data[i] != '\n') continue;
+    u32 end = i;
+    if (end > consumed && capture->Pending.Data[end - 1] == '\r') end--;
+    if (!Grep_ProcessJsonLine(
+            capture, StrView{capture->Pending.Data + consumed, end - consumed}))
+      return false;
+    consumed = i + 1u;
+  }
+
+  if (consumed) {
+    u32 remaining = capture->Pending.Length - consumed;
+    if (remaining)
+      memmove(capture->Pending.Data, capture->Pending.Data + consumed, remaining);
+    capture->Pending.Length = remaining;
+    capture->Pending.Data[remaining] = '\0';
+  }
+  return true;
+}
+
+static bool Grep_OnStderr(void* user, StrView chunk) {
+  GrepCapture* capture = (GrepCapture*)user;
+  StrBuf_Append(&capture->Stderr, chunk);
+  return true;
+}
+
+static bool Grep_IsParentPath(StrView path) {
+  return StrView_EqCStr(path, "..") ||
+         (path.Length >= 3 && path.Data[0] == '.' && path.Data[1] == '.' &&
+          path.Data[2] == '/');
+}
+
+static StrView Grep_FormatPath(GrepFormatter* formatter, StrView filePath) {
+  if (!formatter->SearchIsDirectory) return Fs_Base(filePath);
+  StrView relative = Fs_Relativize(formatter->Arena, formatter->SearchPath, filePath);
+  if (relative.Length && !Grep_IsParentPath(relative)) return relative;
+  return Fs_ToPosix(formatter->Arena, filePath);
+}
+
+static Array<StrView> Grep_NormalizeAndSplit(Arena* arena, StrView content) {
+  StrBuf normalized = StrBuf_Make(arena, content.Length + 1);
+  for (u32 i = 0; i < content.Length; i++) {
+    char c = content.Data[i];
+    if (c == '\r') {
+      if (i + 1u < content.Length && content.Data[i + 1u] == '\n') i++;
+      StrBuf_AppendChar(&normalized, '\n');
+    } else {
+      StrBuf_AppendChar(&normalized, c);
+    }
+  }
+
+  Array<StrView> lines = Array_Make<StrView>(arena, 64);
+  u32 start = 0;
+  for (u32 i = 0; i <= normalized.Length; i++) {
+    if (i == normalized.Length || normalized.Data[i] == '\n') {
+      Array_Push(&lines, StrView{normalized.Data + start, i - start});
+      start = i + 1u;
     }
   }
   return lines;
 }
 
-static bool Grep_LineNumberInMatches(const Array<u32>* matches, u32 lineNo) {
-  for (u32 i = 0; i < matches->Count; i++) {
-    if (matches->Data[i] == lineNo) return true;
-    if (matches->Data[i] > lineNo) return false;
+static GrepFileCacheEntry* Grep_GetFile(GrepFormatter* formatter, StrView path) {
+  for (u32 i = 0; i < formatter->Cache.Count; i++) {
+    if (StrView_Eq(formatter->Cache.Data[i].Path, path)) return &formatter->Cache.Data[i];
   }
-  return false;
+
+  GrepFileCacheEntry entry = {};
+  entry.Path = path;
+  StrBuf native = StrBuf_Make(formatter->Arena, path.Length + 1);
+  StrBuf_Append(&native, path);
+  FILE* file = fopen(StrBuf_CStr(&native), "rb");
+  if (file) {
+    StrBuf content = StrBuf_Make(formatter->Arena, 8192);
+    char chunk[8192];
+    size_t read = 0;
+    while ((read = fread(chunk, 1, sizeof(chunk), file)) > 0)
+      StrBuf_Append(&content, StrView{chunk, (u32)read});
+    entry.ReadOk = ferror(file) == 0;
+    if (fclose(file) != 0) entry.ReadOk = false;
+    if (entry.ReadOk) entry.Lines = Grep_NormalizeAndSplit(formatter->Arena, StrBuf_View(&content));
+  }
+  Array_Push(&formatter->Cache, entry);
+  return &formatter->Cache.Data[formatter->Cache.Count - 1u];
 }
 
-static void Grep_AppendOutputLine(GrepState* s, StrView display, u32 lineNo, bool isMatch,
-                                  StrView line) {
-  StrBuf_Append(s->Output, display);
-  StrBuf_AppendChar(s->Output, isMatch ? ':' : '-');
-  StrBuf_AppendU64(s->Output, lineNo);
-  StrBuf_AppendChar(s->Output, isMatch ? ':' : '-');
-  StrBuf_AppendChar(s->Output, ' ');
-  if (line.Length > GREP_MAX_LINE_LENGTH) {
-    StrBuf_Append(s->Output, StrView{line.Data, GREP_MAX_LINE_LENGTH});
-    StrBuf_AppendCStr(s->Output, "... [truncated]");
-    s->AnyLineTruncated = true;
-  } else {
-    StrBuf_Append(s->Output, line);
-  }
-  StrBuf_AppendChar(s->Output, '\n');
-}
-
-static void Grep_AppendMatchesForFile(GrepState* s, StrView display, const Array<StrView>* lines,
-                                      const Array<u32>* matches) {
-  u32 lastEmitted = 0;
-  for (u32 i = 0; i < matches->Count; i++) {
-    u32 matchLine = matches->Data[i];
-    u32 first = matchLine > s->Context ? matchLine - s->Context : 1u;
-    u32 last = ClankMin(lines->Count, matchLine + s->Context);
-    for (u32 lineNo = first; lineNo <= last; lineNo++) {
-      if (lineNo <= lastEmitted) continue;
-      bool isMatch = Grep_LineNumberInMatches(matches, lineNo);
-      Grep_AppendOutputLine(s, display, lineNo, isMatch, lines->Data[lineNo - 1u]);
-      lastEmitted = lineNo;
-    }
-  }
-}
-
-static bool Grep_SearchFile(GrepState* s, StrView path, StrView display, bool failOnOpen) {
-  if (s->Abort && *s->Abort) {
-    s->Aborted = true;
-    return false;
-  }
-  if (s->HasGlob && !Glob_Match(s->Glob, display, false)) return true;
-
-  StrBuf p = StrBuf_Make(s->Arena, path.Length + 1);
-  StrBuf_Append(&p, path);
-  FILE* f = fopen(StrBuf_CStr(&p), "rb");
-  if (!f) {
-    if (failOnOpen) {
-      StrBuf_AppendCStr(s->Err, "cannot open file: ");
-      StrBuf_Append(s->Err, path);
-      return false;
-    }
-    return true;
-  }
-
-  StrBuf file = StrBuf_Make(s->Arena, 8192);
-  char buf[8192];
-  size_t n = 0;
-  while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
-    StrBuf_Append(&file, StrView{buf, (u32)n});
-    if (s->Abort && *s->Abort) {
-      s->Aborted = true;
-      fclose(f);
-      return false;
-    }
-  }
-  fclose(f);
-
-  StrView bytes = StrBuf_View(&file);
-  if (Grep_IsBinary(bytes)) return true;
-
-  Array<StrView> lines = Grep_SplitLines(s->Arena, bytes);
-  Array<u32> matches = Array_Make<u32>(s->Arena, 8);
-  for (u32 i = 0; i < lines.Count; i++) {
-    if (Grep_MatchesLine(s, lines.Data[i])) {
-      Array_Push(&matches, i + 1u);
-      s->MatchCount++;
-      if (s->MatchCount >= s->Limit) {
-        s->LimitHit = true;
+static u32 Grep_Utf8PrefixBytes(StrView text, u32 maxChars) {
+  u32 bytes = 0;
+  u32 chars = 0;
+  while (bytes < text.Length && chars < maxChars) {
+    u8 lead = (u8)text.Data[bytes];
+    u32 width = 1;
+    if ((lead & 0xE0u) == 0xC0u)
+      width = 2;
+    else if ((lead & 0xF0u) == 0xE0u)
+      width = 3;
+    else if ((lead & 0xF8u) == 0xF0u)
+      width = 4;
+    if (bytes + width > text.Length) width = 1;
+    for (u32 i = 1; i < width; i++) {
+      if (((u8)text.Data[bytes + i] & 0xC0u) != 0x80u) {
+        width = 1;
         break;
       }
     }
+    bytes += width;
+    chars++;
+  }
+  return bytes;
+}
+
+static void Grep_AppendLine(GrepFormatter* formatter, StrView display, u32 lineNumber,
+                            bool isMatch, StrView line) {
+  if (formatter->Output->Length) StrBuf_AppendChar(formatter->Output, '\n');
+  StrBuf_Append(formatter->Output, display);
+  StrBuf_AppendChar(formatter->Output, isMatch ? ':' : '-');
+  StrBuf_AppendU64(formatter->Output, lineNumber);
+  StrBuf_AppendChar(formatter->Output, isMatch ? ':' : '-');
+  StrBuf_AppendChar(formatter->Output, ' ');
+  u32 prefixBytes = Grep_Utf8PrefixBytes(line, GREP_MAX_LINE_LENGTH);
+  if (prefixBytes < line.Length) {
+    StrBuf_Append(formatter->Output, StrView{line.Data, prefixBytes});
+    StrBuf_AppendCStr(formatter->Output, "... [truncated]");
+    formatter->LinesTruncated = true;
+  } else {
+    StrBuf_Append(formatter->Output, line);
+  }
+}
+
+static StrView Grep_SanitizeMatchLine(Arena* arena, StrView line) {
+  StrBuf sanitized = StrBuf_Make(arena, line.Length + 1);
+  for (u32 i = 0; i < line.Length; i++) {
+    if (line.Data[i] != '\r') StrBuf_AppendChar(&sanitized, line.Data[i]);
+  }
+  if (sanitized.Length && sanitized.Data[sanitized.Length - 1u] == '\n') {
+    sanitized.Length--;
+    sanitized.Data[sanitized.Length] = '\0';
+  }
+  return StrBuf_View(&sanitized);
+}
+
+static void Grep_FormatMatch(GrepFormatter* formatter, const GrepMatch& match) {
+  StrView display = Grep_FormatPath(formatter, match.FilePath);
+  if (formatter->Context == 0 && match.HasLineText) {
+    Grep_AppendLine(formatter, display, match.LineNumber, true,
+                    Grep_SanitizeMatchLine(formatter->Arena, match.LineText));
+    return;
   }
 
-  Grep_AppendMatchesForFile(s, display, &lines, &matches);
-  return !s->LimitHit;
+  GrepFileCacheEntry* file = Grep_GetFile(formatter, match.FilePath);
+  if (!file->ReadOk) {
+    if (formatter->Output->Length) StrBuf_AppendChar(formatter->Output, '\n');
+    StrBuf_Append(formatter->Output, display);
+    StrBuf_AppendChar(formatter->Output, ':');
+    StrBuf_AppendU64(formatter->Output, match.LineNumber);
+    StrBuf_AppendCStr(formatter->Output, ": (unable to read file)");
+    return;
+  }
+
+  u32 first =
+      match.LineNumber > formatter->Context ? match.LineNumber - formatter->Context : 1u;
+  u64 last64 = (u64)match.LineNumber + formatter->Context;
+  u32 last = last64 < file->Lines.Count ? (u32)last64 : file->Lines.Count;
+  for (u32 lineNumber = first; lineNumber <= last; lineNumber++) {
+    Grep_AppendLine(formatter, display, lineNumber, lineNumber == match.LineNumber,
+                    file->Lines.Data[lineNumber - 1u]);
+  }
 }
 
-static bool Grep_WalkVisit(void* user, StrView absPath, StrView relPath, const FsEntry& e) {
-  (void)e;
-  GrepState* s = (GrepState*)user;
-  return Grep_SearchFile(s, absPath, relPath, false);
-}
-
-static void Grep_AppendNotice(StrBuf* b, const GrepState* s, bool bytesTruncated) {
-  if (!s->LimitHit && !s->AnyLineTruncated && !bytesTruncated) return;
-  if (b->Length > 0) StrBuf_AppendChar(b, '\n');
-  StrBuf_AppendChar(b, '[');
+static void Grep_AppendNotices(StrBuf* output, u32 limit, bool limitHit, bool bytesTruncated,
+                               bool linesTruncated) {
+  if (!limitHit && !bytesTruncated && !linesTruncated) return;
+  StrBuf_AppendCStr(output, "\n\n[");
   bool wrote = false;
-  if (s->LimitHit) {
-    StrBuf_AppendU64(b, s->Limit);
-    StrBuf_AppendCStr(b, " matches limit reached. Use limit=");
-    StrBuf_AppendU64(b, (u64)s->Limit * 2u);
-    StrBuf_AppendCStr(b, " for more, or refine pattern.");
-    wrote = true;
-  }
-  if (s->AnyLineTruncated) {
-    if (wrote) StrBuf_AppendChar(b, ' ');
-    StrBuf_AppendCStr(b, "Some lines truncated to 500 chars. Use read tool to see full lines");
+  if (limitHit) {
+    StrBuf_AppendU64(output, limit);
+    StrBuf_AppendCStr(output, " matches limit reached. Use limit=");
+    StrBuf_AppendU64(output, (u64)limit * 2u);
+    StrBuf_AppendCStr(output, " for more, or refine pattern");
     wrote = true;
   }
   if (bytesTruncated) {
-    if (wrote) StrBuf_AppendChar(b, ' ');
-    StrBuf_AppendCStr(b, "50.0KB limit reached");
+    if (wrote) StrBuf_AppendCStr(output, ". ");
+    StrBuf_AppendCStr(output, "50.0KB limit reached");
+    wrote = true;
   }
-  StrBuf_AppendChar(b, ']');
+  if (linesTruncated) {
+    if (wrote) StrBuf_AppendCStr(output, ". ");
+    StrBuf_AppendCStr(output, "Some lines truncated to 500 chars. Use read tool to see full lines");
+  }
+  StrBuf_AppendChar(output, ']');
 }
 
-static bool GrepExec(void* ctx, Arena* arena, StrView id, StrView argsJson, volatile i32* abort,
+static bool GrepExec(void*, Arena* arena, StrView, StrView argsJson, volatile i32* abort,
                      ToolResult* out, StrBuf* err) {
-  (void)ctx;
-  (void)id;
-  JsonValue* j = Json_Parse(arena, argsJson);
-  StrView pattern = Json_GetStr(j, "pattern");
-  if (pattern.Length == 0) {
+  JsonValue* argsJsonValue = Json_Parse(arena, argsJson);
+  JsonValue* patternValue = Json_Get(argsJsonValue, "pattern");
+  if (!Json_IsString(patternValue)) {
     StrBuf_AppendCStr(err, "missing 'pattern' argument");
     return false;
   }
-
-  StrView path = Json_GetStr(j, "path");
-  if (path.Length == 0) path = SVL(".");
-  StrView glob = Json_GetStr(j, "glob");
-  bool ignoreCase = Json_GetBool(j, "ignoreCase", false);
-  bool literal = Json_GetBool(j, "literal", false);
-  i64 contextArg = Json_GetInt(j, "context", 0);
-  i64 limitArg = Json_GetInt(j, "limit", 100);
-  u32 contextLines = contextArg > 0 ? (u32)contextArg : 0u;
-  u32 limit = limitArg > 0 ? (u32)limitArg : 100u;
-
-  Regex* re = nullptr;
-  if (!literal) {
-    StrBuf reErr = StrBuf_Make(arena, 128);
-    re = Regex_Compile(arena, pattern, ignoreCase, &reErr);
-    if (!re) {
-      StrBuf_Append(err, StrBuf_View(&reErr));
-      return false;
-    }
+  StrView pattern = patternValue->Str;
+  StrView searchInput = Json_GetStr(argsJsonValue, "path");
+  if (searchInput.Length == 0) searchInput = SVL(".");
+  if (!Fs_Exists(searchInput)) {
+    StrBuf_AppendCStr(err, "Path not found: ");
+    StrBuf_Append(err, searchInput);
+    return false;
   }
 
-  StrBuf raw = StrBuf_Make(arena, 4096);
-  GrepState state = {};
-  state.Arena = arena;
-  state.Output = &raw;
-  state.Err = err;
-  state.Re = re;
-  state.Pattern = pattern;
-  state.Glob = glob;
-  state.Abort = abort;
-  state.Literal = literal;
-  state.IgnoreCase = ignoreCase;
-  state.HasGlob = glob.Length != 0;
-  state.Context = contextLines;
-  state.Limit = limit;
+  StrView rgPath = ToolManager_EnsureRipgrep(arena, abort, err);
+  if (rgPath.Length == 0) return false;
 
-  if (Fs_Exists(path) && !Fs_IsDir(path)) {
-    StrView display = Fs_Base(path);
-    if (!Grep_SearchFile(&state, path, display, true)) {
-      if (state.Aborted) StrBuf_AppendCStr(err, "aborted");
-      return false;
+  StrView searchPath = Fs_RealPath(arena, searchInput);
+  bool isDirectory = Fs_IsDir(searchPath);
+  i64 contextArg = Json_GetInt(argsJsonValue, "context", 0);
+  u32 context = contextArg > 0
+                    ? (contextArg > (i64)0xFFFFFFFFu ? 0xFFFFFFFFu : (u32)contextArg)
+                    : 0u;
+  i64 limitArg = Json_GetInt(argsJsonValue, "limit", GREP_DEFAULT_LIMIT);
+  u32 limit = limitArg < 1
+                  ? 1u
+                  : (limitArg > (i64)0xFFFFFFFFu ? 0xFFFFFFFFu : (u32)limitArg);
+  StrView glob = Json_GetStr(argsJsonValue, "glob");
+
+  StrView rgArgs[12];
+  u32 rgArgCount = 0;
+  rgArgs[rgArgCount++] = SVL("--json");
+  rgArgs[rgArgCount++] = SVL("--line-number");
+  rgArgs[rgArgCount++] = SVL("--color=never");
+  rgArgs[rgArgCount++] = SVL("--hidden");
+  if (Json_GetBool(argsJsonValue, "ignoreCase", false))
+    rgArgs[rgArgCount++] = SVL("--ignore-case");
+  if (Json_GetBool(argsJsonValue, "literal", false))
+    rgArgs[rgArgCount++] = SVL("--fixed-strings");
+  if (glob.Length) {
+    rgArgs[rgArgCount++] = SVL("--glob");
+    rgArgs[rgArgCount++] = glob;
+  }
+  rgArgs[rgArgCount++] = SVL("--");
+  rgArgs[rgArgCount++] = pattern;
+  rgArgs[rgArgCount++] = searchPath;
+
+  GrepCapture capture = {};
+  capture.Arena = arena;
+  capture.Matches = Array_Make<GrepMatch>(arena, limit < 32u ? limit : 32u);
+  capture.Pending = StrBuf_Make(arena, 4096);
+  capture.Stderr = StrBuf_Make(arena, 512);
+  capture.Limit = limit;
+  ExecArgvSink sink = {};
+  sink.User = &capture;
+  sink.OnStdout = Grep_OnStdout;
+  sink.OnStderr = Grep_OnStderr;
+  ExecArgvResult result = Exec_RunArgv(arena, rgPath, rgArgs, rgArgCount, 0, abort, sink);
+  if (!capture.LimitHit && capture.Pending.Length)
+    Grep_ProcessJsonLine(&capture, StrBuf_View(&capture.Pending));
+
+  if (abort && *abort) {
+    StrBuf_AppendCStr(err, "Operation aborted");
+    return false;
+  }
+  if (!result.Spawned) {
+    StrBuf_AppendCStr(err, "Failed to run ripgrep");
+    return false;
+  }
+  if (!capture.LimitHit && result.ExitCode != 0 && result.ExitCode != 1) {
+    StrView stderrText = Grep_Trim(StrBuf_View(&capture.Stderr));
+    if (stderrText.Length)
+      StrBuf_Append(err, stderrText);
+    else {
+      StrBuf_AppendCStr(err, "ripgrep exited with code ");
+      StrBuf_AppendI64(err, result.ExitCode);
     }
-  } else {
-    FsWalkOptions opts = {};
-    opts.RespectGitignore = true;
-    opts.IncludeDirs = false;
-    Fs_Walk(arena, path, opts, Grep_WalkVisit, &state);
-    if (state.Aborted) {
-      StrBuf_AppendCStr(err, "aborted");
-      return false;
-    }
+    return false;
+  }
+  if (capture.MatchCount == 0) {
+    out->Content = Array_Make<Content>(arena, 1);
+    Array_Push(&out->Content, Content_Text(SVL("No matches found")));
+    return true;
   }
 
-  if (state.MatchCount == 0) StrBuf_AppendCStr(&raw, "No matches found");
-  StrView rawView = StrBuf_View(&raw);
-  TruncResult tr = Trunc_Head(arena, rawView, 0xFFFFFFFFu, TRUNC_MAX_BYTES);
-  StrBuf result = StrBuf_Make(arena, tr.Content.Length + 512);
-  StrBuf_Append(&result, tr.Content);
-  Grep_AppendNotice(&result, &state, tr.Truncated && tr.ByBytes);
+  StrBuf rawOutput = StrBuf_Make(arena, 4096);
+  GrepFormatter formatter = {};
+  formatter.Arena = arena;
+  formatter.Output = &rawOutput;
+  formatter.Cache = Array_Make<GrepFileCacheEntry>(arena, 8);
+  formatter.SearchPath = searchPath;
+  formatter.SearchIsDirectory = isDirectory;
+  formatter.Context = context;
+  for (u32 i = 0; i < capture.Matches.Count; i++)
+    Grep_FormatMatch(&formatter, capture.Matches.Data[i]);
+
+  TruncResult truncation =
+      Trunc_Head(arena, StrBuf_View(&rawOutput), 0xFFFFFFFFu, TRUNC_MAX_BYTES);
+  StrBuf output = StrBuf_Make(arena, truncation.Content.Length + 512);
+  StrBuf_Append(&output, truncation.Content);
+  Grep_AppendNotices(&output, limit, capture.LimitHit,
+                     truncation.Truncated && truncation.ByBytes, formatter.LinesTruncated);
 
   out->Content = Array_Make<Content>(arena, 1);
-  Array_Push(&out->Content, Content_Text(StrBuf_View(&result)));
+  Array_Push(&out->Content, Content_Text(StrBuf_View(&output)));
   return true;
 }
 
 Tool GrepTool() {
-  Tool t = {};
-  t.Name = SVL("grep");
-  t.Label = SVL("Grep");
-  t.Description = SVL("Search files with a regex or literal pattern.");
-  t.ParamsJsonSchema = SVL(
+  Tool tool = {};
+  tool.Name = SVL("grep");
+  tool.Label = SVL("Grep");
+  tool.Description =
+      SVL("Search file contents for a pattern. Returns matching lines with file paths and line "
+          "numbers. Respects .gitignore. Output is truncated to 100 matches or 50KB (whichever is "
+          "hit first). Long lines are truncated to 500 chars.");
+  tool.ParamsJsonSchema = SVL(
       "{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\",\"description\":\"Search "
       "pattern (regex or literal string)\"},\"path\":{\"type\":\"string\",\"description\":\"Directory "
       "or file to search (default: current directory)\"},\"glob\":{\"type\":\"string\",\"description\":"
-      "\"Filter files by glob pattern, e.g. '*.ts'\"},\"ignoreCase\":{\"type\":\"boolean\",\"default\":"
-      "false},\"literal\":{\"type\":\"boolean\",\"default\":false,\"description\":\"Treat pattern as "
-      "literal string instead of regex\"},\"context\":{\"type\":\"number\",\"default\":0,\"description\":"
-      "\"Lines of context before and after each match\"},\"limit\":{\"type\":\"number\",\"default\":100,"
-      "\"description\":\"Maximum number of matches\"}},\"required\":[\"pattern\"]}");
-  t.ReplayPolicy = ToolReplayPolicy::ReplaySafe;
-  t.Execute = GrepExec;
-  return t;
+      "\"Filter files by glob pattern, e.g. '*.ts' or '**/*.spec.ts'\"},\"ignoreCase\":{\"type\":"
+      "\"boolean\",\"default\":false,\"description\":\"Case-insensitive search\"},\"literal\":{\"type\":"
+      "\"boolean\",\"default\":false,\"description\":\"Treat pattern as literal string instead of "
+      "regex\"},\"context\":{\"type\":\"number\",\"default\":0,\"description\":\"Number of lines to "
+      "show before and after each match\"},\"limit\":{\"type\":\"number\",\"default\":100,\"description\":"
+      "\"Maximum number of matches to return\"}},\"required\":[\"pattern\"]}");
+  tool.ReplayPolicy = ToolReplayPolicy::ReplaySafe;
+  tool.Execute = GrepExec;
+  return tool;
 }

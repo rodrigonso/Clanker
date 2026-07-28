@@ -17,6 +17,7 @@ struct HttpRequest {
   const HttpHeader* Headers;
   u32 HeaderCount;
   StrView Body;  // request body (for POST)
+  bool FollowRedirects;
 };
 
 struct HttpStreamSink {

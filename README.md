@@ -31,8 +31,8 @@ src/
            refresh, resolve)
   session/ append-only session records, reducer, memory + JSONL repositories
   agent/   durable AgentHarness, recovery driver, hooks, events, compaction
-  tools/   read/write/edit/ls/find/grep/shell, process exec, fs/glob/regex/
-           diff/truncate/filelock infra
+  tools/   read/write/edit/ls/find/grep/shell, direct/shell process exec,
+           ripgrep discovery, fs/glob/diff/truncate/filelock infra
   term/    full-screen TUI: raw-mode terminal, key decoder, differential
            renderer, markdown, transcript model, multi-line editor, controller
   app/     CLI entry + durable session startup + TUI/plain REPL + login flow
@@ -67,6 +67,10 @@ tests/     single CLI test harness (suite selection via args; offline by default
 Requires CMake (3.20+) and a C++17 compiler. libcurl is vendored automatically
 via a checksummed release archive (Schannel on Windows, system TLS elsewhere).
 The release archive is cached under `out/fetchcontent/`.
+
+The `grep` tool uses a system `rg` when available. Otherwise it downloads the
+current ripgrep release to `~/.clank/bin`; set `CLANK_OFFLINE=1` to disable tool
+downloads or `CLANK_RG_PATH` to select an existing binary explicitly.
 
 ```sh
 cmake -S . -B build -G Ninja
