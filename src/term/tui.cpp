@@ -2,7 +2,6 @@
 
 #include <string.h>
 
-#include "agent/agent.h"
 #include "base/sysinfo.h"
 #include "term/cell.h"
 #include "term/sanitize.h"
@@ -1057,9 +1056,14 @@ void DoSubmit(Tui* t) {
     return;
   }
 
-  if (t->AgentRunning && t->Ag) {
+  if (t->AgentRunning && t->Harness) {
     QueueUserDisplayLocked(t, line);
-    Agent_Steer(t->Ag, line);  // mid-turn submit -> steer the running agent
+    SessionResult queued = AgentHarness_QueueSteering(t->Harness, line);
+    if (!SessionResult_IsOk(queued)) {
+      TuiDisplayEvent* display =
+          QueueDisplayEvent(t, TuiDisplayEventKind::Error);
+      SetDisplayPayload(t, display, queued.Message);
+    }
   } else {
     if (!QPush(t, TuiSubmission{TuiSubmissionKind::Prompt, line})) {
       TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::Error);
@@ -1394,7 +1398,15 @@ void HandleKey(Tui* t, const Key& k) {
           t->EscapeArmed && now - t->LastEscapeMs <= kDoubleEscapeMs;
       t->LastEscapeMs = now;
       t->EscapeArmed = !doubleEscape;
-      if (doubleEscape) t->AbortFlag = 1;
+      if (doubleEscape) {
+        if (t->Harness) {
+          SessionResult cancelled =
+              AgentHarness_RequestCancel(t->Harness);
+          if (!SessionResult_IsOk(cancelled)) t->AbortFlag = 1;
+        } else {
+          t->AbortFlag = 1;
+        }
+      }
     } else {
       t->EscapeArmed = false;
       t->LastEscapeMs = 0;
@@ -1611,8 +1623,15 @@ void HandleKey(Tui* t, const Key& k) {
       if (copied) break;
       if (t->OperationActive)
         t->OperationAbortFlag = 1;
-      else if (t->AgentRunning)
-        t->AbortFlag = 1;
+      else if (t->AgentRunning) {
+        if (t->Harness) {
+          SessionResult cancelled =
+              AgentHarness_RequestCancel(t->Harness);
+          if (!SessionResult_IsOk(cancelled)) t->AbortFlag = 1;
+        } else {
+          t->AbortFlag = 1;
+        }
+      }
       else if (!LineEdit_Empty(&t->Edit)) {
         LineEdit_Clear(&t->Edit);
         ResetCommandPalette(t);
@@ -1821,7 +1840,8 @@ void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts) {
 
 bool Tui_ClearSession(Tui* t) {
   Mutex_Lock(&t->Lock);
-  if (t->AgentRunning || (t->Ag && t->Ag->Streaming) || t->Stop || t->Quit) {
+  if (t->AgentRunning || (t->Harness && t->Harness->Running) || t->Stop ||
+      t->Quit) {
     Mutex_Unlock(&t->Lock);
     return false;
   }
@@ -2136,6 +2156,89 @@ void Tui_OpenCommandPalette(Tui* t) {
 }
 
 volatile i32* Tui_Abort(Tui* t) { return &t->AbortFlag; }
+
+static void HydrateTranscriptLocked(Tui* t, const Message* messages,
+                                    u32 count) {
+  for (u32 i = 0; i < count; i++) {
+    const Message* message = &messages[i];
+    if (message->Kind == Role::User) {
+      if (t->Model.HasAssistant) LineModel_EndAssistant(&t->Model);
+      StrBuf text = StrBuf_Make(&t->SessionMem, 128);
+      for (u32 c = 0; c < message->Content.Count; c++) {
+        const Content* content = &message->Content.Data[c];
+        if (content->Kind != ContentKind::Text) continue;
+        if (text.Length) StrBuf_AppendChar(&text, '\n');
+        StrBuf_Append(&text, content->Text);
+      }
+      LineModel_AddUser(&t->Model, StrBuf_View(&text), message->Timestamp);
+    } else if (message->Kind == Role::Assistant) {
+      bool hasText = false;
+      for (u32 c = 0; c < message->Content.Count; c++)
+        if (message->Content.Data[c].Kind == ContentKind::Text &&
+            message->Content.Data[c].Text.Length)
+          hasText = true;
+      if (hasText) {
+        LineModel_BeginAssistant(&t->Model);
+        for (u32 c = 0; c < message->Content.Count; c++)
+          if (message->Content.Data[c].Kind == ContentKind::Text)
+            LineModel_AppendAssistant(&t->Model,
+                                      message->Content.Data[c].Text);
+        LineModel_EndAssistant(&t->Model);
+      }
+      for (u32 c = 0; c < message->Content.Count; c++) {
+        const Content* content = &message->Content.Data[c];
+        if (content->Kind == ContentKind::ToolCall)
+          LineModel_AddTool(&t->Model, content->ToolId, content->ToolName,
+                            content->ToolArgsJson);
+      }
+      if (message->Stop == StopReason::Error)
+        LineModel_AddNotice(&t->Model, EntryKind::Error,
+                            message->ErrorMessage);
+      else if (message->Stop == StopReason::Aborted)
+        LineModel_AddNotice(&t->Model, EntryKind::Info,
+                            SVL("Interrupted by user."));
+    } else if (message->Kind == Role::ToolResult) {
+      StrBuf text = StrBuf_Make(&t->SessionMem, 128);
+      for (u32 c = 0; c < message->Content.Count; c++) {
+        const Content* content = &message->Content.Data[c];
+        if (content->Kind != ContentKind::Text) continue;
+        if (text.Length) StrBuf_AppendChar(&text, '\n');
+        StrBuf_Append(&text, content->Text);
+      }
+      StrView result = StrBuf_View(&text);
+      if (!LineModel_FinishTool(&t->Model, message->ToolCallId, result,
+                                Truncate(result, 1500), message->IsError))
+        LineModel_AddNotice(&t->Model, EntryKind::Error,
+                            SVL("tool result did not match a pending call"));
+    }
+  }
+}
+
+void Tui_HydrateTranscript(Tui* t, const Message* messages, u32 count) {
+  if (!t || (!messages && count)) return;
+  Mutex_Lock(&t->Lock);
+  HydrateTranscriptLocked(t, messages, count);
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+}
+
+void Tui_ReplaceTranscript(Tui* t, const Message* messages, u32 count) {
+  if (!t || (!messages && count)) return;
+  Mutex_Lock(&t->Lock);
+  u16 width = t->Model.Width;
+  u32 cap = t->Model.Cap;
+  LineModel_Release(&t->Model);
+  LineModel_Init(&t->Model, &t->SessionMem, width, cap);
+  StreamReveal_Init(&t->Reveal, &t->SessionMem);
+  t->DisplayEvents = Array_Make<TuiDisplayEvent>(&t->SessionMem, 16);
+  t->DisplayHead = 0;
+  t->Use = {};
+  t->StateTool = {};
+  t->State = t->AgentRunning ? TuiState::Thinking : TuiState::Idle;
+  HydrateTranscriptLocked(t, messages, count);
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+}
 
 void Tui_FeedInput(Tui* t, const char* data, u32 n) {
   Mutex_Lock(&t->Lock);

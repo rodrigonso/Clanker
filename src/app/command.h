@@ -6,6 +6,14 @@ enum class AppCommandKind : u8 {
   Login,
   Model,
   Clear,
+  Session,
+  Sessions,
+  Resume,
+  Tree,
+  Checkout,
+  Fork,
+  Compact,
+  Recover,
   Exit,
   Unknown,
 };
@@ -56,11 +64,21 @@ struct AppCommandUx {
 };
 
 typedef AppCommandHandlerResult (*AppCommandHandlerFn)(void* user, const AppCommandUx* ux);
+typedef AppCommandHandlerResult (*AppCommandArgHandlerFn)(
+    void* user, const AppCommandUx* ux, StrView arguments);
 
 struct AppCommandHandlers {
   void* User;
   AppCommandHandlerFn Login;
   AppCommandHandlerFn Model;
+  AppCommandArgHandlerFn Session;
+  AppCommandArgHandlerFn Sessions;
+  AppCommandArgHandlerFn Resume;
+  AppCommandArgHandlerFn Tree;
+  AppCommandArgHandlerFn Checkout;
+  AppCommandArgHandlerFn Fork;
+  AppCommandArgHandlerFn Compact;
+  AppCommandArgHandlerFn Recover;
 };
 
 struct AppCommandDispatchResult {

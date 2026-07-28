@@ -33,6 +33,7 @@ endif()
 add_library(clank_base STATIC
   src/base/arena.cpp
   src/base/config_file.cpp
+  src/base/process_file_lock.cpp
   src/base/sysinfo.cpp
   ${CLANK_THREAD_SRC})
 target_include_directories(clank_base PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -56,11 +57,22 @@ if(WIN32)
   target_link_libraries(clank_crypto PUBLIC bcrypt)
 endif()
 
+# ---- durable sessions ---------------------------------------------------
+add_library(clank_session STATIC
+  src/session/id.cpp
+  src/session/entry.cpp
+  src/session/reducer.cpp
+  src/session/memory_repository.cpp
+  src/session/jsonl_repository.cpp)
+target_link_libraries(clank_session PUBLIC clank_base clank_json clank_crypto)
+
 # ---- agent ---------------------------------------------------------------
 add_library(clank_agent STATIC
-  src/agent/agent.cpp
+  src/agent/harness.cpp
+  src/agent/driver.cpp
+  src/agent/primitives.cpp
   src/llm/retry.cpp)
-target_link_libraries(clank_agent PUBLIC clank_base)
+target_link_libraries(clank_agent PUBLIC clank_base clank_session)
 
 # ---- libcurl (vendored via FetchContent) ---------------------------------
 include(FetchContent)
@@ -175,7 +187,8 @@ add_executable(clank_tests
   tests/test_base.cpp
   tests/test_types.cpp
   tests/test_json.cpp
-  tests/test_agent.cpp
+  tests/test_session.cpp
+  tests/test_harness.cpp
   tests/test_anthropic.cpp
   tests/test_tools.cpp
   tests/test_infra.cpp
@@ -194,5 +207,5 @@ add_executable(clank_tests
   tests/test_linemodel.cpp
   tests/test_lineedit.cpp
   tests/test_tui.cpp)
-target_link_libraries(clank_tests PRIVATE clank_app clank_proto clank_agent clank_tools clank_crypto clank_auth clank_loopback clank_term)
+target_link_libraries(clank_tests PRIVATE clank_app clank_proto clank_agent clank_session clank_tools clank_crypto clank_auth clank_loopback clank_term)
 add_test(NAME unit COMMAND clank_tests)

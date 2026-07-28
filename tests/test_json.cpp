@@ -54,6 +54,7 @@ void TestJson() {
 
   // Invalid input returns nullptr.
   CHECK(Json_Parse(&a, SV("{bad")) == nullptr);
+  CHECK(Json_Parse(&a, SV("{} trailing")) == nullptr);
 
   ArenaRelease(&a);
 }

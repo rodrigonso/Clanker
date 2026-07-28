@@ -149,6 +149,7 @@ Tool FindTool() {
       "\"type\":\"string\",\"description\":\"Directory to search in (default: current directory)\"},"
       "\"limit\":{\"type\":\"number\",\"description\":\"Maximum number of results (default: 1000)\"}},"
       "\"required\":[\"pattern\"]}");
+  t.ReplayPolicy = ToolReplayPolicy::ReplaySafe;
   t.Execute = FindExec;
   return t;
 }

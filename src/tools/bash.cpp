@@ -128,6 +128,7 @@ Tool BashTool() {
       "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"Bash "
       "command to execute\"},\"timeout\":{\"type\":\"number\",\"description\":\"Timeout in seconds "
       "(optional, no default timeout)\"}},\"required\":[\"command\"]}");
+  t.ReplayPolicy = ToolReplayPolicy::ManualReconcile;
   t.Execute = BashExec;
   return t;
 }

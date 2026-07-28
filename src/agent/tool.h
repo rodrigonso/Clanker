@@ -2,6 +2,7 @@
 #include "base/array.h"
 #include "base/str.h"
 #include "llm/types.h"
+#include "session/replay.h"
 
 // Result returned by a tool on success.
 struct ToolResult {
@@ -24,6 +25,7 @@ struct Tool {
   StrView Description;
   StrView ParamsJsonSchema;
   ToolExecMode ExecMode;  // Default => may run in parallel; Sequential => forces serial batch
+  ToolReplayPolicy ReplayPolicy;  // zero/default requires explicit recovery reconciliation
   void* Ctx;
   bool (*Execute)(void* ctx, Arena* arena, StrView toolCallId, StrView argsJson, volatile i32* abort,
                   ToolResult* out, StrBuf* err);

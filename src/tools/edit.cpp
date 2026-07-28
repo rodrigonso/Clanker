@@ -480,6 +480,7 @@ Tool EditTool() {
       "replacement; must be unique in the file and not overlap other edits\"},\"newText\":{\"type\":\"string\","
       "\"description\":\"Replacement text\"}},\"required\":[\"oldText\",\"newText\"]}}},\"required\":[\"path\","
       "\"edits\"]}");
+  t.ReplayPolicy = ToolReplayPolicy::ManualReconcile;
   t.Execute = EditExec;
   t.ExecMode = ToolExecMode::Default;
   return t;

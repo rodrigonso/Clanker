@@ -1,5 +1,6 @@
 #pragma once
 #include "agent/event.h"
+#include "agent/harness.h"
 #include "base/arena.h"
 #include "base/thread.h"
 #include "term/keys.h"
@@ -50,8 +51,6 @@ struct TuiDisplayEvent {
   bool IsError;
 };
 
-struct Agent;  // forward decl; the TUI pushes steering into the agent's queues
-
 struct TuiCommandSpec {
   StrView Name;
   StrView Alias;
@@ -71,7 +70,7 @@ struct Tui {
   // branch, and current model survive Tui_ClearSession.
   Arena SessionMem;
   Arena ScreenMem;
-  Agent* Ag;  // for pushing mid-turn steering into the agent's queues
+  AgentHarness* Harness;
   Term Trm;
   Screen Scr;
   LineModel Model;
@@ -202,9 +201,10 @@ void Tui_SetStartupContext(Tui* t, StrView cwd, StrView branch);
 void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts);
 
 // Clear conversation/UI state at an idle boundary without emitting a notice.
-// Call Agent_ResetSession first when Ag may hold views submitted by this TUI.
 // Returns false while the agent is active or shutdown is in progress.
 bool Tui_ClearSession(Tui* t);
+void Tui_HydrateTranscript(Tui* t, const Message* messages, u32 count);
+void Tui_ReplaceTranscript(Tui* t, const Message* messages, u32 count);
 
 // Push raw input bytes, decode them, and apply the resulting keys under the
 // lock. InputLoop uses this; headless tests use it to drive input (scroll,

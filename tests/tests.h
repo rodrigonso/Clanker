@@ -1,12 +1,15 @@
 #pragma once
 
+extern const char* g_test_executable;
+
 void TestArena();
 void TestArray();
 void TestStr();
 void TestHostInfo();
 void TestTypes();
 void TestJson();
-void TestAgent();
+void TestSession();
+void TestHarness();
 void TestAnthropic();
 void TestTools();
 void TestInfra();

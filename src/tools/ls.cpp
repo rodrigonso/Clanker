@@ -113,6 +113,7 @@ Tool LsTool() {
       "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Directory "
       "to list (default: current directory)\"},\"limit\":{\"type\":\"number\",\"description\":"
       "\"Maximum number of entries to return (default: 500)\"}}}");
+  t.ReplayPolicy = ToolReplayPolicy::ReplaySafe;
   t.Execute = LsExec;
   return t;
 }

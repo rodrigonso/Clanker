@@ -29,12 +29,13 @@ src/
            callback server + browser opener (no deps beyond OS sockets)
   auth/    credentials + generic OAuth (PKCE flow, callback capture, store,
            refresh, resolve)
-  agent/   the synchronous turn/tool/steering loop + Agent state
+  session/ append-only session records, reducer, memory + JSONL repositories
+  agent/   durable AgentHarness, recovery driver, hooks, events, compaction
   tools/   read/write/edit/ls/find/grep/bash, process exec, fs/glob/regex/
            diff/truncate/filelock infra
   term/    full-screen TUI: raw-mode terminal, key decoder, differential
            renderer, markdown, transcript model, multi-line editor, controller
-  app/     CLI entry + TUI/plain REPL + --login flow
+  app/     CLI entry + durable session startup + TUI/plain REPL + login flow
 tests/     offline unit tests (no network, no API key)
 ```
 
@@ -43,10 +44,10 @@ tests/     offline unit tests (no network, no API key)
 - **No C++ standard library**, no exceptions, no RTTI. Types and conventions
   (`Arena`, `Array<T>`, PascalCase fields, `FFI(cond)` fastfail) follow the
   caboose/Briq house style. Only the C runtime and platform/libcurl APIs are used.
-- **Memory-first transcript.** Messages are flat structs; all text is a
-  `StrView` (non-owning UTF-8 slice) into the arena. There is no per-turn
-  `convertToLlm` duplication (identity conversion) and streaming deltas are
-  forwarded as zero-copy slices rather than whole-message clones.
+- **Append-only durable sessions.** Session entries form a branchable message
+  tree; harness entries persist provider/tool intent, queues, cancellation, and
+  recovery state without entering model context. JSONL is the default backend,
+  while `--no-session` uses the same contracts entirely in memory.
 - **Single-threaded loop, parallel tool batches.** A pluggable `Provider`
   streams one assistant turn (auto-retrying transient errors with capped
   exponential backoff); a turn's tool calls run **concurrently by default** (each
@@ -84,6 +85,9 @@ use the VS-bundled CMake/Ninja).
 ./build/clank --login anthropic     # OAuth (Claude Pro/Max), or set ANTHROPIC_API_KEY
 ./build/clank                        # full-screen TUI; login can also happen inside it
 ./build/clank -m claude-sonnet-4-6 -p "summarize README.md"
+./build/clank --continue             # most recent session for this project
+./build/clank --resume SESSION_ID     # a specific project session
+./build/clank --no-session            # no session filesystem writes
 ```
 
 ## TUI
@@ -119,14 +123,20 @@ a composer selection.
 
 When stdin/stdout isn't a TTY (pipes, redirected) or with `-p`, it falls back to
 a plain line renderer. Plain and piped output write provider deltas immediately
-without display pacing. Piped sessions support `/clear` and `/exit`; interactive
+without display pacing. Session commands remain available; interactive
 selectors such as `/login` and `/model` require a TTY.
 
 Interactive commands:
 
 - `/login` — choose an OAuth-capable provider, authenticate, then choose a model.
 - `/model` — choose a provider and a live-discovered, fallback, or manual model ID.
-- `/clear` — clear the conversation while preserving provider, model, and credentials.
+- `/session` and `/sessions` — inspect session details in TUI flyouts.
+- `/resume [id]` — choose an available session, or switch directly by ID.
+- `/tree` and `/checkout <entry-id>` — inspect or navigate conversation branches.
+- `/fork [entry-id]` — fork and switch to a new session.
+- `/compact` — durably summarize the active branch.
+- `/recover ...` — resume, abort, or reconcile an interrupted operation.
+- `/clear` — create a fresh session while preserving provider/model selection.
 - `/exit` (or `/quit`) — close Clank and return to the shell.
 
 In the TUI, typing `/` opens a prefix-filtered command flyout over the content
@@ -136,13 +146,15 @@ command, Backspace on an empty page to go back, or Escape to dismiss the current
 choice.
 
 Commands entered during a TUI turn run afterward; ordinary text still steers the
-active turn. In `--faux` mode, `/clear` and `/exit` work while `/login` and
-`/model` are unavailable.
+active turn. In `--faux` mode, session commands work while `/login` and `/model`
+are unavailable.
 
 The selected provider/model is written atomically to `~/.clank/settings.json`.
-Startup precedence is built-in defaults, then settings, then the runtime-only
-`-m` override. Interactive mode may start without credentials and blocks prompts
-with `/login` guidance; `-p` remains fail-fast.
+New sessions use built-in defaults, then settings, then the runtime-only `-m`
+override. Resumed sessions restore their durable provider/model ancestry; `-m`
+adds a new durable model selection. Sessions live under
+`~/.clank/sessions/v1/<project-key>/`. Interactive mode may start without
+credentials and blocks prompts with `/login` guidance; `-p` remains fail-fast.
 
 Set `CLANK_PRINT_MEM=1` to print peak RSS at exit.
 
@@ -196,7 +208,8 @@ leaves seams for them):
 - Device-code OAuth (e.g. GitHub Copilot) — the loopback callback flow is done.
 - TUI niceties: visual-row (vs logical-line) Up/Down, syntax highlighting,
   images, undo. The full-screen differential TUI itself is done.
-- Compaction, on-disk sessions, skills, additional slash commands, and extensions.
+- Automatic compaction thresholds, skills, general extensions, and additional
+  providers.
 
 ## License
 

@@ -6,12 +6,15 @@ namespace {
 struct FakeCommandContext {
   int LoginCalls;
   int ModelCalls;
+  int SessionCalls;
+  int ResumeCalls;
   int Notices;
   int Errors;
   AppCommandHandlerResult LoginResult;
   AppCommandHandlerResult ModelResult;
   StrView LastNotice;
   StrView LastError;
+  StrView LastArguments;
 };
 
 void Notice(void* user, StrView message) {
@@ -40,14 +43,32 @@ AppCommandHandlerResult Model(void* user, const AppCommandUx* ux) {
   return ctx->ModelResult;
 }
 
+AppCommandHandlerResult Session(void* user, const AppCommandUx* ux,
+                                StrView arguments) {
+  (void)ux;
+  FakeCommandContext* ctx = (FakeCommandContext*)user;
+  ctx->SessionCalls++;
+  ctx->LastArguments = arguments;
+  return {AppCommandHandlerStatus::Success, SVL("Session shown.")};
+}
+
+AppCommandHandlerResult Resume(void* user, const AppCommandUx* ux,
+                               StrView arguments) {
+  (void)ux;
+  FakeCommandContext* ctx = (FakeCommandContext*)user;
+  ctx->ResumeCalls++;
+  ctx->LastArguments = arguments;
+  return {AppCommandHandlerStatus::Success, StrView{}};
+}
+
 void TestParse() {
-  CHECK_ALL(AppCommandSpec_Count() == 4,
+  CHECK_ALL(AppCommandSpec_Count() == 12,
             AppCommandSpec_At(AppCommandSpec_Count()) == nullptr,
             AppCommandSpec_At(0)->Kind == AppCommandKind::Login,
             StrView_EqCStr(AppCommandSpec_At(0)->Name, "login"),
-            AppCommandSpec_At(3)->Kind == AppCommandKind::Exit,
-            StrView_EqCStr(AppCommandSpec_At(3)->Alias, "quit"),
-            AppCommandSpec_At(3)->Description.Length != 0);
+            AppCommandSpec_At(11)->Kind == AppCommandKind::Exit,
+            StrView_EqCStr(AppCommandSpec_At(11)->Alias, "quit"),
+            AppCommandSpec_At(11)->Description.Length != 0);
 
   AppCommand plain = AppCommand_Parse(SVL("  hello  "));
   CHECK(plain.Kind == AppCommandKind::NotCommand);
@@ -62,6 +83,15 @@ void TestParse() {
   };
   ParseCase cases[] = {
       {SVL("/model"), AppCommandKind::Model},   {SVL("/clear"), AppCommandKind::Clear},
+      {SVL("/session"), AppCommandKind::Session},
+      {SVL("/sessions"), AppCommandKind::Sessions},
+      {SVL("/resume"), AppCommandKind::Resume},
+      {SVL("/resume abc"), AppCommandKind::Resume},
+      {SVL("/tree"), AppCommandKind::Tree},
+      {SVL("/checkout abc"), AppCommandKind::Checkout},
+      {SVL("/fork"), AppCommandKind::Fork},
+      {SVL("/compact"), AppCommandKind::Compact},
+      {SVL("/recover resume"), AppCommandKind::Recover},
       {SVL("/exit"), AppCommandKind::Exit},     {SVL("/quit"), AppCommandKind::Exit},
       {SVL("/LOGIN"), AppCommandKind::Unknown}, {SVL("/"), AppCommandKind::Unknown},
       {SVL("/wat"), AppCommandKind::Unknown},
@@ -83,7 +113,12 @@ void TestDispatch() {
   ctx.LoginResult = {AppCommandHandlerStatus::Success, SVL("Logged in.")};
   ctx.ModelResult = {AppCommandHandlerStatus::Success, SVL("Model selected.")};
   AppCommandUx ux = {&ctx, Notice, Error};
-  AppCommandHandlers handlers = {&ctx, Login, Model};
+  AppCommandHandlers handlers = {};
+  handlers.User = &ctx;
+  handlers.Login = Login;
+  handlers.Model = Model;
+  handlers.Session = Session;
+  handlers.Resume = Resume;
 
   AppCommandDispatchResult plain = AppCommand_Dispatch(SVL("ordinary prompt"), &handlers, &ux);
   CHECK_ALL(!plain.Handled, plain.Action == AppLoopAction::Continue);
@@ -99,6 +134,22 @@ void TestDispatch() {
 
   AppCommandDispatchResult clear = AppCommand_Dispatch(SVL("/clear"), &handlers, &ux);
   CHECK(clear.Handled && clear.Action == AppLoopAction::ResetSession);
+
+  AppCommandDispatchResult session =
+      AppCommand_Dispatch(SVL("/session"), &handlers, &ux);
+  CHECK_ALL(session.Handled && session.Action == AppLoopAction::Continue,
+            ctx.SessionCalls == 1,
+            StrView_EqCStr(ctx.LastNotice, "Session shown."));
+
+  int noticesBeforeResume = ctx.Notices;
+  AppCommandDispatchResult resume =
+      AppCommand_Dispatch(SVL("/resume"), &handlers, &ux);
+  CHECK_ALL(resume.Handled && resume.Action == AppLoopAction::Continue,
+            ctx.ResumeCalls == 1 && ctx.LastArguments.Length == 0,
+            ctx.Notices == noticesBeforeResume);
+  AppCommand_Dispatch(SVL("/resume abc"), &handlers, &ux);
+  CHECK_ALL(ctx.ResumeCalls == 2,
+            StrView_EqCStr(ctx.LastArguments, "abc"));
 
   AppCommandDispatchResult exit = AppCommand_Dispatch(SVL("/exit"), &handlers, &ux);
   CHECK(exit.Handled && exit.Action == AppLoopAction::Exit);
@@ -132,7 +183,10 @@ void TestDispatch() {
 void TestHandlerOutcomes() {
   FakeCommandContext ctx = {};
   AppCommandUx ux = {&ctx, Notice, Error};
-  AppCommandHandlers handlers = {&ctx, Login, Model};
+  AppCommandHandlers handlers = {};
+  handlers.User = &ctx;
+  handlers.Login = Login;
+  handlers.Model = Model;
 
   ctx.LoginResult = {AppCommandHandlerStatus::Cancelled, StrView{}};
   AppCommand_Dispatch(SVL("/login"), &handlers, &ux);

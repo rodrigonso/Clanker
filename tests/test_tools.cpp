@@ -57,6 +57,7 @@ static void TestRead(Arena* a) {
   MakeFile(path, "line1\nline2\n");
 
   Tool rt = ReadTool();
+  CHECK(rt.ReplayPolicy == ToolReplayPolicy::ReplaySafe);
   ToolResult out = {};
   StrBuf err = StrBuf_Make(a, 32);
   bool ok = RunTool(rt, a, Args1(a, "path", path), &out, &err);
@@ -109,6 +110,7 @@ static void TestRead(Arena* a) {
 
 static void TestBash(Arena* a) {
   Tool bt = BashTool();
+  CHECK(bt.ReplayPolicy == ToolReplayPolicy::ManualReconcile);
 
   ToolResult out = {};
   StrBuf err = StrBuf_Make(a, 32);

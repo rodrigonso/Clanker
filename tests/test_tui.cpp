@@ -1,9 +1,10 @@
-#include "agent/agent.h"
 #include "agent/event.h"
+#include "agent/harness.h"
 #include "base/arena.h"
 #include "base/array.h"
 #include "check.h"
 #include "llm/faux.h"
+#include "session/memory_repository.h"
 #include "term/tui.h"
 
 namespace {
@@ -91,10 +92,32 @@ bool SessionUiCleared(const Tui* t, usize usedBefore) {
          t->ModalResult == TuiModalResult::None;
 }
 
-bool SessionContextPreserved(const Tui* t, const Agent* agent) {
+bool SessionContextPreserved(const Tui* t, const AgentHarness* harness) {
   return StrView_Eq(t->ModelName, SVL("kept-model")) &&
          StrView_Eq(t->Cwd, SVL("kept-cwd")) &&
-         StrView_Eq(t->Branch, SVL("kept-branch")) && t->Ag == agent;
+         StrView_Eq(t->Branch, SVL("kept-branch")) &&
+         t->Harness == harness;
+}
+
+bool InitTestHarness(Arena* arena, MemoryRepository* memory,
+                     AgentHarness* harness, Faux* faux) {
+  MemoryRepository_Init(memory);
+  SessionRepository repository = MemoryRepository_AsRepository(memory);
+  SessionCreateOptions create = {};
+  create.ProjectKey = SVL("tui-test");
+  create.WorkingDirectory = SVL("C:\\tui-test");
+  SessionLog log = {};
+  SessionInfo info = {};
+  if (!SessionResult_IsOk(
+          repository.Create(repository.Ctx, arena, &create, &log, &info)))
+    return false;
+  AgentHarnessConfig config = {};
+  config.SystemPrompt = SVL("sys");
+  config.ModelInfo.Provider = SVL("faux");
+  config.ModelInfo.Id = SVL("faux-model");
+  config.ProviderImpl = Faux_Provider(faux);
+  config.ToolExec = ToolExecution::Parallel;
+  return SessionResult_IsOk(AgentHarness_Init(harness, log, &config));
 }
 
 }  // namespace
@@ -391,27 +414,31 @@ void TestTui() {
   // for application preflight before an idle prompt is rendered.
   {
     Arena a2 = ArenaCreate();
-    Model model = {};
-    Agent ag = Agent_Make(&a2, model, SV("sys"));
-    Agent_InitQueues(&ag);
+    Faux faux = {};
+    MemoryRepository memory = {};
+    AgentHarness harness = {};
+    CHECK(InitTestHarness(&a2, &memory, &harness, &faux));
 
     TuiOpts o2;
     o2.ModelName = SVL("m");
     o2.Color = false;
     Tui t2;
     Tui_InitModel(&t2, &a2, o2);
-    t2.Ag = &ag;
+    t2.Harness = &harness;
 
     t2.AgentRunning = true;  // a turn is running
     Feed(&t2, "steer me\r");
-    CHECK_ALL(ag.Steer.Count == 1, t2.QCount == 0);
+    SessionReduction queued = {};
+    CHECK(AgentHarness_Snapshot(&a2, &harness, &queued).Status ==
+          SessionStatus::Ok);
+    CHECK_ALL(queued.PendingQueueItems.Count == 1, t2.QCount == 0);
     DrainDisplay(&t2);
     CHECK_ALL(!AnyRow(&a2, &t2, "you"), AnyRow(&a2, &t2, "steer me"),
               t2.Model.Entries.Data[t2.Model.Entries.Count - 1].Text.Timestamp.Length == 5);
 
     u32 entriesAfterSteer = t2.Model.Entries.Count;
     Feed(&t2, "  /model  \r");
-    CHECK_ALL(t2.QCount == 1, ag.Steer.Count == 1);
+    CHECK_ALL(t2.QCount == 1, queued.PendingQueueItems.Count == 1);
     DrainDisplay(&t2);
     CHECK_ALL(t2.Model.Entries.Count == entriesAfterSteer + 1,
               AnyRow(&a2, &t2, "Queued command:"), AnyRow(&a2, &t2, "/model"));
@@ -423,7 +450,7 @@ void TestTui() {
 
     t2.AgentRunning = false;  // between turns
     Feed(&t2, "next prompt\r");
-    CHECK_ALL(t2.QCount == 1, ag.Steer.Count == 1);  // unchanged
+    CHECK_ALL(t2.QCount == 1, queued.PendingQueueItems.Count == 1);
     CHECK(Tui_WaitForSubmit(&t2, &submission));
     CHECK_ALL(submission.Kind == TuiSubmissionKind::Prompt,
               StrView_Eq(submission.Text, SVL("next prompt")));
@@ -452,6 +479,8 @@ void TestTui() {
     CHECK(AnyRow(&a2, &t2, "Submission queue is full"));
 
     Tui_Stop(&t2);
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    MemoryRepository_Destroy(&memory);
     ArenaRelease(&a2);
   }
 
@@ -571,39 +600,44 @@ void TestTui() {
     ArenaRelease(&ap);
   }
 
-  // End-to-end: a real agent turn (faux provider) must surface the assistant's
-  // streamed text in the transcript after the display queue drains.
+  // A durable snapshot hydrates a completed faux-provider turn.
   {
     Arena a3 = ArenaCreate();
-    Model model = {};
-    Agent ag = Agent_Make(&a3, model, SV("sys"));
-    Agent_InitQueues(&ag);
-
     FauxStep step = {};
     step.Text = SVL("Here is the explanation");
     step.Stop = StopReason::Stop;
-    Faux* f = ArenaPushStruct(&a3, Faux);
-    *f = Faux{};
-    f->Steps = &step;
-    f->Count = 1;
-    ag.Prov = Faux_Provider(f);
+    Faux faux = {};
+    faux.Steps = &step;
+    faux.Count = 1;
+    MemoryRepository memory = {};
+    AgentHarness harness = {};
+    CHECK(InitTestHarness(&a3, &memory, &harness, &faux));
 
     TuiOpts o3;
     o3.ModelName = SVL("m");
     o3.Color = false;
     Tui t3;
     Tui_InitModel(&t3, &a3, o3);
-    ag.Sink.User = &t3;
-    ag.Sink.OnEvent = Tui_AgentEvent;
+    t3.Harness = &harness;
 
-    Agent_Prompt(&ag, SV("ask"));
-    DrainDisplay(&t3);
+    CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SV("ask"))));
+    AgentHarnessSnapshot snapshot = {};
+    CHECK(SessionResult_IsOk(
+        AgentHarness_SnapshotFull(&a3, &harness, &snapshot)));
+    Tui_HydrateTranscript(&t3, snapshot.Transcript.Data,
+                          snapshot.Transcript.Count);
+    u32 hydratedEntries = t3.Model.Entries.Count;
+    Tui_ReplaceTranscript(&t3, snapshot.Transcript.Data,
+                          snapshot.Transcript.Count);
 
     CHECK_ALL(!AnyRow(&a3, &t3, "assistant"),
               AnyRow(&a3, &t3, "Here is the explanation"),
+              t3.Model.Entries.Count == hydratedEntries,
               t3.State == TuiState::Idle);
 
     Tui_Stop(&t3);
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    MemoryRepository_Destroy(&memory);
     ArenaRelease(&a3);
   }
 
@@ -1361,7 +1395,7 @@ void TestTui() {
   }
 
   // Session clear reclaims the resettable arena and returns all conversation/UI
-  // state to idle while preserving terminal context, agent binding, and model.
+  // state to idle while preserving terminal context, harness binding, and model.
   {
     Arena ar = ArenaCreate();
     TuiOpts orr;
@@ -1369,9 +1403,11 @@ void TestTui() {
     orr.Color = false;
     Tui resetTui;
     Tui_InitModel(&resetTui, &ar, orr);
-    Agent ag = Agent_Make(&ar, Model{}, SVL("sys"));
-    Agent_InitQueues(&ag);
-    resetTui.Ag = &ag;
+    Faux faux = {};
+    MemoryRepository memory = {};
+    AgentHarness harness = {};
+    CHECK(InitTestHarness(&ar, &memory, &harness, &faux));
+    resetTui.Harness = &harness;
     Tui_SetStartupContext(&resetTui, SVL("kept-cwd"), SVL("kept-branch"));
 
     LineModel_AddNotice(&resetTui.Model, EntryKind::Info, SVL("old transcript"));
@@ -1405,11 +1441,10 @@ void TestTui() {
     CHECK_ALL(!clearedWhileRunning, resetTui.Model.Entries.Count != 0);
     resetTui.AgentRunning = false;
 
-    CHECK(Agent_ResetSession(&ag));
     CHECK(Tui_ClearSession(&resetTui));
     CHECK(resetTui.QCount == 1);
     CHECK(SessionUiCleared(&resetTui, usedBeforeClear));
-    CHECK(SessionContextPreserved(&resetTui, &ag));
+    CHECK(SessionContextPreserved(&resetTui, &harness));
 
     TuiSubmission preserved = {};
     CHECK(Tui_WaitForSubmit(&resetTui, &preserved));
@@ -1421,10 +1456,11 @@ void TestTui() {
     Feed(&resetTui, "\r");
     CHECK(Tui_GetModalResult(&resetTui, nullptr, nullptr) == TuiModalResult::Confirmed);
     Tui_EndOperation(&resetTui);
-    CHECK(Agent_Release(&ag));
     Tui_Stop(&resetTui);
     CHECK_ALL(!resetTui.SessionUp, !resetTui.SyncUp);
     Tui_Stop(&resetTui);  // final cleanup is idempotent
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    MemoryRepository_Destroy(&memory);
     ArenaRelease(&ar);
   }
 

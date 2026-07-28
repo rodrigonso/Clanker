@@ -47,7 +47,7 @@ its module tree; the orchestrator has no equivalent.
 | Anthropic Messages provider + faux | ✅ | hand-rolled SSE build/parse, offline unit test |
 | ~33 other providers (openai, google, vertex, bedrock, github-copilot, groq, xai, openrouter, …) | ❌ | |
 | 8 other wire protocols (openai-completions / responses / codex, google-generative-ai, google-vertex, bedrock-converse, mistral, azure-openai-responses) | ❌ | |
-| Prompt caching (`cache_control`) | ❌ | not emitted |
+| Prompt caching (`cache_control`) | ✅ | Anthropic system/tool-prefix breakpoint plus the two most recent message groups |
 | Thinking / reasoning streaming | 🟡 | Anthropic thinking deltas parsed; no thinking-level control |
 | Cross-provider message normalization (`transform-messages`) | ❌ | n/a with a single provider |
 | Model registry · `--list-models` · pricing/cost · scoped models | 🟡 | provider registry + live Anthropic `/v1/models` discovery; no pricing or list flag |
@@ -82,8 +82,8 @@ its module tree; the orchestrator has no equivalent.
 |---|---|---|
 | System prompt assembly (date, cwd, tool docs, `AGENTS.md`/`CLAUDE.md` project context) | ❌ | Clank ships a static one-line system prompt |
 | Prompt templates (`$1`, `$@`, `$ARGUMENTS`) | ❌ | |
-| Sessions / persistence (JSONL, resume, fork, branch, tree, listing, naming) | ❌ | |
-| Compaction (auto + manual, branch summarization) | ❌ | |
+| Sessions / persistence (JSONL, resume, fork, branch, tree, listing, naming) | 🟡 | append-only JSONL, `--continue`/`--resume`, tree checkout, forks, labels, recovery; no import flow |
+| Compaction (auto + manual, branch summarization) | 🟡 | durable manual compaction; no automatic threshold policy |
 | Skills (discovery, frontmatter, `<available_skills>` injection, `/skill`) | ❌ | |
 | Subagent / task delegation | ❌ | pi also has none at the harness level |
 
@@ -93,10 +93,10 @@ its module tree; the orchestrator has no equivalent.
 |---|---|---|
 | Print mode (`-p`) · interactive TUI · plain REPL fallback | ✅ | |
 | JSON output mode · RPC (JSONL) mode | ❌ | |
-| CLI flags | 🟡 | ~7 (`-m -p --login --logout --no-open --faux --help`) vs pi's ~45 |
+| CLI flags | 🟡 | model/print/auth plus `--no-session`, `--continue`, and `--resume` |
 | TUI core: differential renderer, markdown, multi-line editor, status line, scroll, steering, abort, `NO_COLOR` | ✅ | |
 | TUI selectors/dialogs (model / session / theme / settings / login / oauth / extension / thinking / trust / diff / image / first-run) | 🟡 | generic list/text modals power login and model selection |
-| Slash commands | 🟡 | `/login`, `/model`, `/clear`, `/exit` (`/quit` alias) |
+| Slash commands | 🟡 | session listing/resume/tree/checkout/fork/compact/recover plus login/model/clear/exit |
 | Themes · configurable keybindings | ❌ | |
 
 ## Platform features

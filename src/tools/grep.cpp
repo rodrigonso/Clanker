@@ -296,6 +296,7 @@ Tool GrepTool() {
       "literal string instead of regex\"},\"context\":{\"type\":\"number\",\"default\":0,\"description\":"
       "\"Lines of context before and after each match\"},\"limit\":{\"type\":\"number\",\"default\":100,"
       "\"description\":\"Maximum number of matches\"}},\"required\":[\"pattern\"]}");
+  t.ReplayPolicy = ToolReplayPolicy::ReplaySafe;
   t.Execute = GrepExec;
   return t;
 }

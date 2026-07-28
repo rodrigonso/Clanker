@@ -267,7 +267,8 @@ JsonValue* Json_Parse(Arena* arena, StrView text) {
   s.a = arena;
   s.ok = true;
   JsonValue* v = ParseValue(&s);
-  return s.ok ? v : nullptr;
+  SkipWs(&s);
+  return s.ok && s.p == s.end ? v : nullptr;
 }
 
 JsonValue* Json_Get(const JsonValue* obj, const char* key) {
