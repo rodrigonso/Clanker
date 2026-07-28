@@ -38,7 +38,8 @@ struct HttpResponse {
   StrView Error;
 };
 
-// Call once at startup / shutdown.
+// Idempotent process-wide setup/teardown. Initialization may be deferred until
+// immediately before the first network-capable operation.
 void Http_GlobalInit();
 void Http_GlobalShutdown();
 

@@ -9,6 +9,7 @@ namespace {
 // Reuse one serialized easy handle to retain connection, DNS, and TLS caches.
 CURL* g_curl;
 Mutex g_lock;
+bool g_initialized;
 
 struct WriteCtx {
   HttpStreamSink sink;
@@ -43,18 +44,22 @@ int XferCb(void* p, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
 }  // namespace
 
 void Http_GlobalInit() {
+  if (g_initialized) return;
   curl_global_init(CURL_GLOBAL_DEFAULT);
   Mutex_Init(&g_lock);
   g_curl = curl_easy_init();
+  g_initialized = true;
 }
 
 void Http_GlobalShutdown() {
+  if (!g_initialized) return;
   if (g_curl) {
     curl_easy_cleanup(g_curl);
     g_curl = nullptr;
   }
   Mutex_Destroy(&g_lock);
   curl_global_cleanup();
+  g_initialized = false;
 }
 
 HttpResult Http_Stream(Arena* arena, const HttpRequest* req, HttpStreamSink sink, volatile i32* abort) {

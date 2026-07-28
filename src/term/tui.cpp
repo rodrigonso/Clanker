@@ -136,6 +136,11 @@ void Wake(Tui* t) {
   Cond_Signal(&t->RenderCv);
 }
 
+void WakeInput(Tui* t) {
+  t->InputDirty = true;
+  Wake(t);
+}
+
 bool HasQueuedDisplayEvents(const Tui* t) {
   return t->DisplayHead < t->DisplayEvents.Count;
 }
@@ -1667,6 +1672,7 @@ void RenderLoop(void* arg) {
       continue;
     }
     Compose(t);
+    t->InputDirty = false;
     bool writeClipboard = PrepareClipboardOutput(t);
     Mutex_Unlock(&t->Lock);
     Screen_Flush(&t->Scr);
@@ -1687,6 +1693,7 @@ void RenderLoop(void* arg) {
     if (!t->Dirty && !t->Stop) Cond_WaitTimeout(&t->RenderCv, &t->Lock, interval);
     t->Dirty = false;
     while (!t->Stop) {
+      if (t->InputDirty) break;
       u64 elapsed = MonotonicMillis() - lastFrame;
       if (elapsed >= kMinFrameMs) break;
       Cond_WaitTimeout(&t->RenderCv, &t->Lock, (u32)(kMinFrameMs - elapsed));
@@ -1733,14 +1740,46 @@ bool Tui_Start(Tui* t, Arena* mem, TuiOpts opts) {
   Screen_Resize(&t->Scr, cols, rows);
   LineModel_SetWidth(&t->Model, cols);
 
-  StrView raw = Sys_CurrentDir(mem);
-  t->Cwd = Sys_AbbreviatePath(mem, raw, Sys_HomeDir(mem));
-  t->Branch = Sys_GitBranch(mem, raw);
+  // Avoid scheduler latency on the startup-critical frame.
+  Compose(t);
+  Screen_Flush(&t->Scr);
 
-  Thread_Start(&t->RenderThread, RenderLoop, t);
-  Thread_Start(&t->InputThread, InputLoop, t);
-  t->ThreadsUp = true;
+  if (!Thread_Start(&t->InputThread, InputLoop, t)) {
+    Tui_Stop(t);
+    return false;
+  }
+  t->InputThreadUp = true;
+  if (!Thread_Start(&t->RenderThread, RenderLoop, t)) {
+    Tui_Stop(t);
+    return false;
+  }
+  t->RenderThreadUp = true;
   return true;
+}
+
+static StrView CopyStartupText(char* dst, u32 cap, StrView text) {
+  u32 n = text.Length < cap - 1 ? text.Length : cap - 1;
+  if (n) memcpy(dst, text.Data, n);
+  dst[n] = 0;
+  return StrView{dst, n};
+}
+
+void Tui_SetStartupContext(Tui* t, StrView cwd, StrView branch) {
+  Mutex_Lock(&t->Lock);
+  t->Cwd = CopyStartupText(t->CwdStorage, (u32)sizeof(t->CwdStorage), cwd);
+  t->Branch =
+      CopyStartupText(t->BranchStorage, (u32)sizeof(t->BranchStorage), branch);
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+}
+
+void Tui_LoadStartupContext(Tui* t) {
+  Arena scratch = ArenaCreate((usize)4 << 20);
+  StrView raw = Sys_CurrentDir(&scratch);
+  StrView cwd = Sys_AbbreviatePath(&scratch, raw, Sys_HomeDir(&scratch));
+  StrView branch = Sys_GitBranch(&scratch, raw);
+  Tui_SetStartupContext(t, cwd, branch);
+  ArenaRelease(&scratch);
 }
 
 void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts) {
@@ -1880,13 +1919,16 @@ void Tui_Stop(Tui* t) {
     RequestStopLocked(t);
     Mutex_Unlock(&t->Lock);
   }
-  if (t->ThreadsUp) {
-    Term_WakeInput(&t->Trm);
+  if (t->InputThreadUp) Term_WakeInput(&t->Trm);
+  if (t->RenderThreadUp) {
     Thread_Join(&t->RenderThread);
-    Thread_Join(&t->InputThread);
-    t->ThreadsUp = false;
-    Term_Exit(&t->Trm);
+    t->RenderThreadUp = false;
   }
+  if (t->InputThreadUp) {
+    Thread_Join(&t->InputThread);
+    t->InputThreadUp = false;
+  }
+  Term_Exit(&t->Trm);
   if (t->ScreenUp) {
     ArenaRelease(&t->ScreenMem);
     t->ScreenUp = false;
@@ -2101,14 +2143,14 @@ void Tui_FeedInput(Tui* t, const char* data, u32 n) {
     Key escape = {};
     escape.Kind = KeyKind::Escape;
     HandleKey(t, escape);
-    Wake(t);
+    WakeInput(t);
     Mutex_Unlock(&t->Lock);
     return;
   }
   KeyDecoder_Push(&t->Dec, data, n);
   Key k;
   while (KeyDecoder_Next(&t->Dec, &k)) HandleKey(t, k);
-  Wake(t);
+  WakeInput(t);
   Mutex_Unlock(&t->Lock);
 }
 

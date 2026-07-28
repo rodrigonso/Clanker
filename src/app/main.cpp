@@ -40,8 +40,21 @@ static void OnSigint(int) { g_abort = 1; }
 
 // ---- auth wiring ---------------------------------------------------------
 
+struct AuthWarmup;
+
 struct AppAuth {
   StrView Path;
+  AuthWarmup* Warmup;
+};
+
+struct AuthWarmup {
+  Thread Worker;
+  StrView Path;
+  StrView Provider;
+  const char* EnvVar;
+  volatile i32* Abort;
+  bool Started;
+  bool Joined;
 };
 
 struct InteractiveRuntime {
@@ -54,11 +67,65 @@ struct InteractiveRuntime {
   bool Faux;
   bool AutoOpen;
   Tui* TuiView;
+  AppAuth* Auth;
+  AuthWarmup* AuthWarmupState;
 };
+
+static void RunAuthWarmup(void* user) {
+  AuthWarmup* warmup = (AuthWarmup*)user;
+  Arena scratch = ArenaCreate((usize)16 << 20);
+  Auth_ResolveToken(&scratch, warmup->Path, warmup->Provider,
+                    warmup->EnvVar, warmup->Abort);
+  ArenaRelease(&scratch);
+}
+
+static bool StartAuthWarmup(AuthWarmup* warmup, AppAuth* auth,
+                            const ProviderSpec* spec, volatile i32* abort) {
+  if (!warmup || !auth || !spec) return false;
+  *warmup = AuthWarmup{};
+  warmup->Path = auth->Path;
+  warmup->Provider = spec->Id;
+  warmup->EnvVar = spec->ApiKeyEnvVar;
+  warmup->Abort = abort;
+  auth->Warmup = warmup;
+  if (!Thread_Start(&warmup->Worker, RunAuthWarmup, warmup)) {
+    auth->Warmup = nullptr;
+    return false;
+  }
+  warmup->Started = true;
+  return true;
+}
+
+static void JoinAuthWarmup(AuthWarmup* warmup) {
+  if (!warmup || !warmup->Started || warmup->Joined) return;
+  Thread_Join(&warmup->Worker);
+  warmup->Joined = true;
+}
+
+static void CancelAuthWarmup(AuthWarmup* warmup, AppAuth* auth) {
+  if (!warmup) return;
+  if (warmup->Abort) *warmup->Abort = 1;
+  JoinAuthWarmup(warmup);
+  if (auth && auth->Warmup == warmup) {
+    auth->Warmup = nullptr;
+  }
+}
+
+static void FinishRuntimeAuthWarmup(InteractiveRuntime* rt) {
+  if (rt && rt->AuthWarmupState) JoinAuthWarmup(rt->AuthWarmupState);
+}
+
+static void CancelRuntimeAuthWarmup(InteractiveRuntime* rt) {
+  if (!rt || !rt->AuthWarmupState) return;
+  CancelAuthWarmup(rt->AuthWarmupState, rt->Auth);
+  rt->AuthWarmupState = nullptr;
+}
 
 static bool AppResolveAuth(void* user, Arena* arena, StrView provider, volatile i32* abort,
                            StrView* out) {
   AppAuth* aa = (AppAuth*)user;
+  AuthWarmup* warmup = aa->Warmup;
+  if (warmup && StrView_Eq(warmup->Provider, provider)) JoinAuthWarmup(warmup);
   const ProviderSpec* spec = ProviderRegistry_Find(provider);
   StrView t =
       Auth_ResolveToken(arena, aa->Path, provider, spec ? spec->ApiKeyEnvVar : nullptr, abort);
@@ -528,6 +595,7 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
   volatile i32* abort = RuntimeBeginOperation(rt, ux, StrBuf_View(&label));
 
   RuntimeSetOperationStatus(rt, ux, SVL("Resolving provider credentials."));
+  FinishRuntimeAuthWarmup(rt);
   StrView token =
       Auth_ResolveToken(&scratch, rt->AuthPath, spec->Id, spec->ApiKeyEnvVar, abort);
   ProviderModelList live = {};
@@ -666,6 +734,7 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
 
 static bool RuntimeCheckAuth(InteractiveRuntime* rt, const AppCommandUx* ux, bool asError) {
   if (rt->Faux) return true;
+  FinishRuntimeAuthWarmup(rt);
   volatile i32* abort = rt->Ag ? rt->Ag->Stream.Abort : nullptr;
   if (abort && *abort) return false;
   if (rt->Ag && ResolvePromptAuth(rt->Ag)) return true;
@@ -780,6 +849,7 @@ static AppCommandHandlerResult HandleLoginCommand(void* user, const AppCommandUx
                                      provider.Message};
 
     if (authenticated != provider.Spec) {
+      CancelRuntimeAuthWarmup(rt);
       AppCommandHandlerResult login = RunOAuthLogin(rt, provider.Spec, ux);
       if (login.Status != AppCommandHandlerStatus::Success) return login;
       authenticated = provider.Spec;
@@ -918,6 +988,7 @@ static void PrintHelp() {
 
 // Plain line REPL (non-TTY / fallback): the original fgets loop.
 static void RunPlainRepl(InteractiveRuntime* rt, Faux* fauxState) {
+  EnableTerminal();
   rt->TuiView = nullptr;
   if (rt->Faux)
     printf("Clank (faux demo). Ctrl+C interrupts a turn, /exit quits.\n");
@@ -971,6 +1042,7 @@ static void RunTuiRepl(InteractiveRuntime* rt, Faux* fauxState) {
 
   Tui tui;
   if (!Tui_Start(&tui, rt->Mem, opts)) {
+    if (!rt->Faux) Http_GlobalInit();
     RunPlainRepl(rt, fauxState);
     return;
   }
@@ -981,8 +1053,15 @@ static void RunTuiRepl(InteractiveRuntime* rt, Faux* fauxState) {
   tui.Ag = rt->Ag;
   rt->Ag->Stream.Abort = Tui_Abort(&tui);
 
+  AuthWarmup warmup = {};
+  if (!rt->Faux) {
+    Http_GlobalInit();
+    rt->AuthWarmupState = &warmup;
+    StartAuthWarmup(&warmup, rt->Auth, rt->Spec, Tui_OperationAbort(&tui));
+  }
+  Tui_LoadStartupContext(&tui);
+
   AppCommandUx commandUx = {&tui, TuiCommandNotice, TuiCommandError};
-  if (!rt->Faux) RuntimeCheckAuth(rt, &commandUx, false);
   AppCommandHandlers handlers = RuntimeCommandHandlers(rt);
   for (;;) {
     TuiSubmission submission = {};
@@ -1006,6 +1085,7 @@ static void RunTuiRepl(InteractiveRuntime* rt, Faux* fauxState) {
     if (rt->Faux) fauxState->Index = 0;
     Agent_Prompt(rt->Ag, submission.Text);
   }
+  CancelRuntimeAuthWarmup(rt);
   Tui_Stop(&tui);
   rt->Ag->Sink.User = nullptr;
   rt->Ag->Sink.OnEvent = ReplSink;
@@ -1041,14 +1121,13 @@ int main(int argc, char** argv) {
     }
   }
 
-  EnableTerminal();
-  Http_GlobalInit();
   Arena arena = ArenaCreate((usize)2 << 30);
   StrView authPath = AuthStore_DefaultPath(&arena);
   StrView settingsPath = AppSettings_DefaultPath(&arena);
   signal(SIGINT, OnSigint);
 
   if (loginProvider) {
+    Http_GlobalInit();
     int rc = RunCommandLineLogin(&arena, authPath, loginProvider, !noOpen);
     Http_GlobalShutdown();
     ArenaRelease(&arena);
@@ -1061,7 +1140,8 @@ int main(int argc, char** argv) {
     return rc;
   }
 
-  AppAuth appAuth = {authPath};
+  AppAuth appAuth = {};
+  appAuth.Path = authPath;
   RuntimeSelection selected = {};
   if (!faux) {
     selected = LoadRuntimeSelection(&arena, settingsPath, modelOverride);
@@ -1119,8 +1199,11 @@ int main(int argc, char** argv) {
   runtime.Ag = &ag;
   runtime.Faux = faux;
   runtime.AutoOpen = !noOpen;
+  runtime.Auth = &appAuth;
 
   if (onePrompt) {
+    EnableTerminal();
+    if (!faux) Http_GlobalInit();
     g_abort = 0;
     if (!faux && !ResolvePromptAuth(&ag)) {
       if (g_abort) {
@@ -1148,8 +1231,10 @@ int main(int argc, char** argv) {
 
   if (Term_IsInteractive())
     RunTuiRepl(&runtime, &fauxState);
-  else
+  else {
+    if (!faux) Http_GlobalInit();
     RunPlainRepl(&runtime, &fauxState);
+  }
 
   MaybeReportMem();
   Agent_Release(&ag);

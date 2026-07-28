@@ -85,7 +85,8 @@ struct Tui {
   CondVar RenderCv;
   Thread InputThread;
   Thread RenderThread;
-  bool ThreadsUp;
+  bool InputThreadUp;
+  bool RenderThreadUp;
   bool SyncUp;
   bool SessionUp;
   bool ScreenUp;
@@ -95,6 +96,7 @@ struct Tui {
   u32 QHead, QTail, QCount;
 
   bool Dirty;
+  bool InputDirty;
   bool Stop;
   bool Quit;
   bool AgentRunning;
@@ -134,6 +136,8 @@ struct Tui {
   // Startup context shown on the sticky line below the prompt.
   StrView Cwd;     // working directory, home-abbreviated for display
   StrView Branch;  // git branch, or empty when not in a repo / detached
+  char CwdStorage[4096];
+  char BranchStorage[512];
 
   // Scroll.
   bool Follow;
@@ -184,10 +188,14 @@ struct Tui {
   u32 DisplayHead;
 };
 
-// Enter the alt screen and start threads. Returns false if not a TTY (caller
-// should fall back to the plain renderer).
+// Enter the alt screen, paint the first frame synchronously, then start input
+// and render threads. Returns false if not a TTY.
 bool Tui_Start(Tui* t, Arena* mem, TuiOpts opts);
 void Tui_Stop(Tui* t);
+
+// Populate the sticky cwd/branch line after startup is already responsive.
+void Tui_LoadStartupContext(Tui* t);
+void Tui_SetStartupContext(Tui* t, StrView cwd, StrView branch);
 
 // Non-terminal state init (model, editor, locks). Used by Tui_Start and by
 // headless tests that drive the event mapping without a real terminal.

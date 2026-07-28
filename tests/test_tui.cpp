@@ -1372,8 +1372,7 @@ void TestTui() {
     Agent ag = Agent_Make(&ar, Model{}, SVL("sys"));
     Agent_InitQueues(&ag);
     resetTui.Ag = &ag;
-    resetTui.Cwd = SVL("kept-cwd");
-    resetTui.Branch = SVL("kept-branch");
+    Tui_SetStartupContext(&resetTui, SVL("kept-cwd"), SVL("kept-branch"));
 
     LineModel_AddNotice(&resetTui.Model, EntryKind::Info, SVL("old transcript"));
     LineEdit_InsertText(&resetTui.Edit, SVL("draft"));
@@ -1427,6 +1426,27 @@ void TestTui() {
     CHECK_ALL(!resetTui.SessionUp, !resetTui.SyncUp);
     Tui_Stop(&resetTui);  // final cleanup is idempotent
     ArenaRelease(&ar);
+  }
+
+  // Startup context is copied into controller-owned storage, and input wakes
+  // are distinguished so the renderer may bypass its stream-frame throttle.
+  {
+    Arena as = ArenaCreate();
+    Tui startup;
+    InitHeadlessTui(&startup, &as, false);
+    char cwd[] = "startup-cwd";
+    char branch[] = "startup-branch";
+    Tui_SetStartupContext(&startup, SV(cwd), SV(branch));
+    cwd[0] = 'x';
+    branch[0] = 'x';
+    CHECK_ALL(StrView_Eq(startup.Cwd, SVL("startup-cwd")),
+              StrView_Eq(startup.Branch, SVL("startup-branch")),
+              !startup.InputDirty);
+    Feed(&startup, "a");
+    CHECK_ALL(startup.InputDirty,
+              StrView_Eq(LineEdit_Text(&startup.Edit), SVL("a")));
+    Tui_Stop(&startup);
+    ArenaRelease(&as);
   }
 
   CHECK(g_displayDrainsOk);
