@@ -76,10 +76,20 @@ target_link_libraries(clank_agent PUBLIC clank_base clank_session)
 
 # ---- libcurl (vendored via FetchContent) ---------------------------------
 include(FetchContent)
+set(CLANK_FETCHCONTENT_CACHE_ROOT
+  "${CMAKE_CURRENT_SOURCE_DIR}/out/fetchcontent"
+  CACHE PATH "Persistent download cache for vendored dependencies")
+set(FETCHCONTENT_UPDATES_DISCONNECTED ON CACHE BOOL "" FORCE)
 set(BUILD_CURL_EXE OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(BUILD_LIBCURL_DOCS OFF CACHE BOOL "" FORCE)
+set(BUILD_MISC_DOCS OFF CACHE BOOL "" FORCE)
+set(ENABLE_CURL_MANUAL OFF CACHE BOOL "" FORCE)
 set(CURL_DISABLE_TESTS ON CACHE BOOL "" FORCE)
+set(CURL_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
+set(CURL_ENABLE_EXPORT_TARGET OFF CACHE BOOL "" FORCE)
 set(HTTP_ONLY ON CACHE BOOL "" FORCE)
 set(CURL_USE_LIBPSL OFF CACHE BOOL "" FORCE)
 set(CURL_USE_LIBSSH2 OFF CACHE BOOL "" FORCE)
@@ -95,9 +105,10 @@ else()
   set(CURL_USE_OPENSSL ON CACHE BOOL "" FORCE)
 endif()
 FetchContent_Declare(curl
-  GIT_REPOSITORY https://github.com/curl/curl.git
-  GIT_TAG curl-8_11_1
-  GIT_SHALLOW TRUE)
+  URL https://curl.se/download/curl-8.11.1.tar.xz
+  URL_HASH SHA256=c7ca7db48b0909743eaef34250da02c19bc61d4f1dcedd6603f109409536ab56
+  DOWNLOAD_DIR "${CLANK_FETCHCONTENT_CACHE_ROOT}/downloads"
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
 FetchContent_MakeAvailable(curl)
 
 add_library(clank_http STATIC src/net/http_curl.cpp)
@@ -177,12 +188,12 @@ target_link_libraries(clank_app PUBLIC clank_anthropic clank_auth clank_term)
 add_executable(clank src/app/main.cpp)
 target_link_libraries(clank PRIVATE clank_app clank_anthropic clank_tools clank_agent clank_auth clank_term)
 
-add_executable(clank_http_smoke src/app/http_smoke.cpp)
+add_executable(clank_http_smoke EXCLUDE_FROM_ALL src/app/http_smoke.cpp)
 target_link_libraries(clank_http_smoke PRIVATE clank_http)
 
 # ---- tests ---------------------------------------------------------------
 enable_testing()
-add_executable(clank_tests
+add_executable(clank_tests EXCLUDE_FROM_ALL
   tests/test_main.cpp
   tests/test_base.cpp
   tests/test_types.cpp

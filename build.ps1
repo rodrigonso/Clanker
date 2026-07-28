@@ -15,13 +15,13 @@
     Build directory (default: build), relative to the repo root unless absolute.
 
 .PARAMETER Target
-    Optional specific target to build (e.g. clank, clank_tests). Builds all by default.
+    Optional specific target to build (e.g. clank, clank_tests). Builds clank by default.
 
 .PARAMETER Clean
     Delete the build directory before configuring for a fresh build.
 
 .PARAMETER Test
-    Run the unit test suite (clank_tests) after a successful build.
+    Build and run the unit test suite (clank_tests) after a successful build.
 
 .EXAMPLE
     .\build.ps1
@@ -35,6 +35,7 @@ param(
     [ValidateSet('Release', 'Debug', 'RelWithDebInfo', 'MinSizeRel')]
     [string]$Config = 'Release',
     [string]$BuildDir = 'build',
+    [ValidatePattern('^[A-Za-z0-9_.:+-]+$')]
     [string]$Target,
     [switch]$Clean,
     [switch]$Test
@@ -75,6 +76,40 @@ if ($Clean -and (Test-Path $buildPath)) {
     Remove-Item -Recurse -Force $buildPath
 }
 
+function Get-CMakeCacheValue {
+    param(
+        [string]$CachePath,
+        [string]$Name
+    )
+    $match = Select-String -Path $CachePath -Pattern "^$([regex]::Escape($Name)):[^=]+=(.*)$" |
+        Select-Object -First 1
+    if ($match -and $match.Matches.Count -gt 0) {
+        return $match.Matches[0].Groups[1].Value
+    }
+    return $null
+}
+
+$cachePath = Join-Path $buildPath 'CMakeCache.txt'
+$ninjaPath = Join-Path $buildPath 'build.ninja'
+$needsConfigure = -not (Test-Path $cachePath) -or -not (Test-Path $ninjaPath)
+if (-not $needsConfigure) {
+    $cachedSource = Get-CMakeCacheValue $cachePath 'CMAKE_HOME_DIRECTORY'
+    if ($cachedSource -and
+        -not [System.IO.Path]::GetFullPath($cachedSource).Equals(
+            [System.IO.Path]::GetFullPath($root),
+            [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Build directory '$buildPath' belongs to '$cachedSource'. Choose another -BuildDir or use -Clean."
+    }
+
+    $cachedGenerator = Get-CMakeCacheValue $cachePath 'CMAKE_GENERATOR'
+    if ($cachedGenerator -ne 'Ninja') {
+        throw "Build directory '$buildPath' uses generator '$cachedGenerator'. Use -Clean to recreate it with Ninja."
+    }
+
+    $cachedConfig = Get-CMakeCacheValue $cachePath 'CMAKE_BUILD_TYPE'
+    $needsConfigure = $cachedConfig -ne $Config
+}
+
 # Directories to prepend to PATH *before* invoking vcvars64:
 #   - the VS Installer dir, because vcvars64.bat calls `vswhere` unqualified
 #   - the VS-bundled CMake/Ninja, so a standalone install isn't required
@@ -88,31 +123,49 @@ foreach ($p in @(
     if (Test-Path $p) { $prepend += $p }
 }
 
+$targets = [System.Collections.Generic.List[string]]::new()
+$targets.Add($(if ($Target) { $Target } else { 'clank' }))
+if ($Test -and -not $targets.Contains('clank_tests')) {
+    $targets.Add('clank_tests')
+}
+
+$cmakeExe = Join-Path $vsPath 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
+if (-not (Test-Path $cmakeExe)) {
+    $cmakeExe = (Get-Command cmake -ErrorAction Stop).Source
+}
+
+$hasBuildWork = $true
+if (-not $needsConfigure) {
+    $dryRunArgs = @('--build', $buildPath, '--target') + $targets + @('--', '-n')
+    $dryRunOutput = & $cmakeExe @dryRunArgs 2>&1
+    $hasBuildWork = $LASTEXITCODE -ne 0 -or
+        -not ($dryRunOutput -match '^ninja: no work to do\.$')
+}
+
 # Build a single cmd.exe invocation so the vcvars64 environment persists across steps.
 $steps = @(
     "set `"PATH=$($prepend -join ';');%PATH%`"",
-    "call `"$vcvars`" >nul",
-    "cmake -S `"$root`" -B `"$buildPath`" -G Ninja -DCMAKE_BUILD_TYPE=$Config")
-if ($Target) {
-    $steps += "cmake --build `"$buildPath`" --target $Target"
-} else {
-    $steps += "cmake --build `"$buildPath`""
+    "call `"$vcvars`" >nul")
+if ($needsConfigure) {
+    $steps += "cmake -S `"$root`" -B `"$buildPath`" -G Ninja -DCMAKE_BUILD_TYPE=$Config"
 }
+$steps += "cmake --build `"$buildPath`" --target $($targets -join ' ')"
 
-Write-Host "Configuring + building ($Config)..." -ForegroundColor Cyan
-& $env:ComSpec /c ($steps -join ' && ')
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "Build failed (exit $LASTEXITCODE)." -ForegroundColor Red
-    exit $LASTEXITCODE
+$action = if ($needsConfigure) { 'Configuring + building' } else { 'Building' }
+Write-Host "$action ($Config): $($targets -join ', ')" -ForegroundColor Cyan
+if ($hasBuildWork) {
+    & $env:ComSpec /c ($steps -join ' && ')
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Build failed (exit $LASTEXITCODE)." -ForegroundColor Red
+        exit $LASTEXITCODE
+    }
+} else {
+    $dryRunOutput | Write-Output
 }
 Write-Host "Build succeeded -> $buildPath" -ForegroundColor Green
 
 if ($Test) {
     $tests = Join-Path $buildPath 'clank_tests.exe'
-    if (-not (Test-Path $tests)) {
-        Write-Host "clank_tests.exe not found (was it built?). Run without -Target or build the clank_tests target." -ForegroundColor Red
-        exit 1
-    }
     Write-Host "Running tests..." -ForegroundColor Cyan
     & $tests
     if ($LASTEXITCODE -ne 0) {

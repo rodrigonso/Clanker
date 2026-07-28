@@ -65,15 +65,20 @@ tests/     offline unit tests (no network, no API key)
 ## Build
 
 Requires CMake (3.20+) and a C++17 compiler. libcurl is vendored automatically
-via `FetchContent` (Schannel on Windows, system TLS elsewhere).
+via a checksummed release archive (Schannel on Windows, system TLS elsewhere).
+The release archive is cached under `out/fetchcontent/`.
 
 ```sh
 cmake -S . -B build -G Ninja
 cmake --build build
+cmake --build build --target clank_tests
+ctest --test-dir build
 ```
 
 On Windows with the VS toolchain, run the commands from a `vcvars64` shell (or
-use the VS-bundled CMake/Ninja).
+use the VS-bundled CMake/Ninja). `build.ps1` builds only the `clank` executable
+by default, skips redundant configure passes, and accepts `-Test` to build and
+run the unit tests.
 
 ## Run
 
