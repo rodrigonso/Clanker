@@ -19,7 +19,7 @@
 #include "net/browser.h"
 #include "net/http.h"
 #include "term/term.h"
-#include "term/tui.h"
+#include "tui/tui.h"
 #include "term/sanitize.h"
 #include "tools/tools.h"
 #include "tools/filelock.h"

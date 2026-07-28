@@ -29,5 +29,8 @@ void TestSanitize();
 void TestStreamReveal();
 void TestLineModel();
 void TestLineEdit();
+void TestUi();
+void TestUiWidgets();
+void TestUiDemo();
 void TestTui();
 void TestHttp();

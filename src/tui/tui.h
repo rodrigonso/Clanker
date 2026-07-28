@@ -4,11 +4,12 @@
 #include "base/arena.h"
 #include "base/thread.h"
 #include "term/keys.h"
-#include "term/lineedit.h"
-#include "term/linemodel.h"
+#include "ui/lineedit.h"
+#include "tui/linemodel.h"
 #include "term/screen.h"
-#include "term/stream_reveal.h"
+#include "tui/stream_reveal.h"
 #include "term/term.h"
+#include "ui/widgets.h"
 
 // Full-screen TUI controller. Owns the terminal, a differential renderer, the
 // transcript line model and the multi-line input editor. Runs two background
@@ -16,7 +17,6 @@
 // events through Tui_AgentEvent / drains user input via Tui_WaitForSubmit.
 
 enum class TuiState : u8 { Idle, Thinking, Streaming, Tool };
-enum class TuiDragDomain : u8 { None, Transcript, Composer };
 
 enum class TuiModalKind : u8 { None, Select, Text };
 enum class TuiModalResult : u8 { None, Pending, Confirmed, Back, Cancelled };
@@ -73,6 +73,8 @@ struct Tui {
   AgentHarness* Harness;
   Term Trm;
   Screen Scr;
+  UiContext Ui;
+  UiTextInputState InputUi;
   LineModel Model;
   LineEdit Edit;
   LineEdit ModalEdit;
@@ -89,6 +91,8 @@ struct Tui {
   bool SyncUp;
   bool SessionUp;
   bool ScreenUp;
+  bool UiUp;
+  bool Color;
 
   // Main-thread submission queue. Commands are queued even during active turns.
   TuiSubmission Queue[64];
@@ -158,7 +162,7 @@ struct Tui {
   u16 MouseDownY;
   bool HasMouse;
   bool MouseDragMoved;
-  TuiDragDomain DragDomain;
+  bool TranscriptDragging;
 
   // Selection state. Transcript points are absolute display-row/cell
   // coordinates in the LineModel revision captured when the drag began.
@@ -170,12 +174,6 @@ struct Tui {
   u64 TranscriptSelectionHash;
   i32 SelectionEdgeDirection;
   u64 NextSelectionScrollMs;
-
-  // Geometry from the last composed frame, used for composer mouse hit-testing.
-  u16 LastCols;
-  u16 LastInputTop;
-  u16 LastInputH;
-  u32 LastInputFirstRow;
 
   // Clipboard text is queued under Lock, then encoded by the render/shutdown path.
   StrBuf ClipboardRaw;
@@ -256,8 +254,7 @@ bool Tui_AdvanceStream(Tui* t, u64 nowMs);
 bool Tui_HasPendingDisplay(const Tui* t);
 
 // Headless composition and inspection helpers.
-void Tui_ComposeFrame(Tui* t, u16 cols, u16 rows);
-void Tui_TestCompose(Tui* t, u16 cols, u16 rows, u64 nowMs = 0);
+void Tui_ComposeFrame(Tui* t, u16 cols, u16 rows, u64 nowMs = 0);
 bool Tui_TestDrainShutdown(Tui* t, ScreenWriter write, void* user);
 
 volatile i32* Tui_Abort(Tui* t);

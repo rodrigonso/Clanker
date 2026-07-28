@@ -79,6 +79,13 @@ void TestScreen() {
             Screen_BackAt(&s, 1, 1).Ch == CELL_CONT,
             Screen_BackAt(&s, 2, 1).Ch == 'X');
 
+  // A same-size resize is a no-op. UI composition may request the current
+  // dimensions every frame and must preserve cell diffing.
+  s.ForceRepaint = false;
+  Screen_Resize(&s, 10, 3);
+  CHECK_ALL(!s.ForceRepaint,
+            Screen_BackAt(&s, 0, 1).Ch == 0x4F60);
+
   // A narrower resize forces a full repaint flag.
   Screen_Resize(&s, 6, 2);
   CHECK(s.ForceRepaint);

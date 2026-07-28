@@ -2,7 +2,7 @@
 #include "base/array.h"
 #include "base/str.h"
 
-// A multi-line UTF-8 input editor. Holds a buffer (which may contain '\n'),
+// Reusable multi-line UTF-8 input editor. Holds a buffer (which may contain '\n'),
 // a cursor as a byte offset, and a submit history. Pure / terminal-free.
 struct LineEdit {
   Arena* Mem;
@@ -13,6 +13,14 @@ struct LineEdit {
   Array<StrView> History;
   i32 HistPos;      // -1 = editing live buffer; else index into History
   StrBuf Stash;     // live buffer saved while browsing history
+};
+
+struct LineEditLayout {
+  StrView Rows[256];
+  u32 Starts[256];
+  u32 Count;
+  u32 CursorRow;
+  u16 CursorCol;
 };
 
 void LineEdit_Init(LineEdit* e, Arena* mem);
@@ -27,9 +35,9 @@ StrView LineEdit_SelectedText(const LineEdit* e);
 void LineEdit_ClearSelection(LineEdit* e);
 
 void LineEdit_SetCursor(LineEdit* e, u32 offset, bool extend = false);
+void LineEdit_Layout(const LineEdit* e, u16 wrapWidth,
+                     LineEditLayout* out);
 u32 LineEdit_HitTest(const LineEdit* e, u16 wrapWidth, u32 row, u32 col);
-void LineEdit_SetCursorAt(LineEdit* e, u16 wrapWidth, u32 row, u32 col,
-                          bool extend = false);
 
 void LineEdit_InsertText(LineEdit* e, StrView s);  // paste-safe (keeps newlines)
 void LineEdit_InsertChar(LineEdit* e, u32 cp);

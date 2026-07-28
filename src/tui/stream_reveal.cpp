@@ -1,6 +1,6 @@
 #include <string.h>
 
-#include "term/stream_reveal.h"
+#include "tui/stream_reveal.h"
 
 namespace {
 

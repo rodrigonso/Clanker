@@ -1,9 +1,9 @@
-#include "term/linemodel.h"
+#include "tui/linemodel.h"
 
 #include <string.h>
 #include <time.h>
 
-#include "term/markdown.h"
+#include "tui/markdown.h"
 
 namespace {
 
@@ -17,8 +17,6 @@ const u32 ICON_FIELD_CELLS = 2;
 const u8 ACCENT_FG = 214;
 const u8 ASSISTANT_FG = 255;
 StrView SquareMarker() { return SVL("\xe2\x96\xa0"); }
-
-bool g_lmColor = true;
 
 StrView BufView(const StrBuf& buf) { return StrView{buf.Data, buf.Length}; }
 
@@ -36,8 +34,8 @@ u32 LineTextWidth(StrView text) {
 
 void WrapSpanLine(Arena* a, const SpanLine* in, u16 width, Array<SpanLine>* out);
 
-Style LStyle(u8 fg, u8 attr) {
-  return Style{g_lmColor ? fg : COL_DEFAULT, COL_DEFAULT, attr};
+Style LStyle(const LineModel* m, u8 fg, u8 attr) {
+  return Style{m->Color ? fg : COL_DEFAULT, COL_DEFAULT, attr};
 }
 
 StrView Spaces(Arena* arena, u32 count) {
@@ -186,7 +184,8 @@ void BuildUser(LineModel* m, const Entry* entry) {
     SpanLine logical;
     InitRow(&m->RowsMem, &logical, 3);
     if (firstLine) {
-      PushIcon(&m->RowsMem, &logical.Spans, marker, LStyle(ACCENT_FG, ATTR_BOLD));
+      PushIcon(&m->RowsMem, &logical.Spans, marker,
+               LStyle(m, ACCENT_FG, ATTR_BOLD));
     } else {
       Array_Push(&logical.Spans, Span{indent, StyleDefault(), true});
     }
@@ -194,7 +193,8 @@ void BuildUser(LineModel* m, const Entry* entry) {
     logical.Continuation = Span{indent, StyleDefault(), true};
     logical.HasContinuation = true;
     if (firstLine && entry->Text.Timestamp.Length) {
-      logical.Right = Span{entry->Text.Timestamp, LStyle(244, ATTR_NONE)};
+      logical.Right =
+          Span{entry->Text.Timestamp, LStyle(m, 244, ATTR_NONE)};
       logical.HasRight = true;
     }
     WrapAndAppend(m, &logical);
@@ -210,12 +210,13 @@ void BuildAssistant(LineModel* m, const Entry* entry) {
   StrView indent = IconIndent(&m->RowsMem, marker);
 
   Array<SpanLine> logical = Array_Make<SpanLine>(&m->RowsMem, 8);
-  Markdown_Render(&m->RowsMem, text, &logical);
+  Markdown_Render(&m->RowsMem, text, &logical, m->Color);
   for (u32 i = 0; i < logical.Count; i++) {
     SpanLine prefixed;
     InitRow(&m->RowsMem, &prefixed, logical.Data[i].Spans.Count + 2);
     if (i == 0) {
-      PushIcon(&m->RowsMem, &prefixed.Spans, marker, LStyle(ASSISTANT_FG, ATTR_BOLD));
+      PushIcon(&m->RowsMem, &prefixed.Spans, marker,
+               LStyle(m, ASSISTANT_FG, ATTR_BOLD));
     } else {
       Array_Push(&prefixed.Spans, Span{indent, StyleDefault(), true});
     }
@@ -229,9 +230,12 @@ void BuildAssistant(LineModel* m, const Entry* entry) {
 
 void BuildTool(LineModel* m, const Entry* entry, bool expandPreview) {
   StrView marker = SquareMarker();
-  Style markerSt = entry->Tool.Error ? LStyle(196, ATTR_BOLD) : LStyle(ACCENT_FG, ATTR_DIM);
-  Style label = entry->Tool.Error ? LStyle(196, ATTR_BOLD) : LStyle(252, ATTR_BOLD);
-  Style detail = entry->Tool.Error ? LStyle(196, ATTR_NONE) : LStyle(252, ATTR_NONE);
+  Style markerSt = entry->Tool.Error ? LStyle(m, 196, ATTR_BOLD)
+                                     : LStyle(m, ACCENT_FG, ATTR_DIM);
+  Style label = entry->Tool.Error ? LStyle(m, 196, ATTR_BOLD)
+                                  : LStyle(m, 252, ATTR_BOLD);
+  Style detail = entry->Tool.Error ? LStyle(m, 196, ATTR_NONE)
+                                   : LStyle(m, 252, ATTR_NONE);
   StrView indent = IconIndent(&m->RowsMem, marker);
 
   SpanLine logical;
@@ -247,7 +251,8 @@ void BuildTool(LineModel* m, const Entry* entry, bool expandPreview) {
     Array_Push(&logical.Spans, Span{SVL("  "), detail});
     Array_Push(&logical.Spans,
                Span{BufView(entry->Tool.View.Outcome),
-                    entry->Tool.Error ? LStyle(196, ATTR_NONE) : LStyle(244, ATTR_NONE)});
+                    entry->Tool.Error ? LStyle(m, 196, ATTR_NONE)
+                                      : LStyle(m, 244, ATTR_NONE)});
   }
   logical.Continuation = Span{indent, StyleDefault(), true};
   logical.HasContinuation = true;
@@ -255,7 +260,9 @@ void BuildTool(LineModel* m, const Entry* entry, bool expandPreview) {
 
   if (expandPreview && entry->Tool.Done && entry->Tool.Preview.Length) {
     AppendPlain(m, BufView(entry->Tool.Preview),
-                entry->Tool.Error ? LStyle(196, ATTR_NONE) : LStyle(244, ATTR_DIM), indent, indent);
+                entry->Tool.Error ? LStyle(m, 196, ATTR_NONE)
+                                  : LStyle(m, 244, ATTR_DIM),
+                indent, indent);
   }
 }
 
@@ -311,11 +318,13 @@ void BuildEntryRows(LineModel* m, u32 idx, u32 expandedStart) {
       break;
     }
     case EntryKind::Info:
-      BuildPlainTurn(m, entry, SquareMarker(), LStyle(ACCENT_FG, ATTR_BOLD),
-                     LStyle(244, ATTR_NONE));
+      BuildPlainTurn(m, entry, SquareMarker(),
+                     LStyle(m, ACCENT_FG, ATTR_BOLD),
+                     LStyle(m, 244, ATTR_NONE));
       break;
     case EntryKind::Error:
-      BuildPlainTurn(m, entry, SVL("!"), LStyle(196, ATTR_BOLD), LStyle(196, ATTR_BOLD));
+      BuildPlainTurn(m, entry, SVL("!"), LStyle(m, 196, ATTR_BOLD),
+                     LStyle(m, 196, ATTR_BOLD));
       break;
   }
 
@@ -329,7 +338,11 @@ void BuildEntryRows(LineModel* m, u32 idx, u32 expandedStart) {
   for (u32 i = 0; i < rowCount; i++) m->Lines.Data[rowStart + i].EntryId = entry->Id;
   if (rowCount != 0) {
     m->Lines.Data[rowStart].IsEntryStart = true;
-    if (hidden) m->Lines.Data[rowStart].HasHiddenContent = true;
+    if (hidden) {
+      m->Lines.Data[rowStart].HasHiddenContent = true;
+      m->Lines.Data[rowStart].Hidden =
+          Span{SVL("\xe2\x80\xa6"), LStyle(m, 244, ATTR_DIM)};
+    }
   }
 }
 
@@ -358,7 +371,7 @@ u32 PreviewRowCount(LineModel* m, const Entry* entry) {
   Array<SpanLine> rows = Array_Make<SpanLine>(&m->RowsMem, 8);
   StrView indent = IconIndent(&m->RowsMem, SquareMarker());
   AppendPlainRows(&m->RowsMem, &rows, m->Width, BufView(entry->Tool.Preview),
-                  LStyle(244, ATTR_DIM), indent, indent);
+                  LStyle(m, 244, ATTR_DIM), indent, indent);
   u32 count = rows.Count;
   ArenaRestore(&m->RowsMem, mark);
   return count;
@@ -542,12 +555,8 @@ void WrapSpanLine(Arena* a, const SpanLine* in, u16 width, Array<SpanLine>* out)
 
 }  // namespace
 
-void LineModel_SetColorEnabled(bool on) {
-  g_lmColor = on;
-  Markdown_SetColorEnabled(on);
-}
-
-void LineModel_Init(LineModel* m, Arena* mem, u16 width, u32 cap) {
+void LineModel_Init(LineModel* m, Arena* mem, u16 width, u32 cap,
+                    bool color) {
   m->Mem = mem;
   m->RowsMem = ArenaCreate(LINE_ROWS_RESERVE);
   m->Entries = Array_Make<Entry>(mem, 16);
@@ -560,6 +569,7 @@ void LineModel_Init(LineModel* m, Arena* mem, u16 width, u32 cap) {
   m->NextEntryId = 1;
   m->DisplayRevision = 1;
   m->HasAssistant = false;
+  m->Color = color;
 }
 
 void LineModel_Release(LineModel* m) { ArenaRelease(&m->RowsMem); }
@@ -653,8 +663,13 @@ bool LineModel_NextDisplayRowRun(const DisplayRowLayout* layout, DisplayRowItera
   if (iterator->SpanIndex == line->Spans.Count) {
     iterator->SpanIndex++;
     if (layout->HiddenColumn < layout->Columns) {
-      *run =
-          DisplayRowRun{SVL("\xe2\x80\xa6"), LStyle(244, ATTR_DIM), layout->HiddenColumn, 1};
+      StrView text =
+          line->Hidden.Text.Length ? line->Hidden.Text : SVL("\xe2\x80\xa6");
+      Style style =
+          line->Hidden.Text.Length
+              ? line->Hidden.St
+              : StyleMake(244, COL_DEFAULT, ATTR_DIM);
+      *run = DisplayRowRun{text, style, layout->HiddenColumn, 1};
       return true;
     }
   }

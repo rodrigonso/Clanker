@@ -1,6 +1,6 @@
 #include "base/arena.h"
 #include "check.h"
-#include "term/linemodel.h"
+#include "tui/linemodel.h"
 
 namespace {
 
@@ -73,7 +73,6 @@ bool Finish(LineModel* model, StrView id, StrView result, bool isError = false) 
 
 void TestLineModel() {
   Arena a = ArenaCreate();
-  LineModel_SetColorEnabled(true);
 
   {
     LineModel model;
@@ -499,8 +498,7 @@ void TestLineModel() {
 
   {
     LineModel noColor;
-    LineModel_SetColorEnabled(false);
-    LineModel_Init(&noColor, &a, 40, 5000);
+    LineModel_Init(&noColor, &a, 40, 5000, false);
     LineModel_AddUser(&noColor, SVL("plain"), 0);
     CHECK(LineModel_At(&noColor, 0)->Spans.Data[0].St.Fg == COL_DEFAULT);
     LineModel_AddTool(&noColor, SVL("id"), SVL("bash"), SVL("{\"command\":\"echo\"}"));
@@ -509,7 +507,6 @@ void TestLineModel() {
     CHECK(row != nullptr);
     CHECK(row->Spans.Data[0].St.Fg == COL_DEFAULT);
     LineModel_Release(&noColor);
-    LineModel_SetColorEnabled(true);
   }
 
   {

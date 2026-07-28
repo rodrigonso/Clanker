@@ -2,7 +2,7 @@
 #include "base/array.h"
 #include "base/str.h"
 #include "term/cell.h"
-#include "term/toolview.h"
+#include "tui/toolview.h"
 
 // A styled run of text and a logical/wrapped line made of such runs.
 struct Span {
@@ -15,6 +15,7 @@ struct SpanLine {
   Array<Span> Spans;
   Span Right;
   Span Continuation;
+  Span Hidden;
   u64 EntryId;
   bool HasRight;
   bool HasContinuation;
@@ -97,12 +98,13 @@ struct LineModel {
   u64 NextEntryId;
   u64 DisplayRevision;
   bool HasAssistant;
+  bool Color;
 };
 
-void LineModel_Init(LineModel* m, Arena* mem, u16 width, u32 cap);
+void LineModel_Init(LineModel* m, Arena* mem, u16 width, u32 cap,
+                    bool color = true);
 void LineModel_Release(LineModel* m);
 void LineModel_SetWidth(LineModel* m, u16 width);  // re-wrap everything
-void LineModel_SetColorEnabled(bool on);
 u32 LineModel_Count(const LineModel* m);
 // Check whether another width fits within `maxRows` without changing the
 // current rendered rows.

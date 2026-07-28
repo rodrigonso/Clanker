@@ -70,6 +70,7 @@ void Screen_Init(Screen* s, Arena* mem, ScreenWriter w, void* user) {
 void Screen_Resize(Screen* s, u16 cols, u16 rows) {
   if (cols == 0) cols = 1;
   if (rows == 0) rows = 1;
+  if (s->Front && s->Back && s->Cols == cols && s->Rows == rows) return;
   u32 need = (u32)cols * rows;
   if (need > s->Cap || !s->Front) {
     s->Front = (Cell*)ArenaAlloc(s->Mem, need * sizeof(Cell), alignof(Cell));

@@ -61,6 +61,9 @@ const Suite kSuites[] = {
     {"stream_reveal", TestStreamReveal, TagDefault, "streaming reveal"},
     {"linemodel", TestLineModel, TagDefault, "line model and wrapping"},
     {"lineedit", TestLineEdit, TagDefault, "multi-line editor"},
+    {"ui", TestUi, TagDefault, "frame-built terminal components"},
+    {"ui_widgets", TestUiWidgets, TagDefault, "reusable terminal widgets"},
+    {"ui_demo", TestUiDemo, TagDefault, "standalone component screen"},
     {"tui", TestTui, TagDefault, "headless TUI controller"},
     {"http", TestHttp, TagNetwork, "live TLS/HTTP request (network)"},
 };

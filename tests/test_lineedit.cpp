@@ -1,6 +1,6 @@
 #include "base/arena.h"
 #include "check.h"
-#include "term/lineedit.h"
+#include "ui/lineedit.h"
 
 static bool Eq(const LineEdit* e, const char* s) { return StrView_EqCStr(LineEdit_Text(e), s); }
 
@@ -137,6 +137,13 @@ void TestLineEdit() {
   LineEdit_SetCursor(&e, LineEdit_HitTest(&e, 4, 0, 1));
   LineEdit_SetCursor(&e, LineEdit_HitTest(&e, 4, 1, 1), true);
   CHECK(SelectionEq(&e, 1, 6, "\xe4\xb8\xad" "bc"));
+
+  Reset(&e, SVL("abcdeX"));
+  LineEdit_SetCursor(&e, 5);
+  LineEditLayout layout;
+  LineEdit_Layout(&e, 5, &layout);
+  CHECK_ALL(layout.Count == 2, layout.Starts[1] == 5,
+            layout.CursorRow == 1, layout.CursorCol == 0);
 
   Reset(&e, SVL("ab\ncd"));
   CHECK_ALL(LineEdit_HitTest(&e, 20, 0, 20) == 2,

@@ -1,6 +1,6 @@
 #include "base/arena.h"
 #include "check.h"
-#include "term/markdown.h"
+#include "tui/markdown.h"
 
 namespace {
 
@@ -20,7 +20,6 @@ bool SpanHas(const Array<Span>* a, const char* needle, u8 attrMask, u8 fg) {
 
 void TestMarkdown() {
   Arena a = ArenaCreate();
-  Markdown_SetColorEnabled(true);
 
   // Inline: bold.
   {
@@ -67,6 +66,11 @@ void TestMarkdown() {
     Array<SpanLine> out = Array_Make<SpanLine>(&a, 4);
     Markdown_Render(&a, SVL("```\ncode\n```"), &out);
     CHECK_ALL(out.Count == 1, SpanHas(&out.Data[0].Spans, "code", 0, 114));
+  }
+  {
+    Array<Span> out = Array_Make<Span>(&a, 4);
+    Markdown_Inline(SVL("`plain`"), StyleDefault(), &out, false);
+    CHECK_ALL(out.Count == 1, out.Data[0].St.Fg == COL_DEFAULT);
   }
 
   ArenaRelease(&a);

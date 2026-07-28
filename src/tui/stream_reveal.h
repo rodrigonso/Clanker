@@ -2,7 +2,7 @@
 #include "base/arena.h"
 #include "base/str.h"
 
-// TUI-only smoothing for bursty provider text. Incoming deltas are copied into
+// App-specific smoothing for bursty provider text. Incoming deltas are copied into
 // owned storage, then exposed as rate-limited UTF-8-safe slices.
 struct StreamReveal {
   StrBuf Pending;

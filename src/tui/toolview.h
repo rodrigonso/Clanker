@@ -3,6 +3,7 @@
 
 enum class ToolViewKind : u8 { Unknown, Bash, Read, Grep, Find, Ls, Write, Edit };
 
+// App-specific presentation model for tool calls.
 struct ToolView {
   ToolViewKind Kind;
   StrView Marker;

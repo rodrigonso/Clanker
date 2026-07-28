@@ -5,7 +5,7 @@
 #include "check.h"
 #include "llm/faux.h"
 #include "session/memory_repository.h"
-#include "term/tui.h"
+#include "tui/tui.h"
 
 namespace {
 
@@ -60,6 +60,45 @@ void InitHeadlessTui(Tui* t, Arena* a, bool color) {
   Tui_InitModel(t, a, opts);
 }
 
+const UiNode* ComposerNode(const Tui* t) {
+  for (u32 i = 0; i < t->Ui.Nodes.Count; i++) {
+    const UiNode* node = Ui_GetNode(&t->Ui, i);
+    if (node && node->Persistent == &t->InputUi) return node;
+  }
+  return nullptr;
+}
+
+u16 ComposerTop(const Tui* t) {
+  const UiNode* node = ComposerNode(t);
+  return node ? (u16)node->Rect.Y : 0;
+}
+
+u64 FrameHash(const Tui* t) {
+  u64 hash = 1469598103934665603ull;
+  auto add = [&hash](u64 value) {
+    for (u32 i = 0; i < 8; i++) {
+      hash ^= (u8)(value >> (i * 8));
+      hash *= 1099511628211ull;
+    }
+  };
+
+  add(t->Scr.Cols);
+  add(t->Scr.Rows);
+  for (u16 y = 0; y < t->Scr.Rows; y++) {
+    for (u16 x = 0; x < t->Scr.Cols; x++) {
+      Cell cell = Screen_BackAt(&t->Scr, x, y);
+      add(cell.Ch);
+      add(cell.St.Fg);
+      add(cell.St.Bg);
+      add(cell.St.Attr);
+    }
+  }
+  add(t->Scr.CursorVisible);
+  add(t->Scr.CursorX);
+  add(t->Scr.CursorY);
+  return hash;
+}
+
 u16 ScrollbarColumn(const Tui* t) { return (u16)(t->Scr.Cols - 1); }
 
 u32 ScrollMaxTop(const Tui* t) {
@@ -88,7 +127,9 @@ bool SessionUiCleared(const Tui* t, usize usedBefore) {
          t->State == TuiState::Idle && t->StateTool.Length == 0 && t->TurnStartMs == 0 &&
          t->QueuedCount == 0 && t->Follow && t->Top == 0 && t->LastTop == 0 &&
          t->LastPaneH == 0 && t->HoveredEntryId == 0 && t->PressedEntryId == 0 &&
-         !t->HasMouse && !t->OperationActive && t->ModalKind == TuiModalKind::None &&
+         !t->HasMouse && !t->InputUi.Dragging && t->Ui.Captured == 0 &&
+         t->Ui.Active == 0 && !t->OperationActive &&
+         t->ModalKind == TuiModalKind::None &&
          t->ModalResult == TuiModalResult::None;
 }
 
@@ -131,6 +172,55 @@ void TestTui() {
 
   Tui t;
   Tui_InitModel(&t, &a, o);
+
+  // Frame hashes cover every cell glyph/style plus cursor state. These fixtures
+  // are the visual parity contract for the component-system migration.
+  {
+    Arena af = ArenaCreate();
+    TuiCommandSpec commands[] = {
+        {SVL("help"), SVL("h"), SVL("Show help")},
+        {SVL("model"), SVL("m"), SVL("Choose model")},
+    };
+    TuiOpts of;
+    of.ModelName = SVL("fixture-model");
+    of.Color = true;
+    of.Commands = commands;
+    of.CommandCount = 2;
+    Tui tf;
+    Tui_InitModel(&tf, &af, of);
+    Tui_SetStartupContext(&tf, SVL("C:\\repo"), SVL("main"));
+    LineModel_AddNotice(&tf.Model, EntryKind::Info, SVL("fixture transcript"));
+    Feed(&tf, "hello");
+    Tui_ComposeFrame(&tf, 20, 12);
+    CHECK(FrameHash(&tf) == 341164753521852848ull);
+
+    LineEdit_Clear(&tf.Edit);
+    Feed(&tf, "/");
+    Tui_ComposeFrame(&tf, 20, 12);
+    CHECK(FrameHash(&tf) == 15422722240356324109ull);
+
+    StrView options[] = {SVL("first"), SVL("second"), SVL("third")};
+    CHECK(Tui_BeginSelection(&tf, SVL("Choose"), options, 3, 1));
+    Tui_ComposeFrame(&tf, 20, 12);
+    CHECK(FrameHash(&tf) == 5659820654767030695ull);
+
+    Tui_ComposeFrame(&tf, 28, 15);
+    CHECK(FrameHash(&tf) == 3140326830571842231ull);
+    Tui_Stop(&tf);
+    ArenaRelease(&af);
+  }
+
+  {
+    Arena af = ArenaCreate();
+    Tui tf;
+    InitHeadlessTui(&tf, &af, false);
+    LineModel_AddNotice(&tf.Model, EntryKind::Info, SVL("fixture transcript"));
+    Feed(&tf, "hello");
+    Tui_ComposeFrame(&tf, 20, 12);
+    CHECK(FrameHash(&tf) == 8250882380115578081ull);
+    Tui_Stop(&tf);
+    ArenaRelease(&af);
+  }
 
   Message m = {};
   m.Kind = Role::Assistant;
@@ -207,8 +297,7 @@ void TestTui() {
 
   // Hover maps screen rows through the last rendered viewport. Separator and
   // non-transcript rows are not interactive.
-  t.LastTop = 0;
-  t.LastPaneH = 3;
+  Tui_ComposeFrame(&t, 80, 9);
   Feed(&t, "\x1b[<35;50;1M");  // assistant row; x does not limit the button
   CHECK(t.HoveredEntryId == assistantEntryId);
   Feed(&t, "\x1b[<35;2;2M");  // separator
@@ -223,7 +312,7 @@ void TestTui() {
   Feed(&t, "\x1b[<0;2;3M\x1b[<0;2;3m");
   CHECK(!LineModel_IsEntryCollapsed(&t.Model, toolEntryId));
   CHECK(AnyRow(&a, &t, "hello-from-bash"));
-  t.LastPaneH = 4;
+  Tui_ComposeFrame(&t, 80, 10);
   Feed(&t, "\x1b[<35;2;4M");  // expanded preview row is content, not a button
   CHECK(t.HoveredEntryId == 0);
   Feed(&t, "\x1b[<0;2;4M\x1b[<0;2;4m");
@@ -793,8 +882,7 @@ void TestTui() {
     Tui_InitModel(&t5, &a5, o5);
     LineModel_AddNotice(&t5.Model, EntryKind::Info, SVL("first row\ncontent row"));
     u64 noticeId = t5.Model.Entries.Data[0].Id;
-    t5.LastTop = 0;
-    t5.LastPaneH = 2;
+    Tui_ComposeFrame(&t5, 20, 8);
 
     Feed(&t5, "\x1b[<35;2;1M");
     CHECK(t5.HoveredEntryId == noticeId);
@@ -827,14 +915,14 @@ void TestTui() {
     u64 targetId = tc.Model.Entries.Data[0].Id;
     LineModel_BeginAssistant(&tc.Model);
     LineModel_AppendAssistant(&tc.Model, SVL("stream"));
-    Tui_TestCompose(&tc, 20, 12);
+    Tui_ComposeFrame(&tc, 20, 12);
 
     Feed(&tc, "\x1b[<0;2;1M");
     u64 pressedRevision = tc.TranscriptSelectionRevision;
     LineModel_AppendAssistant(&tc.Model, SVL(" update"));
     CHECK(LineModel_DisplayRevision(&tc.Model) == pressedRevision);
-    Tui_TestCompose(&tc, 20, 12);
-    CHECK_ALL(tc.DragDomain == TuiDragDomain::Transcript,
+    Tui_ComposeFrame(&tc, 20, 12);
+    CHECK_ALL(tc.TranscriptDragging,
               tc.PressedEntryId == targetId);
     Feed(&tc, "\x1b[<0;2;1m");
     CHECK_ALL(LineModel_IsEntryCollapsed(&tc.Model, targetId), tc.Follow);
@@ -842,7 +930,7 @@ void TestTui() {
     Feed(&tc, "\x1b[<0;4;3M\x1b[<32;9;3M\x1b[<0;9;3m");
     CHECK(tc.TranscriptSelectionRevision != 0);
     LineModel_AppendAssistant(&tc.Model, SVL(" more"));
-    Tui_TestCompose(&tc, 20, 12);
+    Tui_ComposeFrame(&tc, 20, 12);
     CHECK(tc.TranscriptSelectionRevision != 0);
     Feed(&tc, "\x03");
     CHECK(StrView_Eq(StrBuf_View(&tc.ClipboardRaw), SVL("stream")));
@@ -862,13 +950,13 @@ void TestTui() {
     Tui_InitModel(&tw, &aw, ow);
     LineModel_BeginAssistant(&tw.Model);
     LineModel_AppendAssistant(&tw.Model, SVL("stream"));
-    Tui_TestCompose(&tw, 20, 12);
+    Tui_ComposeFrame(&tw, 20, 12);
     Feed(&tw, "\x1b[<0;11;1M\x1b[<32;13;1M\x1b[<0;13;1m");
     u64 whitespaceRevision = tw.TranscriptSelectionRevision;
     CHECK(whitespaceRevision != 0);
     LineModel_AppendAssistant(&tw.Model, SVL(" more"));
     CHECK(LineModel_DisplayRevision(&tw.Model) == whitespaceRevision);
-    Tui_TestCompose(&tw, 20, 12);
+    Tui_ComposeFrame(&tw, 20, 12);
     CHECK(tw.TranscriptSelectionRevision == 0);
     Tui_Stop(&tw);
     ArenaRelease(&aw);
@@ -923,14 +1011,15 @@ void TestTui() {
     Tui_InitModel(&ts, &as, os);
 
     Feed(&ts, "abcdef");
-    Tui_TestCompose(&ts, 20, 12);
+    Tui_ComposeFrame(&ts, 20, 12);
     Feed(&ts, "\x1b[<0;4;10M\x1b[<32;7;10M\x1b[<0;7;10m");
     CHECK_ALL(LineEdit_HasSelection(&ts.Edit),
               StrView_Eq(LineEdit_SelectedText(&ts.Edit), SVL("bcd")));
-    Tui_TestCompose(&ts, 20, 12);
-    CHECK_ALL(Screen_BackAt(&ts.Scr, 3, ts.LastInputTop).St.Bg == 238,
-              Screen_BackAt(&ts.Scr, 5, ts.LastInputTop).St.Bg == 238,
-              Screen_BackAt(&ts.Scr, 2, ts.LastInputTop).St.Bg != 238);
+    Tui_ComposeFrame(&ts, 20, 12);
+    u16 composerTop = ComposerTop(&ts);
+    CHECK_ALL(Screen_BackAt(&ts.Scr, 3, composerTop).St.Bg == 238,
+              Screen_BackAt(&ts.Scr, 5, composerTop).St.Bg == 238,
+              Screen_BackAt(&ts.Scr, 2, composerTop).St.Bg != 238);
 
     Feed(&ts, "\x1b[<0;5;10M\x1b[<0;5;10m");
     CHECK_ALL(LineEdit_Cursor(&ts.Edit) == 2, !LineEdit_HasSelection(&ts.Edit));
@@ -948,8 +1037,8 @@ void TestTui() {
     Feed(&ts, "ab\ncde");
     Feed(&ts, "\x1b[1;2A");  // Shift+Up
     CHECK(StrView_Eq(LineEdit_SelectedText(&ts.Edit), SVL("\ncde")));
-    Tui_TestCompose(&ts, 20, 12);
-    CHECK(Screen_BackAt(&ts.Scr, 4, ts.LastInputTop).St.Bg == 238);
+    Tui_ComposeFrame(&ts, 20, 12);
+    CHECK(Screen_BackAt(&ts.Scr, 4, ComposerTop(&ts)).St.Bg == 238);
     Feed(&ts, "\x1b[1;2B");  // Shift+Down
     CHECK(!LineEdit_HasSelection(&ts.Edit));
     Feed(&ts, "\x1b[1;2H");  // Shift+Home
@@ -985,9 +1074,9 @@ void TestTui() {
     // to map later drag rows in a scrolled composer.
     LineEdit_Clear(&ts.Edit);
     Feed(&ts, "0\n1\n2\n3\n4\n5\n6\n7\n8\n9");
-    Tui_TestCompose(&ts, 20, 12);
+    Tui_ComposeFrame(&ts, 20, 12);
     Feed(&ts, "\x1b[<0;3;5M");
-    Tui_TestCompose(&ts, 20, 12);
+    Tui_ComposeFrame(&ts, 20, 12);
     Feed(&ts, "\x1b[<32;4;10M\x1b[<0;4;10m");
     CHECK(StrView_Eq(LineEdit_SelectedText(&ts.Edit), SVL("4\n5\n6\n7\n8\n9")));
 
@@ -1006,17 +1095,19 @@ void TestTui() {
     Tui_InitModel(&ts, &as, os);
     Feed(&ts, "a\xcc\x81" "b");
     Feed(&ts, "\x1b[1;2D");
-    Tui_TestCompose(&ts, 20, 12);
-    CHECK((Screen_BackAt(&ts.Scr, 4, ts.LastInputTop).St.Attr & ATTR_UNDERLINE) != 0);
-    CHECK((Screen_BackAt(&ts.Scr, 3, ts.LastInputTop).St.Attr & ATTR_UNDERLINE) == 0);
+    Tui_ComposeFrame(&ts, 20, 12);
+    CHECK((Screen_BackAt(&ts.Scr, 4, ComposerTop(&ts)).St.Attr &
+           ATTR_UNDERLINE) != 0);
+    CHECK((Screen_BackAt(&ts.Scr, 3, ComposerTop(&ts)).St.Attr &
+           ATTR_UNDERLINE) == 0);
 
     LineEdit_Clear(&ts.Edit);
     LineModel_BeginAssistant(&ts.Model);
     LineModel_AppendAssistant(&ts.Model, SVL("[link](https://example.com)"));
     LineModel_EndAssistant(&ts.Model);
-    Tui_TestCompose(&ts, 20, 12);
+    Tui_ComposeFrame(&ts, 20, 12);
     Feed(&ts, "\x1b[<0;4;1M\x1b[<32;7;1M\x1b[<0;7;1m");
-    Tui_TestCompose(&ts, 20, 12);
+    Tui_ComposeFrame(&ts, 20, 12);
     Style selectedLink = Screen_BackAt(&ts.Scr, 3, 0).St;
     CHECK((selectedLink.Attr & ATTR_UNDERLINE) != 0);
     CHECK((selectedLink.Attr & ATTR_REVERSE) != 0);
@@ -1034,11 +1125,11 @@ void TestTui() {
     Tui ts;
     Tui_InitModel(&ts, &as, os);
     LineModel_AddNotice(&ts.Model, EntryKind::Info, SVL("alpha\nbravo\ncharlie"));
-    Tui_TestCompose(&ts, 20, 12);
+    Tui_ComposeFrame(&ts, 20, 12);
 
     Feed(&ts, "\x1b[<0;4;1M\x1b[<32;6;3M\x1b[<0;6;3m");
     CHECK_ALL(ts.TranscriptSelectionRevision != 0, !ts.Follow);
-    Tui_TestCompose(&ts, 20, 12);
+    Tui_ComposeFrame(&ts, 20, 12);
     CHECK_ALL(Screen_BackAt(&ts.Scr, 3, 0).St.Bg == 238,
               Screen_BackAt(&ts.Scr, 0, 1).St.Bg == 238,
               Screen_BackAt(&ts.Scr, 4, 2).St.Bg == 238,
@@ -1075,7 +1166,7 @@ void TestTui() {
     Feed(&ts, "\x1b[<0;4;1M\x1b[<32;5;2M\x1b[<0;5;2m");
     CHECK_ALL(ts.TranscriptSelectionRevision != 0,
               !LineEdit_HasSelection(&ts.Edit));
-    Tui_TestCompose(&ts, 20, 12);
+    Tui_ComposeFrame(&ts, 20, 12);
     Feed(&ts, "\x1b[<0;3;10M\x1b[<32;4;10M\x1b[<0;4;10m");
     CHECK_ALL(LineEdit_HasSelection(&ts.Edit),
               ts.TranscriptSelectionRevision == 0);
@@ -1093,7 +1184,7 @@ void TestTui() {
     Tui ts;
     Tui_InitModel(&ts, &as, os);
     LineModel_AddNotice(&ts.Model, EntryKind::Info, SVL("alpha\nbravo"));
-    Tui_TestCompose(&ts, 20, 12);
+    Tui_ComposeFrame(&ts, 20, 12);
     CHECK(ts.LastPaneH > LineModel_Count(&ts.Model));
 
     Feed(&ts, "\x1b[<0;20;5M\x1b[<32;4;1M\x1b[<0;4;1m\x03");
@@ -1113,7 +1204,7 @@ void TestTui() {
     Tui ts;
     Tui_InitModel(&ts, &as, os);
     LineModel_AddNotice(&ts.Model, EntryKind::Info, SVL("abcdefghijklmnopq"));
-    Tui_TestCompose(&ts, 20, 12);
+    Tui_ComposeFrame(&ts, 20, 12);
     Feed(&ts, "\x1b[<0;4;1M\x1b[<32;20;1M\x1b[<0;20;1m\x03");
     CHECK(StrView_Eq(StrBuf_View(&ts.ClipboardRaw), SVL("abcdefghijklmnopq")));
     Feed(&ts, "\x1b[<0;20;1M\x1b[<32;4;1M\x1b[<0;4;1m\x03");
@@ -1131,7 +1222,7 @@ void TestTui() {
     Tui ts;
     Tui_InitModel(&ts, &as, os);
     LineModel_AddNotice(&ts.Model, EntryKind::Info, SVL("wide \xe5\xa5\xbdx"));
-    Tui_TestCompose(&ts, 20, 12);
+    Tui_ComposeFrame(&ts, 20, 12);
     Feed(&ts, "\x1b[<0;10;1M\x1b[<32;9;1M\x1b[<0;9;1m\x03");
     CHECK(StrView_Eq(StrBuf_View(&ts.ClipboardRaw), SVL("\xe5\xa5\xbd")));
     Tui_Stop(&ts);
@@ -1148,7 +1239,7 @@ void TestTui() {
     Tui ts;
     Tui_InitModel(&ts, &as, os);
     LineModel_AddUser(&ts.Model, SVL("copy me\nnext"), 1000);
-    Tui_TestCompose(&ts, 20, 12);
+    Tui_ComposeFrame(&ts, 20, 12);
     Feed(&ts, "\x1b[<0;1;1M\x1b[<32;2;2M\x1b[<0;2;2m\x03");
     StrView copied = StrBuf_View(&ts.ClipboardRaw);
     char timestamp[6];
@@ -1175,7 +1266,7 @@ void TestTui() {
     CHECK(LineModel_FinishTool(&ts.Model, SVL("copy-tool"), SVL("result"),
                                SVL("hidden preview"), false));
     LineModel_AddNotice(&ts.Model, EntryKind::Info, SVL("after"));
-    Tui_TestCompose(&ts, 20, 12);
+    Tui_ComposeFrame(&ts, 20, 12);
     Feed(&ts, "\x1b[<0;1;1M\x1b[<32;2;2M\x1b[<0;2;2m\x03");
     CHECK(StrView_Contains(StrBuf_View(&ts.ClipboardRaw), "\xe2\x80\xa6"));
     Tui_Stop(&ts);
@@ -1193,23 +1284,23 @@ void TestTui() {
     Tui_InitModel(&ts, &as, os);
     for (u32 i = 0; i < 30; i++)
       LineModel_AddNotice(&ts.Model, EntryKind::Info, SVL("scroll row"));
-    Tui_TestCompose(&ts, 20, 12);
+    Tui_ComposeFrame(&ts, 20, 12);
     ts.Follow = false;
     ts.Top = 10;
-    Tui_TestCompose(&ts, 20, 12);
+    Tui_ComposeFrame(&ts, 20, 12);
 
     Feed(&ts, "\x1b[<0;4;4M\x1b[<32;5;7M");
     CHECK(ts.TranscriptSelectionRevision != 0);
     u32 top = ts.Top;
     u32 focus = ts.TranscriptFocusRow;
-    Tui_TestCompose(&ts, 20, 12, 1000);
+    Tui_ComposeFrame(&ts, 20, 12, 1000);
     CHECK(ts.Top == top + 1);
-    Tui_TestCompose(&ts, 20, 12, 1020);
+    Tui_ComposeFrame(&ts, 20, 12, 1020);
     CHECK(ts.Top == top + 1);
-    Tui_TestCompose(&ts, 20, 12, 1050);
+    Tui_ComposeFrame(&ts, 20, 12, 1050);
     CHECK_ALL(ts.Top == top + 2, ts.TranscriptFocusRow > focus, !ts.Follow);
     Feed(&ts, "\x1b[<32;5;1M");
-    Tui_TestCompose(&ts, 20, 12, 1060);
+    Tui_ComposeFrame(&ts, 20, 12, 1060);
     CHECK(ts.Top == top + 1);
     Feed(&ts, "\x1b[<0;5;1m");
 
@@ -1227,16 +1318,16 @@ void TestTui() {
     Tui ts;
     Tui_InitModel(&ts, &as, os);
     LineModel_AddNotice(&ts.Model, EntryKind::Info, SVL("one\ntwo"));
-    Tui_TestCompose(&ts, 20, 12);
+    Tui_ComposeFrame(&ts, 20, 12);
     Feed(&ts, "\x1b[<0;4;1M\x1b[<32;5;2M\x1b[<0;5;2m");
     CHECK(ts.TranscriptSelectionRevision != 0);
     LineModel_AddNotice(&ts.Model, EntryKind::Info, SVL("changed"));
-    Tui_TestCompose(&ts, 20, 12);
+    Tui_ComposeFrame(&ts, 20, 12);
     CHECK(ts.TranscriptSelectionRevision == 0);
 
     Feed(&ts, "\x1b[<0;4;1M\x1b[<32;5;2M\x1b[<0;5;2m");
     CHECK(ts.TranscriptSelectionRevision != 0);
-    Tui_TestCompose(&ts, 20, 13);
+    Tui_ComposeFrame(&ts, 20, 13);
     CHECK(ts.TranscriptSelectionRevision == 0);
 
     Tui_Stop(&ts);
@@ -1316,7 +1407,15 @@ void TestTui() {
     Tui_InitModel(&tm, &am, om);
 
     StrView options[] = {SVL("first"), SVL("second"), SVL("third")};
+    Tui_ComposeFrame(&tm, 20, 12);
+    UiEvent dragStart = {};
+    dragStart.Kind = UiEventKind::MouseDown;
+    dragStart.X = 2;
+    dragStart.Y = ComposerTop(&tm);
+    CHECK(Ui_Dispatch(&tm.Ui, dragStart));
+    CHECK_ALL(tm.InputUi.Dragging, tm.Ui.Captured != 0);
     CHECK(Tui_BeginSelection(&tm, SVL("Choose"), options, 3));
+    CHECK_ALL(!tm.InputUi.Dragging, tm.Ui.Captured == 0);
     CHECK(Tui_GetModalResult(&tm, nullptr, nullptr) == TuiModalResult::Pending);
     Feed(&tm, "\x1b[B\x1b[B\r");
     u32 selected = 0;
@@ -1438,6 +1537,13 @@ void TestTui() {
     Feed(&resetTui, "/queued\r");
     CHECK(resetTui.QCount == 1);
     LineEdit_InsertText(&resetTui.Edit, SVL("second draft"));
+    Tui_ComposeFrame(&resetTui, 20, 12);
+    UiEvent dragStart = {};
+    dragStart.Kind = UiEventKind::MouseDown;
+    dragStart.X = 2;
+    dragStart.Y = ComposerTop(&resetTui);
+    CHECK(Ui_Dispatch(&resetTui.Ui, dragStart));
+    CHECK_ALL(resetTui.InputUi.Dragging, resetTui.Ui.Captured != 0);
     Tui_CommandNotice(&resetTui, SVL("pending display"));
     StreamReveal_Push(&resetTui.Reveal, SVL("pending reveal"));
     resetTui.Use.Input = 11;

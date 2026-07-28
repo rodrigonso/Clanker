@@ -123,7 +123,7 @@ if(WIN32)
   target_link_libraries(clank_loopback PUBLIC ws2_32 shell32)
 endif()
 
-# ---- term (full-screen TUI) ----------------------------------------------
+# ---- term (terminal I/O + cell renderer) ---------------------------------
 if(WIN32)
   set(CLANK_TERM_PLATFORM src/term/term_win.cpp)
 else()
@@ -134,15 +134,28 @@ add_library(clank_term STATIC
   src/term/keys.cpp
   src/term/cell.cpp
   src/term/screen.cpp
-  src/term/markdown.cpp
   src/term/sanitize.cpp
-  src/term/stream_reveal.cpp
-  src/term/linemodel.cpp
-  src/term/toolview.cpp
-  src/term/lineedit.cpp
-  src/term/tui.cpp
   ${CLANK_TERM_PLATFORM})
-target_link_libraries(clank_term PUBLIC clank_base clank_agent clank_json)
+target_link_libraries(clank_term PUBLIC clank_base)
+
+# ---- ui (reusable terminal component library) ----------------------------
+add_library(clank_ui STATIC
+  src/ui/lineedit.cpp
+  src/ui/ui.cpp
+  src/ui/layout.cpp
+  src/ui/canvas.cpp
+  src/ui/event.cpp
+  src/ui/widgets.cpp)
+target_link_libraries(clank_ui PUBLIC clank_base clank_term)
+
+# ---- tui (Clank-specific full-screen application) ------------------------
+add_library(clank_tui STATIC
+  src/tui/markdown.cpp
+  src/tui/stream_reveal.cpp
+  src/tui/linemodel.cpp
+  src/tui/toolview.cpp
+  src/tui/tui.cpp)
+target_link_libraries(clank_tui PUBLIC clank_ui clank_term clank_agent clank_json)
 
 # ---- llm providers -------------------------------------------------------
 add_library(clank_proto STATIC src/llm/anthropic_proto.cpp)
@@ -182,11 +195,11 @@ add_library(clank_app STATIC
   src/app/plain_select.cpp
   src/app/provider_registry.cpp
   src/app/settings.cpp)
-target_link_libraries(clank_app PUBLIC clank_anthropic clank_auth clank_term)
+target_link_libraries(clank_app PUBLIC clank_anthropic clank_auth clank_tui)
 
 # ---- executables ---------------------------------------------------------
 add_executable(clank src/app/main.cpp)
-target_link_libraries(clank PRIVATE clank_app clank_anthropic clank_tools clank_agent clank_auth clank_term)
+target_link_libraries(clank PRIVATE clank_app clank_anthropic clank_tools clank_agent clank_auth clank_tui)
 
 # ---- tests ---------------------------------------------------------------
 # One harness for everything: tests/test_main.cpp is a CLI that selects suites
@@ -216,9 +229,12 @@ add_executable(clank_tests EXCLUDE_FROM_ALL
   tests/test_stream_reveal.cpp
   tests/test_linemodel.cpp
   tests/test_lineedit.cpp
+  tests/test_ui.cpp
+  tests/test_ui_widgets.cpp
+  tests/test_ui_demo.cpp
   tests/test_tui.cpp
   tests/test_http.cpp)
-target_link_libraries(clank_tests PRIVATE clank_app clank_proto clank_agent clank_session clank_tools clank_crypto clank_auth clank_loopback clank_term clank_http)
+target_link_libraries(clank_tests PRIVATE clank_app clank_proto clank_agent clank_session clank_tools clank_crypto clank_auth clank_loopback clank_tui clank_ui clank_term clank_http)
 
 # Default ctest run stays offline; the network suite is opt-in.
 add_test(NAME unit COMMAND clank_tests)

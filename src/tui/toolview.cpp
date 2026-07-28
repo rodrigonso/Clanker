@@ -1,4 +1,4 @@
-#include "term/toolview.h"
+#include "tui/toolview.h"
 
 #include <string.h>
 

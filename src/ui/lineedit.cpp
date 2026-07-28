@@ -1,4 +1,4 @@
-#include "term/lineedit.h"
+#include "ui/lineedit.h"
 
 #include <string.h>
 
@@ -168,40 +168,64 @@ void LineEdit_SetCursor(LineEdit* e, u32 offset, bool extend) {
   SyncDesired(e);
 }
 
-u32 LineEdit_HitTest(const LineEdit* e, u16 wrapWidth, u32 row, u32 col) {
+void LineEdit_Layout(const LineEdit* e, u16 wrapWidth,
+                     LineEditLayout* out) {
+  memset(out, 0, sizeof(*out));
   StrView t = LineEdit_Text(e);
-  u32 width = wrapWidth > 0 ? wrapWidth : 1;
-  u32 displayRow = 0;
+  u32 cursor = LineEdit_Cursor(e);
+  u32 width = wrapWidth ? wrapWidth : 1;
   u32 rowStart = 0;
-  u32 displayCol = 0;
-  u32 i = 0;
-  while (i < t.Length) {
-    if (t.Data[i] == '\n') {
-      if (displayRow == row) return OffsetForColumn(t, rowStart, i, col, true);
-      displayRow++;
-      i++;
-      rowStart = i;
-      displayCol = 0;
+  u32 rowWidth = 0;
+  u32 offset = 0;
+  while (offset < t.Length && out->Count < 255) {
+    u32 cpStart = offset;
+    u32 cp = Utf8Decode(t, &offset);
+    if (cp == '\n') {
+      out->Starts[out->Count] = rowStart;
+      out->Rows[out->Count++] =
+          StrView{t.Data + rowStart, cpStart - rowStart};
+      rowStart = offset;
+      rowWidth = 0;
       continue;
     }
-    u32 next = i;
-    u32 cp = Utf8Decode(t, &next);
     u32 cw = DisplayCharWidth(cp);
-    if (displayCol + cw > width) {
-      if (displayRow == row) return OffsetForColumn(t, rowStart, i, col, true);
-      displayRow++;
-      rowStart = i;
-      displayCol = 0;
+    if (rowWidth && rowWidth + cw > width) {
+      out->Starts[out->Count] = rowStart;
+      out->Rows[out->Count++] =
+          StrView{t.Data + rowStart, cpStart - rowStart};
+      rowStart = cpStart;
+      rowWidth = 0;
     }
-    displayCol += cw;
-    i = next;
+    rowWidth += cw;
   }
-  if (displayRow == row) return OffsetForColumn(t, rowStart, t.Length, col, true);
-  return t.Length;
+  out->Starts[out->Count] = rowStart;
+  out->Rows[out->Count++] =
+      StrView{t.Data + rowStart, t.Length - rowStart};
+
+  out->CursorRow = out->Count - 1;
+  for (u32 row = 0; row < out->Count; row++) {
+    u32 start = out->Starts[row];
+    u32 end = start + out->Rows[row].Length;
+    bool sharedSoftBoundary =
+        cursor == end && row + 1 < out->Count &&
+        out->Starts[row + 1] == cursor;
+    if (cursor >= start && cursor <= end && !sharedSoftBoundary) {
+      out->CursorRow = row;
+      out->CursorCol = (u16)ColOfOffset(
+          StrView{t.Data + start, cursor - start}, cursor - start);
+      break;
+    }
+  }
 }
 
-void LineEdit_SetCursorAt(LineEdit* e, u16 wrapWidth, u32 row, u32 col, bool extend) {
-  LineEdit_SetCursor(e, LineEdit_HitTest(e, wrapWidth, row, col), extend);
+u32 LineEdit_HitTest(const LineEdit* e, u16 wrapWidth, u32 row, u32 col) {
+  LineEditLayout layout;
+  LineEdit_Layout(e, wrapWidth, &layout);
+  StrView text = LineEdit_Text(e);
+  if (row >= layout.Count) return text.Length;
+  u32 start = layout.Starts[row];
+  u32 end = start + layout.Rows[row].Length;
+  return OffsetForColumn(text, start, end, col, true);
 }
 
 void LineEdit_InsertText(LineEdit* e, StrView s) {

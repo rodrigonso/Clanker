@@ -1,4 +1,4 @@
-#include "term/tui.h"
+#include "tui/tui.h"
 
 #include <string.h>
 
@@ -13,8 +13,9 @@ const char* kSpinner[10] = {"\xe2\xa0\x8b", "\xe2\xa0\x99", "\xe2\xa0\xb9", "\xe
                             "\xe2\xa0\x87", "\xe2\xa0\x8f"};
 constexpr u64 kDoubleEscapeMs = 500;
 
-bool g_color = true;
-Style St(u8 fg, u8 attr) { return Style{g_color ? fg : COL_DEFAULT, COL_DEFAULT, attr}; }
+Style TuiSt(const Tui* t, u8 fg, u8 attr) {
+  return Style{t->Color ? fg : COL_DEFAULT, COL_DEFAULT, attr};
+}
 
 // Append a C-string to a bounded buffer.
 void Put(char* buf, u32 cap, u32* len, const char* s) {
@@ -199,90 +200,16 @@ StrView Truncate(StrView s, u32 maxBytes) {
   return StrView{s.Data, n};
 }
 
-// ---- input layout ----
-struct InputLayout {
-  StrView Rows[256];
-  u32 RowCount;
-  u32 CurRow;
-  u16 CurCol;
-};
-
-u32 InputCellWidth(u32 cp) {
-  u32 width = CharWidth(cp);
-  return width < 1 ? 1 : width;
-}
-
-void LayoutInput(StrView text, u32 cursor, u16 width, InputLayout* out) {
-  out->RowCount = 0;
-  out->CurRow = 0;
-  out->CurCol = 0;
-  if (width < 1) width = 1;
-  u32 rowStart = 0;
-  u16 col = 0;
-  u32 i = 0;
-  while (true) {
-    if (i == cursor) {
-      out->CurRow = out->RowCount;
-      out->CurCol = col;
-    }
-    if (i >= text.Length) break;
-    if (text.Data[i] == '\n') {
-      if (out->RowCount < 256) out->Rows[out->RowCount++] = StrView{text.Data + rowStart, i - rowStart};
-      i++;
-      rowStart = i;
-      col = 0;
-      continue;
-    }
-    u32 jj = i;
-    u32 cp = Utf8Decode(text, &jj);
-    u32 cw = InputCellWidth(cp);
-    if ((u32)col + cw > width) {
-      if (out->RowCount < 256) out->Rows[out->RowCount++] = StrView{text.Data + rowStart, i - rowStart};
-      rowStart = i;
-      col = 0;
-      if (i == cursor) {
-        out->CurRow = out->RowCount;
-        out->CurCol = 0;
-      }
-    }
-    col = (u16)(col + cw);
-    i = jj;
-  }
-  if (out->RowCount < 256) out->Rows[out->RowCount++] = StrView{text.Data + rowStart, text.Length - rowStart};
-}
-
-u32 InputTextWidth(StrView text) {
-  u32 width = 0;
-  u32 i = 0;
-  while (i < text.Length) width += InputCellWidth(Utf8Decode(text, &i));
-  return width;
-}
-
-Style HoverStyle(Style style) {
-  if (g_color)
-    style.Bg = 235;
-  else
-    style.Attr |= ATTR_DIM;
-  return style;
-}
-
-Style RowTextStyle(Style style, bool hovered) {
-  if (hovered) return HoverStyle(style);
-  return style;
-}
-
 const u8 SELECTION_BG = 238;
 
 void ClearTranscriptSelection(Tui* t) {
-  if (t->TranscriptSelectionRevision == 0 &&
-      t->DragDomain != TuiDragDomain::Transcript)
+  if (t->TranscriptSelectionRevision == 0 && !t->TranscriptDragging)
     return;
   t->TranscriptSelectionRevision = 0;
   t->TranscriptSelectionHash = 0;
   t->SelectionEdgeDirection = 0;
   t->NextSelectionScrollMs = 0;
-  if (t->DragDomain == TuiDragDomain::Transcript)
-    t->DragDomain = TuiDragDomain::None;
+  t->TranscriptDragging = false;
 }
 
 void FocusComposer(Tui* t) { ClearTranscriptSelection(t); }
@@ -388,155 +315,43 @@ bool GetTranscriptSelection(Tui* t, TranscriptSelection* selection) {
          NormalizeTranscriptSelection(t, selection);
 }
 
-void ApplySelectedCells(Screen* s, u16 y, DisplayRowRange range) {
-  if (y >= s->Rows || range.Start >= range.End) return;
-  if (range.End > s->Cols) range.End = s->Cols;
-  for (u16 x = range.Start; x < range.End; x++) {
-    Style* style = &s->Back[(u32)y * s->Cols + x].St;
-    if (g_color)
-      style->Bg = SELECTION_BG;
-    else if (style->Attr & ATTR_UNDERLINE)
-      style->Attr |= ATTR_REVERSE;
-    else
-      style->Attr |= ATTR_UNDERLINE;
-  }
-}
-
-void RenderSpanLine(Tui* t, u16 y, u32 row, const SpanLine* ln, u16 cols, bool hovered,
-                    const TranscriptSelection* selection) {
-  Screen* s = &t->Scr;
-  if (cols && hovered) {
-    Style fill = HoverStyle(StyleDefault());
-    Screen_Fill(s, 0, y, (u16)(cols - 1), y, fill);
-  }
-
-  DisplayRowLayout layout = LineModel_LayoutDisplayRow(ln, cols);
-  DisplayRowIterator iterator = {};
-  DisplayRowRun run;
-  while (LineModel_NextDisplayRowRun(&layout, &iterator, &run))
-    Screen_PutText(s, run.Column, y, run.Text, RowTextStyle(run.St, hovered),
-                   (u16)(run.Column + run.CellWidth));
-
-  DisplayRowRange selected;
-  if (TranscriptRangeForRow(selection, row, &layout, &selected))
-    ApplySelectedCells(s, y, selected);
-}
-
-void ComposeStatus(Tui* t, u16 statusY, u16 cols) {
-  // No background fill: this row reads as ambient/muted text on the default
-  // background, matching the sticky cwd line above the composer box.
-  Style st = St(g_color ? 244 : COL_DEFAULT, ATTR_NONE);
-
-  // Left: agent state.
-  char left[256];
-  u32 ll = 0;
+void FormatStatus(Tui* t, char* left, u32 leftCap, u32* ll, char* right,
+                  u32 rightCap, u32* rl) {
+  *ll = 0;
   if (t->OperationActive) {
-    Put(left, sizeof(left), &ll, kSpinner[t->Spinner % 10]);
-    Put(left, sizeof(left), &ll, " ");
-    for (u32 i = 0; i < t->OperationLabel.Length && ll < sizeof(left) - 1; i++)
-      left[ll++] = t->OperationLabel.Data[i];
+    Put(left, leftCap, ll, kSpinner[t->Spinner % 10]);
+    Put(left, leftCap, ll, " ");
+    for (u32 i = 0; i < t->OperationLabel.Length && *ll < leftCap - 1; i++)
+      left[(*ll)++] = t->OperationLabel.Data[i];
     if (t->OperationStatus.Length) {
-      Put(left, sizeof(left), &ll, ": ");
-      for (u32 i = 0; i < t->OperationStatus.Length && ll < sizeof(left) - 1; i++)
-        left[ll++] = t->OperationStatus.Data[i];
+      Put(left, leftCap, ll, ": ");
+      for (u32 i = 0; i < t->OperationStatus.Length && *ll < leftCap - 1; i++)
+        left[(*ll)++] = t->OperationStatus.Data[i];
     }
   } else if (t->State == TuiState::Idle) {
-    Put(left, sizeof(left), &ll, "ready");
+    Put(left, leftCap, ll, "ready");
   } else {
-    Put(left, sizeof(left), &ll, kSpinner[t->Spinner % 10]);
-    Put(left, sizeof(left), &ll, " ");
+    Put(left, leftCap, ll, kSpinner[t->Spinner % 10]);
+    Put(left, leftCap, ll, " ");
     if (t->State == TuiState::Tool) {
-      Put(left, sizeof(left), &ll, "running ");
-      for (u32 i = 0; i < t->StateTool.Length && ll < sizeof(left) - 1; i++) left[ll++] = t->StateTool.Data[i];
+      Put(left, leftCap, ll, "running ");
+      for (u32 i = 0; i < t->StateTool.Length && *ll < leftCap - 1; i++)
+        left[(*ll)++] = t->StateTool.Data[i];
     } else if (t->State == TuiState::Streaming) {
-      Put(left, sizeof(left), &ll, "responding");
+      Put(left, leftCap, ll, "responding");
     } else {
-      Put(left, sizeof(left), &ll, "thinking");
+      Put(left, leftCap, ll, "thinking");
     }
   }
 
-  // Right (right-aligned): model name + token usage.
-  char right[256];
-  u32 rl = 0;
-  for (u32 i = 0; i < t->ModelName.Length && rl < sizeof(right) - 1; i++) right[rl++] = t->ModelName.Data[i];
+  *rl = 0;
+  for (u32 i = 0; i < t->ModelName.Length && *rl < rightCap - 1; i++)
+    right[(*rl)++] = t->ModelName.Data[i];
   if (t->Use.Input || t->Use.Output) {
-    Put(right, sizeof(right), &rl, "  \xe2\x86\x91");
-    PutScaled(right, sizeof(right), &rl, t->Use.Input);
-    Put(right, sizeof(right), &rl, " \xe2\x86\x93");
-    PutScaled(right, sizeof(right), &rl, t->Use.Output);
-  }
-
-  StrView rightView{right, rl};
-  u32 rightW = TextWidth(rightView);
-  u16 rightX = (u32)cols > rightW ? (u16)(cols - rightW) : 0;
-
-  // Draw the state on the left, clipped so it never overruns the right block.
-  Screen_PutText(&t->Scr, 1, statusY, StrView{left, ll}, st,
-                 rightX ? rightX : cols);
-  Screen_PutText(&t->Scr, rightX, statusY, rightView, st, cols);
-}
-
-// Composer input box: a rounded border (no background fill) drawn around the
-// input row(s). `innerTop`/`innerH` is the text area; the border occupies the
-// row just above and below it plus the first/last column of every row.
-void DrawInputBox(Tui* t, u16 topY, u16 bottomY, u16 innerTop, u16 innerH, u16 cols) {
-  if (cols < 2) return;
-  Style border = St(g_color ? 250 : COL_DEFAULT, ATTR_NONE);  // default bg: border only, no fill
-
-  const u32 kMaxRule = 512;
-  char rule[kMaxRule * 3];
-  u32 rl = 0;
-  u16 innerW = (u16)(cols - 2);
-  u16 ruleLen = innerW < kMaxRule ? innerW : kMaxRule;
-  for (u16 i = 0; i < ruleLen; i++) Put(rule, sizeof(rule), &rl, "\xe2\x94\x80");
-  StrView ruleView{rule, rl};
-
-  Screen_PutText(&t->Scr, 0, topY, SVL("\xe2\x95\xad"), border, cols);
-  Screen_PutText(&t->Scr, 1, topY, ruleView, border, (u16)(cols - 1));
-  Screen_PutText(&t->Scr, (u16)(cols - 1), topY, SVL("\xe2\x95\xae"), border, cols);
-
-  Screen_PutText(&t->Scr, 0, bottomY, SVL("\xe2\x95\xb0"), border, cols);
-  Screen_PutText(&t->Scr, 1, bottomY, ruleView, border, (u16)(cols - 1));
-  Screen_PutText(&t->Scr, (u16)(cols - 1), bottomY, SVL("\xe2\x95\xaf"), border, cols);
-
-  for (u16 y = innerTop; y < innerTop + innerH; y++) {
-    Screen_PutText(&t->Scr, 0, y, SVL("\xe2\x94\x82"), border, cols);
-    Screen_PutText(&t->Scr, (u16)(cols - 1), y, SVL("\xe2\x94\x82"), border, cols);
-  }
-}
-
-void HighlightInputSelection(Tui* t, u16 y, StrView row, StrView text, u16 x) {
-  u32 selectionStart, selectionEnd;
-  if (!LineEdit_SelectionBounds(&t->Edit, &selectionStart, &selectionEnd)) return;
-  u32 rowStart = (u32)(row.Data - text.Data);
-  u32 rowEnd = rowStart + row.Length;
-  u32 start = selectionStart > rowStart ? selectionStart : rowStart;
-  u32 end = selectionEnd < rowEnd ? selectionEnd : rowEnd;
-  if (start < end) {
-    u16 startCol = (u16)InputTextWidth(StrView{text.Data + rowStart, start - rowStart});
-    u16 endCol = (u16)InputTextWidth(StrView{text.Data + rowStart, end - rowStart});
-    ApplySelectedCells(&t->Scr, y,
-                       DisplayRowRange{(u16)(x + startCol), (u16)(x + endCol)});
-  }
-  if (rowEnd < text.Length && text.Data[rowEnd] == '\n' && selectionStart <= rowEnd &&
-      selectionEnd > rowEnd) {
-    u16 newlineCol = (u16)InputTextWidth(row);
-    ApplySelectedCells(
-        &t->Scr, y,
-        DisplayRowRange{(u16)(x + newlineCol), (u16)(x + newlineCol + 1u)});
-  }
-}
-
-// Sticky working-directory + git-branch line, drawn on the row just above the
-// prompt. Muted so it reads as ambient context, not transcript content.
-void ComposeCwd(Tui* t, u16 cwdY, u16 cols) {
-  if (t->Cwd.Length == 0) return;
-  Style st = St(g_color ? 244 : COL_DEFAULT, ATTR_NONE);
-  u16 x = Screen_PutText(&t->Scr, 1, cwdY, t->Cwd, st, cols);
-  if (t->Branch.Length) {
-    x = Screen_PutText(&t->Scr, x, cwdY, SVL("  (\xe2\x8e\x87 "), st, cols);
-    x = Screen_PutText(&t->Scr, x, cwdY, t->Branch, st, cols);
-    Screen_PutText(&t->Scr, x, cwdY, SVL(")"), st, cols);
+    Put(right, rightCap, rl, "  \xe2\x86\x91");
+    PutScaled(right, rightCap, rl, t->Use.Input);
+    Put(right, rightCap, rl, " \xe2\x86\x93");
+    PutScaled(right, rightCap, rl, t->Use.Output);
   }
 }
 
@@ -612,26 +427,6 @@ ScrollbarGeometry CalcScrollbarGeometry(u32 count, u16 paneH, u32 top) {
   out.ThumbTop = (u16)thumbTop;
   out.ThumbH = (u16)thumbH;
   return out;
-}
-
-void DrawScrollbar(Tui* t, u16 paneH, u32 count, u32 top) {
-  t->LastScrollbarThumbTop = 0;
-  t->LastScrollbarThumbH = 0;
-  if (!t->ScrollbarVisible || paneH == 0 || count <= paneH) return;
-
-  ScrollbarGeometry geometry = CalcScrollbarGeometry(count, paneH, top);
-  t->LastScrollbarThumbTop = geometry.ThumbTop;
-  t->LastScrollbarThumbH = geometry.ThumbH;
-
-  u16 x = ScrollbarX(t);
-  Style track = g_color ? StyleMake(238, COL_DEFAULT, ATTR_NONE)
-                        : StyleMake(COL_DEFAULT, COL_DEFAULT, ATTR_DIM);
-  Style thumb = g_color ? StyleMake(250, COL_DEFAULT, ATTR_NONE)
-                        : StyleMake(COL_DEFAULT, COL_DEFAULT, ATTR_BOLD);
-  for (u16 y = 0; y < paneH; y++)
-    Screen_PutChar(&t->Scr, x, y, 0x2595, track);
-  for (u16 y = 0; y < geometry.ThumbH; y++)
-    Screen_PutChar(&t->Scr, x, (u16)(geometry.ThumbTop + y), 0x2595, thumb);
 }
 
 void ApplyDisplayEvent(Tui* t, const TuiDisplayEvent& ev) {
@@ -718,62 +513,139 @@ bool PumpDisplay(Tui* t, u64 nowMs) {
 
 bool AdvanceSelectionTick(Tui* t, u64 nowMs);
 
-void DrawPanelBorder(Tui* t, u16 x0, u16 y0, u16 x1, u16 y1, Style style) {
-  if (x1 <= x0 || y1 <= y0) return;
-  Screen_Fill(&t->Scr, x0, y0, x1, y1, style);
-  Screen_PutText(&t->Scr, x0, y0, SVL("\xe2\x95\xad"), style, (u16)(x0 + 1));
-  Screen_PutText(&t->Scr, x1, y0, SVL("\xe2\x95\xae"), style, (u16)(x1 + 1));
-  Screen_PutText(&t->Scr, x0, y1, SVL("\xe2\x95\xb0"), style, (u16)(x0 + 1));
-  Screen_PutText(&t->Scr, x1, y1, SVL("\xe2\x95\xaf"), style, (u16)(x1 + 1));
-  for (u16 x = (u16)(x0 + 1); x < x1; x++) {
-    Screen_PutText(&t->Scr, x, y0, SVL("\xe2\x94\x80"), style, (u16)(x + 1));
-    Screen_PutText(&t->Scr, x, y1, SVL("\xe2\x94\x80"), style, (u16)(x + 1));
+struct CommandPaletteComponentData {
+  Tui* Controller;
+  StrView Query;
+  u32 MatchCount;
+  u16 TopBorderY;
+  u16 Height;
+  u16 Cols;
+};
+
+void PaintCommandPaletteNode(UiContext*, const UiNode* node,
+                             UiCanvas* canvas) {
+  CommandPaletteComponentData* data =
+      (CommandPaletteComponentData*)node->User;
+  Tui* t = data->Controller;
+  if (data->Height < 4 || data->TopBorderY < data->Height) return;
+  u16 y0 = (u16)(data->TopBorderY - data->Height);
+  u16 y1 = (u16)(data->TopBorderY - 1);
+  u16 panelW = data->Cols > 76 ? 72 : (u16)(data->Cols - 2);
+  u16 x0 = 1;
+  u16 x1 = (u16)(x0 + panelW - 1);
+  Style panel = TuiSt(t, 252, ATTR_NONE);
+  UiRect panelRect{x0, y0, (u16)(x1 - x0 + 1),
+                   (u16)(y1 - y0 + 1)};
+  UiCanvas_Fill(canvas, panelRect, panel);
+  UiCanvas_DrawBorder(canvas, panelRect, panel);
+
+  Style title = panel;
+  title.Attr |= ATTR_BOLD;
+  UiCanvas_PutTextClipped(canvas, (u16)(x0 + 2), (u16)(y0 + 1),
+                          SVL("Commands"), title, x1);
+
+  u32 visible = data->Height - 3;
+  if (data->MatchCount == 0) {
+    t->CommandPaletteSelected = 0;
+    t->CommandPaletteFirst = 0;
+    Style empty = panel;
+    empty.Attr |= ATTR_DIM;
+    UiCanvas_PutTextClipped(canvas, (u16)(x0 + 2), (u16)(y0 + 2),
+                            SVL("No matching commands"), empty, x1);
+    return;
   }
-  for (u16 y = (u16)(y0 + 1); y < y1; y++) {
-    Screen_PutText(&t->Scr, x0, y, SVL("\xe2\x94\x82"), style, (u16)(x0 + 1));
-    Screen_PutText(&t->Scr, x1, y, SVL("\xe2\x94\x82"), style, (u16)(x1 + 1));
+
+  if (t->CommandPaletteSelected >= data->MatchCount)
+    t->CommandPaletteSelected = 0;
+  if (t->CommandPaletteSelected < t->CommandPaletteFirst)
+    t->CommandPaletteFirst = t->CommandPaletteSelected;
+  if (t->CommandPaletteSelected >= t->CommandPaletteFirst + visible)
+    t->CommandPaletteFirst = t->CommandPaletteSelected - visible + 1;
+  u32 maxFirst =
+      data->MatchCount > visible ? data->MatchCount - visible : 0;
+  if (t->CommandPaletteFirst > maxFirst) t->CommandPaletteFirst = maxFirst;
+
+  for (u32 row = 0; row < visible; row++) {
+    u32 matchIndex = t->CommandPaletteFirst + row;
+    const TuiCommandSpec* command =
+        CommandMatchAt(t, data->Query, matchIndex);
+    if (!command) break;
+    u16 y = (u16)(y0 + 2 + row);
+    bool selected = matchIndex == t->CommandPaletteSelected;
+    Style option = panel;
+    if (selected) {
+      option.Attr |= ATTR_REVERSE;
+      UiCanvas_Fill(canvas,
+                    UiRect{(u16)(x0 + 1), y, (u16)(x1 - x0 - 1), 1},
+                    option);
+    }
+    u16 x = UiCanvas_PutTextClipped(
+        canvas, (u16)(x0 + 2), y,
+        selected ? SVL("\xe2\x80\xba ") : SVL("  "), option, x1);
+    Style name = option;
+    name.Attr |= ATTR_BOLD;
+    x = UiCanvas_PutTextClipped(canvas, x, y, SVL("/"), name, x1);
+    x = UiCanvas_PutTextClipped(canvas, x, y, command->Name, name, x1);
+    u16 descriptionX = (u16)(x0 + 18);
+    if (descriptionX < x + 2) descriptionX = (u16)(x + 2);
+    Style description = option;
+    description.Attr |= ATTR_DIM;
+    UiCanvas_PutTextClipped(canvas, descriptionX, y,
+                            command->Description, description, x1);
   }
 }
 
-void ComposeModal(Tui* t, u16 cols, u16 topBorderY) {
-  if (t->ModalKind == TuiModalKind::None || t->ModalResult != TuiModalResult::Pending)
+struct ModalComponentData {
+  Tui* Controller;
+  u16 Cols;
+  u16 TopBorderY;
+};
+
+void PaintModalNode(UiContext*, const UiNode* node, UiCanvas* canvas) {
+  ModalComponentData* data = (ModalComponentData*)node->User;
+  Tui* t = data->Controller;
+  if (t->ModalKind == TuiModalKind::None ||
+      t->ModalResult != TuiModalResult::Pending || data->TopBorderY < 4)
     return;
 
-  if (topBorderY < 4) return;
-  u16 panelW = cols > 76 ? 72 : (u16)(cols - 2);
+  u16 panelW = data->Cols > 76 ? 72 : (u16)(data->Cols - 2);
   u16 desiredH =
       t->ModalKind == TuiModalKind::Select
           ? (u16)((t->ModalOptionCount < 12 ? t->ModalOptionCount : 12) + 3)
           : 6;
-  u16 panelH = desiredH < topBorderY ? desiredH : topBorderY;
+  u16 panelH = desiredH < data->TopBorderY ? desiredH : data->TopBorderY;
   if (panelH < 4) return;
   u16 x0 = 1;
-  u16 y0 = (u16)(topBorderY - panelH);
+  u16 y0 = (u16)(data->TopBorderY - panelH);
   u16 x1 = (u16)(x0 + panelW - 1);
-  u16 y1 = (u16)(topBorderY - 1);
+  u16 y1 = (u16)(data->TopBorderY - 1);
   bool compactText = t->ModalKind == TuiModalKind::Text && panelH < 5;
-  Style panel = St(g_color ? 252 : COL_DEFAULT, ATTR_NONE);
-  DrawPanelBorder(t, x0, y0, x1, y1, panel);
+  Style panel = TuiSt(t, 252, ATTR_NONE);
+  UiRect panelRect{x0, y0, (u16)(x1 - x0 + 1),
+                   (u16)(y1 - y0 + 1)};
+  UiCanvas_Fill(canvas, panelRect, panel);
+  UiCanvas_DrawBorder(canvas, panelRect, panel);
 
   Style path = panel;
   path.Attr |= ATTR_DIM;
-  u16 titleX =
-      Screen_PutText(&t->Scr, (u16)(x0 + 2), (u16)(y0 + 1),
-                     SVL("Commands  /  "), path, (u16)(x1 - 1));
+  u16 titleX = UiCanvas_PutTextClipped(
+      canvas, (u16)(x0 + 2), (u16)(y0 + 1), SVL("Commands  /  "),
+      path, (u16)(x1 - 1));
   Style title = panel;
   title.Attr |= ATTR_BOLD;
-  Screen_PutText(&t->Scr, titleX, (u16)(y0 + 1),
-                 compactText ? t->ModalPrompt : t->ModalTitle, title,
-                 (u16)(x1 - 1));
+  UiCanvas_PutTextClipped(
+      canvas, titleX, (u16)(y0 + 1),
+      compactText ? t->ModalPrompt : t->ModalTitle, title,
+      (u16)(x1 - 1));
 
   if (t->ModalKind == TuiModalKind::Select) {
     u32 visible = panelH > 3 ? panelH - 3 : 1;
     if (t->ModalSelected < t->ModalFirst) t->ModalFirst = t->ModalSelected;
     if (t->ModalSelected >= t->ModalFirst + visible)
       t->ModalFirst = t->ModalSelected - visible + 1;
-    u32 maxFirst = t->ModalOptionCount > visible ? t->ModalOptionCount - visible : 0;
+    u32 maxFirst =
+        t->ModalOptionCount > visible ? t->ModalOptionCount - visible : 0;
     if (t->ModalFirst > maxFirst) t->ModalFirst = maxFirst;
-
     for (u32 row = 0; row < visible; row++) {
       u32 index = t->ModalFirst + row;
       if (index >= t->ModalOptionCount) break;
@@ -781,94 +653,41 @@ void ComposeModal(Tui* t, u16 cols, u16 topBorderY) {
       bool selected = index == t->ModalSelected;
       Style option = panel;
       if (selected) option.Attr |= ATTR_REVERSE;
-      if (selected) Screen_Fill(&t->Scr, (u16)(x0 + 1), y, (u16)(x1 - 1), y, option);
-      Screen_PutText(&t->Scr, (u16)(x0 + 2), y, selected ? SVL("\xe2\x80\xba ") : SVL("  "),
-                     option, (u16)(x1 - 1));
-      Screen_PutText(&t->Scr, (u16)(x0 + 4), y, t->ModalOptions[index], option,
-                     (u16)(x1 - 1));
+      if (selected)
+        UiCanvas_Fill(
+            canvas, UiRect{(u16)(x0 + 1), y, (u16)(x1 - x0 - 1), 1},
+            option);
+      UiCanvas_PutTextClipped(
+          canvas, (u16)(x0 + 2), y,
+          selected ? SVL("\xe2\x80\xba ") : SVL("  "), option,
+          (u16)(x1 - 1));
+      UiCanvas_PutTextClipped(canvas, (u16)(x0 + 4), y,
+                              t->ModalOptions[index], option,
+                              (u16)(x1 - 1));
     }
-    Screen_SetCursor(&t->Scr, false, 0, 0);
+    UiCanvas_SetCursor(canvas, node->Id, false, 0, 0);
     return;
   }
 
   Style prompt = panel;
   prompt.Attr |= ATTR_DIM;
   if (!compactText)
-    Screen_PutText(&t->Scr, (u16)(x0 + 2), (u16)(y0 + 2), t->ModalPrompt,
-                   prompt, (u16)(x1 - 1));
+    UiCanvas_PutTextClipped(canvas, (u16)(x0 + 2), (u16)(y0 + 2),
+                            t->ModalPrompt, prompt, (u16)(x1 - 1));
   u16 editY = (u16)(y1 - 1);
   Style edit = panel;
   edit.Attr |= ATTR_REVERSE;
-  Screen_Fill(&t->Scr, (u16)(x0 + 2), editY, (u16)(x1 - 2), editY, edit);
+  UiCanvas_Fill(canvas,
+                UiRect{(u16)(x0 + 2), editY, (u16)(x1 - x0 - 3), 1},
+                edit);
   StrView text = LineEdit_Text(&t->ModalEdit);
-  Screen_PutText(&t->Scr, (u16)(x0 + 3), editY, text, edit, (u16)(x1 - 2));
-  u32 cursorW = TextWidth(StrView{text.Data, LineEdit_Cursor(&t->ModalEdit)});
+  UiCanvas_PutTextClipped(canvas, (u16)(x0 + 3), editY, text, edit,
+                          (u16)(x1 - 2));
+  u32 cursorW =
+      TextWidth(StrView{text.Data, LineEdit_Cursor(&t->ModalEdit)});
   u16 cursorX = (u16)(x0 + 3 + cursorW);
   if (cursorX >= x1 - 2) cursorX = (u16)(x1 - 3);
-  Screen_SetCursor(&t->Scr, true, cursorX, editY);
-}
-
-void ComposeCommandPalette(Tui* t, StrView query, u32 matchCount, u16 topBorderY,
-                           u16 paletteH, u16 cols) {
-  if (paletteH < 4 || topBorderY < paletteH) return;
-
-  u16 y0 = (u16)(topBorderY - paletteH);
-  u16 y1 = (u16)(topBorderY - 1);
-  u16 panelW = cols > 76 ? 72 : (u16)(cols - 2);
-  u16 x0 = 1;
-  u16 x1 = (u16)(x0 + panelW - 1);
-  Style panel = St(g_color ? 252 : COL_DEFAULT, ATTR_NONE);
-  DrawPanelBorder(t, x0, y0, x1, y1, panel);
-
-  Style title = panel;
-  title.Attr |= ATTR_BOLD;
-  Screen_PutText(&t->Scr, (u16)(x0 + 2), (u16)(y0 + 1), SVL("Commands"),
-                 title, x1);
-
-  u32 visible = paletteH - 3;
-  if (matchCount == 0) {
-    t->CommandPaletteSelected = 0;
-    t->CommandPaletteFirst = 0;
-    Style empty = panel;
-    empty.Attr |= ATTR_DIM;
-    Screen_PutText(&t->Scr, (u16)(x0 + 2), (u16)(y0 + 2),
-                   SVL("No matching commands"), empty, x1);
-    return;
-  }
-
-  if (t->CommandPaletteSelected >= matchCount) t->CommandPaletteSelected = 0;
-  if (t->CommandPaletteSelected < t->CommandPaletteFirst)
-    t->CommandPaletteFirst = t->CommandPaletteSelected;
-  if (t->CommandPaletteSelected >= t->CommandPaletteFirst + visible)
-    t->CommandPaletteFirst = t->CommandPaletteSelected - visible + 1;
-  u32 maxFirst = matchCount > visible ? matchCount - visible : 0;
-  if (t->CommandPaletteFirst > maxFirst) t->CommandPaletteFirst = maxFirst;
-
-  for (u32 row = 0; row < visible; row++) {
-    u32 matchIndex = t->CommandPaletteFirst + row;
-    const TuiCommandSpec* command = CommandMatchAt(t, query, matchIndex);
-    if (!command) break;
-    u16 y = (u16)(y0 + 2 + row);
-    bool selected = matchIndex == t->CommandPaletteSelected;
-    Style option = panel;
-    if (selected) {
-      option.Attr |= ATTR_REVERSE;
-      Screen_Fill(&t->Scr, (u16)(x0 + 1), y, (u16)(x1 - 1), y, option);
-    }
-
-    u16 x = Screen_PutText(&t->Scr, (u16)(x0 + 2), y,
-                           selected ? SVL("\xe2\x80\xba ") : SVL("  "), option, x1);
-    Style name = option;
-    name.Attr |= ATTR_BOLD;
-    x = Screen_PutText(&t->Scr, x, y, SVL("/"), name, x1);
-    x = Screen_PutText(&t->Scr, x, y, command->Name, name, x1);
-
-    u16 descriptionX = (u16)(x0 + 18);
-    if (descriptionX < x + 2) descriptionX = (u16)(x + 2);
-    Style description = option;
-    description.Attr |= ATTR_DIM;
-    Screen_PutText(&t->Scr, descriptionX, y, command->Description, description, x1);
-  }
+  UiCanvas_SetCursor(canvas, node->Id, true, cursorX, editY);
 }
 
 struct TranscriptLayout {
@@ -904,22 +723,194 @@ TranscriptLayout LayoutTranscript(Tui* t, u16 cols, u16 paneH, bool geometryChan
   return TranscriptLayout{contentCols, count, top};
 }
 
+void DoSubmit(Tui* t);
+
+void ComposerSubmit(void* user) { DoSubmit((Tui*)user); }
+
+void ComposerChanged(void* user) { ResetCommandPalette((Tui*)user); }
+
+void ComposerInteract(void* user) {
+  Tui* t = (Tui*)user;
+  FocusComposer(t);
+  t->PressedEntryId = 0;
+  t->ScrollbarDragging = false;
+}
+
+bool ComposerHistoryPrevious(void* user) {
+  Tui* t = (Tui*)user;
+  LineEdit_HistoryPrev(&t->Edit);
+  return true;
+}
+
+bool ComposerHistoryNext(void* user) {
+  Tui* t = (Tui*)user;
+  LineEdit_HistoryNext(&t->Edit);
+  return true;
+}
+
+struct TranscriptComponentData {
+  Tui* Controller;
+  TranscriptLayout Layout;
+  u16 Height;
+  bool HasSelection;
+  TranscriptSelection Selection;
+};
+
+bool EventTranscriptNode(UiContext* ui, UiNode* node, const UiEvent& event);
+
+void CancelTranscriptCapture(void* persistent) {
+  Tui* t = (Tui*)persistent;
+  if (!t) return;
+  t->ScrollbarDragging = false;
+  t->PressedEntryId = 0;
+  t->TranscriptDragging = false;
+  t->SelectionEdgeDirection = 0;
+  t->NextSelectionScrollMs = 0;
+}
+
+Style SelectionTransform(Style style, void* user) {
+  Tui* t = (Tui*)user;
+  if (t->Color)
+    style.Bg = SELECTION_BG;
+  else if (style.Attr & ATTR_UNDERLINE)
+    style.Attr |= ATTR_REVERSE;
+  else
+    style.Attr |= ATTR_UNDERLINE;
+  return style;
+}
+
+Style TranscriptHoverStyle(const Tui* t, Style style) {
+  if (t->Color)
+    style.Bg = 235;
+  else
+    style.Attr |= ATTR_DIM;
+  return style;
+}
+
+void PaintTranscriptNode(UiContext*, const UiNode* node, UiCanvas* canvas) {
+  TranscriptComponentData* data = (TranscriptComponentData*)node->User;
+  Tui* t = data->Controller;
+  for (u16 r = 0; r < data->Height; r++) {
+    u32 idx = data->Layout.Top + r;
+    if (idx >= data->Layout.Count) break;
+    const SpanLine* line = LineModel_At(&t->Model, idx);
+    bool hovered =
+        line->IsEntryStart && line->EntryId != 0 &&
+        line->EntryId == t->HoveredEntryId;
+    if (data->Layout.Cols && hovered)
+      UiCanvas_Fill(
+          canvas, UiRect{0, r, data->Layout.Cols, 1},
+          TranscriptHoverStyle(t, StyleDefault()));
+    DisplayRowLayout layout =
+        LineModel_LayoutDisplayRow(line, data->Layout.Cols);
+    DisplayRowIterator iterator = {};
+    DisplayRowRun run;
+    while (LineModel_NextDisplayRowRun(&layout, &iterator, &run)) {
+      Style style =
+          hovered ? TranscriptHoverStyle(t, run.St) : run.St;
+      UiCanvas_PutTextClipped(
+          canvas, run.Column, r, run.Text, style,
+          (u16)(run.Column + run.CellWidth));
+    }
+    DisplayRowRange selected;
+    if (data->HasSelection &&
+        TranscriptRangeForRow(&data->Selection, idx, &layout, &selected))
+      UiCanvas_TransformStyles(
+          canvas, UiRect{selected.Start, r,
+                         (u16)(selected.End - selected.Start), 1},
+          SelectionTransform, t);
+  }
+
+  t->LastScrollbarThumbTop = 0;
+  t->LastScrollbarThumbH = 0;
+  if (!t->ScrollbarVisible || data->Height == 0 ||
+      data->Layout.Count <= data->Height)
+    return;
+  ScrollbarGeometry geometry =
+      CalcScrollbarGeometry(data->Layout.Count, data->Height, data->Layout.Top);
+  t->LastScrollbarThumbTop = geometry.ThumbTop;
+  t->LastScrollbarThumbH = geometry.ThumbH;
+  u16 x = (u16)(t->Scr.Cols - 1);
+  Style track =
+      t->Color ? StyleMake(238, COL_DEFAULT, ATTR_NONE)
+               : StyleMake(COL_DEFAULT, COL_DEFAULT, ATTR_DIM);
+  Style thumb =
+      t->Color ? StyleMake(250, COL_DEFAULT, ATTR_NONE)
+               : StyleMake(COL_DEFAULT, COL_DEFAULT, ATTR_BOLD);
+  for (u16 y = 0; y < data->Height; y++)
+    UiCanvas_PutChar(canvas, x, y, 0x2595, track);
+  for (u16 y = 0; y < geometry.ThumbH; y++)
+    UiCanvas_PutChar(canvas, x, (u16)(geometry.ThumbTop + y), 0x2595,
+                     thumb);
+}
+
+UiLayoutStyle Positioned(u16 x, u16 y, u16 width, u16 height) {
+  UiLayoutStyle layout = {};
+  layout.Width = Ui_Cells(width);
+  layout.Height = Ui_Cells(height);
+  layout.OffsetX = (i16)x;
+  layout.OffsetY = (i16)y;
+  return layout;
+}
+
+void BuildStatusComponents(Tui* t, u16 statusY, u16 cols) {
+  char* left = (char*)Ui_FrameAlloc(&t->Ui, 256, alignof(char));
+  char* right = (char*)Ui_FrameAlloc(&t->Ui, 256, alignof(char));
+  u32 leftLength = 0;
+  u32 rightLength = 0;
+  FormatStatus(t, left, 256, &leftLength, right, 256, &rightLength);
+
+  UiLayoutStyle row = Positioned(0, statusY, cols, 1);
+  row.Padding.Left = 1;
+  Ui_BeginRow(&t->Ui, Ui_Key(SVL("status")), row);
+  Style style = TuiSt(t, 244, ATTR_NONE);
+  UiTextProps leftProps = {};
+  leftProps.Layout.Width = Ui_Fill();
+  leftProps.Layout.Height = Ui_Fill();
+  leftProps.StyleValue = style;
+  Ui_Text(&t->Ui, Ui_Key(SVL("left")), StrView{left, leftLength}, leftProps);
+  UiTextProps rightProps = {};
+  rightProps.Layout.Width = Ui_Content();
+  rightProps.Layout.Height = Ui_Fill();
+  rightProps.StyleValue = style;
+  Ui_Text(&t->Ui, Ui_Key(SVL("right")), StrView{right, rightLength},
+          rightProps);
+  Ui_EndContainer(&t->Ui);
+}
+
+void BuildCwdComponent(Tui* t, u16 cwdY, u16 cols) {
+  if (t->Cwd.Length == 0 || cols <= 1) return;
+  Style style = TuiSt(t, 244, ATTR_NONE);
+  UiTextSpan spans[4];
+  u32 count = 0;
+  spans[count++] = UiTextSpan{t->Cwd, style};
+  if (t->Branch.Length) {
+    spans[count++] = UiTextSpan{SVL("  (\xe2\x8e\x87 "), style};
+    spans[count++] = UiTextSpan{t->Branch, style};
+    spans[count++] = UiTextSpan{SVL(")"), style};
+  }
+  UiTextProps props = {};
+  props.Layout = Positioned(1, cwdY, (u16)(cols - 1), 1);
+  props.StyleValue = style;
+  Ui_StyledText(&t->Ui, Ui_Key(SVL("cwd")), spans, count, props);
+}
+
 void ComposeAtSize(Tui* t, u16 cols, u16 rows, u64 nowMs) {
   bool sizeChanged = cols != t->Scr.Cols || rows != t->Scr.Rows;
   if (sizeChanged) {
     ClearTranscriptSelection(t);
     Screen_Resize(&t->Scr, cols, rows);
   }
-  t->LastCols = cols;
   if (cols < 6 || rows < 6) {
     ViewportAnchor anchor = CaptureViewportAnchor(t);
     ResetScrollbar(t);
     t->LastPaneH = 0;
-    t->LastInputH = 0;
     t->LastTop = 0;
     LineModel_SetWidth(&t->Model, cols);
     RestoreViewportAnchor(t, anchor);
-    Screen_BeginFrame(&t->Scr);
+    Ui_BeginFrame(&t->Ui, &t->Scr);
+    Ui_EndFrame(&t->Ui);
+    Ui_Render(&t->Ui, cols, rows);
     return;
   }
 
@@ -929,12 +920,13 @@ void ComposeAtSize(Tui* t, u16 cols, u16 rows, u64 nowMs) {
 
   // Input box layout: left/right border column + one padding column each side.
   u16 textW = (u16)(cols > 4 ? cols - 4 : 1);
-  InputLayout il;
-  LayoutInput(LineEdit_Text(&t->Edit), LineEdit_Cursor(&t->Edit), textW, &il);
+  LineEditLayout inputLayout;
+  LineEdit_Layout(&t->Edit, textW, &inputLayout);
   u16 maxInputH = (u16)(rows / 2);
   if (maxInputH < 1) maxInputH = 1;
   if (maxInputH > 10) maxInputH = 10;
-  u16 inputH = (u16)(il.RowCount < maxInputH ? il.RowCount : maxInputH);
+  u16 inputH =
+      (u16)(inputLayout.Count < maxInputH ? inputLayout.Count : maxInputH);
   if (inputH < 1) inputH = 1;
 
   // Reserve the bottom row for the status bar, a top/bottom border row for the
@@ -961,13 +953,8 @@ void ComposeAtSize(Tui* t, u16 cols, u16 rows, u64 nowMs) {
   // Leave a blank row between the transcript and the sticky context line when
   // the terminal is tall enough to retain at least one transcript row.
   u16 paneH = cwdY > 1 ? (u16)(cwdY - 1) : cwdY;  // rows [0, paneH)
-  t->LastInputTop = inputTop;
-  t->LastInputH = inputH;
-
   TranscriptLayout transcript =
       LayoutTranscript(t, cols, paneH, sizeChanged || paneH != t->LastPaneH);
-
-  Screen_BeginFrame(&t->Scr);
 
   // Transcript.
   if (t->HasMouse && t->MouseY < paneH &&
@@ -977,47 +964,110 @@ void ComposeAtSize(Tui* t, u16 cols, u16 rows, u64 nowMs) {
   } else {
     t->HoveredEntryId = 0;
   }
-  TranscriptSelection selection;
+  TranscriptSelection selection = {};
   bool hasSelection = GetTranscriptSelection(t, &selection);
-
-  for (u16 r = 0; r < paneH; r++) {
-    u32 idx = transcript.Top + r;
-    if (idx >= transcript.Count) break;
-    const SpanLine* line = LineModel_At(&t->Model, idx);
-    bool hovered =
-        line->IsEntryStart && line->EntryId != 0 && line->EntryId == t->HoveredEntryId;
-    RenderSpanLine(t, r, idx, line, transcript.Cols, hovered,
-                   hasSelection ? &selection : nullptr);
+  u32 firstRow = inputLayout.CursorRow >= inputH
+                     ? inputLayout.CursorRow - inputH + 1
+                     : 0;
+  if (t->InputUi.Dragging) {
+    u32 maxFirstRow =
+        inputLayout.Count > inputH ? inputLayout.Count - inputH : 0;
+    firstRow = t->InputUi.FirstRow < maxFirstRow
+                   ? t->InputUi.FirstRow
+                   : maxFirstRow;
   }
-  DrawScrollbar(t, paneH, transcript.Count, transcript.Top);
 
-  // Status.
-  ComposeStatus(t, statusY, cols);
+  Ui_BeginFrame(&t->Ui, &t->Scr);
+  UiLayoutStyle root = {};
+  root.Width = Ui_Fill();
+  root.Height = Ui_Fill();
+  Ui_BeginStack(&t->Ui, Ui_Key(SVL("root")), root);
 
-  // Composer box (scroll within if taller than the box).
-  DrawInputBox(t, topBorderY, bottomBorderY, inputTop, inputH, cols);
-  u32 firstRow = il.CurRow >= inputH ? il.CurRow - inputH + 1 : 0;
-  if (t->DragDomain == TuiDragDomain::Composer) {
-    u32 maxFirstRow = il.RowCount > inputH ? il.RowCount - inputH : 0;
-    firstRow = t->LastInputFirstRow < maxFirstRow ? t->LastInputFirstRow : maxFirstRow;
+  TranscriptComponentData* transcriptData =
+      (TranscriptComponentData*)Ui_FrameAlloc(
+          &t->Ui, sizeof(TranscriptComponentData),
+          alignof(TranscriptComponentData));
+  *transcriptData =
+      TranscriptComponentData{t, transcript, paneH, hasSelection, selection};
+  UiNodeDesc transcriptNode = {};
+  transcriptNode.Kind = UiNodeKind::Custom;
+  transcriptNode.Key = Ui_Key(SVL("transcript"));
+  transcriptNode.Ops.Paint = PaintTranscriptNode;
+  transcriptNode.Ops.Event = EventTranscriptNode;
+  transcriptNode.Ops.Cancel = CancelTranscriptCapture;
+  transcriptNode.User = transcriptData;
+  transcriptNode.Persistent = t;
+  transcriptNode.Layout = Positioned(0, 0, cols, paneH);
+  Ui_Leaf(&t->Ui, transcriptNode);
+
+  BuildCwdComponent(t, cwdY, cols);
+
+  UiBorderProps inputBorder = {};
+  inputBorder.Layout =
+      Positioned(0, topBorderY, cols, (u16)(inputH + 2));
+  inputBorder.StyleValue = TuiSt(t, 250, ATTR_NONE);
+  Ui_BeginBorder(&t->Ui, Ui_Key(SVL("composer-border")), inputBorder);
+  Ui_EndContainer(&t->Ui);
+
+  t->InputUi.Edit = &t->Edit;
+  t->InputUi.FirstRow = firstRow;
+  UiTextInputProps inputProps = {};
+  inputProps.Layout =
+      Positioned(1, inputTop, (u16)(cols - 2), inputH);
+  inputProps.State = &t->InputUi;
+  inputProps.TextStyle = StyleDefault();
+  inputProps.SelectionStyle =
+      t->Color ? StyleMake(COL_DEFAULT, SELECTION_BG, ATTR_NONE)
+               : StyleMake(COL_DEFAULT, COL_DEFAULT, ATTR_UNDERLINE);
+  inputProps.WrapWidth = textW;
+  inputProps.InsetLeft = 1;
+  inputProps.InsetRight = 1;
+  inputProps.OnSubmit = ComposerSubmit;
+  inputProps.OnChange = ComposerChanged;
+  inputProps.OnInteract = ComposerInteract;
+  inputProps.OnUpBoundary = ComposerHistoryPrevious;
+  inputProps.OnDownBoundary = ComposerHistoryNext;
+  inputProps.User = t;
+  Ui_TextInput(&t->Ui, Ui_Key(SVL("composer-input")), inputProps);
+
+  BuildStatusComponents(t, statusY, cols);
+
+  if (commandPalette && paletteH) {
+    CommandPaletteComponentData* paletteData =
+        (CommandPaletteComponentData*)Ui_FrameAlloc(
+            &t->Ui, sizeof(CommandPaletteComponentData),
+            alignof(CommandPaletteComponentData));
+    *paletteData = CommandPaletteComponentData{
+        t, commandQuery, commandMatches, topBorderY, paletteH, cols};
+    UiNodeDesc paletteNode = {};
+    paletteNode.Kind = UiNodeKind::Custom;
+    paletteNode.Key = Ui_Key(SVL("command-palette"));
+    paletteNode.Ops.Paint = PaintCommandPaletteNode;
+    paletteNode.User = paletteData;
+    paletteNode.Layout.Width = Ui_Fill();
+    paletteNode.Layout.Height = Ui_Fill();
+    Ui_Leaf(&t->Ui, paletteNode);
   }
-  t->LastInputFirstRow = firstRow;
-  StrView inputText = LineEdit_Text(&t->Edit);
-  for (u16 i = 0; i < inputH; i++) {
-    u32 rr = firstRow + i;
-    if (rr >= il.RowCount) break;
-    Screen_PutText(&t->Scr, 2, (u16)(inputTop + i), il.Rows[rr], StyleDefault(), (u16)(cols - 1));
-    HighlightInputSelection(t, (u16)(inputTop + i), il.Rows[rr], inputText, 2);
-  }
-  u16 curScreenRow = (u16)(inputTop + (il.CurRow - firstRow));
-  u16 curScreenCol = (u16)(2 + il.CurCol);
-  if (curScreenCol >= (u16)(cols - 1)) curScreenCol = (u16)(cols - 2);
-  Screen_SetCursor(&t->Scr, true, curScreenCol, curScreenRow);
 
-  // Sticky context line above the prompt.
-  ComposeCwd(t, cwdY, cols);
-  ComposeCommandPalette(t, commandQuery, commandMatches, topBorderY, paletteH, cols);
-  ComposeModal(t, cols, topBorderY);
+  if (t->ModalKind != TuiModalKind::None &&
+      t->ModalResult == TuiModalResult::Pending) {
+    ModalComponentData* modalData =
+        (ModalComponentData*)Ui_FrameAlloc(
+            &t->Ui, sizeof(ModalComponentData), alignof(ModalComponentData));
+    *modalData = ModalComponentData{t, cols, topBorderY};
+    UiNodeDesc modalNode = {};
+    modalNode.Kind = UiNodeKind::Custom;
+    modalNode.Key = Ui_Key(SVL("modal"));
+    modalNode.Ops.Paint = PaintModalNode;
+    modalNode.User = modalData;
+    modalNode.Layout.Width = Ui_Fill();
+    modalNode.Layout.Height = Ui_Fill();
+    Ui_Leaf(&t->Ui, modalNode);
+  }
+
+  Ui_EndContainer(&t->Ui);
+  Ui_EndFrame(&t->Ui);
+  Ui_Render(&t->Ui, cols, rows);
 }
 
 void Compose(Tui* t) {
@@ -1104,25 +1154,6 @@ u64 HitTestEntry(const Tui* t, u16 x, u16 y) {
   if (t->ScrollbarVisible && x == ScrollbarX(t)) return 0;
   const SpanLine* line = LineModel_At(&t->Model, t->LastTop + y);
   return line && line->IsEntryStart ? line->EntryId : 0;
-}
-
-bool HitComposer(const Tui* t, u16 x, u16 y) {
-  return t->LastInputH != 0 && y >= t->LastInputTop &&
-         y < (u16)(t->LastInputTop + t->LastInputH) && x > 0 &&
-         (u32)x + 1u < t->LastCols;
-}
-
-void SetComposerMouseCursor(Tui* t, u16 x, u16 y, bool extend = false) {
-  if (t->LastInputH == 0 || t->LastCols < 6) return;
-  u16 screenRow = y;
-  if (screenRow < t->LastInputTop) screenRow = t->LastInputTop;
-  u16 lastRow = (u16)(t->LastInputTop + t->LastInputH - 1u);
-  if (screenRow > lastRow) screenRow = lastRow;
-  u32 row = t->LastInputFirstRow + screenRow - t->LastInputTop;
-  u32 col = x > 2 ? x - 2u : 0;
-  u16 textW = (u16)(t->LastCols - 4u);
-  if (col > textW) col = textW;
-  LineEdit_SetCursorAt(&t->Edit, textW, row, col, extend);
 }
 
 u16 TranscriptMouseCell(const Tui* t, u16 x) {
@@ -1287,18 +1318,13 @@ void HandleTextKey(Tui* t, const Key& k) {
 }
 
 void UpdateMouseDrag(Tui* t) {
-  if (t->DragDomain == TuiDragDomain::None && t->PressedEntryId == 0) return;
+  if (!t->TranscriptDragging && t->PressedEntryId == 0) return;
   if (t->MouseX != t->MouseDownX || t->MouseY != t->MouseDownY) {
     t->MouseDragMoved = true;
     t->PressedEntryId = 0;
   }
   if (!t->MouseDragMoved) return;
-  if (t->DragDomain == TuiDragDomain::None) return;
-
-  if (t->DragDomain == TuiDragDomain::Composer) {
-    SetComposerMouseCursor(t, t->MouseX, t->MouseY, true);
-    return;
-  }
+  if (!t->TranscriptDragging) return;
 
   t->Top = t->LastTop;
   t->Follow = false;
@@ -1319,7 +1345,7 @@ void UpdateMouseDrag(Tui* t) {
 }
 
 bool AdvanceSelectionTick(Tui* t, u64 nowMs) {
-  if (t->DragDomain != TuiDragDomain::Transcript || t->SelectionEdgeDirection == 0 ||
+  if (!t->TranscriptDragging || t->SelectionEdgeDirection == 0 ||
       t->LastPaneH == 0 || !ValidateTranscriptSelection(t))
     return false;
   if (t->NextSelectionScrollMs != 0 && nowMs < t->NextSelectionScrollMs) return false;
@@ -1337,6 +1363,101 @@ bool AdvanceSelectionTick(Tui* t, u64 nowMs) {
   if (t->TranscriptFocusRow >= count) t->TranscriptFocusRow = count - 1u;
   t->TranscriptFocusCell = TranscriptMouseCell(t, t->MouseX);
   RefreshTranscriptSelectionHash(t);
+  return true;
+}
+
+Key MouseKey(const UiEvent& event) {
+  Key key = {};
+  key.MouseX =
+      event.X < 0 ? 0 : (event.X > 0xffff ? 0xffff : (u16)event.X);
+  key.MouseY =
+      event.Y < 0 ? 0 : (event.Y > 0xffff ? 0xffff : (u16)event.Y);
+  return key;
+}
+
+bool EventTranscriptNode(UiContext* ui, UiNode* node,
+                         const UiEvent& event) {
+  TranscriptComponentData* data = (TranscriptComponentData*)node->User;
+  Tui* t = data->Controller;
+  if (event.Kind == UiEventKind::Wheel) {
+    ScrollBy(t, event.Delta * kWheelStep);
+    return true;
+  }
+
+  if (event.Kind != UiEventKind::MouseMove &&
+      event.Kind != UiEventKind::MouseDown &&
+      event.Kind != UiEventKind::MouseUp)
+    return false;
+  Key key = MouseKey(event);
+
+  if (event.Kind == UiEventKind::MouseMove) {
+    if (t->ScrollbarDragging) {
+      DragScrollbar(t, key);
+      return true;
+    }
+    UpdateMouse(t, key);
+    UpdateMouseDrag(t);
+    return true;
+  }
+
+  if (event.Kind == UiEventKind::MouseDown) {
+    if (IsScrollbarHit(t, key)) {
+      BeginScrollbarDrag(t, key);
+      Ui_CapturePointer(ui, node->Id);
+      return true;
+    }
+    UpdateMouse(t, key);
+    t->MouseDragMoved = false;
+    t->MouseDownX = t->MouseX;
+    t->MouseDownY = t->MouseY;
+    LineEdit_ClearSelection(&t->Edit);
+    if (TranscriptMousePoint(
+            t, t->MouseX, t->MouseY, &t->TranscriptAnchorRow,
+            &t->TranscriptAnchorCell)) {
+      ClearTranscriptSelection(t);
+      t->Top = t->LastTop;
+      t->TranscriptFocusRow = t->TranscriptAnchorRow;
+      t->TranscriptFocusCell = t->TranscriptAnchorCell;
+      t->TranscriptSelectionRevision =
+          LineModel_DisplayRevision(&t->Model);
+      RefreshTranscriptSelectionHash(t);
+      t->TranscriptDragging = true;
+      t->PressedEntryId = t->HoveredEntryId;
+      Ui_CapturePointer(ui, node->Id);
+    } else {
+      ClearTranscriptSelection(t);
+      t->TranscriptDragging = false;
+      t->PressedEntryId = 0;
+    }
+    return true;
+  }
+
+  if (t->ScrollbarDragging) {
+    DragScrollbar(t, key);
+    t->ScrollbarDragging = false;
+    Ui_ReleasePointer(ui, node->Id);
+    return true;
+  }
+  UpdateMouse(t, key);
+  UpdateMouseDrag(t);
+  bool transcriptDragging = t->TranscriptDragging;
+  u64 pressed = t->PressedEntryId;
+  t->PressedEntryId = 0;
+  bool activate =
+      !t->MouseDragMoved && pressed != 0 && pressed == t->HoveredEntryId;
+  t->TranscriptDragging = false;
+  t->SelectionEdgeDirection = 0;
+  t->NextSelectionScrollMs = 0;
+  if (activate) {
+    ViewportAnchor anchor = CaptureViewportAnchor(t);
+    if (LineModel_ToggleEntry(&t->Model, pressed))
+      RestoreViewportAnchor(t, anchor);
+    ClearTranscriptSelection(t);
+  } else if (transcriptDragging &&
+             (!t->MouseDragMoved || !TranscriptPointsDiffer(t))) {
+    ClearTranscriptSelection(t);
+  }
+  Ui_ReleasePointer(ui, node->Id);
   return true;
 }
 
@@ -1388,6 +1509,67 @@ bool DrainShutdownOutput(Tui* t, ScreenWriter write, void* user) {
   StrView clipboard = StrBuf_View(&t->ClipboardOsc);
   Mutex_Unlock(&t->Lock);
   if (writeClipboard && write) write(user, clipboard.Data, clipboard.Length);
+  return true;
+}
+
+bool IsComposerKey(KeyKind kind) {
+  switch (kind) {
+    case KeyKind::Char:
+    case KeyKind::Enter:
+    case KeyKind::Newline:
+    case KeyKind::Backspace:
+    case KeyKind::Delete:
+    case KeyKind::Tab:
+    case KeyKind::Left:
+    case KeyKind::Right:
+    case KeyKind::Up:
+    case KeyKind::Down:
+    case KeyKind::Home:
+    case KeyKind::End:
+    case KeyKind::WordLeft:
+    case KeyKind::WordRight:
+    case KeyKind::CtrlU:
+    case KeyKind::CtrlK:
+    case KeyKind::CtrlW:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool DispatchComposerKey(Tui* t, const Key& key) {
+  if (t->Ui.Nodes.Count == 0 || !IsComposerKey(key.Kind)) return false;
+  return Ui_Dispatch(&t->Ui, Ui_EventFromKey(key));
+}
+
+bool DispatchPointerKey(Tui* t, const Key& key) {
+  bool hasFrame = t->Ui.Nodes.Count != 0;
+  if (key.Kind == KeyKind::ScrollUp || key.Kind == KeyKind::ScrollDown) {
+    if (hasFrame && Ui_Dispatch(&t->Ui, Ui_EventFromKey(key))) return true;
+    ScrollBy(t, key.Kind == KeyKind::ScrollUp ? -kWheelStep : kWheelStep);
+    return true;
+  }
+  if (key.Kind != KeyKind::MouseMove &&
+      key.Kind != KeyKind::MouseLeftDown &&
+      key.Kind != KeyKind::MouseLeftUp)
+    return false;
+
+  UpdateMousePosition(t, key);
+  if (key.Kind == KeyKind::MouseLeftUp) {
+    if (hasFrame)
+      Ui_Dispatch(&t->Ui, Ui_EventFromKey(key));
+    return true;
+  }
+  if (hasFrame && Ui_Dispatch(&t->Ui, Ui_EventFromKey(key))) return true;
+  if (key.Kind == KeyKind::MouseMove) {
+    t->HoveredEntryId = 0;
+    return true;
+  }
+
+  Ui_CancelPointer(&t->Ui);
+  LineEdit_ClearSelection(&t->Edit);
+  ClearTranscriptSelection(t);
+  CancelTranscriptCapture(t);
   return true;
 }
 
@@ -1450,6 +1632,13 @@ void HandleKey(Tui* t, const Key& k) {
         return;
       default: break;
     }
+  }
+
+  if (DispatchPointerKey(t, k)) {
+    return;
+  }
+  if (DispatchComposerKey(t, k)) {
+    return;
   }
 
   switch (k.Kind) {
@@ -1544,76 +1733,6 @@ void HandleKey(Tui* t, const Key& k) {
       }
       break;
     }
-    case KeyKind::ScrollUp: ScrollBy(t, -kWheelStep); break;
-    case KeyKind::ScrollDown: ScrollBy(t, kWheelStep); break;
-    case KeyKind::MouseMove:
-      if (t->ScrollbarDragging) {
-        DragScrollbar(t, k);
-        break;
-      }
-      UpdateMouse(t, k);
-      UpdateMouseDrag(t);
-      break;
-    case KeyKind::MouseLeftDown: {
-      if (IsScrollbarHit(t, k)) {
-        BeginScrollbarDrag(t, k);
-        break;
-      }
-      UpdateMouse(t, k);
-      t->MouseDragMoved = false;
-      t->MouseDownX = t->MouseX;
-      t->MouseDownY = t->MouseY;
-      if (HitComposer(t, t->MouseX, t->MouseY)) {
-        ClearTranscriptSelection(t);
-        SetComposerMouseCursor(t, t->MouseX, t->MouseY);
-        t->DragDomain = TuiDragDomain::Composer;
-        t->PressedEntryId = 0;
-      } else if (TranscriptMousePoint(
-                     t, t->MouseX, t->MouseY, &t->TranscriptAnchorRow,
-                     &t->TranscriptAnchorCell)) {
-        LineEdit_ClearSelection(&t->Edit);
-        ClearTranscriptSelection(t);
-        t->Top = t->LastTop;
-        t->TranscriptFocusRow = t->TranscriptAnchorRow;
-        t->TranscriptFocusCell = t->TranscriptAnchorCell;
-        t->TranscriptSelectionRevision = LineModel_DisplayRevision(&t->Model);
-        RefreshTranscriptSelectionHash(t);
-        t->DragDomain = TuiDragDomain::Transcript;
-        t->PressedEntryId = t->HoveredEntryId;
-      } else {
-        LineEdit_ClearSelection(&t->Edit);
-        ClearTranscriptSelection(t);
-        t->DragDomain = TuiDragDomain::None;
-        t->PressedEntryId = 0;
-      }
-      break;
-    }
-    case KeyKind::MouseLeftUp: {
-      if (t->ScrollbarDragging) {
-        DragScrollbar(t, k);
-        t->ScrollbarDragging = false;
-        break;
-      }
-      UpdateMouse(t, k);
-      UpdateMouseDrag(t);
-      TuiDragDomain dragDomain = t->DragDomain;
-      u64 pressed = t->PressedEntryId;
-      t->PressedEntryId = 0;
-      bool activate =
-          !t->MouseDragMoved && pressed != 0 && pressed == t->HoveredEntryId;
-      t->DragDomain = TuiDragDomain::None;
-      t->SelectionEdgeDirection = 0;
-      t->NextSelectionScrollMs = 0;
-      if (activate) {
-        ViewportAnchor anchor = CaptureViewportAnchor(t);
-        if (LineModel_ToggleEntry(&t->Model, pressed)) RestoreViewportAnchor(t, anchor);
-        ClearTranscriptSelection(t);
-      } else if (dragDomain == TuiDragDomain::Transcript &&
-                 (!t->MouseDragMoved || !TranscriptPointsDiffer(t))) {
-        ClearTranscriptSelection(t);
-      }
-      break;
-    }
     case KeyKind::CtrlC: {
       bool copied = false;
       if (LineEdit_HasSelection(&t->Edit)) {
@@ -1701,8 +1820,8 @@ void RenderLoop(void* arg) {
     u64 lastFrame = MonotonicMillis();
 
     Mutex_Lock(&t->Lock);
-    bool edgeDragging = t->DragDomain == TuiDragDomain::Transcript &&
-                        t->SelectionEdgeDirection != 0;
+    bool edgeDragging =
+        t->TranscriptDragging && t->SelectionEdgeDirection != 0;
     u32 interval = edgeDragging
                        ? kMinFrameMs
                        : (Tui_HasPendingDisplay(t)
@@ -1725,10 +1844,6 @@ void RenderLoop(void* arg) {
 
 }  // namespace
 
-void Tui_ComposeFrame(Tui* t, u16 cols, u16 rows) {
-  ComposeAtSize(t, cols, rows, MonotonicMillis());
-}
-
 bool Tui_AdvanceStream(Tui* t, u64 nowMs) {
   bool changed = PumpDisplay(t, nowMs);
   ValidateTranscriptSelection(t);
@@ -1739,7 +1854,7 @@ bool Tui_HasPendingDisplay(const Tui* t) {
   return StreamReveal_HasPending(&t->Reveal) || HasQueuedDisplayEvents(t);
 }
 
-void Tui_TestCompose(Tui* t, u16 cols, u16 rows, u64 nowMs) {
+void Tui_ComposeFrame(Tui* t, u16 cols, u16 rows, u64 nowMs) {
   ComposeAtSize(t, cols, rows, nowMs ? nowMs : MonotonicMillis());
 }
 
@@ -1806,8 +1921,7 @@ void Tui_LoadStartupContext(Tui* t) {
 void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts) {
   memset(t, 0, sizeof(*t));
   t->Mem = mem;
-  g_color = opts.Color;
-  LineModel_SetColorEnabled(opts.Color);
+  t->Color = opts.Color;
   t->ModelName = StrView_Dup(mem, opts.ModelName);
   if (opts.Commands && opts.CommandCount) {
     t->Commands = ArenaPushArray(mem, TuiCommandSpec, opts.CommandCount);
@@ -1821,9 +1935,12 @@ void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts) {
   t->ScreenMem = ArenaCreate();
   t->ScreenUp = true;
   Screen_Init(&t->Scr, &t->ScreenMem, nullptr, nullptr);
+  Ui_Init(&t->Ui);
+  t->UiUp = true;
   t->SessionMem = ArenaCreate();
-  LineModel_Init(&t->Model, &t->SessionMem, 80, 5000);
+  LineModel_Init(&t->Model, &t->SessionMem, 80, 5000, opts.Color);
   LineEdit_Init(&t->Edit, &t->SessionMem);
+  t->InputUi.Edit = &t->Edit;
   LineEdit_Init(&t->ModalEdit, &t->SessionMem);
   KeyDecoder_Init(&t->Dec);
   StreamReveal_Init(&t->Reveal, &t->SessionMem);
@@ -1849,6 +1966,8 @@ bool Tui_ClearSession(Tui* t) {
   }
 
   bool cancelModal = t->ModalResult == TuiModalResult::Pending;
+  Ui_CancelPointer(&t->Ui);
+  t->Ui.Active = 0;
   u16 width = t->Model.Width;
   u32 cap = t->Model.Cap;
   Arena nextSession = ArenaCreate();
@@ -1863,8 +1982,9 @@ bool Tui_ClearSession(Tui* t) {
   LineModel_Release(&t->Model);
   ArenaRelease(&t->SessionMem);
   t->SessionMem = nextSession;
-  LineModel_Init(&t->Model, &t->SessionMem, width, cap);
+  LineModel_Init(&t->Model, &t->SessionMem, width, cap, t->Color);
   LineEdit_Init(&t->Edit, &t->SessionMem);
+  t->InputUi = UiTextInputState{&t->Edit, 0, false};
   LineEdit_Init(&t->ModalEdit, &t->SessionMem);
   KeyDecoder_Init(&t->Dec);
   StreamReveal_Init(&t->Reveal, &t->SessionMem);
@@ -1915,7 +2035,7 @@ bool Tui_ClearSession(Tui* t) {
   t->MouseDownY = 0;
   t->HasMouse = false;
   t->MouseDragMoved = false;
-  t->DragDomain = TuiDragDomain::None;
+  t->TranscriptDragging = false;
   t->TranscriptAnchorRow = 0;
   t->TranscriptFocusRow = 0;
   t->TranscriptAnchorCell = 0;
@@ -1924,10 +2044,6 @@ bool Tui_ClearSession(Tui* t) {
   t->TranscriptSelectionHash = 0;
   t->SelectionEdgeDirection = 0;
   t->NextSelectionScrollMs = 0;
-  t->LastCols = 0;
-  t->LastInputTop = 0;
-  t->LastInputH = 0;
-  t->LastInputFirstRow = 0;
 
   if (cancelModal) Cond_Broadcast(&t->ModalCv);
   Wake(t);
@@ -1951,6 +2067,10 @@ void Tui_Stop(Tui* t) {
     t->InputThreadUp = false;
   }
   Term_Exit(&t->Trm);
+  if (t->UiUp) {
+    Ui_Release(&t->Ui);
+    t->UiUp = false;
+  }
   if (t->ScreenUp) {
     ArenaRelease(&t->ScreenMem);
     t->ScreenUp = false;
@@ -2069,6 +2189,7 @@ bool Tui_BeginSelection(Tui* t, StrView title, const StrView* options, u32 optio
     Mutex_Unlock(&t->Lock);
     return false;
   }
+  Ui_CancelPointer(&t->Ui);
   t->ModalOptions = ArenaPushArray(&t->SessionMem, StrView, optionCount);
   for (u32 i = 0; i < optionCount; i++)
     t->ModalOptions[i] = StrView_Dup(&t->SessionMem, options[i]);
@@ -2091,6 +2212,7 @@ bool Tui_BeginTextEntry(Tui* t, StrView title, StrView prompt, StrView initial) 
     Mutex_Unlock(&t->Lock);
     return false;
   }
+  Ui_CancelPointer(&t->Ui);
   LineEdit_Clear(&t->ModalEdit);
   LineEdit_InsertText(&t->ModalEdit, initial);
   t->ModalTitle = StrView_Dup(&t->SessionMem, title);
@@ -2230,7 +2352,7 @@ void Tui_ReplaceTranscript(Tui* t, const Message* messages, u32 count) {
   u16 width = t->Model.Width;
   u32 cap = t->Model.Cap;
   LineModel_Release(&t->Model);
-  LineModel_Init(&t->Model, &t->SessionMem, width, cap);
+  LineModel_Init(&t->Model, &t->SessionMem, width, cap, t->Color);
   StreamReveal_Init(&t->Reveal, &t->SessionMem);
   t->DisplayEvents = Array_Make<TuiDisplayEvent>(&t->SessionMem, 16);
   t->DisplayHead = 0;

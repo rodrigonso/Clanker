@@ -111,6 +111,11 @@ continuously across ~60fps frames at a capped UTF-8 scalar rate instead of
 painting a large received chunk all at once. Visual message/tool transitions
 wait behind queued text without blocking the agent or tool execution.
 
+The interface is assembled with the internal, arena-backed `clank_ui`
+component library. Layout, focus, hit-testing, pointer capture, reusable
+widgets, and custom component integration are documented in
+[`docs/UI.md`](docs/UI.md).
+
 Keys: **Enter** sends · **Ctrl+J** / Alt+Enter inserts a newline · arrows move
 (↑/↓ across lines, then through history at the edges) · **Ctrl+←/→** word jump ·
 Home/End · **Shift** + movement selects composer text ·
