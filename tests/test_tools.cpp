@@ -106,15 +106,16 @@ static void TestRead(Arena* a) {
   remove(pimg);
 }
 
-// ---- bash ----------------------------------------------------------------
+// ---- shell ---------------------------------------------------------------
 
-static void TestBash(Arena* a) {
-  Tool bt = BashTool();
-  CHECK(bt.ReplayPolicy == ToolReplayPolicy::ManualReconcile);
+static void TestShell(Arena* a) {
+  Tool shell = ShellTool();
+  CHECK_ALL(StrView_Eq(shell.Name, SVL("shell")), StrView_Eq(shell.Label, SVL("Shell")),
+            shell.ReplayPolicy == ToolReplayPolicy::ManualReconcile);
 
   ToolResult out = {};
   StrBuf err = StrBuf_Make(a, 32);
-  bool ok = RunTool(bt, a, SV("{\"command\":\"echo hello123\"}"), &out, &err);
+  bool ok = RunTool(shell, a, SV("{\"command\":\"echo hello123\"}"), &out, &err);
   CHECK_ALL(ok, out.Content.Count == 1,
             StrView_Contains(out.Content.Data[0].Text, "hello123"),
             !StrView_Contains(out.Content.Data[0].Text, "exit code"));
@@ -122,7 +123,7 @@ static void TestBash(Arena* a) {
   // non-zero exit => error result
   ToolResult o2 = {};
   StrBuf e2 = StrBuf_Make(a, 32);
-  bool ok2 = RunTool(bt, a, SV("{\"command\":\"exit 3\"}"), &o2, &e2);
+  bool ok2 = RunTool(shell, a, SV("{\"command\":\"exit 3\"}"), &o2, &e2);
   CHECK_ALL(!ok2, StrView_Contains(StrBuf_View(&e2), "exited with code 3"));
 }
 
@@ -228,7 +229,7 @@ static void TestTreeTools(Arena* a) {
 void TestTools() {
   Arena a = ArenaCreate();
   TestRead(&a);
-  TestBash(&a);
+  TestShell(&a);
   TestWrite(&a);
   TestEdit(&a);
   TestTreeTools(&a);

@@ -13,12 +13,12 @@
 #include <unistd.h>
 #endif
 
-static void Bash_AppendHex16(StrBuf* b, u64 v) {
+static void Shell_AppendHex16(StrBuf* b, u64 v) {
   static const char* hex = "0123456789abcdef";
   for (i32 i = 15; i >= 0; --i) StrBuf_AppendChar(b, hex[(v >> ((u32)i * 4u)) & 0xFu]);
 }
 
-static StrView Bash_WriteTempOutput(Arena* arena, StrView output) {
+static StrView Shell_WriteTempOutput(Arena* arena, StrView output) {
   static u32 counter;
   counter++;
 
@@ -40,8 +40,8 @@ static StrView Bash_WriteTempOutput(Arena* arena, StrView output) {
   clock_gettime(CLOCK_REALTIME, &ts);
   u64 unique = ((u64)(u32)getpid() << 32) ^ (u64)(u32)ts.tv_nsec ^ (u64)counter;
 #endif
-  StrBuf_AppendCStr(&path, "pi-bash-");
-  Bash_AppendHex16(&path, unique);
+  StrBuf_AppendCStr(&path, "clank-shell-");
+  Shell_AppendHex16(&path, unique);
   StrBuf_AppendCStr(&path, ".log");
 
   FILE* f = fopen(StrBuf_CStr(&path), "wb");
@@ -53,7 +53,7 @@ static StrView Bash_WriteTempOutput(Arena* arena, StrView output) {
   return StrBuf_View(&path);
 }
 
-static void Bash_AppendTruncNotice(StrBuf* b, TruncResult tr, StrView path) {
+static void Shell_AppendTruncNotice(StrBuf* b, TruncResult tr, StrView path) {
   u32 a = tr.TotalLines > tr.OutputLines ? tr.TotalLines - tr.OutputLines + 1u : 1u;
   u32 c = tr.TotalLines;
   StrBuf_AppendCStr(b, "\n\n[Showing lines ");
@@ -68,8 +68,8 @@ static void Bash_AppendTruncNotice(StrBuf* b, TruncResult tr, StrView path) {
   StrBuf_AppendChar(b, ']');
 }
 
-static bool BashExec(void* ctx, Arena* arena, StrView id, StrView argsJson, volatile i32* abort,
-                     ToolResult* out, StrBuf* err) {
+static bool ShellExec(void* ctx, Arena* arena, StrView id, StrView argsJson, volatile i32* abort,
+                      ToolResult* out, StrBuf* err) {
   (void)ctx;
   (void)id;
   JsonValue* j = Json_Parse(arena, argsJson);
@@ -96,8 +96,8 @@ static bool BashExec(void* ctx, Arena* arena, StrView id, StrView argsJson, vola
     StrBuf_Append(&text, tr.Content);
   }
   if (tr.Truncated) {
-    StrView path = Bash_WriteTempOutput(arena, r.Output);
-    if (path.Length) Bash_AppendTruncNotice(&text, tr, path);
+    StrView path = Shell_WriteTempOutput(arena, r.Output);
+    if (path.Length) Shell_AppendTruncNotice(&text, tr, path);
   }
 
   if (r.TimedOut) {
@@ -119,16 +119,16 @@ static bool BashExec(void* ctx, Arena* arena, StrView id, StrView argsJson, vola
   return true;
 }
 
-Tool BashTool() {
+Tool ShellTool() {
   Tool t = {};
-  t.Name = SVL("bash");
-  t.Label = SVL("Bash");
-  t.Description = SVL("Run a bash command and return combined stdout/stderr.");
+  t.Name = SVL("shell");
+  t.Label = SVL("Shell");
+  t.Description = SVL("Run a shell command and return combined stdout/stderr.");
   t.ParamsJsonSchema = SVL(
-      "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"Bash "
+      "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"Shell "
       "command to execute\"},\"timeout\":{\"type\":\"number\",\"description\":\"Timeout in seconds "
       "(optional, no default timeout)\"}},\"required\":[\"command\"]}");
   t.ReplayPolicy = ToolReplayPolicy::ManualReconcile;
-  t.Execute = BashExec;
+  t.Execute = ShellExec;
   return t;
 }

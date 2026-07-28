@@ -3,7 +3,7 @@
 
 // Sanitize external (tool) output before it enters the display transcript.
 //
-// Tool output (e.g. a Windows `cmd.exe` command run via the bash tool) can carry
+// Tool output (e.g. a Windows `cmd.exe` command run via the shell tool) can carry
 // carriage returns (CRLF line endings), tabs, and ANSI/VT escape sequences. The
 // differential renderer stores one cell per scalar and re-emits it verbatim, so
 // a raw `\r` would snap the real cursor back to column 0 mid-row -- desyncing it

@@ -263,8 +263,8 @@ void TestTui() {
 
   ev = {};
   ev.Kind = AgentEventKind::ToolStart;
-  ev.ToolCallId = SVL("bash-1");
-  ev.ToolName = SVL("bash");
+  ev.ToolCallId = SVL("shell-1");
+  ev.ToolName = SVL("shell");
   ev.ToolArgsJson = SVL("{\"command\":\"ls\"}");
   Tui_AgentEvent(&t, ev);
   CHECK(t.State == TuiState::Streaming);
@@ -272,10 +272,10 @@ void TestTui() {
 
   ToolResult tr = {};
   tr.Content = Array_Make<Content>(&a, 1);
-  Array_Push(&tr.Content, Content_Text(SVL("hello-from-bash")));
+  Array_Push(&tr.Content, Content_Text(SVL("hello-from-shell")));
   ev = {};
   ev.Kind = AgentEventKind::ToolEnd;
-  ev.ToolCallId = SVL("bash-1");
+  ev.ToolCallId = SVL("shell-1");
   ev.Result = &tr;
   Tui_AgentEvent(&t, ev);
 
@@ -287,8 +287,8 @@ void TestTui() {
 
   // The transcript captured the unlabeled assistant text and compact tool row.
   CHECK_ALL(!AnyRow(&a, &t, "assistant"), AnyRow(&a, &t, "Hello world"),
-            AnyRow(&a, &t, "\xe2\x96\xa0  ls"),
-            !AnyRow(&a, &t, "hello-from-bash"), t.State == TuiState::Idle,
+            AnyRow(&a, &t, "\xe2\x96\xa0  Shell ls"),
+            !AnyRow(&a, &t, "hello-from-shell"), t.State == TuiState::Idle,
             t.Use.Output == 7);
 
   u64 assistantEntryId = t.Model.Entries.Data[0].Id;
@@ -311,7 +311,7 @@ void TestTui() {
   // turn cancels activation.
   Feed(&t, "\x1b[<0;2;3M\x1b[<0;2;3m");
   CHECK(!LineModel_IsEntryCollapsed(&t.Model, toolEntryId));
-  CHECK(AnyRow(&a, &t, "hello-from-bash"));
+  CHECK(AnyRow(&a, &t, "hello-from-shell"));
   Tui_ComposeFrame(&t, 80, 10);
   Feed(&t, "\x1b[<35;2;4M");  // expanded preview row is content, not a button
   CHECK(t.HoveredEntryId == 0);
@@ -321,16 +321,16 @@ void TestTui() {
   CHECK(!LineModel_IsEntryCollapsed(&t.Model, toolEntryId));
   Feed(&t, "\x1b[<0;2;3M\x1b[<0;2;3m");
   CHECK(LineModel_IsEntryCollapsed(&t.Model, toolEntryId));
-  CHECK(!AnyRow(&a, &t, "hello-from-bash"));
+  CHECK(!AnyRow(&a, &t, "hello-from-shell"));
 
   // Ctrl+O expands all when any tool is collapsed, then collapses an
   // all-expanded tool set.
   Feed(&t, "\x0f");
   CHECK(!LineModel_IsEntryCollapsed(&t.Model, toolEntryId));
-  CHECK(AnyRow(&a, &t, "hello-from-bash"));
+  CHECK(AnyRow(&a, &t, "hello-from-shell"));
   Feed(&t, "\x0f");
   CHECK(LineModel_IsEntryCollapsed(&t.Model, toolEntryId));
-  CHECK(!AnyRow(&a, &t, "hello-from-bash"));
+  CHECK(!AnyRow(&a, &t, "hello-from-shell"));
 
   // No queued prompt input pending.
   CHECK(t.QCount == 0);
@@ -783,7 +783,7 @@ void TestTui() {
     q = {};
     q.Kind = AgentEventKind::ToolStart;
     q.ToolCallId = SVL("queued-tool");
-    q.ToolName = SVL("bash");
+    q.ToolName = SVL("shell");
     q.ToolArgsJson = StrView{args, (u32)sizeof(args) - 1};
     Tui_AgentEvent(&tq, q);
 
@@ -845,7 +845,7 @@ void TestTui() {
     AgentEvent start = {};
     start.Kind = AgentEventKind::ToolStart;
     start.ToolCallId = SVL("long");
-    start.ToolName = SVL("bash");
+    start.ToolName = SVL("shell");
     start.ToolArgsJson = SVL("{\"command\":\"long-output\"}");
     Tui_AgentEvent(&t4, start);
 
@@ -971,7 +971,7 @@ void TestTui() {
     o6.Color = true;
     Tui t6;
     Tui_InitModel(&t6, &a6, o6);
-    LineModel_AddTool(&t6.Model, SVL("early"), SVL("bash"), SVL("{\"command\":\"echo\"}"));
+    LineModel_AddTool(&t6.Model, SVL("early"), SVL("shell"), SVL("{\"command\":\"echo\"}"));
     u64 toolId = t6.Model.Entries.Data[0].Id;
     CHECK(LineModel_ToggleEntry(&t6.Model, toolId));
     for (u32 i = 0; i < 12; i++)
@@ -1261,7 +1261,7 @@ void TestTui() {
     os.Color = false;
     Tui ts;
     Tui_InitModel(&ts, &as, os);
-    LineModel_AddTool(&ts.Model, SVL("copy-tool"), SVL("bash"),
+    LineModel_AddTool(&ts.Model, SVL("copy-tool"), SVL("shell"),
                       SVL("{\"command\":\"echo hi\"}"));
     CHECK(LineModel_FinishTool(&ts.Model, SVL("copy-tool"), SVL("result"),
                                SVL("hidden preview"), false));

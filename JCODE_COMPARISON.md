@@ -59,7 +59,7 @@ not committed physical memory.
 |---|---|---|
 | Providers | Anthropic and faux provider | Claude, OpenAI, Gemini, Copilot, Azure, OpenRouter, Bedrock, and many OpenAI-compatible providers |
 | Authentication | Anthropic API keys and OAuth with automatic refresh | Multiple OAuth providers, API keys, custom endpoints, and multi-account switching |
-| Coding tools | `read`, `write`, `edit`, `ls`, `find`, `grep`, `bash` | 30+ tools including patching, browser/web access, background jobs, memory, skills, MCP, todo, session search, and swarm |
+| Coding tools | `read`, `write`, `edit`, `ls`, `find`, `grep`, `shell` | 30+ tools including patching, browser/web access, background jobs, memory, skills, MCP, todo, session search, and swarm |
 | Editing | Exact and whitespace-tolerant multi-edit with unified diff | Edit, multiedit, unified patch, and Codex-compatible `apply_patch` |
 | Code intelligence | Native grep/find | Ripgrep-backed grep/find plus outline, trace, smart search, and context-aware result truncation |
 | LSP/tree-sitter | None | None found |

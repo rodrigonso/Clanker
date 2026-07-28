@@ -2049,15 +2049,15 @@ int main(int argc, char** argv) {
   }
   FileLock_Init();
   Tool tools[] = {ReadTool(), WriteTool(), EditTool(), LsTool(),
-                  FindTool(), GrepTool(), BashTool()};
+                  FindTool(), GrepTool(), ShellTool()};
 
   FauxStep steps[2] = {};
   Faux fauxState = {};
   if (faux) {
     steps[0].Text = SVL("Let me run a quick command.\n");
-    steps[0].ToolName = SVL("bash");
+    steps[0].ToolName = SVL("shell");
     steps[0].ToolId = SVL("t1");
-    steps[0].ToolArgsJson = SVL("{\"command\":\"echo hello-from-bash\"}");
+    steps[0].ToolArgsJson = SVL("{\"command\":\"echo hello-from-shell\"}");
     steps[1].Text = SVL("The command printed its greeting. All done.");
     steps[1].Stop = StopReason::Stop;
     fauxState.Steps = steps;
@@ -2067,7 +2067,7 @@ int main(int argc, char** argv) {
   AgentHarnessConfig harnessConfig = {};
   harnessConfig.SystemPrompt =
       SV("You are Clank, a concise coding assistant. You have these tools: "
-         "read, write, edit, ls, find, grep, and bash. Use them when they help "
+         "read, write, edit, ls, find, grep, and shell. Use them when they help "
          "answer the user.");
   harnessConfig.ModelInfo = model;
   harnessConfig.Tools = tools;

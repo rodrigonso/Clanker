@@ -57,7 +57,7 @@ its module tree; the orchestrator has no equivalent.
 | pi tool | Clank | notes |
 |---|---|---|
 | `read` | ✅ | `offset` / `limit`, verbatim text, pi-style head truncation, image content blocks; no image auto-resize |
-| `bash` | ✅ | `timeout` in **seconds**, process-tree kill, tail truncation with full-output temp log; no live UI streaming yet |
+| `shell` | ✅ | `timeout` in **seconds**, process-tree kill, tail truncation with full-output temp log; no live UI streaming yet |
 | `write` | ✅ | creates parent dirs, overwrites, serialized per-file |
 | `edit` | ✅ | exact + whitespace-tolerant fuzzy multi-edit, mutation lock, unified diff; NFKC omitted |
 | `grep` | ✅ | native regex engine (not `rg`), context / literal / ignore-case, gitignore-lite |
