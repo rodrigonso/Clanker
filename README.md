@@ -9,13 +9,13 @@ baseline (embedded JS engine + SDK object graphs) and duplicates the transcript
 several times in UTF-16. Clank runs the same agent loop with an
 arena-allocated, UTF-8, zero-copy transcript.
 
-**Measured:** a full faux run (libcurl init + agent + a `bash` tool execution)
+**Measured:** a full faux run (libcurl init + agent + a `shell` tool execution)
 peaks at **~6 MB RSS** (`CLANK_PRINT_MEM=1`).
 
 ## What it is
 
 A runnable Clank agent: the agent loop + the Anthropic Messages provider
-(HTTP/SSE) + `read`, `write`, `edit`, `ls`, `find`, `grep`, and `bash` tools +
+(HTTP/SSE) + `read`, `write`, `edit`, `ls`, `find`, `grep`, and `shell` tools +
 a streaming REPL.
 
 ```
@@ -31,7 +31,7 @@ src/
            refresh, resolve)
   session/ append-only session records, reducer, memory + JSONL repositories
   agent/   durable AgentHarness, recovery driver, hooks, events, compaction
-  tools/   read/write/edit/ls/find/grep/bash, process exec, fs/glob/regex/
+  tools/   read/write/edit/ls/find/grep/shell, process exec, fs/glob/regex/
            diff/truncate/filelock infra
   term/    full-screen TUI: raw-mode terminal, key decoder, differential
            renderer, markdown, transcript model, multi-line editor, controller

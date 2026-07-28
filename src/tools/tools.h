@@ -3,7 +3,7 @@
 
 // Built-in tool factories.
 Tool ReadTool();
-Tool BashTool();
+Tool ShellTool();
 Tool WriteTool();
 Tool EditTool();
 Tool LsTool();

@@ -359,7 +359,7 @@ void TestLineModel() {
   {
     LineModel tools;
     LineModel_Init(&tools, &a, 100, 5000);
-    LineModel_AddTool(&tools, SVL("bash-id"), SVL("bash"), SVL("{\"command\":\"echo hi\"}"));
+    LineModel_AddTool(&tools, SVL("shell-id"), SVL("shell"), SVL("{\"command\":\"echo hi\"}"));
     LineModel_AddTool(&tools, SVL("read-id"), SVL("read"),
                       SVL("{\"path\":\"src/main.cpp\",\"offset\":10,\"limit\":5}"));
     CHECK_ALL(BlankRows(&tools) == 0, tools.Entries.Count == 2,
@@ -367,14 +367,14 @@ void TestLineModel() {
               tools.Entries.Data[0].Collapsed, tools.Entries.Data[1].Collapsed,
               !tools.Entries.Data[0].Tool.Done, !tools.Entries.Data[1].Tool.Done);
 
-    CHECK(Finish(&tools, SVL("bash-id"), SVL("hi")));
+    CHECK(Finish(&tools, SVL("shell-id"), SVL("hi")));
     CHECK_ALL(tools.Entries.Data[0].Tool.Done, !tools.Entries.Data[1].Tool.Done);
     CHECK(Finish(&tools, SVL("read-id"), SVL("alpha-preview\nbeta-preview\ngamma-preview")));
-    CHECK_ALL(AnyRowHas(&a, &tools, "\xe2\x96\xa0  echo hi"),
+    CHECK_ALL(AnyRowHas(&a, &tools, "\xe2\x96\xa0  Shell echo hi"),
               AnyRowHas(&a, &tools, "Read src/main.cpp L10:14"),
               AnyRowHas(&a, &tools, "3 lines read"),
               !AnyRowHas(&a, &tools, "alpha-preview"));
-    u64 bashEntryId = tools.Entries.Data[0].Id;
+    u64 shellEntryId = tools.Entries.Data[0].Id;
     u64 readEntryId = tools.Entries.Data[1].Id;
     u32 readFirst = 0;
     u32 readRows = 0;
@@ -382,7 +382,7 @@ void TestLineModel() {
     CHECK_ALL(found, readRows == 1, LineModel_At(&tools, readFirst)->HasHiddenContent);
 
     CHECK(LineModel_ToggleAllTools(&tools));
-    CHECK_ALL(!LineModel_IsEntryCollapsed(&tools, bashEntryId),
+    CHECK_ALL(!LineModel_IsEntryCollapsed(&tools, shellEntryId),
               !LineModel_IsEntryCollapsed(&tools, readEntryId),
               AnyRowHas(&a, &tools, "alpha-preview"),
               AnyRowHas(&a, &tools, "beta-preview"),
@@ -391,22 +391,22 @@ void TestLineModel() {
     CHECK(readPreview != nullptr);
     CHECK_ALL(RowStartsWith(&a, readPreview, "   "), readPreview->EntryId == readEntryId);
     CHECK(LineModel_ToggleAllTools(&tools));
-    CHECK_ALL(LineModel_IsEntryCollapsed(&tools, bashEntryId),
+    CHECK_ALL(LineModel_IsEntryCollapsed(&tools, shellEntryId),
               LineModel_IsEntryCollapsed(&tools, readEntryId),
               !AnyRowHas(&a, &tools, "alpha-preview"));
 
-    CHECK(LineModel_ToggleEntry(&tools, bashEntryId));
-    CHECK_ALL(!LineModel_IsEntryCollapsed(&tools, bashEntryId),
+    CHECK(LineModel_ToggleEntry(&tools, shellEntryId));
+    CHECK_ALL(!LineModel_IsEntryCollapsed(&tools, shellEntryId),
               LineModel_IsEntryCollapsed(&tools, readEntryId));
     CHECK(LineModel_ToggleAllTools(&tools));
-    CHECK_ALL(!LineModel_IsEntryCollapsed(&tools, bashEntryId),
+    CHECK_ALL(!LineModel_IsEntryCollapsed(&tools, shellEntryId),
               !LineModel_IsEntryCollapsed(&tools, readEntryId));
     CHECK(LineModel_ToggleAllTools(&tools));
 
     LineModel_AddTool(
-        &tools, SVL("control-id"), SVL("bash"),
+        &tools, SVL("control-id"), SVL("shell"),
         SVL("{\"command\":\"first line\\n\\u001b[31msecond line\\u001b[0m\"}"));
-    CHECK_ALL(AnyRowHas(&a, &tools, "\xe2\x96\xa0  first line second line"),
+    CHECK_ALL(AnyRowHas(&a, &tools, "\xe2\x96\xa0  Shell first line second line"),
               !StrView_Contains(StrBuf_View(&tools.Entries.Data[2].Tool.View.Detail), "\n"),
               !StrView_Contains(StrBuf_View(&tools.Entries.Data[2].Tool.View.Detail), "\x1b"));
     LineModel_Release(&tools);
@@ -415,13 +415,13 @@ void TestLineModel() {
   {
     LineModel toolWrap;
     LineModel_Init(&toolWrap, &a, 16, 5000);
-    LineModel_AddTool(&toolWrap, SVL("bash"), SVL("bash"),
+    LineModel_AddTool(&toolWrap, SVL("shell"), SVL("shell"),
                       SVL("{\"command\":\"echo this command wraps\"}"));
-    u64 bashId = toolWrap.Entries.Data[0].Id;
+    u64 shellId = toolWrap.Entries.Data[0].Id;
     CHECK_ALL(RowStartsWith(&a, LineModel_At(&toolWrap, 0), "\xe2\x96\xa0  "),
               LineModel_Count(&toolWrap) == 1,
               LineModel_At(&toolWrap, 0)->HasHiddenContent);
-    CHECK(LineModel_ToggleEntry(&toolWrap, bashId));
+    CHECK(LineModel_ToggleEntry(&toolWrap, shellId));
     CHECK(RowStartsWith(&a, LineModel_At(&toolWrap, 1), "   "));
 
     LineModel_AddTool(&toolWrap, SVL("read"), SVL("read"),
@@ -544,7 +544,7 @@ void TestLineModel() {
                 SpansWithFg(&a, plainOutcome, 167).Length == 0);
     }
 
-    LineModel_AddTool(&summaries, SVL("error"), SVL("bash"), SVL("{\"command\":\"false\"}"));
+    LineModel_AddTool(&summaries, SVL("error"), SVL("shell"), SVL("{\"command\":\"false\"}"));
     CHECK(Finish(&summaries, SVL("error"), SVL("Command exited with code 1"), true));
     const SpanLine* failed = FindRow(&a, &summaries, "failed");
     CHECK(failed != nullptr);
@@ -558,9 +558,9 @@ void TestLineModel() {
     LineModel_Init(&noColor, &a, 40, 5000);
     LineModel_AddUser(&noColor, SVL("plain"), 0);
     CHECK(LineModel_At(&noColor, 0)->Spans.Data[0].St.Fg == COL_DEFAULT);
-    LineModel_AddTool(&noColor, SVL("id"), SVL("bash"), SVL("{\"command\":\"echo\"}"));
+    LineModel_AddTool(&noColor, SVL("id"), SVL("shell"), SVL("{\"command\":\"echo\"}"));
     CHECK(Finish(&noColor, SVL("id"), SVL("ok")));
-    const SpanLine* row = FindRow(&a, &noColor, "\xe2\x96\xa0  echo");
+    const SpanLine* row = FindRow(&a, &noColor, "\xe2\x96\xa0  Shell echo");
     CHECK(row != nullptr);
     CHECK(row->Spans.Data[0].St.Fg == COL_DEFAULT);
 

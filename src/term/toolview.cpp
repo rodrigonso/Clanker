@@ -190,10 +190,10 @@ void InitParsed(Arena* arena, Arena* scratch, ToolView* view, StrView name, StrV
     return;
   }
 
-  if (Eq(name, "bash")) {
-    view->Kind = ToolViewKind::Bash;
+  if (Eq(name, "shell")) {
+    view->Kind = ToolViewKind::Shell;
     view->Marker = SVL("$");
-    view->Label = StrView{};
+    view->Label = SVL("Shell");
     AppendFlat(scratch, &view->Detail, Json_GetStr(args, "command"), TOOL_SUMMARY_MAX_BYTES);
     return;
   }
@@ -305,7 +305,7 @@ void ToolView_Finish(ToolView* view, StrView result, bool isError) {
   }
 
   switch (view->Kind) {
-    case ToolViewKind::Bash:
+    case ToolViewKind::Shell:
       break;
     case ToolViewKind::Read: {
       if (StrView_Contains(result, "Read image file [")) {

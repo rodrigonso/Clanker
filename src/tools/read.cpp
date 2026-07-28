@@ -152,7 +152,7 @@ static bool ReadExec(void* ctx, Arena* arena, StrView id, StrView argsJson, vola
       Read_AppendKb(&result, firstLineBytes);
       StrBuf_AppendCStr(&result, ", exceeds ");
       Read_AppendKb(&result, TRUNC_MAX_BYTES);
-      StrBuf_AppendCStr(&result, " limit. Use bash: sed -n '");
+      StrBuf_AppendCStr(&result, " limit. Use shell: sed -n '");
       StrBuf_AppendU64(&result, startLine1);
       StrBuf_AppendCStr(&result, "p' ");
       StrBuf_Append(&result, path);
