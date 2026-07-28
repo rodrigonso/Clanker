@@ -21,12 +21,18 @@
     Delete the build directory before configuring for a fresh build.
 
 .PARAMETER Test
-    Build and run the unit test suite (clank_tests) after a successful build.
+    Build and run the test harness (clank_tests) after a successful build.
+
+.PARAMETER TestArgs
+    Arguments forwarded to clank_tests, e.g. suite names, --list, or --filter.
+    Implies -Test. With no arguments the full offline sweep runs.
 
 .EXAMPLE
     .\build.ps1
 .EXAMPLE
     .\build.ps1 -Config Debug -Test
+.EXAMPLE
+    .\build.ps1 -Test -TestArgs json,session
 .EXAMPLE
     .\build.ps1 -Target clank -Clean
 #>
@@ -38,8 +44,13 @@ param(
     [ValidatePattern('^[A-Za-z0-9_.:+-]+$')]
     [string]$Target,
     [switch]$Clean,
-    [switch]$Test
+    [switch]$Test,
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$TestArgs
 )
+
+# Passing -TestArgs alone implies -Test.
+if ($TestArgs -and -not $Test) { $Test = $true }
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
@@ -166,8 +177,9 @@ Write-Host "Build succeeded -> $buildPath" -ForegroundColor Green
 
 if ($Test) {
     $tests = Join-Path $buildPath 'clank_tests.exe'
-    Write-Host "Running tests..." -ForegroundColor Cyan
-    & $tests
+    $suiteLabel = if ($TestArgs) { $TestArgs -join ' ' } else { 'all offline suites' }
+    Write-Host "Running tests ($suiteLabel)..." -ForegroundColor Cyan
+    if ($TestArgs) { & $tests @TestArgs } else { & $tests }
     if ($LASTEXITCODE -ne 0) {
         Write-Host "Tests failed (exit $LASTEXITCODE)." -ForegroundColor Red
         exit $LASTEXITCODE

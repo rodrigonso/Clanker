@@ -36,7 +36,7 @@ src/
   term/    full-screen TUI: raw-mode terminal, key decoder, differential
            renderer, markdown, transcript model, multi-line editor, controller
   app/     CLI entry + durable session startup + TUI/plain REPL + login flow
-tests/     offline unit tests (no network, no API key)
+tests/     single CLI test harness (suite selection via args; offline by default)
 ```
 
 ## Design notes
@@ -188,15 +188,29 @@ Resolution priority: stored api_key → stored OAuth (refresh) → env var.
 
 ## Test
 
+`clank_tests` is the single test harness for the whole project: one CLI that
+lets you (or an agent) pick exactly what to exercise.
+
 ```sh
-./build/clank_tests       # unit tests: base, json, loop, anthropic, tools, crypto,
-                          #   auth, loopback, threads, keys, screen, markdown,
-                          #   linemodel, lineedit, tui, commands, settings,
-                          #   provider registry/model discovery
-./build/clank_http_smoke  # TLS/HTTP smoke against https://example.com
+./build/clank_tests                 # every offline suite
+./build/clank_tests --list          # suite names, tags, descriptions
+./build/clank_tests json session    # only the named suites
+./build/clank_tests --filter line   # substring match: linemodel + lineedit
+./build/clank_tests --all           # include network-tagged suites
+./build/clank_tests --help          # usage
 ```
 
-The unit suite is network-free and key-free: the loop runs against a faux
+Suites tagged `network` (currently `http`, a live TLS/HTTP request that replaces
+the old `clank_http_smoke` binary) are skipped by default, so a bare run stays
+offline and deterministic. Request one by name or with `--all`; point it at a
+local server with `CLANK_TEST_HTTP_URL`. Exit code is 0 on success, 1 on test
+failure, 2 on a usage error. `ctest` runs the offline sweep as the `unit` test;
+the `network` test is registered but disabled by default.
+
+Adding a suite is a new `tests/test_*.cpp`, a declaration in `tests/tests.h`, and
+one row in the `kSuites` table in `tests/test_main.cpp`.
+
+The default run is network-free and key-free: the loop runs against a faux
 provider, the Anthropic SSE parser against a recorded fixture, the OAuth module
 against fixtures, the callback server against an in-process loopback socket, and
 the TUI via pure units (key decoder, differential-renderer diff, markdown,
