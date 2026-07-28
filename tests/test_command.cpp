@@ -7,6 +7,8 @@ struct FakeCommandContext {
   int LoginCalls;
   int ModelCalls;
   int SessionCalls;
+  int NameCalls;
+  int SessionsCalls;
   int ResumeCalls;
   int TrustCalls;
   int ReloadCalls;
@@ -63,6 +65,24 @@ AppCommandHandlerResult Resume(void* user, const AppCommandUx* ux,
   return {AppCommandHandlerStatus::Success, StrView{}};
 }
 
+AppCommandHandlerResult Name(void* user, const AppCommandUx* ux,
+                             StrView arguments) {
+  (void)ux;
+  FakeCommandContext* ctx = (FakeCommandContext*)user;
+  ctx->NameCalls++;
+  ctx->LastArguments = arguments;
+  return {AppCommandHandlerStatus::Success, SVL("Name updated.")};
+}
+
+AppCommandHandlerResult Sessions(void* user, const AppCommandUx* ux,
+                                 StrView arguments) {
+  (void)ux;
+  FakeCommandContext* ctx = (FakeCommandContext*)user;
+  ctx->SessionsCalls++;
+  ctx->LastArguments = arguments;
+  return {AppCommandHandlerStatus::Success, StrView{}};
+}
+
 AppCommandHandlerResult Trust(void* user, const AppCommandUx* ux,
                               StrView arguments) {
   (void)ux;
@@ -82,13 +102,18 @@ AppCommandHandlerResult Reload(void* user, const AppCommandUx* ux,
 }
 
 void TestParse() {
-  CHECK_ALL(AppCommandSpec_Count() == 14,
+  CHECK_ALL(AppCommandSpec_Count() == 15,
             AppCommandSpec_At(AppCommandSpec_Count()) == nullptr,
             AppCommandSpec_At(0)->Kind == AppCommandKind::Login,
             StrView_EqCStr(AppCommandSpec_At(0)->Name, "login"),
-            AppCommandSpec_At(13)->Kind == AppCommandKind::Exit,
-            StrView_EqCStr(AppCommandSpec_At(13)->Alias, "quit"),
-            AppCommandSpec_At(13)->Description.Length != 0);
+            AppCommandSpec_At(0)->Arguments ==
+                AppCommandArgumentPolicy::None,
+            AppCommandSpec_At(14)->Kind == AppCommandKind::Exit,
+            StrView_EqCStr(AppCommandSpec_At(14)->Alias, "quit"),
+            AppCommandSpec_At(14)->Description.Length != 0,
+            StrView_EqCStr(AppCommand_Usage(AppCommandKind::Resume),
+                           "Usage: /resume [session-id]"),
+            AppCommand_Usage(AppCommandKind::Unknown).Length == 0);
 
   AppCommand plain = AppCommand_Parse(SVL("  hello  "));
   CHECK(plain.Kind == AppCommandKind::NotCommand);
@@ -104,7 +129,10 @@ void TestParse() {
   ParseCase cases[] = {
       {SVL("/model"), AppCommandKind::Model},   {SVL("/clear"), AppCommandKind::Clear},
       {SVL("/session"), AppCommandKind::Session},
+      {SVL("/name"), AppCommandKind::Name},
+      {SVL("/name release work"), AppCommandKind::Name},
       {SVL("/sessions"), AppCommandKind::Sessions},
+      {SVL("/sessions all"), AppCommandKind::Sessions},
       {SVL("/resume"), AppCommandKind::Resume},
       {SVL("/resume abc"), AppCommandKind::Resume},
       {SVL("/tree"), AppCommandKind::Tree},
@@ -140,6 +168,8 @@ void TestDispatch() {
   handlers.Login = Login;
   handlers.Model = Model;
   handlers.Session = Session;
+  handlers.Name = Name;
+  handlers.Sessions = Sessions;
   handlers.Resume = Resume;
   handlers.Trust = Trust;
   handlers.Reload = Reload;
@@ -164,6 +194,17 @@ void TestDispatch() {
   CHECK_ALL(session.Handled && session.Action == AppLoopAction::Continue,
             ctx.SessionCalls == 1,
             StrView_EqCStr(ctx.LastNotice, "Session shown."));
+
+  AppCommand_Dispatch(SVL("/name Release work"), &handlers, &ux);
+  CHECK_ALL(ctx.NameCalls == 1,
+            StrView_EqCStr(ctx.LastArguments, "Release work"),
+            StrView_EqCStr(ctx.LastNotice, "Name updated."));
+  AppCommand_Dispatch(SVL("/name --clear"), &handlers, &ux);
+  CHECK_ALL(ctx.NameCalls == 2,
+            StrView_EqCStr(ctx.LastArguments, "--clear"));
+  AppCommand_Dispatch(SVL("/sessions all"), &handlers, &ux);
+  CHECK_ALL(ctx.SessionsCalls == 1,
+            StrView_EqCStr(ctx.LastArguments, "all"));
 
   int noticesBeforeResume = ctx.Notices;
   AppCommandDispatchResult resume =

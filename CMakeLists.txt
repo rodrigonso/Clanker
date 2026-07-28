@@ -61,6 +61,7 @@ endif()
 add_library(clank_session STATIC
   src/session/id.cpp
   src/session/entry.cpp
+  src/session/metadata.cpp
   src/session/reducer.cpp
   src/session/memory_repository.cpp
   src/session/jsonl_repository.cpp)

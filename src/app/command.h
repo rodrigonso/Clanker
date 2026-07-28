@@ -7,6 +7,7 @@ enum class AppCommandKind : u8 {
   Model,
   Clear,
   Session,
+  Name,
   Sessions,
   Resume,
   Tree,
@@ -20,15 +21,24 @@ enum class AppCommandKind : u8 {
   Unknown,
 };
 
+enum class AppCommandArgumentPolicy : u8 {
+  None,
+  Optional,
+  Required,
+};
+
 struct AppCommandSpec {
   AppCommandKind Kind;
   StrView Name;
   StrView Alias;
   StrView Description;
+  StrView Usage;
+  AppCommandArgumentPolicy Arguments;
 };
 
 u32 AppCommandSpec_Count();
 const AppCommandSpec* AppCommandSpec_At(u32 index);
+StrView AppCommand_Usage(AppCommandKind kind);
 
 struct AppCommand {
   AppCommandKind Kind;
@@ -74,6 +84,7 @@ struct AppCommandHandlers {
   AppCommandHandlerFn Login;
   AppCommandHandlerFn Model;
   AppCommandArgHandlerFn Session;
+  AppCommandArgHandlerFn Name;
   AppCommandArgHandlerFn Sessions;
   AppCommandArgHandlerFn Resume;
   AppCommandArgHandlerFn Tree;

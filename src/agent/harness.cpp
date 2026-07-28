@@ -8,6 +8,20 @@ SessionResult Invalid(const char* message) {
   return SessionResult_Error(SessionStatus::InvalidArgument, SV(message));
 }
 
+SessionResult EnsureIdleLocked(const AgentHarness* harness,
+                               StrView busyMessage) {
+  if (harness->Faulted)
+    return SessionResult_Error(SessionStatus::Faulted,
+                               SVL("agent harness is faulted"));
+  if (harness->Running)
+    return SessionResult_Error(SessionStatus::Busy, busyMessage);
+  if (harness->Suspended)
+    return SessionResult_Error(
+        SessionStatus::Suspended,
+        SVL("suspended operation must be resolved first"));
+  return SessionResult_Ok();
+}
+
 SessionResult HookFailure(SessionResult result, const char* fallback) {
   if (SessionResult_IsOk(result)) return result;
   return SessionResult_Error(
@@ -443,15 +457,9 @@ SessionResult AgentHarness_Run(AgentHarness* harness, StrView prompt) {
     return Invalid("run arguments are invalid");
   {
     ScopedLock lock(&harness->StateLock);
-    if (harness->Faulted)
-      return SessionResult_Error(SessionStatus::Faulted,
-                                 SVL("agent harness is faulted"));
-    if (harness->Running)
-      return SessionResult_Error(SessionStatus::Busy,
-                                 SVL("agent harness is already running"));
-    if (harness->Suspended)
-      return SessionResult_Error(SessionStatus::Suspended,
-                                 SVL("suspended operation must be resolved first"));
+    SessionResult idle =
+        EnsureIdleLocked(harness, SVL("agent harness is already running"));
+    if (!SessionResult_IsOk(idle)) return idle;
     harness->Running = true;
     harness->AbortFlag = 0;
     harness->ActiveOperationId = DurableId_Generate();
@@ -488,15 +496,9 @@ SessionResult AgentHarness_Compact(AgentHarness* harness) {
     return Invalid("compaction arguments are invalid");
   {
     ScopedLock lock(&harness->StateLock);
-    if (harness->Faulted)
-      return SessionResult_Error(SessionStatus::Faulted,
-                                 SVL("agent harness is faulted"));
-    if (harness->Running)
-      return SessionResult_Error(SessionStatus::Busy,
-                                 SVL("agent harness is already running"));
-    if (harness->Suspended)
-      return SessionResult_Error(SessionStatus::Suspended,
-                                 SVL("suspended operation must be resolved first"));
+    SessionResult idle =
+        EnsureIdleLocked(harness, SVL("agent harness is already running"));
+    if (!SessionResult_IsOk(idle)) return idle;
     harness->Running = true;
     harness->AbortFlag = 0;
     harness->ActiveOperationId = DurableId_Generate();
@@ -532,15 +534,9 @@ SessionResult AgentHarness_Navigate(AgentHarness* harness,
     return Invalid("navigation arguments are invalid");
   {
     ScopedLock lock(&harness->StateLock);
-    if (harness->Faulted)
-      return SessionResult_Error(SessionStatus::Faulted,
-                                 SVL("agent harness is faulted"));
-    if (harness->Running)
-      return SessionResult_Error(SessionStatus::Busy,
-                                 SVL("agent harness is already running"));
-    if (harness->Suspended)
-      return SessionResult_Error(SessionStatus::Suspended,
-                                 SVL("suspended operation must be resolved first"));
+    SessionResult idle =
+        EnsureIdleLocked(harness, SVL("agent harness is already running"));
+    if (!SessionResult_IsOk(idle)) return idle;
     harness->Running = true;
     harness->ActiveOperationId = DurableId_Generate();
   }
@@ -615,15 +611,9 @@ SessionResult AgentHarness_LabelBranch(AgentHarness* harness, StrView label) {
     return Invalid("branch label arguments are invalid");
   {
     ScopedLock lock(&harness->StateLock);
-    if (harness->Faulted)
-      return SessionResult_Error(SessionStatus::Faulted,
-                                 SVL("agent harness is faulted"));
-    if (harness->Running)
-      return SessionResult_Error(SessionStatus::Busy,
-                                 SVL("agent harness is running"));
-    if (harness->Suspended)
-      return SessionResult_Error(SessionStatus::Suspended,
-                                 SVL("suspended operation must be resolved first"));
+    SessionResult idle =
+        EnsureIdleLocked(harness, SVL("agent harness is running"));
+    if (!SessionResult_IsOk(idle)) return idle;
   }
   Arena scratch = ArenaCreate();
   Array<SessionRecord> records = {};
@@ -645,6 +635,22 @@ SessionResult AgentHarness_LabelBranch(AgentHarness* harness, StrView label) {
   return result;
 }
 
+SessionResult AgentHarness_SetName(AgentHarness* harness, StrView name) {
+  if (!harness || !harness->Initialized)
+    return Invalid("session name arguments are invalid");
+  {
+    ScopedLock lock(&harness->StateLock);
+    SessionResult idle =
+        EnsureIdleLocked(harness, SVL("agent harness is running"));
+    if (!SessionResult_IsOk(idle)) return idle;
+  }
+  SessionRecord record = {};
+  record.EntryId = DurableId_Generate();
+  record.Kind = SessionRecordKind::SessionName;
+  record.SessionNameEntry.Name = name;
+  return AgentHarness_Append(harness, &record, 1);
+}
+
 SessionResult AgentHarness_SetModel(AgentHarness* harness,
                                     Model model,
                                     Provider provider) {
@@ -653,15 +659,9 @@ SessionResult AgentHarness_SetModel(AgentHarness* harness,
     return Invalid("model arguments are invalid");
   {
     ScopedLock lock(&harness->StateLock);
-    if (harness->Faulted)
-      return SessionResult_Error(SessionStatus::Faulted,
-                                 SVL("agent harness is faulted"));
-    if (harness->Running)
-      return SessionResult_Error(SessionStatus::Busy,
-                                 SVL("agent harness is running"));
-    if (harness->Suspended)
-      return SessionResult_Error(SessionStatus::Suspended,
-                                 SVL("suspended operation must be resolved first"));
+    SessionResult idle =
+        EnsureIdleLocked(harness, SVL("agent harness is running"));
+    if (!SessionResult_IsOk(idle)) return idle;
     harness->Running = true;
   }
   Arena scratch = ArenaCreate();

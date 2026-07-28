@@ -3,22 +3,51 @@
 namespace {
 
 const AppCommandSpec kCommands[] = {
-    {AppCommandKind::Login, SVL("login"), {}, SVL("Sign in and choose a provider")},
-    {AppCommandKind::Model, SVL("model"), {}, SVL("Change the active provider and model")},
-    {AppCommandKind::Clear, SVL("clear"), {}, SVL("Start a new session")},
-    {AppCommandKind::Session, SVL("session"), {}, SVL("Show the current session")},
-    {AppCommandKind::Sessions, SVL("sessions"), {}, SVL("List project sessions")},
-    {AppCommandKind::Resume, SVL("resume"), {}, SVL("Choose a session to resume")},
-    {AppCommandKind::Tree, SVL("tree"), {}, SVL("Show the conversation tree")},
-    {AppCommandKind::Checkout, SVL("checkout"), {}, SVL("Move to a tree entry")},
-    {AppCommandKind::Fork, SVL("fork"), {}, SVL("Fork the current or selected entry")},
-    {AppCommandKind::Compact, SVL("compact"), {}, SVL("Compact the current branch")},
-    {AppCommandKind::Recover, SVL("recover"), {}, SVL("Recover a suspended operation")},
-    {AppCommandKind::Trust, SVL("trust"), {}, SVL("Change saved project trust")},
+    {AppCommandKind::Login, SVL("login"), {},
+     SVL("Sign in and choose a provider"), SVL("Usage: /login"),
+     AppCommandArgumentPolicy::None},
+    {AppCommandKind::Model, SVL("model"), {},
+     SVL("Change the active provider and model"), SVL("Usage: /model"),
+     AppCommandArgumentPolicy::None},
+    {AppCommandKind::Clear, SVL("clear"), {}, SVL("Start a new session"),
+     SVL("Usage: /clear"), AppCommandArgumentPolicy::None},
+    {AppCommandKind::Session, SVL("session"), {},
+     SVL("Show the current session"), SVL("Usage: /session"),
+     AppCommandArgumentPolicy::None},
+    {AppCommandKind::Name, SVL("name"), {},
+     SVL("Set or clear the session name"),
+     SVL("Usage: /name <title|--clear>"), AppCommandArgumentPolicy::Optional},
+    {AppCommandKind::Sessions, SVL("sessions"), {},
+     SVL("List current or all sessions"), SVL("Usage: /sessions [all]"),
+     AppCommandArgumentPolicy::Optional},
+    {AppCommandKind::Resume, SVL("resume"), {},
+     SVL("Choose a session to resume"), SVL("Usage: /resume [session-id]"),
+     AppCommandArgumentPolicy::Optional},
+    {AppCommandKind::Tree, SVL("tree"), {},
+     SVL("Show the conversation tree"), SVL("Usage: /tree"),
+     AppCommandArgumentPolicy::None},
+    {AppCommandKind::Checkout, SVL("checkout"), {},
+     SVL("Move to a tree entry"), SVL("Usage: /checkout <entry-id>"),
+     AppCommandArgumentPolicy::Required},
+    {AppCommandKind::Fork, SVL("fork"), {},
+     SVL("Fork the current or selected entry"), SVL("Usage: /fork [entry-id]"),
+     AppCommandArgumentPolicy::Optional},
+    {AppCommandKind::Compact, SVL("compact"), {},
+     SVL("Compact the current branch"), SVL("Usage: /compact"),
+     AppCommandArgumentPolicy::None},
+    {AppCommandKind::Recover, SVL("recover"), {},
+     SVL("Recover a suspended operation"),
+     SVL("Usage: /recover <resume|abort|tool ACTION [result]>"),
+     AppCommandArgumentPolicy::Required},
+    {AppCommandKind::Trust, SVL("trust"), {},
+     SVL("Change saved project trust"), SVL("Usage: /trust"),
+     AppCommandArgumentPolicy::None},
     {AppCommandKind::Reload, SVL("reload"), {},
-     SVL("Reload settings and prompt context")},
+     SVL("Reload settings and prompt context"), SVL("Usage: /reload"),
+     AppCommandArgumentPolicy::None},
     {AppCommandKind::Exit, SVL("exit"), SVL("quit"),
-     SVL("Exit Clank and return to the shell (alias: /quit)")},
+     SVL("Exit Clank and return to the shell (alias: /quit)"),
+     SVL("Usage: /exit (alias: /quit)"), AppCommandArgumentPolicy::None},
 };
 
 bool IsSpace(char c) {
@@ -41,39 +70,10 @@ void Error(const AppCommandUx* ux, StrView message) {
   if (message.Length && ux && ux->Error) ux->Error(ux->User, message);
 }
 
-StrView Usage(AppCommandKind kind) {
-  switch (kind) {
-    case AppCommandKind::Login:
-      return SVL("Usage: /login");
-    case AppCommandKind::Model:
-      return SVL("Usage: /model");
-    case AppCommandKind::Clear:
-      return SVL("Usage: /clear");
-    case AppCommandKind::Session:
-      return SVL("Usage: /session");
-    case AppCommandKind::Sessions:
-      return SVL("Usage: /sessions");
-    case AppCommandKind::Resume:
-      return SVL("Usage: /resume [session-id]");
-    case AppCommandKind::Tree:
-      return SVL("Usage: /tree");
-    case AppCommandKind::Checkout:
-      return SVL("Usage: /checkout <entry-id>");
-    case AppCommandKind::Fork:
-      return SVL("Usage: /fork [entry-id]");
-    case AppCommandKind::Compact:
-      return SVL("Usage: /compact");
-    case AppCommandKind::Recover:
-      return SVL("Usage: /recover <resume|abort|tool ACTION [result]>");
-    case AppCommandKind::Trust:
-      return SVL("Usage: /trust");
-    case AppCommandKind::Reload:
-      return SVL("Usage: /reload");
-    case AppCommandKind::Exit:
-      return SVL("Usage: /exit (alias: /quit)");
-    default:
-      return StrView{};
-  }
+const AppCommandSpec* FindSpec(AppCommandKind kind) {
+  for (u32 i = 0; i < AppCommandSpec_Count(); i++)
+    if (kCommands[i].Kind == kind) return &kCommands[i];
+  return nullptr;
 }
 
 AppCommandHandlerResult RunHandler(AppCommandHandlerFn fn, void* user, const AppCommandUx* ux,
@@ -119,6 +119,11 @@ const AppCommandSpec* AppCommandSpec_At(u32 index) {
   return index < AppCommandSpec_Count() ? &kCommands[index] : nullptr;
 }
 
+StrView AppCommand_Usage(AppCommandKind kind) {
+  const AppCommandSpec* spec = FindSpec(kind);
+  return spec ? spec->Usage : StrView{};
+}
+
 AppCommand AppCommand_Parse(StrView input) {
   StrView line = Trim(input);
   if (!line.Length || line.Data[0] != '/')
@@ -153,15 +158,15 @@ AppCommandDispatchResult AppCommand_Dispatch(StrView input, const AppCommandHand
     return AppCommandDispatchResult{true, AppLoopAction::Continue};
   }
 
-  bool requiresArguments =
-      command.Kind == AppCommandKind::Checkout ||
-      command.Kind == AppCommandKind::Recover;
-  bool allowsArguments = requiresArguments ||
-                         command.Kind == AppCommandKind::Resume ||
-                         command.Kind == AppCommandKind::Fork;
-  if ((!allowsArguments && command.Arguments.Length) ||
-      (requiresArguments && !command.Arguments.Length)) {
-    Error(ux, Usage(command.Kind));
+  const AppCommandSpec* spec = FindSpec(command.Kind);
+  bool invalidArguments =
+      !spec ||
+      (spec->Arguments == AppCommandArgumentPolicy::None &&
+       command.Arguments.Length) ||
+      (spec->Arguments == AppCommandArgumentPolicy::Required &&
+       !command.Arguments.Length);
+  if (invalidArguments) {
+    Error(ux, spec ? spec->Usage : StrView{});
     return AppCommandDispatchResult{true, AppLoopAction::Continue};
   }
 
@@ -187,6 +192,7 @@ AppCommandDispatchResult AppCommand_Dispatch(StrView input, const AppCommandHand
     if (handlers) {
       switch (command.Kind) {
         case AppCommandKind::Session: fn = handlers->Session; break;
+        case AppCommandKind::Name: fn = handlers->Name; break;
         case AppCommandKind::Sessions: fn = handlers->Sessions; break;
         case AppCommandKind::Resume: fn = handlers->Resume; break;
         case AppCommandKind::Tree: fn = handlers->Tree; break;

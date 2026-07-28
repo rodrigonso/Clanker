@@ -151,6 +151,18 @@ StrView Sys_CurrentDir(Arena* a) {
   return DupCStr(a, StripTrailingSep(SV(buf)));
 }
 
+bool Sys_SetCurrentDir(StrView path) {
+  if (!path.Data || !path.Length || path.Length >= 4096) return false;
+  char native[4096];
+  memcpy(native, path.Data, path.Length);
+  native[path.Length] = 0;
+#if defined(_WIN32)
+  return _chdir(native) == 0;
+#else
+  return chdir(native) == 0;
+#endif
+}
+
 StrView Sys_HomeDir(Arena* a) {
 #if defined(_WIN32)
   const char* h = getenv("USERPROFILE");

@@ -46,8 +46,11 @@ tests/     single CLI test harness (suite selection via args; offline by default
   caboose/Briq house style. Only the C runtime and platform/libcurl APIs are used.
 - **Append-only durable sessions.** Session entries form a branchable message
   tree; harness entries persist provider/tool intent, queues, cancellation, and
-  recovery state without entering model context. JSONL is the default backend,
-  while `--no-session` uses the same contracts entirely in memory.
+  recovery state without entering model context. Session-global names are
+  separate from branch labels, and a shared metadata projection derives titles,
+  activity/duration statistics, counts, ancestry, and lifetime attempt usage.
+  JSONL is the default backend, while `--no-session` uses the same contracts
+  entirely in memory.
 - **Single-threaded loop, parallel tool batches.** A pluggable `Provider`
   streams one assistant turn (auto-retrying transient errors with capped
   exponential backoff); a turn's tool calls run **concurrently by default** (each
@@ -95,7 +98,7 @@ run the unit tests.
 ./build/clank                        # full-screen TUI; login can also happen inside it
 ./build/clank -m claude-sonnet-4-6 -p "summarize README.md"
 ./build/clank --continue             # most recent session for this project
-./build/clank --resume SESSION_ID     # a specific project session
+./build/clank --resume SESSION_ID     # exact ID, including sessions from other projects
 ./build/clank --no-session            # no session filesystem writes
 ./build/clank --system-prompt SYSTEM.md -p "review this project"
 ./build/clank --append-system-prompt "Prefer minimal changes"
@@ -175,8 +178,14 @@ Interactive commands:
 
 - `/login` — choose an OAuth-capable provider, authenticate, then choose a model.
 - `/model` — choose a provider and a live-discovered, fallback, or manual model ID.
-- `/session` and `/sessions` — inspect session details in TUI flyouts.
-- `/resume [id]` — choose an available session, or switch directly by ID.
+- `/session` — inspect the current title, IDs, project, status, times, model,
+  counts, token categories, and fork ancestry. Token totals use a trailing `+`
+  when interrupted attempts have unavailable usage.
+- `/name [title]` — set the current session name; an empty TUI value or
+  `/name --clear` restores the first-user-message title.
+- `/sessions [all]` — browse rich current-project metadata, or all projects.
+- `/resume [id]` — choose an available session, including an all-project page,
+  or switch directly by exact full ID.
 - `/tree` and `/checkout <entry-id>` — inspect or navigate conversation branches.
 - `/fork [entry-id]` — fork and switch to a new session.
 - `/compact` — durably summarize the active branch.
@@ -200,9 +209,15 @@ The selected provider/model and `defaultProjectTrust` policy are written
 atomically to `~/.clank/settings.json`.
 New sessions use built-in defaults, then settings, then the runtime-only `-m`
 override. Resumed sessions restore their durable provider/model ancestry; `-m`
-adds a new durable model selection. Sessions live under
-`~/.clank/sessions/v1/<project-key>/`. Interactive mode may start without
-credentials and blocks prompts with `/login` guidance; `-p` remains fail-fast.
+adds a new durable model selection. Direct IDs are exact opaque durable IDs.
+Cross-project resume enters the session's stored working directory, resolves
+project trust again, rebuilds prompt context, and rollback-safely switches the
+session, process cwd, and TUI cwd/branch. `--continue` remains scoped to the current project. Sessions
+live under `~/.clank/sessions/v1/<project-key>/`; their canonical JSONL files
+also store names and per-attempt usage without a sidecar. Unreadable session
+files are reported and skipped during browsing/continuation. Interactive
+mode may start without credentials and blocks prompts with `/login` guidance;
+`-p` remains fail-fast.
 
 Set `CLANK_PRINT_MEM=1` to print peak RSS at exit.
 
@@ -272,6 +287,8 @@ leaves seams for them):
   images, undo. The full-screen differential TUI itself is done.
 - Automatic compaction thresholds, skills, general extensions, and additional
   providers.
+- Fuzzy/regex session search, generated names, pricing, deletion UX, and a
+  derived session metadata sidecar.
 
 ## License
 

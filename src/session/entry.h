@@ -19,6 +19,7 @@ enum class SessionRecordKind : u8 {
   Tools,
   Compaction,
   BranchLabel,
+  SessionName,
   OperationStarted,
   GenerationStarted,
   GenerationFinished,
@@ -84,6 +85,10 @@ struct BranchLabelEntryData {
   StrView Label;
 };
 
+struct SessionNameEntryData {
+  StrView Name;
+};
+
 struct OperationStartedData {
   DurableId OperationId;
   OperationKind Operation;
@@ -110,6 +115,8 @@ struct GenerationFinishedData {
   GenerationOutcome Outcome;
   DurableId MessageEntryId;
   StrView Error;
+  bool HasUsage;
+  Usage Use;
 };
 
 struct ToolStartedData {
@@ -199,6 +206,7 @@ struct SessionRecord {
     ToolsEntryData ToolsEntry;
     CompactionEntryData CompactionEntry;
     BranchLabelEntryData BranchLabelEntry;
+    SessionNameEntryData SessionNameEntry;
     OperationStartedData OperationStarted;
     GenerationStartedData GenerationStarted;
     GenerationFinishedData GenerationFinished;
@@ -217,6 +225,11 @@ struct SessionRecord {
 
 SessionEntryClass SessionRecord_ClassForKind(SessionRecordKind kind);
 StrView SessionRecordKind_Name(SessionRecordKind kind);
+DurableId SessionRecord_ParentId(const SessionRecord* record);
+SessionResult SessionRecord_PrepareForkCopy(
+    const SessionRecord* source, DurableId targetSessionId, u64 targetSeq,
+    u64 createdAt, const Array<DurableId>* oldIds,
+    const Array<DurableId>* newIds, SessionRecord* out);
 
 // Encodes exactly one JSON object without a trailing newline.
 SessionResult SessionRecord_Encode(StrBuf* out, const SessionRecord* record);

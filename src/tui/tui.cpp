@@ -1287,10 +1287,9 @@ void HandleTextKey(Tui* t, const Key& k) {
       if (!k.Alt && k.Codepoint >= 0x20) LineEdit_InsertChar(&t->ModalEdit, k.Codepoint);
       break;
     case KeyKind::Enter:
-      if (!LineEdit_Empty(&t->ModalEdit)) {
-        t->ModalTextResult = StrView_Dup(&t->SessionMem, LineEdit_Text(&t->ModalEdit));
-        FinishModal(t, TuiModalResult::Confirmed);
-      }
+      t->ModalTextResult =
+          StrView_Dup(&t->SessionMem, LineEdit_Text(&t->ModalEdit));
+      FinishModal(t, TuiModalResult::Confirmed);
       break;
     case KeyKind::Backspace:
       if (LineEdit_Empty(&t->ModalEdit))

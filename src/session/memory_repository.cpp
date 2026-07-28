@@ -1,16 +1,12 @@
 #include "session/memory_repository.h"
 
-#include <stdlib.h>
-
 #include "session/reducer.h"
 
 struct MemoryLogHandle;
 
 struct MemorySession {
-  SessionInfo Info;
   Array<SessionRecord> Records;
   MemoryLogHandle* Writer;
-  bool Deleted;
 };
 
 struct MemoryLogHandle {
@@ -27,24 +23,33 @@ SessionResult Invalid(const char* message) {
   return SessionResult_Error(SessionStatus::InvalidArgument, SV(message));
 }
 
-DurableId SessionParentId(const SessionRecord* record) {
-  switch (record->Kind) {
-    case SessionRecordKind::Message: return record->MessageEntry.ParentId;
-    case SessionRecordKind::Model: return record->ModelEntry.ParentId;
-    case SessionRecordKind::Thinking: return record->ThinkingEntry.ParentId;
-    case SessionRecordKind::Tools: return record->ToolsEntry.ParentId;
-    case SessionRecordKind::Compaction: return record->CompactionEntry.ParentId;
-    case SessionRecordKind::BranchLabel: return record->BranchLabelEntry.ParentId;
-    default: return DurableId{};
-  }
+const SessionRecord* SessionRoot(const MemorySession* session) {
+  return session && session->Records.Count ? &session->Records.Data[0]
+                                           : nullptr;
+}
+
+DurableId SessionId(const MemorySession* session) {
+  const SessionRecord* root = SessionRoot(session);
+  return root ? root->SessionId : DurableId{};
+}
+
+StrView ProjectKey(const MemorySession* session) {
+  const SessionRecord* root = SessionRoot(session);
+  return root ? root->SessionStarted.ProjectKey : StrView{};
+}
+
+u64 LastSeq(const MemorySession* session) {
+  return session && session->Records.Count
+             ? session->Records.Data[session->Records.Count - 1].Seq
+             : 0;
 }
 
 MemorySession* FindSession(MemoryRepository* repository, StrView projectKey,
                            DurableId sessionId) {
   for (u32 i = 0; i < repository->Sessions.Count; i++) {
     MemorySession* session = repository->Sessions.Data[i];
-    if (!session->Deleted && DurableId_Eq(session->Info.SessionId, sessionId) &&
-        StrView_Eq(session->Info.ProjectKey, projectKey))
+    if (DurableId_Eq(SessionId(session), sessionId) &&
+        StrView_Eq(ProjectKey(session), projectKey))
       return session;
   }
   return nullptr;
@@ -52,20 +57,18 @@ MemorySession* FindSession(MemoryRepository* repository, StrView projectKey,
 
 bool IdExists(MemoryRepository* repository, DurableId sessionId) {
   for (u32 i = 0; i < repository->Sessions.Count; i++) {
-    if (!repository->Sessions.Data[i]->Deleted &&
-        DurableId_Eq(repository->Sessions.Data[i]->Info.SessionId, sessionId))
+    if (DurableId_Eq(SessionId(repository->Sessions.Data[i]), sessionId))
       return true;
   }
   return false;
 }
 
-SessionInfo CopyInfo(Arena* arena, const MemorySession* session) {
-  SessionInfo info = session->Info;
-  info.ProjectKey = StrView_Dup(arena, info.ProjectKey);
-  info.WorkingDirectory = StrView_Dup(arena, info.WorkingDirectory);
-  info.Label = StrView_Dup(arena, info.Label);
-  info.Busy = session->Writer != nullptr;
-  return info;
+SessionResult BuildInfo(Arena* arena, const MemorySession* session,
+                        SessionInfo* out) {
+  SessionMetadataBuildOptions options = {};
+  options.Busy = session->Writer != nullptr;
+  return SessionMetadata_Build(arena, session->Records.Data,
+                               session->Records.Count, &options, out);
 }
 
 MemoryLogHandle* NewHandleLocked(MemoryRepository* repository,
@@ -102,8 +105,6 @@ SessionResult ReadAll(void* context, Arena* arena, Array<SessionRecord>* out) {
   ScopedLock lock(&repository->Lock);
   if (handle->Closed)
     return SessionResult_Error(SessionStatus::InvalidState, SVL("session log is closed"));
-  if (handle->Session->Deleted)
-    return SessionResult_Error(SessionStatus::NotFound, SVL("session was deleted"));
   return CloneRecords(arena, &handle->Session->Records, out);
 }
 
@@ -112,7 +113,7 @@ SessionResult PrepareRecord(const MemorySession* session, u64 seq,
   if (!input || !out) return Invalid("append record is null");
   SessionRecord record = *input;
   record.SchemaVersion = SESSION_SCHEMA_VERSION;
-  record.SessionId = session->Info.SessionId;
+  record.SessionId = SessionId(session);
   record.Seq = seq;
   record.EntryClass = SessionRecord_ClassForKind(record.Kind);
   if (record.CreatedAt == 0) record.CreatedAt = NowMillis();
@@ -132,8 +133,6 @@ SessionResult AppendBatch(void* context, SessionRecord* input, u32 count) {
                                SVL("session log does not own the writer"));
   if (handle->Faulted)
     return SessionResult_Error(SessionStatus::Faulted, SVL("session log is faulted"));
-  if (handle->Session->Deleted)
-    return SessionResult_Error(SessionStatus::NotFound, SVL("session was deleted"));
 
   repository->AppendCalls++;
   if (repository->FailOnAppendCall != 0 &&
@@ -182,14 +181,9 @@ SessionResult AppendBatch(void* context, SessionRecord* input, u32 count) {
     }
     Array_Push(&handle->Session->Records, persistent);
     input[i] = prepared.Data[i];
-    if (persistent.Kind == SessionRecordKind::BranchLabel)
-      handle->Session->Info.Label = persistent.BranchLabelEntry.Label;
   }
-  handle->Session->Info.LastSeq = handle->Session->Records.Count;
-  handle->Session->Info.UpdatedAt =
-      handle->Session->Records.Data[handle->Session->Records.Count - 1].CreatedAt;
   ArenaRelease(&scratch);
-  return SessionResult_Ok(handle->Session->Info.LastSeq);
+  return SessionResult_Ok(LastSeq(handle->Session));
 }
 
 SessionResult Append(void* context, SessionRecord* record) {
@@ -244,15 +238,14 @@ MemorySession* CreateSessionLocked(MemoryRepository* repository,
   if (!SessionResult_IsOk(copied)) return nullptr;
   Array_Push(&session->Records, persistent);
 
-  session->Info.SessionId = sessionId;
-  session->Info.ProjectKey = persistent.SessionStarted.ProjectKey;
-  session->Info.WorkingDirectory = persistent.SessionStarted.WorkingDirectory;
-  session->Info.Label = persistent.SessionStarted.Label;
-  session->Info.CreatedAt = persistent.CreatedAt;
-  session->Info.UpdatedAt = persistent.CreatedAt;
-  session->Info.LastSeq = 1;
   Array_Push(&repository->Sessions, session);
   return session;
+}
+
+void DiscardLastSession(MemoryRepository* repository, MemorySession* session) {
+  if (repository->Sessions.Count &&
+      repository->Sessions.Data[repository->Sessions.Count - 1] == session)
+    repository->Sessions.Count--;
 }
 
 SessionResult Create(void* context, Arena* arena, const SessionCreateOptions* options,
@@ -273,8 +266,15 @@ SessionResult Create(void* context, Arena* arena, const SessionCreateOptions* op
                                SVL("failed to initialize memory session"));
   MemoryLogHandle* handle = NewHandleLocked(repository, session, true);
   *outLog = LogInterface(handle);
-  *outInfo = CopyInfo(arena, session);
-  return SessionResult_Ok(1);
+  SessionResult built = BuildInfo(arena, session, outInfo);
+  if (!SessionResult_IsOk(built)) {
+    session->Writer = nullptr;
+    handle->Closed = true;
+    DiscardLastSession(repository, session);
+    *outLog = {};
+    return built;
+  }
+  return built;
 }
 
 SessionResult Open(void* context, Arena* arena, const SessionOpenOptions* options,
@@ -295,29 +295,49 @@ SessionResult Open(void* context, Arena* arena, const SessionOpenOptions* option
   if (!SessionResult_IsOk(valid)) return valid;
   MemoryLogHandle* handle = NewHandleLocked(repository, session, options->Writable);
   *outLog = LogInterface(handle);
-  *outInfo = CopyInfo(arena, session);
-  return SessionResult_Ok(session->Info.LastSeq);
+  SessionResult built = BuildInfo(arena, session, outInfo);
+  if (!SessionResult_IsOk(built)) {
+    if (session->Writer == handle) session->Writer = nullptr;
+    handle->Closed = true;
+    *outLog = {};
+    return built;
+  }
+  return built;
 }
 
-SessionResult Inspect(void* context, Arena* arena, StrView projectKey,
-                      DurableId sessionId, SessionInfo* outInfo) {
+SessionResult Resolve(void* context, Arena* arena, DurableId sessionId,
+                      SessionInfo* outInfo) {
   MemoryRepository* repository = (MemoryRepository*)context;
-  if (!repository || !arena || !outInfo || projectKey.Length == 0 ||
-      !DurableId_IsSet(sessionId))
-    return Invalid("inspect arguments are invalid");
+  if (!repository || !arena || !outInfo || !DurableId_IsSet(sessionId))
+    return Invalid("resolve arguments are invalid");
   ScopedLock lock(&repository->Lock);
-  MemorySession* session = FindSession(repository, projectKey, sessionId);
-  if (!session)
-    return SessionResult_Error(SessionStatus::NotFound, SVL("session was not found"));
-  *outInfo = CopyInfo(arena, session);
-  return SessionResult_Ok(session->Info.LastSeq);
+  MemorySession* found = nullptr;
+  for (u32 i = 0; i < repository->Sessions.Count; i++) {
+    MemorySession* session = repository->Sessions.Data[i];
+    if (!DurableId_Eq(SessionId(session), sessionId))
+      continue;
+    if (found)
+      return SessionResult_Error(SessionStatus::Conflict,
+                                 SVL("session ID exists in multiple projects"));
+    found = session;
+  }
+  if (!found)
+    return SessionResult_Error(SessionStatus::NotFound,
+                               SVL("session was not found"));
+  return BuildInfo(arena, found, outInfo);
 }
 
-SessionResult List(void* context, Arena* arena, StrView projectKey,
+SessionResult List(void* context, Arena* arena,
+                   const SessionListOptions* options,
                    Array<SessionInfo>* outItems) {
   MemoryRepository* repository = (MemoryRepository*)context;
-  if (!repository || !arena || !outItems || projectKey.Length == 0)
+  if (!repository || !arena || !options || !outItems ||
+      (options->Scope != SessionListScope::CurrentProject &&
+       options->Scope != SessionListScope::AllProjects) ||
+      (options->Scope == SessionListScope::CurrentProject &&
+       options->ProjectKey.Length == 0))
     return Invalid("list arguments are invalid");
+  if (options->SkippedCount) *options->SkippedCount = 0;
   ScopedLock lock(&repository->Lock);
   Array<SessionInfo> items =
       Array_Make<SessionInfo>(arena, repository->Sessions.Count
@@ -325,18 +345,17 @@ SessionResult List(void* context, Arena* arena, StrView projectKey,
                                         : 1);
   for (u32 i = repository->Sessions.Count; i > 0; i--) {
     MemorySession* session = repository->Sessions.Data[i - 1];
-    if (!session->Deleted && StrView_Eq(session->Info.ProjectKey, projectKey))
-      Array_Push(&items, CopyInfo(arena, session));
+    if (options->Scope == SessionListScope::CurrentProject &&
+        !StrView_Eq(ProjectKey(session), options->ProjectKey))
+      continue;
+    SessionInfo info = {};
+    SessionResult built = BuildInfo(arena, session, &info);
+    if (!SessionResult_IsOk(built)) return built;
+    Array_Push(&items, info);
   }
+  SessionInfo_SortByActivity(&items);
   *outItems = items;
   return SessionResult_Ok();
-}
-
-DurableId RemapId(const Array<DurableId>* oldIds, const Array<DurableId>* newIds,
-                  DurableId oldId) {
-  for (u32 i = 0; i < oldIds->Count; i++)
-    if (DurableId_Eq(oldIds->Data[i], oldId)) return newIds->Data[i];
-  return DurableId{};
 }
 
 SessionResult Fork(void* context, Arena* arena, const SessionForkOptions* options,
@@ -395,57 +414,21 @@ SessionResult Fork(void* context, Arena* arena, const SessionForkOptions* option
 
   for (u32 i = 1; i < branch.Count; i++) {
     const SessionRecord* sourceRecord = branch.Data[i];
-    SessionRecord copy = *sourceRecord;
-    copy.SchemaVersion = SESSION_SCHEMA_VERSION;
-    copy.SessionId = target->Info.SessionId;
-    copy.Seq = target->Records.Count + 1;
-    copy.EntryId = DurableId_Generate();
-    copy.EntryClass = SessionEntryClass::Session;
-    copy.CreatedAt = NowMillis();
-
-    DurableId parent = RemapId(&oldIds, &newIds, SessionParentId(sourceRecord));
-    if (!DurableId_IsSet(parent)) {
-      target->Deleted = true;
+    SessionRecord copy = {};
+    SessionResult prepared = SessionRecord_PrepareForkCopy(
+        sourceRecord, SessionId(target), target->Records.Count + 1,
+        NowMillis(), &oldIds, &newIds, &copy);
+    if (!SessionResult_IsOk(prepared)) {
+      DiscardLastSession(repository, target);
       ArenaRelease(&scratch);
-      return SessionResult_Error(SessionStatus::Corrupt,
-                                 SVL("fork branch parent could not be remapped"));
-    }
-    switch (copy.Kind) {
-      case SessionRecordKind::Message: copy.MessageEntry.ParentId = parent; break;
-      case SessionRecordKind::Model: copy.ModelEntry.ParentId = parent; break;
-      case SessionRecordKind::Thinking: copy.ThinkingEntry.ParentId = parent; break;
-      case SessionRecordKind::Tools: copy.ToolsEntry.ParentId = parent; break;
-      case SessionRecordKind::BranchLabel: copy.BranchLabelEntry.ParentId = parent; break;
-      case SessionRecordKind::Compaction: {
-        copy.CompactionEntry.ParentId = parent;
-        copy.CompactionEntry.BaseEntryId =
-            RemapId(&oldIds, &newIds, copy.CompactionEntry.BaseEntryId);
-        copy.CompactionEntry.ThroughEntryId =
-            RemapId(&oldIds, &newIds, copy.CompactionEntry.ThroughEntryId);
-        copy.CompactionEntry.SourceHeadId =
-            RemapId(&oldIds, &newIds, copy.CompactionEntry.SourceHeadId);
-        if (!DurableId_IsSet(copy.CompactionEntry.BaseEntryId) ||
-            !DurableId_IsSet(copy.CompactionEntry.ThroughEntryId) ||
-            !DurableId_IsSet(copy.CompactionEntry.SourceHeadId)) {
-          target->Deleted = true;
-          ArenaRelease(&scratch);
-          return SessionResult_Error(SessionStatus::Corrupt,
-                                     SVL("fork compaction could not be remapped"));
-        }
-        break;
-      }
-      default:
-        target->Deleted = true;
-        ArenaRelease(&scratch);
-        return SessionResult_Error(SessionStatus::Corrupt,
-                                   SVL("fork branch contains a harness record"));
+      return prepared;
     }
 
     SessionRecord persistent = {};
     SessionResult cloned =
         SessionRecord_Clone(&repository->Mem, &copy, &persistent);
     if (!SessionResult_IsOk(cloned)) {
-      target->Deleted = true;
+      DiscardLastSession(repository, target);
       ArenaRelease(&scratch);
       return cloned;
     }
@@ -457,86 +440,23 @@ SessionResult Fork(void* context, Arena* arena, const SessionForkOptions* option
   SessionResult valid =
       SessionRecords_Validate(target->Records.Data, target->Records.Count);
   if (!SessionResult_IsOk(valid)) {
-    target->Deleted = true;
+    DiscardLastSession(repository, target);
     ArenaRelease(&scratch);
     return valid;
   }
-  target->Info.LastSeq = target->Records.Count;
-  target->Info.UpdatedAt =
-      target->Records.Data[target->Records.Count - 1].CreatedAt;
-  if (target->Records.Count > 1 &&
-      target->Records.Data[target->Records.Count - 1].Kind ==
-          SessionRecordKind::BranchLabel)
-    target->Info.Label =
-        target->Records.Data[target->Records.Count - 1].BranchLabelEntry.Label;
-
   MemoryLogHandle* handle = NewHandleLocked(repository, target, true);
   *outLog = LogInterface(handle);
-  *outInfo = CopyInfo(arena, target);
-  ArenaRelease(&scratch);
-  return SessionResult_Ok(target->Info.LastSeq);
-}
-
-SessionResult Rename(void* context, DurableId sessionId, StrView projectKey,
-                     StrView label) {
-  MemoryRepository* repository = (MemoryRepository*)context;
-  if (!repository || !DurableId_IsSet(sessionId) || projectKey.Length == 0 ||
-      label.Length == 0)
-    return Invalid("rename arguments are invalid");
-
-  MemoryLogHandle* handle = nullptr;
-  {
-    ScopedLock lock(&repository->Lock);
-    MemorySession* session = FindSession(repository, projectKey, sessionId);
-    if (!session)
-      return SessionResult_Error(SessionStatus::NotFound,
-                                 SVL("session was not found"));
-    if (session->Writer)
-      return SessionResult_Error(SessionStatus::Busy,
-                                 SVL("session already has a writer"));
-    handle = NewHandleLocked(repository, session, true);
-  }
-
-  Arena scratch = ArenaCreate();
-  Array<SessionRecord> records = {};
-  SessionResult read = ReadAll(handle, &scratch, &records);
-  if (!SessionResult_IsOk(read)) {
-    CloseLog(handle);
+  SessionResult built = BuildInfo(arena, target, outInfo);
+  if (!SessionResult_IsOk(built)) {
+    target->Writer = nullptr;
+    handle->Closed = true;
+    DiscardLastSession(repository, target);
+    *outLog = {};
     ArenaRelease(&scratch);
-    return read;
+    return built;
   }
-  SessionReduction reduction = {};
-  SessionResult reduced =
-      SessionReducer_Reduce(&scratch, records.Data, records.Count, &reduction);
-  if (!SessionResult_IsOk(reduced)) {
-    CloseLog(handle);
-    ArenaRelease(&scratch);
-    return reduced;
-  }
-  SessionRecord rename = {};
-  rename.EntryId = DurableId_Generate();
-  rename.Kind = SessionRecordKind::BranchLabel;
-  rename.BranchLabelEntry.ParentId = reduction.HeadId;
-  rename.BranchLabelEntry.Label = label;
-  SessionResult appended = Append(handle, &rename);
-  CloseLog(handle);
   ArenaRelease(&scratch);
-  return appended;
-}
-
-SessionResult Delete(void* context, DurableId sessionId, StrView projectKey) {
-  MemoryRepository* repository = (MemoryRepository*)context;
-  if (!repository || !DurableId_IsSet(sessionId) || projectKey.Length == 0)
-    return Invalid("delete arguments are invalid");
-  ScopedLock lock(&repository->Lock);
-  MemorySession* session = FindSession(repository, projectKey, sessionId);
-  if (!session)
-    return SessionResult_Error(SessionStatus::NotFound, SVL("session was not found"));
-  if (session->Writer)
-    return SessionResult_Error(SessionStatus::Busy,
-                               SVL("session already has a writer"));
-  session->Deleted = true;
-  return SessionResult_Ok(session->Info.LastSeq);
+  return SessionResult_Ok(LastSeq(target));
 }
 
 void CloseRepository(void* context) {
@@ -566,11 +486,9 @@ SessionRepository MemoryRepository_AsRepository(MemoryRepository* repository) {
   result.Ctx = repository;
   result.Create = Create;
   result.Open = Open;
-  result.Inspect = Inspect;
+  result.Resolve = Resolve;
   result.List = List;
   result.Fork = Fork;
-  result.Rename = Rename;
-  result.Delete = Delete;
   result.Close = CloseRepository;
   return result;
 }

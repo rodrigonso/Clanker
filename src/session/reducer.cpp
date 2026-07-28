@@ -2,18 +2,6 @@
 
 namespace {
 
-DurableId ParentId(const SessionRecord* record) {
-  switch (record->Kind) {
-    case SessionRecordKind::Message: return record->MessageEntry.ParentId;
-    case SessionRecordKind::Model: return record->ModelEntry.ParentId;
-    case SessionRecordKind::Thinking: return record->ThinkingEntry.ParentId;
-    case SessionRecordKind::Tools: return record->ToolsEntry.ParentId;
-    case SessionRecordKind::Compaction: return record->CompactionEntry.ParentId;
-    case SessionRecordKind::BranchLabel: return record->BranchLabelEntry.ParentId;
-    default: return DurableId{};
-  }
-}
-
 const SessionRecord* FindEntry(const SessionReduction* reduction, DurableId id) {
   for (u32 i = 0; i < reduction->Nodes.Count; i++) {
     if (DurableId_Eq(reduction->Nodes.Data[i].EntryId, id))
@@ -100,7 +88,7 @@ SessionResult SessionReducer_Ancestry(Arena* arena, const SessionReduction* redu
   while (current) {
     Array_Push(&reverse, current);
     if (current->Kind == SessionRecordKind::SessionStarted) break;
-    DurableId parent = ParentId(current);
+    DurableId parent = SessionRecord_ParentId(current);
     current = FindEntry(reduction, parent);
     if (!current) return Corrupt("branch parent was not found");
   }
@@ -161,10 +149,11 @@ SessionResult SessionReducer_Reduce(Arena* arena, const SessionRecord* records, 
 
   for (u32 i = 0; i < count; i++) {
     const SessionRecord* record = &records[i];
-    if (record->EntryClass == SessionEntryClass::Session) {
+    if (record->EntryClass == SessionEntryClass::Session &&
+        record->Kind != SessionRecordKind::SessionName) {
       SessionNode node = {};
       node.EntryId = record->EntryId;
-      node.ParentId = ParentId(record);
+      node.ParentId = SessionRecord_ParentId(record);
       node.RecordIndex = i;
       Array_Push(&result.Nodes, node);
       if (record->Kind != SessionRecordKind::SessionStarted &&

@@ -1,17 +1,14 @@
 #pragma once
 
 #include "base/array.h"
-#include "session/entry.h"
+#include "session/metadata.h"
 
-struct SessionInfo {
-  DurableId SessionId;
+enum class SessionListScope : u8 { CurrentProject, AllProjects };
+
+struct SessionListOptions {
+  SessionListScope Scope;
   StrView ProjectKey;
-  StrView WorkingDirectory;
-  StrView Label;
-  u64 CreatedAt;
-  u64 UpdatedAt;
-  u64 LastSeq;
-  bool Busy;
+  u32* SkippedCount;
 };
 
 struct SessionCreateOptions {
@@ -81,13 +78,12 @@ struct SessionRepository {
                           SessionLog* outLog, SessionInfo* outInfo);
   SessionResult (*Open)(void* ctx, Arena* arena, const SessionOpenOptions* options,
                         SessionLog* outLog, SessionInfo* outInfo);
-  SessionResult (*Inspect)(void* ctx, Arena* arena, StrView projectKey, DurableId sessionId,
+  SessionResult (*Resolve)(void* ctx, Arena* arena, DurableId sessionId,
                            SessionInfo* outInfo);
-  SessionResult (*List)(void* ctx, Arena* arena, StrView projectKey,
+  SessionResult (*List)(void* ctx, Arena* arena,
+                        const SessionListOptions* options,
                         Array<SessionInfo>* outItems);
   SessionResult (*Fork)(void* ctx, Arena* arena, const SessionForkOptions* options,
                         SessionLog* outLog, SessionInfo* outInfo);
-  SessionResult (*Rename)(void* ctx, DurableId sessionId, StrView projectKey, StrView label);
-  SessionResult (*Delete)(void* ctx, DurableId sessionId, StrView projectKey);
   void (*Close)(void* ctx);
 };

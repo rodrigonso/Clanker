@@ -60,6 +60,7 @@ SessionResult AgentHarness_Run(AgentHarness* harness, StrView prompt);
 SessionResult AgentHarness_Compact(AgentHarness* harness);
 SessionResult AgentHarness_Navigate(AgentHarness* harness, DurableId targetEntryId);
 SessionResult AgentHarness_LabelBranch(AgentHarness* harness, StrView label);
+SessionResult AgentHarness_SetName(AgentHarness* harness, StrView name);
 SessionResult AgentHarness_SetModel(AgentHarness* harness,
                                     Model model,
                                     Provider provider);

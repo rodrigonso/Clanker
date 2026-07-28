@@ -109,6 +109,9 @@ struct PromptContextLifetime {
   ~PromptContextLifetime() { PromptContext_Release(Context); }
 };
 
+static void EmitPromptDiagnostics(const PromptContext* context,
+                                  const AppCommandUx* ux);
+
 static void RunAuthWarmup(void* user) {
   AuthWarmup* warmup = (AuthWarmup*)user;
   Arena scratch = ArenaCreate((usize)16 << 20);
@@ -1112,6 +1115,98 @@ static bool RuntimeRestartWatch(InteractiveRuntime* rt,
   return true;
 }
 
+static SessionResult ResolveRuntimeProjectTrust(
+    InteractiveRuntime* rt, Arena* scratch, StrView workingDirectory,
+    bool* trusted, bool* hasResources) {
+  *hasResources =
+      ProjectTrust_HasGatedResources(scratch, workingDirectory);
+  if (!*hasResources) {
+    *trusted = true;
+    return SessionResult_Ok();
+  }
+  if (rt->TrustOverride != ProjectTrustOverride::Unspecified) {
+    *trusted = rt->TrustOverride == ProjectTrustOverride::Trusted;
+    return SessionResult_Ok();
+  }
+
+  ProjectTrustStore store = {};
+  ProjectTrustStoreLoadResult loaded =
+      ProjectTrustStore_Load(scratch, rt->TrustPath, &store);
+  if (loaded == ProjectTrustStoreLoadResult::Malformed)
+    return SessionResult_Error(SessionStatus::Corrupt,
+                               SVL("the project trust store is malformed"));
+  if (loaded == ProjectTrustStoreLoadResult::ReadFailure)
+    return SessionResult_Error(SessionStatus::IoError,
+                               SVL("the project trust store could not be read"));
+
+  StrView cwd = ProjectTrust_CanonicalPath(scratch, workingDirectory);
+  bool interactive = rt->TuiView || Term_IsInteractive();
+  ProjectTrustResolution resolution = ProjectTrust_Resolve(
+      true, rt->TrustOverride, &store, cwd, rt->DefaultTrust, interactive);
+  if (!resolution.NeedsPrompt) {
+    *trusted = resolution.Trusted;
+    return SessionResult_Ok();
+  }
+
+  enum class TrustAction : u8 {
+    TrustCurrent,
+    TrustParent,
+    TrustSession,
+    UntrustCurrent,
+    UntrustSession,
+  };
+  StrView parent = ProjectTrust_ParentPath(scratch, cwd);
+  StrView options[5] = {};
+  TrustAction actions[5] = {};
+  u32 count = 0;
+  options[count] = SVL("Trust this folder");
+  actions[count++] = TrustAction::TrustCurrent;
+  StrBuf parentOption = StrBuf_Make(scratch, parent.Length + 32);
+  if (parent.Length) {
+    StrBuf_AppendCStr(&parentOption, "Trust parent folder: ");
+    StrBuf_Append(&parentOption, parent);
+    options[count] = StrBuf_View(&parentOption);
+    actions[count++] = TrustAction::TrustParent;
+  }
+  options[count] = SVL("Trust for this session only");
+  actions[count++] = TrustAction::TrustSession;
+  options[count] = SVL("Do not trust this folder");
+  actions[count++] = TrustAction::UntrustCurrent;
+  options[count] = SVL("Do not trust for this session only");
+  actions[count++] = TrustAction::UntrustSession;
+
+  StrBuf title = StrBuf_Make(scratch, cwd.Length + 96);
+  StrBuf_AppendCStr(
+      &title,
+      "The selected project contains prompt files that can replace system instructions:\n");
+  StrBuf_Append(&title, cwd);
+  u32 selected = 0;
+  RuntimeInputResult input =
+      RuntimeSelect(rt, StrBuf_View(&title), options, count, &selected);
+  if (input != RuntimeInputResult::Confirmed)
+    return SessionResult_Error(SessionStatus::Cancelled,
+                               SVL("project trust selection was cancelled"));
+
+  TrustAction action = actions[selected];
+  *trusted = action == TrustAction::TrustCurrent ||
+             action == TrustAction::TrustParent ||
+             action == TrustAction::TrustSession;
+  if (action == TrustAction::TrustSession ||
+      action == TrustAction::UntrustSession)
+    return SessionResult_Ok();
+
+  StrView decisionPath =
+      action == TrustAction::TrustParent ? parent : cwd;
+  StrView removePath =
+      action == TrustAction::TrustParent ? cwd : StrView{};
+  StrBuf error = StrBuf_Make(scratch, 128);
+  if (!ProjectTrustStore_Update(scratch, rt->TrustPath, decisionPath,
+                                *trusted, removePath, &error))
+    return SessionResult_Error(SessionStatus::IoError,
+                               StrView_Dup(rt->Mem, StrBuf_View(&error)));
+  return SessionResult_Ok();
+}
+
 static bool RuntimeRestorePreviousSession(
     InteractiveRuntime* rt, DurableId previousSessionId,
     const AgentHarnessConfig* config, const AppCommandUx* ux) {
@@ -1129,29 +1224,43 @@ static bool RuntimeRestorePreviousSession(
     if (restored.Status == SessionStatus::Suspended)
       restored = SessionResult_Ok(restored.Seq);
   }
-
-  if (!SessionResult_IsOk(restored)) {
-    SessionCreateOptions create = {};
-    create.ProjectKey = rt->ProjectKey;
-    create.WorkingDirectory = rt->WorkingDirectory;
-    restored =
-        rt->Sessions->Create(rt->Sessions->Ctx, &scratch, &create, &log, &info);
-    if (SessionResult_IsOk(restored))
-      restored = AgentHarness_Init(rt->Harness, log, config);
-    if (SessionResult_IsOk(restored))
-      restored = AgentHarness_SetModel(rt->Harness, config->ModelInfo,
-                                       config->ProviderImpl);
-  }
   bool ok = SessionResult_IsOk(restored) && RuntimeRestartWatch(rt, ux);
   ArenaRelease(&scratch);
   return ok;
 }
 
+static bool RuntimeRollbackSessionSwitch(
+    InteractiveRuntime* rt, StrView previousWorkingDirectory,
+    DurableId previousSessionId, const AgentHarnessConfig* previousConfig,
+    const AppCommandUx* ux) {
+  if (!Sys_SetCurrentDir(previousWorkingDirectory))
+    return false;
+  bool restored = RuntimeRestorePreviousSession(
+      rt, previousSessionId, previousConfig, ux);
+  if (restored && rt->TuiView)
+    Tui_LoadStartupContext(rt->TuiView);
+  return restored;
+}
+
 static SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
                                         SessionLog target,
+                                        const SessionInfo* targetInfo,
                                         const SessionReduction* targetState,
                                         const AppCommandUx* ux) {
-  Arena scratch = ArenaCreate((usize)16 << 20);
+  if (!targetInfo || !targetInfo->WorkingDirectory.Length ||
+      !targetInfo->ProjectKey.Length) {
+    SessionLog_Close(&target);
+    return SessionResult_Error(SessionStatus::InvalidArgument,
+                               SVL("target session metadata is incomplete"));
+  }
+  if (!Fs_IsDir(targetInfo->WorkingDirectory)) {
+    SessionLog_Close(&target);
+    return SessionResult_Error(
+        SessionStatus::NotFound,
+        SVL("the session working directory no longer exists"));
+  }
+
+  Arena scratch = ArenaCreate((usize)32 << 20);
   SessionReduction previousState = {};
   SessionResult previous =
       AgentHarness_Snapshot(&scratch, rt->Harness, &previousState);
@@ -1166,6 +1275,34 @@ static SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
   DurableId previousSessionId = previousState.Records[0].SessionId;
   AgentHarnessConfig previousConfig = rt->Harness->Config;
   AgentHarnessConfig config = previousConfig;
+  StrView previousWorkingDirectory = rt->WorkingDirectory;
+  bool switchingProject =
+      !StrView_Eq(targetInfo->ProjectKey, rt->ProjectKey) ||
+      !StrView_Eq(targetInfo->WorkingDirectory, rt->WorkingDirectory);
+  PromptContext nextPrompt = {};
+  PromptContextOptions nextPromptOptions = rt->PromptOptions;
+  bool nextTrusted = rt->ProjectTrusted;
+  bool nextHasResources = rt->HasProjectResources;
+  if (switchingProject) {
+    SessionResult trust = ResolveRuntimeProjectTrust(
+        rt, &scratch, targetInfo->WorkingDirectory, &nextTrusted,
+        &nextHasResources);
+    if (!SessionResult_IsOk(trust)) {
+      SessionLog_Close(&target);
+      ArenaRelease(&scratch);
+      return trust;
+    }
+    nextPromptOptions.WorkingDirectory = targetInfo->WorkingDirectory;
+    nextPromptOptions.ProjectTrusted = nextTrusted;
+    StrBuf error = StrBuf_Make(&scratch, 160);
+    if (!PromptContext_Build(&nextPromptOptions, &nextPrompt, &error)) {
+      SessionLog_Close(&target);
+      StrView message = StrView_Dup(rt->Mem, StrBuf_View(&error));
+      ArenaRelease(&scratch);
+      return SessionResult_Error(SessionStatus::IoError, message);
+    }
+    config.SystemPrompt = nextPrompt.SystemPrompt;
+  }
   const ProviderSpec* targetSpec = rt->Spec;
   Model targetModel = rt->CurrentModel;
   if (targetState && targetState->Provider.Length &&
@@ -1173,6 +1310,7 @@ static SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
     if (rt->Faux) {
       if (!StrView_Eq(targetState->Provider, SVL("faux"))) {
         SessionLog_Close(&target);
+        PromptContext_Release(&nextPrompt);
         ArenaRelease(&scratch);
         return SessionResult_Error(
             SessionStatus::InvalidState,
@@ -1183,6 +1321,7 @@ static SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
       if (!targetSpec || !targetSpec->CreateModel ||
           !targetSpec->CreateProvider) {
         SessionLog_Close(&target);
+        PromptContext_Release(&nextPrompt);
         ArenaRelease(&scratch);
         return SessionResult_Error(
             SessionStatus::InvalidState,
@@ -1199,33 +1338,93 @@ static SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
   SessionResult closed = AgentHarness_Close(rt->Harness);
   if (!SessionResult_IsOk(closed)) {
     SessionLog_Close(&target);
+    PromptContext_Release(&nextPrompt);
     RuntimeRestartWatch(rt, ux);
     ArenaRelease(&scratch);
     return closed;
   }
 
+  if (!Sys_SetCurrentDir(targetInfo->WorkingDirectory)) {
+    SessionLog_Close(&target);
+    bool restored = RuntimeRollbackSessionSwitch(
+        rt, previousWorkingDirectory, previousSessionId, &previousConfig, ux);
+    PromptContext_Release(&nextPrompt);
+    ArenaRelease(&scratch);
+    return restored
+               ? SessionResult_Error(
+                     SessionStatus::IoError,
+                     SVL("failed to enter the session working directory"))
+               : SessionResult_Error(
+                     SessionStatus::Faulted,
+                     SVL("failed to enter the session directory and restore the previous session"));
+  }
+
   SessionResult initialized = AgentHarness_Init(rt->Harness, target, &config);
   if (!SessionResult_IsOk(initialized) &&
       initialized.Status != SessionStatus::Suspended) {
-    RuntimeRestorePreviousSession(rt, previousSessionId, &previousConfig, ux);
+    bool restored = RuntimeRollbackSessionSwitch(
+        rt, previousWorkingDirectory, previousSessionId, &previousConfig, ux);
+    PromptContext_Release(&nextPrompt);
     ArenaRelease(&scratch);
-    return initialized;
+    return restored
+               ? initialized
+               : SessionResult_Error(
+                     SessionStatus::Faulted,
+                     SVL("session switch failed and the previous session could not be restored"));
   }
-  rt->Spec = targetSpec;
-  rt->CurrentModel = targetModel;
   if (rt->TuiView) {
     if (!Tui_ClearSession(rt->TuiView)) {
-      RuntimeRestartWatch(rt, ux);
+      AgentHarness_Close(rt->Harness);
+      bool restored = RuntimeRollbackSessionSwitch(
+          rt, previousWorkingDirectory, previousSessionId, &previousConfig, ux);
+      PromptContext_Release(&nextPrompt);
       ArenaRelease(&scratch);
-      return SessionResult_Error(SessionStatus::Busy,
-                                 SVL("the TUI could not switch sessions"));
+      return restored
+                 ? SessionResult_Error(
+                       SessionStatus::Busy,
+                       SVL("the TUI could not switch sessions"))
+                 : SessionResult_Error(
+                       SessionStatus::Faulted,
+                       SVL("the TUI switch failed and the previous session could not be restored"));
     }
-    Tui_SetModelName(rt->TuiView, targetModel.Id);
   }
   if (!RuntimeRestartWatch(rt, ux)) {
+    AgentHarness_Close(rt->Harness);
+    bool restored = RuntimeRollbackSessionSwitch(
+        rt, previousWorkingDirectory, previousSessionId, &previousConfig, ux);
+    PromptContext_Release(&nextPrompt);
     ArenaRelease(&scratch);
-    return SessionResult_Error(SessionStatus::IoError,
-                               SVL("failed to watch the selected session"));
+    return restored
+               ? SessionResult_Error(
+                     SessionStatus::IoError,
+                     SVL("failed to watch the selected session"))
+               : SessionResult_Error(
+                     SessionStatus::Faulted,
+                     SVL("failed to watch the selected session and restore the previous session"));
+  }
+
+  rt->Spec = targetSpec;
+  rt->CurrentModel = targetModel;
+  if (switchingProject) {
+    PromptContext previousPrompt = *rt->Prompt;
+    *rt->Prompt = nextPrompt;
+    nextPrompt = {};
+    rt->ProjectKey = StrView_Dup(rt->Mem, targetInfo->ProjectKey);
+    rt->WorkingDirectory =
+        StrView_Dup(rt->Mem, targetInfo->WorkingDirectory);
+    rt->PromptOptions = nextPromptOptions;
+    rt->PromptOptions.WorkingDirectory = rt->WorkingDirectory;
+    rt->ProjectTrusted = nextTrusted;
+    rt->HasProjectResources = nextHasResources;
+    rt->TrustCoversProjectResources =
+        nextHasResources ||
+        rt->TrustOverride != ProjectTrustOverride::Unspecified;
+    PromptContext_Release(&previousPrompt);
+    EmitPromptDiagnostics(rt->Prompt, ux);
+  }
+  if (rt->TuiView) {
+    Tui_SetModelName(rt->TuiView, targetModel.Id);
+    Tui_LoadStartupContext(rt->TuiView);
   }
   ArenaRelease(&scratch);
   return initialized.Status == SessionStatus::Suspended
@@ -1233,112 +1432,251 @@ static SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
              : initialized;
 }
 
-static AppCommandHandlerResult HandleSessionCommand(
-    void* user, const AppCommandUx*, StrView) {
-  InteractiveRuntime* rt = (InteractiveRuntime*)user;
-  Arena scratch = ArenaCreate((usize)16 << 20);
-  SessionReduction state = {};
-  SessionResult snapshot =
-      AgentHarness_Snapshot(&scratch, rt->Harness, &state);
-  if (!SessionResult_IsOk(snapshot)) {
-    ArenaRelease(&scratch);
-    return CommandResult(snapshot, {});
-  }
+static StrView SessionTitle(const SessionInfo* info) {
+  return info->DisplayTitle.Length ? info->DisplayTitle
+                                   : SVL("(untitled session)");
+}
 
-  StrView options[8] = {};
-  u32 optionCount = 0;
-  StrBuf id = StrBuf_Make(&scratch, 48);
-  StrBuf_AppendCStr(&id, "ID       ");
-  if (state.RecordCount)
-    StrBuf_Append(&id, DurableId_View(&state.Records[0].SessionId));
-  options[optionCount++] = StrBuf_View(&id);
-  if (state.RecordCount &&
-      state.Records[0].SessionStarted.Label.Length) {
-    StrBuf label = StrBuf_Make(&scratch, 64);
-    StrBuf_AppendCStr(&label, "Label    ");
-    StrBuf_Append(&label, state.Records[0].SessionStarted.Label);
-    options[optionCount++] = StrBuf_View(&label);
+static StrView FormatDuration(Arena* arena, u64 milliseconds) {
+  u64 seconds = milliseconds / 1000;
+  u64 days = seconds / 86400;
+  u64 hours = (seconds / 3600) % 24;
+  u64 minutes = (seconds / 60) % 60;
+  seconds %= 60;
+  StrBuf text = StrBuf_Make(arena, 32);
+  if (days) {
+    StrBuf_AppendU64(&text, days);
+    StrBuf_AppendCStr(&text, "d ");
+    StrBuf_AppendU64(&text, hours);
+    StrBuf_AppendChar(&text, 'h');
+  } else if (hours) {
+    StrBuf_AppendU64(&text, hours);
+    StrBuf_AppendCStr(&text, "h ");
+    StrBuf_AppendU64(&text, minutes);
+    StrBuf_AppendChar(&text, 'm');
+  } else if (minutes) {
+    StrBuf_AppendU64(&text, minutes);
+    StrBuf_AppendCStr(&text, "m ");
+    StrBuf_AppendU64(&text, seconds);
+    StrBuf_AppendChar(&text, 's');
+  } else {
+    StrBuf_AppendU64(&text, seconds);
+    StrBuf_AppendChar(&text, 's');
   }
-  StrBuf storage = StrBuf_Make(&scratch, 32);
-  StrBuf_AppendCStr(&storage, "Storage  ");
-  StrBuf_AppendCStr(&storage, rt->NoSession ? "memory" : "jsonl");
-  options[optionCount++] = StrBuf_View(&storage);
-  StrBuf project = StrBuf_Make(&scratch, rt->ProjectKey.Length + 16);
-  StrBuf_AppendCStr(&project, "Project  ");
-  StrBuf_Append(&project, rt->ProjectKey);
-  options[optionCount++] = StrBuf_View(&project);
-  StrBuf model = StrBuf_Make(
-      &scratch, state.Provider.Length + state.Model.Length + 16);
-  StrBuf_AppendCStr(&model, "Model    ");
-  if (state.Provider.Length) {
-    StrBuf_Append(&model, state.Provider);
+  return StrBuf_View(&text);
+}
+
+static StrView FormatRelativeAge(Arena* arena, u64 timestamp, u64 now) {
+  if (!timestamp || now < timestamp) return SVL("now");
+  u64 seconds = (now - timestamp) / 1000;
+  StrBuf text = StrBuf_Make(arena, 32);
+  if (seconds < 60) {
+    StrBuf_AppendU64(&text, seconds);
+    StrBuf_AppendCStr(&text, "s ago");
+  } else if (seconds < 3600) {
+    StrBuf_AppendU64(&text, seconds / 60);
+    StrBuf_AppendCStr(&text, "m ago");
+  } else if (seconds < 86400) {
+    StrBuf_AppendU64(&text, seconds / 3600);
+    StrBuf_AppendCStr(&text, "h ago");
+  } else {
+    StrBuf_AppendU64(&text, seconds / 86400);
+    StrBuf_AppendCStr(&text, "d ago");
+  }
+  return StrBuf_View(&text);
+}
+
+static StrView FormatTimestamp(Arena* arena, u64 timestamp) {
+  if (!timestamp) return SVL("(unknown)");
+  time_t seconds = (time_t)(timestamp / 1000);
+  struct tm local = {};
+#if defined(_WIN32)
+  if (localtime_s(&local, &seconds) != 0) return SVL("(unknown)");
+#else
+  if (!localtime_r(&seconds, &local)) return SVL("(unknown)");
+#endif
+  char value[32];
+  int length =
+      snprintf(value, sizeof(value), "%04d-%02d-%02d %02d:%02d:%02d",
+               local.tm_year + 1900, local.tm_mon + 1, local.tm_mday,
+               local.tm_hour, local.tm_min, local.tm_sec);
+  return length > 0 ? StrView_Dup(arena, StrView{value, (u32)length})
+                    : SVL("(unknown)");
+}
+
+static void AddDetail(Array<StrView>* lines, Arena* arena, const char* label,
+                      StrView value) {
+  StrBuf line = StrBuf_Make(arena, value.Length + 24);
+  StrBuf_AppendCStr(&line, label);
+  StrBuf_Append(&line, value.Length ? value : SVL("(none)"));
+  Array_Push(lines, StrBuf_View(&line));
+}
+
+static Array<StrView> SessionDetailLines(Arena* arena,
+                                         const SessionInfo* info,
+                                         StrView storage, StrView status) {
+  Array<StrView> lines = Array_Make<StrView>(arena, 20);
+  AddDetail(&lines, arena, "Title      ", SessionTitle(info));
+  AddDetail(&lines, arena, "Name       ", info->ExplicitName);
+  AddDetail(&lines, arena, "ID         ", DurableId_View(&info->SessionId));
+  AddDetail(&lines, arena, "Project    ", info->ProjectKey);
+  AddDetail(&lines, arena, "CWD        ", info->WorkingDirectory);
+  AddDetail(&lines, arena, "Storage    ", storage);
+  AddDetail(&lines, arena, "Status     ", status);
+  AddDetail(&lines, arena, "Created    ",
+            FormatTimestamp(arena, info->CreatedAt));
+  AddDetail(&lines, arena, "Activity   ",
+            FormatTimestamp(arena, info->LastActivityAt));
+  AddDetail(&lines, arena, "Updated    ",
+            FormatTimestamp(arena, info->StorageUpdatedAt));
+  AddDetail(&lines, arena, "Wall span  ",
+            FormatDuration(arena, info->WallSpanMs));
+  StrBuf active = StrBuf_Make(arena, 48);
+  StrBuf_Append(&active, FormatDuration(arena, info->ActiveTimeMs));
+  if (info->Running)
+    StrBuf_AppendCStr(&active, " (running)");
+  else if (info->ActiveTimePartial)
+    StrBuf_AppendCStr(&active, " (partial)");
+  AddDetail(&lines, arena, "Active     ", StrBuf_View(&active));
+
+  StrBuf model =
+      StrBuf_Make(arena, info->CurrentProvider.Length +
+                             info->CurrentModel.Length + 2);
+  if (info->CurrentProvider.Length) {
+    StrBuf_Append(&model, info->CurrentProvider);
     StrBuf_AppendChar(&model, '/');
   }
-  StrBuf_Append(&model, state.Model);
-  options[optionCount++] = StrBuf_View(&model);
-  StrBuf head = StrBuf_Make(&scratch, 48);
-  StrBuf_AppendCStr(&head, "Head     ");
-  if (DurableId_IsSet(state.HeadId))
-    StrBuf_Append(&head, DurableId_View(&state.HeadId));
-  else
-    StrBuf_AppendCStr(&head, "(root)");
-  options[optionCount++] = StrBuf_View(&head);
-  StrView branchLabel = {};
-  for (u32 i = 0; i < state.Branch.Count; i++)
-    if (state.Branch.Data[i]->Kind == SessionRecordKind::BranchLabel)
-      branchLabel = state.Branch.Data[i]->BranchLabelEntry.Label;
-  if (branchLabel.Length) {
-    StrBuf branch = StrBuf_Make(&scratch, branchLabel.Length + 16);
-    StrBuf_AppendCStr(&branch, "Branch   ");
-    StrBuf_Append(&branch, branchLabel);
-    options[optionCount++] = StrBuf_View(&branch);
-  }
-  StrBuf status = StrBuf_Make(&scratch, 32);
-  StrBuf_AppendCStr(&status, "Status   ");
-  if (rt->Harness->Faulted)
-    StrBuf_AppendCStr(&status, "faulted");
-  else if (rt->Harness->Running)
-    StrBuf_AppendCStr(&status, "running");
-  else if (rt->Harness->Suspended)
-    StrBuf_AppendCStr(&status, "suspended");
-  else
-    StrBuf_AppendCStr(&status, "idle");
-  options[optionCount++] = StrBuf_View(&status);
+  StrBuf_Append(&model, info->CurrentModel);
+  AddDetail(&lines, arena, "Model      ", StrBuf_View(&model));
 
-  if (rt->TuiView) {
-    u32 selected = 0;
-    RuntimeInputResult result =
-        RuntimeSelect(rt, SVL("Current session"), options, optionCount,
-                      &selected);
-    ArenaRelease(&scratch);
-    if (result == RuntimeInputResult::Back)
-      return ReturnToCommandPalette(rt);
-    return AppCommandHandlerResult{AppCommandHandlerStatus::Success, {}};
-  }
+  StrBuf messages = StrBuf_Make(arena, 96);
+  StrBuf_AppendU64(&messages, info->MessageCount);
+  StrBuf_AppendCStr(&messages, " total (");
+  StrBuf_AppendU64(&messages, info->UserMessageCount);
+  StrBuf_AppendCStr(&messages, " user, ");
+  StrBuf_AppendU64(&messages, info->AssistantMessageCount);
+  StrBuf_AppendCStr(&messages, " assistant, ");
+  StrBuf_AppendU64(&messages, info->ToolResultMessageCount);
+  StrBuf_AppendCStr(&messages, " tool)");
+  AddDetail(&lines, arena, "Messages   ", StrBuf_View(&messages));
 
-  StrBuf text = StrBuf_Make(rt->Mem, 256);
-  for (u32 i = 0; i < optionCount; i++) {
-    StrBuf_Append(&text, options[i]);
-    if (i + 1 < optionCount) StrBuf_AppendChar(&text, '\n');
+  StrBuf counts = StrBuf_Make(arena, 96);
+  StrBuf_AppendU64(&counts, info->ToolCallCount);
+  StrBuf_AppendCStr(&counts, " tools, ");
+  StrBuf_AppendU64(&counts, info->GenerationCount);
+  StrBuf_AppendCStr(&counts, " generations, ");
+  StrBuf_AppendU64(&counts, info->CompactionCount);
+  StrBuf_AppendCStr(&counts, " compactions, ");
+  StrBuf_AppendU64(&counts, info->OperationCount);
+  StrBuf_AppendCStr(&counts, " operations");
+  AddDetail(&lines, arena, "Counts     ", StrBuf_View(&counts));
+
+  StrBuf tokens = StrBuf_Make(arena, 128);
+  StrBuf_AppendU64(&tokens, info->TotalTokens);
+  if (info->UsageIncomplete) StrBuf_AppendChar(&tokens, '+');
+  StrBuf_AppendCStr(&tokens, " total (in ");
+  StrBuf_AppendU64(&tokens, info->InputTokens);
+  StrBuf_AppendCStr(&tokens, ", out ");
+  StrBuf_AppendU64(&tokens, info->OutputTokens);
+  StrBuf_AppendCStr(&tokens, ", cache read ");
+  StrBuf_AppendU64(&tokens, info->CacheReadTokens);
+  StrBuf_AppendCStr(&tokens, ", write ");
+  StrBuf_AppendU64(&tokens, info->CacheWriteTokens);
+  StrBuf_AppendCStr(&tokens, ", reasoning ");
+  StrBuf_AppendU64(&tokens, info->ReasoningTokens);
+  StrBuf_AppendChar(&tokens, ')');
+  if (info->UsageIncomplete) {
+    StrBuf_AppendCStr(&tokens, "; ");
+    StrBuf_AppendU64(&tokens, info->UnknownUsageCount);
+    StrBuf_AppendCStr(&tokens, info->UnknownUsageCount == 1
+                                  ? " attempt unavailable"
+                                  : " attempts unavailable");
   }
-  ArenaRelease(&scratch);
-  return AppCommandHandlerResult{AppCommandHandlerStatus::Success,
-                                 StrBuf_View(&text)};
+  AddDetail(&lines, arena, "Tokens     ", StrBuf_View(&tokens));
+
+  if (DurableId_IsSet(info->ForkedFromSessionId)) {
+    StrBuf ancestry = StrBuf_Make(arena, 64);
+    StrBuf_Append(&ancestry, DurableId_View(&info->ForkedFromSessionId));
+    StrBuf_AppendCStr(&ancestry, " @ ");
+    StrBuf_Append(&ancestry, DurableId_View(&info->ForkedFromEntryId));
+    AddDetail(&lines, arena, "Forked     ", StrBuf_View(&ancestry));
+  }
+  if (info->Label.Length)
+    AddDetail(&lines, arena, "Branch     ", info->Label);
+  return lines;
+}
+
+static StrView SessionStatusText(const SessionInfo* info) {
+  if (info->Running) return SVL("running");
+  if (info->Suspended) return SVL("suspended");
+  if (info->Busy) return SVL("busy");
+  return SVL("available");
 }
 
 static StrView FormatSessionOption(Arena* arena, const SessionInfo* info,
-                                   DurableId currentSessionId) {
-  StrBuf option = StrBuf_Make(arena, info->Label.Length + 64);
-  StrBuf_Append(&option, DurableId_View(&info->SessionId));
-  if (info->Label.Length) {
-    StrBuf_AppendCStr(&option, "  ");
-    StrBuf_Append(&option, info->Label);
+                                   DurableId currentSessionId,
+                                   bool allProjects, bool includeFullId,
+                                   u64 nowMs, StrView home) {
+  StrBuf option =
+      StrBuf_Make(arena, SessionTitle(info).Length +
+                             info->WorkingDirectory.Length + 160);
+  StrBuf_Append(&option, SessionTitle(info));
+  StrBuf_AppendCStr(&option, "  |  ");
+  StrBuf_AppendU64(&option, info->MessageCount);
+  StrBuf_AppendCStr(&option, " msg  |  ");
+  StrBuf_AppendU64(&option, info->TotalTokens);
+  if (info->UsageIncomplete) StrBuf_AppendChar(&option, '+');
+  StrBuf_AppendCStr(&option, " tok  |  ");
+  StrBuf_Append(&option,
+                FormatRelativeAge(arena, info->LastActivityAt, nowMs));
+  StrBuf_AppendCStr(&option, "  |  ");
+  StrBuf_Append(&option, FormatDuration(arena, info->ActiveTimeMs));
+  StrBuf_AppendCStr(&option, " active");
+  if (allProjects) {
+    StrView cwd =
+        Sys_AbbreviatePath(arena, info->WorkingDirectory, home);
+    StrBuf_AppendCStr(&option, "  |  ");
+    StrBuf_Append(&option, cwd);
+  }
+  if (includeFullId) {
+    StrBuf_AppendCStr(&option, "  |  ");
+    StrBuf_Append(&option, DurableId_View(&info->SessionId));
   }
   if (DurableId_Eq(info->SessionId, currentSessionId))
     StrBuf_AppendCStr(&option, "  [current]");
   else if (info->Busy)
     StrBuf_AppendCStr(&option, "  [busy]");
+  else if (info->Suspended)
+    StrBuf_AppendCStr(&option, "  [suspended]");
   return StrBuf_View(&option);
+}
+
+struct SessionOptionList {
+  SessionInfo** Sessions;
+  StrView* Options;
+  u32 Count;
+};
+
+static SessionOptionList BuildSessionOptions(
+    Arena* arena, Array<SessionInfo>* items, DurableId currentSessionId,
+    bool allProjects, bool includeFullId, bool availableOnly, u64 nowMs,
+    StrView home) {
+  SessionOptionList result = {};
+  u32 capacity = items->Count + 1;
+  result.Sessions = ArenaPushArray(arena, SessionInfo*, capacity);
+  result.Options = ArenaPushArray(arena, StrView, capacity);
+  for (u32 i = 0; i < items->Count; i++) {
+    SessionInfo* info = &items->Data[i];
+    if (availableOnly &&
+        (DurableId_Eq(info->SessionId, currentSessionId) || info->Busy))
+      continue;
+    result.Sessions[result.Count] = info;
+    result.Options[result.Count] =
+        FormatSessionOption(arena, info, currentSessionId, allProjects,
+                            includeFullId, nowMs, home);
+    result.Count++;
+  }
+  return result;
 }
 
 static SessionResult CurrentSessionId(Arena* arena, InteractiveRuntime* rt,
@@ -1354,17 +1692,156 @@ static SessionResult CurrentSessionId(Arena* arena, InteractiveRuntime* rt,
   return snapshot;
 }
 
-static AppCommandHandlerResult HandleSessionsCommand(
+static AppCommandHandlerResult HandleSessionCommand(
     void* user, const AppCommandUx*, StrView) {
   InteractiveRuntime* rt = (InteractiveRuntime*)user;
   Arena scratch = ArenaCreate((usize)32 << 20);
+  SessionReduction state = {};
+  SessionResult snapshot =
+      AgentHarness_Snapshot(&scratch, rt->Harness, &state);
+  if (!SessionResult_IsOk(snapshot)) {
+    ArenaRelease(&scratch);
+    return CommandResult(snapshot, {});
+  }
+  SessionMetadataBuildOptions build = {};
+  build.Busy = true;
+  build.Running = rt->Harness->Running;
+  build.Suspended = rt->Harness->Suspended;
+  build.NowMs = NowMillis();
+  SessionInfo info = {};
+  SessionResult metadata =
+      SessionMetadata_Build(&scratch, state.Records, state.RecordCount,
+                            &build, &info);
+  if (!SessionResult_IsOk(metadata)) {
+    ArenaRelease(&scratch);
+    return CommandResult(metadata, {});
+  }
+  StrView status = rt->Harness->Faulted
+                       ? SVL("faulted")
+                   : rt->Harness->Running
+                       ? SVL("running")
+                   : rt->Harness->Suspended ? SVL("suspended")
+                                             : SVL("idle");
+  Array<StrView> lines = SessionDetailLines(
+      &scratch, &info, rt->NoSession ? SVL("memory") : SVL("jsonl"),
+      status);
+  if (rt->TuiView) {
+    u32 selected = 0;
+    RuntimeInputResult result =
+        RuntimeSelect(rt, SVL("Current session"), lines.Data, lines.Count,
+                      &selected);
+    ArenaRelease(&scratch);
+    if (result == RuntimeInputResult::Back)
+      return ReturnToCommandPalette(rt);
+    return AppCommandHandlerResult{AppCommandHandlerStatus::Success, {}};
+  }
+  StrBuf text = StrBuf_Make(rt->Mem, 768);
+  for (u32 i = 0; i < lines.Count; i++) {
+    StrBuf_Append(&text, lines.Data[i]);
+    if (i + 1 < lines.Count) StrBuf_AppendChar(&text, '\n');
+  }
+  ArenaRelease(&scratch);
+  return AppCommandHandlerResult{AppCommandHandlerStatus::Success,
+                                 StrBuf_View(&text)};
+}
+
+static AppCommandHandlerResult HandleNameCommand(
+    void* user, const AppCommandUx*, StrView arguments) {
+  InteractiveRuntime* rt = (InteractiveRuntime*)user;
+  Arena scratch = ArenaCreate((usize)16 << 20);
+  StrView name = arguments;
+  if (!arguments.Length) {
+    if (!rt->TuiView) {
+      ArenaRelease(&scratch);
+      return AppCommandHandlerResult{
+          AppCommandHandlerStatus::Failed,
+          AppCommand_Usage(AppCommandKind::Name)};
+    }
+    SessionReduction state = {};
+    SessionResult snapshot =
+        AgentHarness_Snapshot(&scratch, rt->Harness, &state);
+    if (!SessionResult_IsOk(snapshot)) {
+      ArenaRelease(&scratch);
+      return CommandResult(snapshot, {});
+    }
+    SessionMetadataBuildOptions build = {};
+    SessionInfo info = {};
+    SessionResult metadata =
+        SessionMetadata_Build(&scratch, state.Records, state.RecordCount,
+                              &build, &info);
+    if (!SessionResult_IsOk(metadata)) {
+      ArenaRelease(&scratch);
+      return CommandResult(metadata, {});
+    }
+    StrView entered = {};
+    RuntimeInputResult result =
+        RuntimeReadText(rt, &scratch, SVL("Session name"),
+                        SVL("Name (empty clears)"), info.ExplicitName,
+                        &entered);
+    if (result != RuntimeInputResult::Confirmed) {
+      ArenaRelease(&scratch);
+      if (result == RuntimeInputResult::Back)
+        return ReturnToCommandPalette(rt);
+      return AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled,
+                                     SVL("Session name unchanged.")};
+    }
+    name = TrimAscii(entered);
+  } else if (StrView_Eq(arguments, SVL("--clear"))) {
+    name = {};
+  }
+  SessionResult named = AgentHarness_SetName(rt->Harness, name);
+  ArenaRelease(&scratch);
+  return CommandResult(named, name.Length ? SVL("session name updated")
+                                          : SVL("session name cleared"));
+}
+
+static SessionResult ListSessions(InteractiveRuntime* rt, Arena* arena,
+                                  SessionListScope scope,
+                                  Array<SessionInfo>* out,
+                                  u32* skippedCount = nullptr) {
+  SessionListOptions options = {};
+  options.Scope = scope;
+  options.ProjectKey = rt->ProjectKey;
+  options.SkippedCount = skippedCount;
+  return rt->Sessions->List(rt->Sessions->Ctx, arena, &options, out);
+}
+
+static void ReportSkippedSessions(const AppCommandUx* ux, Arena* arena,
+                                  u32 skippedCount) {
+  if (!skippedCount) return;
+  StrBuf warning = StrBuf_Make(arena, 96);
+  StrBuf_AppendCStr(&warning, "Skipped ");
+  StrBuf_AppendU64(&warning, skippedCount);
+  StrBuf_AppendCStr(&warning, skippedCount == 1
+                                 ? " unreadable session file."
+                                 : " unreadable session files.");
+  EmitCommandNotice(ux, StrBuf_View(&warning));
+}
+
+static AppCommandHandlerResult HandleSessionsCommand(
+    void* user, const AppCommandUx* ux, StrView arguments) {
+  InteractiveRuntime* rt = (InteractiveRuntime*)user;
+  Arena scratch = ArenaCreate((usize)32 << 20);
+  SessionListScope scope = SessionListScope::CurrentProject;
+  if (arguments.Length) {
+    if (!StrView_Eq(arguments, SVL("all"))) {
+      ArenaRelease(&scratch);
+      return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
+                                     AppCommand_Usage(
+                                         AppCommandKind::Sessions)};
+    }
+    scope = SessionListScope::AllProjects;
+  }
+list_scope:
   Array<SessionInfo> items = {};
+  u32 skippedCount = 0;
   SessionResult listed =
-      rt->Sessions->List(rt->Sessions->Ctx, &scratch, rt->ProjectKey, &items);
+      ListSessions(rt, &scratch, scope, &items, &skippedCount);
   if (!SessionResult_IsOk(listed)) {
     ArenaRelease(&scratch);
     return CommandResult(listed, {});
   }
+  ReportSkippedSessions(ux, &scratch, skippedCount);
   DurableId currentSessionId = {};
   SessionResult current =
       CurrentSessionId(&scratch, rt, &currentSessionId);
@@ -1372,28 +1849,53 @@ static AppCommandHandlerResult HandleSessionsCommand(
     ArenaRelease(&scratch);
     return CommandResult(current, {});
   }
-  u32 optionCount = items.Count ? items.Count : 1;
-  StrView* options = ArenaPushArray(&scratch, StrView, optionCount);
-  if (!items.Count)
-    options[0] = SVL("No sessions for this project");
-  for (u32 i = 0; i < items.Count; i++)
-    options[i] =
-        FormatSessionOption(&scratch, &items.Data[i], currentSessionId);
+  bool allProjects = scope == SessionListScope::AllProjects;
+  u64 nowMs = NowMillis();
+  StrView home = allProjects ? Sys_HomeDir(&scratch) : StrView{};
+  SessionOptionList rows = BuildSessionOptions(
+      &scratch, &items, currentSessionId, allProjects, !rt->TuiView, false,
+      nowMs, home);
+  u32 optionCount = rows.Count;
+  if (rt->TuiView && !allProjects)
+    rows.Options[optionCount++] = SVL("All projects...");
+  else if (!optionCount)
+    rows.Options[optionCount++] = SVL("No sessions found");
 
   if (rt->TuiView) {
     u32 selected = 0;
     RuntimeInputResult result =
-        RuntimeSelect(rt, SVL("Project sessions"), options, optionCount,
+        RuntimeSelect(rt, allProjects ? SVL("All sessions")
+                                      : SVL("Project sessions"),
+                      rows.Options, optionCount,
                       &selected);
-    ArenaRelease(&scratch);
-    if (result == RuntimeInputResult::Back)
+    if (result == RuntimeInputResult::Back) {
+      ArenaRelease(&scratch);
       return ReturnToCommandPalette(rt);
+    }
+    if (result != RuntimeInputResult::Confirmed) {
+      ArenaRelease(&scratch);
+      return AppCommandHandlerResult{AppCommandHandlerStatus::Success, {}};
+    }
+    if (!allProjects && selected == rows.Count) {
+      scope = SessionListScope::AllProjects;
+      goto list_scope;
+    }
+    if (selected < rows.Count) {
+      Array<StrView> details =
+          SessionDetailLines(&scratch, rows.Sessions[selected],
+                             rt->NoSession ? SVL("memory") : SVL("jsonl"),
+                             SessionStatusText(rows.Sessions[selected]));
+      u32 ignored = 0;
+      RuntimeSelect(rt, SVL("Session details"), details.Data, details.Count,
+                    &ignored);
+    }
+    ArenaRelease(&scratch);
     return AppCommandHandlerResult{AppCommandHandlerStatus::Success, {}};
   }
 
   StrBuf text = StrBuf_Make(rt->Mem, optionCount * 96 + 32);
   for (u32 i = 0; i < optionCount; i++) {
-    StrBuf_Append(&text, options[i]);
+    StrBuf_Append(&text, rows.Options[i]);
     if (i + 1 < optionCount) StrBuf_AppendChar(&text, '\n');
   }
   ArenaRelease(&scratch);
@@ -1409,65 +1911,60 @@ static AppCommandHandlerResult HandleResumeCommand(
                                    SVL("cannot switch sessions while an operation is active")};
   Arena scratch = ArenaCreate((usize)64 << 20);
   DurableId sessionId = {};
+  SessionInfo selectedInfo = {};
+  DurableId currentSessionId = {};
+  SessionResult current =
+      CurrentSessionId(&scratch, rt, &currentSessionId);
+  if (!SessionResult_IsOk(current)) {
+    ArenaRelease(&scratch);
+    return CommandResult(current, {});
+  }
   if (arguments.Length) {
     if (!DurableId_Parse(arguments, &sessionId)) {
       ArenaRelease(&scratch);
       return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
                                      SVL("invalid session ID")};
     }
+    SessionResult resolved = rt->Sessions->Resolve(
+        rt->Sessions->Ctx, &scratch, sessionId, &selectedInfo);
+    if (!SessionResult_IsOk(resolved)) {
+      ArenaRelease(&scratch);
+      return CommandResult(resolved, {});
+    }
   } else {
     if (!rt->TuiView) {
       ArenaRelease(&scratch);
       return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
-                                     SVL("Usage: /resume [session-id]")};
+                                     AppCommand_Usage(
+                                         AppCommandKind::Resume)};
     }
+    SessionListScope scope = SessionListScope::CurrentProject;
+resume_scope:
     Array<SessionInfo> items = {};
+    u32 skippedCount = 0;
     SessionResult listed =
-        rt->Sessions->List(rt->Sessions->Ctx, &scratch, rt->ProjectKey,
-                           &items);
+        ListSessions(rt, &scratch, scope, &items, &skippedCount);
     if (!SessionResult_IsOk(listed)) {
       ArenaRelease(&scratch);
       return CommandResult(listed, {});
     }
-    DurableId currentSessionId = {};
-    SessionResult current =
-        CurrentSessionId(&scratch, rt, &currentSessionId);
-    if (!SessionResult_IsOk(current)) {
-      ArenaRelease(&scratch);
-      return CommandResult(current, {});
-    }
-    u32 availableCount = 0;
-    for (u32 i = 0; i < items.Count; i++)
-      if (!DurableId_Eq(items.Data[i].SessionId, currentSessionId) &&
-          !items.Data[i].Busy)
-        availableCount++;
-    if (!availableCount) {
-      StrView empty[] = {SVL("No other sessions are available")};
-      u32 selected = 0;
-      RuntimeInputResult result =
-          RuntimeSelect(rt, SVL("Resume session"), empty, 1, &selected);
-      ArenaRelease(&scratch);
-      if (result == RuntimeInputResult::Back)
-        return ReturnToCommandPalette(rt);
-      return AppCommandHandlerResult{AppCommandHandlerStatus::Success, {}};
-    }
-    SessionInfo** available =
-        ArenaPushArray(&scratch, SessionInfo*, availableCount);
-    StrView* options =
-        ArenaPushArray(&scratch, StrView, availableCount);
-    u32 at = 0;
-    for (u32 i = 0; i < items.Count; i++) {
-      if (DurableId_Eq(items.Data[i].SessionId, currentSessionId) ||
-          items.Data[i].Busy)
-        continue;
-      available[at] = &items.Data[i];
-      options[at] =
-          FormatSessionOption(&scratch, &items.Data[i], currentSessionId);
-      at++;
-    }
+    ReportSkippedSessions(ux, &scratch, skippedCount);
+    bool allProjects = scope == SessionListScope::AllProjects;
+    u64 nowMs = NowMillis();
+    StrView home = allProjects ? Sys_HomeDir(&scratch) : StrView{};
+    SessionOptionList rows = BuildSessionOptions(
+        &scratch, &items, currentSessionId, allProjects, false, true, nowMs,
+        home);
+    u32 optionCount = rows.Count;
+    if (!allProjects)
+      rows.Options[optionCount++] = SVL("All projects...");
+    else if (!optionCount)
+      rows.Options[optionCount++] = SVL("No other sessions are available");
     u32 selected = 0;
     RuntimeInputResult result =
-        RuntimeSelect(rt, SVL("Resume session"), options, availableCount,
+        RuntimeSelect(rt, allProjects ? SVL("Resume from all projects")
+                                      : SVL("Resume session"),
+                      rows.Options, optionCount,
                       &selected);
     if (result != RuntimeInputResult::Confirmed) {
       ArenaRelease(&scratch);
@@ -1475,11 +1972,30 @@ static AppCommandHandlerResult HandleResumeCommand(
         return ReturnToCommandPalette(rt);
       return AppCommandHandlerResult{AppCommandHandlerStatus::Success, {}};
     }
-    sessionId = available[selected]->SessionId;
+    if (!allProjects && selected == rows.Count) {
+      scope = SessionListScope::AllProjects;
+      goto resume_scope;
+    }
+    if (selected >= rows.Count) {
+      ArenaRelease(&scratch);
+      return AppCommandHandlerResult{AppCommandHandlerStatus::Success, {}};
+    }
+    selectedInfo = *rows.Sessions[selected];
+    sessionId = selectedInfo.SessionId;
+  }
+  if (DurableId_Eq(sessionId, currentSessionId)) {
+    ArenaRelease(&scratch);
+    return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
+                                   SVL("that session is already current")};
+  }
+  if (selectedInfo.Busy) {
+    ArenaRelease(&scratch);
+    return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
+                                   SVL("session already has a writer")};
   }
   SessionOpenOptions open = {};
   open.SessionId = sessionId;
-  open.ProjectKey = rt->ProjectKey;
+  open.ProjectKey = selectedInfo.ProjectKey;
   open.Writable = true;
   SessionLog log = {};
   SessionInfo info = {};
@@ -1499,7 +2015,8 @@ static AppCommandHandlerResult HandleResumeCommand(
     ArenaRelease(&scratch);
     return CommandResult(read, {});
   }
-  SessionResult switched = RuntimeSwitchToLog(rt, log, &state, ux);
+  SessionResult switched =
+      RuntimeSwitchToLog(rt, log, &info, &state, ux);
   ArenaRelease(&scratch);
   return CommandResult(switched, SVL("session resumed"));
 }
@@ -1589,7 +2106,8 @@ static AppCommandHandlerResult HandleForkCommand(
       forked = SessionReducer_Reduce(&scratch, records.Data, records.Count,
                                      &forkState);
     if (SessionResult_IsOk(forked))
-      forked = RuntimeSwitchToLog(rt, forkLog, &forkState, ux);
+      forked =
+          RuntimeSwitchToLog(rt, forkLog, &forkInfo, &forkState, ux);
     else
       SessionLog_Close(&forkLog);
   }
@@ -1627,7 +2145,7 @@ static AppCommandHandlerResult HandleRecoverCommand(
   if (!StrView_Eq(command, SVL("tool")))
     return AppCommandHandlerResult{
         AppCommandHandlerStatus::Failed,
-        SVL("Usage: /recover <resume|abort|tool ACTION [result]>")};
+        AppCommand_Usage(AppCommandKind::Recover)};
 
   StrView action = rest;
   StrView suppliedText = {};
@@ -1923,7 +2441,8 @@ static bool RuntimeResetSession(InteractiveRuntime* rt, const AppCommandUx* ux) 
     return false;
   }
 
-  SessionResult switched = RuntimeSwitchToLog(rt, log, nullptr, ux);
+  SessionResult switched =
+      RuntimeSwitchToLog(rt, log, &info, nullptr, ux);
   if (!SessionResult_IsOk(switched)) {
     EmitCommandError(ux, switched.Message);
     return false;
@@ -1944,6 +2463,7 @@ static AppCommandHandlers RuntimeCommandHandlers(InteractiveRuntime* rt) {
   AppCommandHandlers handlers = {};
   handlers.User = rt;
   handlers.Session = HandleSessionCommand;
+  handlers.Name = HandleNameCommand;
   handlers.Sessions = HandleSessionsCommand;
   handlers.Resume = HandleResumeCommand;
   handlers.Tree = HandleTreeCommand;
@@ -2020,7 +2540,7 @@ static void PrintHelp() {
       "  -m <model>        Override the configured model for this run only\n"
       "  -p <prompt>       Run a single prompt and exit (print mode)\n"
       "  -c, --continue    Continue the most recent session for this project\n"
-      "  -r, --resume ID   Resume a specific session for this project\n"
+      "  -r, --resume ID   Resume an exact session ID from any project\n"
       "  --no-session      Keep the session in memory; write no session files\n"
       "  --system-prompt VALUE\n"
       "                    Replace the built-in prompt with text or file content\n"
@@ -2037,8 +2557,9 @@ static void PrintHelp() {
       "  --help            Show this help\n\n"
       "Auth: run `--login anthropic` for a Claude Pro/Max subscription (a local\n"
       "callback server captures the redirect automatically), or set ANTHROPIC_API_KEY.\n"
-      "Interactive commands: /session, /sessions, /resume, /tree, /checkout,\n"
-      "/fork, /compact, /recover, /trust, /reload, /login, /model, /clear, /exit.\n");
+      "Interactive commands: /session, /name, /sessions, /resume, /tree,\n"
+      "/checkout, /fork, /compact, /recover, /trust, /reload, /login, /model,\n"
+      "/clear, /exit.\n");
 }
 
 static bool ResolveStartupProjectTrust(
@@ -2464,6 +2985,57 @@ int main(int argc, char** argv) {
     ArenaRelease(&arena);
     return 1;
   }
+  StrView projectKey = SessionProjectKey(&arena, workingDirectory);
+  MemoryRepository memoryRepository = {};
+  JsonlRepository jsonlRepository = {};
+  SessionRepository sessions = {};
+  if (noSession) {
+    MemoryRepository_Init(&memoryRepository);
+    sessions = MemoryRepository_AsRepository(&memoryRepository);
+  } else {
+    JsonlRepository_Init(&jsonlRepository, SessionDataRoot(&arena));
+    sessions = JsonlRepository_AsRepository(&jsonlRepository);
+  }
+
+  SessionInfo resolvedResume = {};
+  DurableId resolvedResumeId = {};
+  if (resumeSession) {
+    if (!DurableId_Parse(SV(resumeSession), &resolvedResumeId)) {
+      fprintf(stderr, "error: invalid session ID\n");
+      sessions.Close(sessions.Ctx);
+      ArenaRelease(&arena);
+      return 1;
+    }
+    SessionResult resolved = sessions.Resolve(
+        sessions.Ctx, &arena, resolvedResumeId, &resolvedResume);
+    if (!SessionResult_IsOk(resolved)) {
+      fprintf(stderr, "error: session startup failed: %.*s\n",
+              (int)resolved.Message.Length, resolved.Message.Data);
+      sessions.Close(sessions.Ctx);
+      ArenaRelease(&arena);
+      return 1;
+    }
+    if (!Fs_IsDir(resolvedResume.WorkingDirectory)) {
+      fprintf(stderr,
+              "error: session working directory no longer exists: %.*s\n",
+              (int)resolvedResume.WorkingDirectory.Length,
+              resolvedResume.WorkingDirectory.Data);
+      sessions.Close(sessions.Ctx);
+      ArenaRelease(&arena);
+      return 1;
+    }
+    if (!Sys_SetCurrentDir(resolvedResume.WorkingDirectory)) {
+      fprintf(stderr, "error: could not enter session working directory: %.*s\n",
+              (int)resolvedResume.WorkingDirectory.Length,
+              resolvedResume.WorkingDirectory.Data);
+      sessions.Close(sessions.Ctx);
+      ArenaRelease(&arena);
+      return 1;
+    }
+    workingDirectory =
+        StrView_Dup(&arena, resolvedResume.WorkingDirectory);
+    projectKey = StrView_Dup(&arena, resolvedResume.ProjectKey);
+  }
   StrView agentDirectory = Fs_Parent(settingsPath);
   StrView trustPath = ProjectTrust_DefaultPath(&arena);
   bool projectTrusted = false;
@@ -2473,6 +3045,7 @@ int main(int argc, char** argv) {
           &arena, trustPath, workingDirectory, selected.DefaultTrust,
           trustOverride, trustInteractive, &projectTrusted,
           &hasProjectResources)) {
+    sessions.Close(sessions.Ctx);
     ArenaRelease(&arena);
     return 1;
   }
@@ -2503,6 +3076,7 @@ int main(int argc, char** argv) {
   if (!PromptContext_Build(&promptOptions, &promptContext, &promptError)) {
     fprintf(stderr, "error: %.*s\n", (int)promptError.Length,
             promptError.Data);
+    sessions.Close(sessions.Ctx);
     ArenaRelease(&arena);
     return 1;
   }
@@ -2544,25 +3118,22 @@ int main(int argc, char** argv) {
     harnessConfig.ResolveAuth = AppResolveAuth;
   }
 
-  StrView projectKey = SessionProjectKey(&arena, workingDirectory);
-  MemoryRepository memoryRepository = {};
-  JsonlRepository jsonlRepository = {};
-  SessionRepository sessions = {};
-  if (noSession) {
-    MemoryRepository_Init(&memoryRepository);
-    sessions = MemoryRepository_AsRepository(&memoryRepository);
-  } else {
-    JsonlRepository_Init(&jsonlRepository, SessionDataRoot(&arena));
-    sessions = JsonlRepository_AsRepository(&jsonlRepository);
-  }
-
   SessionLog sessionLog = {};
   SessionInfo sessionInfo = {};
   SessionResult sessionResult = {};
   bool openedExisting = continueSession || resumeSession;
   if (continueSession) {
     Array<SessionInfo> items = {};
-    sessionResult = sessions.List(sessions.Ctx, &arena, projectKey, &items);
+    SessionListOptions list = {};
+    list.Scope = SessionListScope::CurrentProject;
+    list.ProjectKey = projectKey;
+    u32 skippedCount = 0;
+    list.SkippedCount = &skippedCount;
+    sessionResult =
+        sessions.List(sessions.Ctx, &arena, &list, &items);
+    if (SessionResult_IsOk(sessionResult) && skippedCount)
+      fprintf(stderr, "warning: skipped %u unreadable session file%s\n",
+              skippedCount, skippedCount == 1 ? "" : "s");
     if (SessionResult_IsOk(sessionResult) && items.Count == 0)
       sessionResult = SessionResult_Error(
           SessionStatus::NotFound,
@@ -2576,18 +3147,12 @@ int main(int argc, char** argv) {
           sessions.Open(sessions.Ctx, &arena, &open, &sessionLog, &sessionInfo);
     }
   } else if (resumeSession) {
-    DurableId sessionId = {};
-    if (!DurableId_Parse(SV(resumeSession), &sessionId)) {
-      sessionResult = SessionResult_Error(SessionStatus::InvalidArgument,
-                                          SVL("invalid session ID"));
-    } else {
-      SessionOpenOptions open = {};
-      open.SessionId = sessionId;
-      open.ProjectKey = projectKey;
-      open.Writable = true;
-      sessionResult =
-          sessions.Open(sessions.Ctx, &arena, &open, &sessionLog, &sessionInfo);
-    }
+    SessionOpenOptions open = {};
+    open.SessionId = resolvedResumeId;
+    open.ProjectKey = resolvedResume.ProjectKey;
+    open.Writable = true;
+    sessionResult =
+        sessions.Open(sessions.Ctx, &arena, &open, &sessionLog, &sessionInfo);
   } else {
     SessionCreateOptions create = {};
     create.ProjectKey = projectKey;

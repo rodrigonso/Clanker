@@ -81,6 +81,35 @@ StrView LockPath(Arena* arena, JsonlRepository* repository, StrView projectKey,
                  SessionFileName(arena, sessionId, ".lock"));
 }
 
+SessionResult FindGlobalProject(Arena* arena, JsonlRepository* repository,
+                                DurableId sessionId, StrView* outProject) {
+  StrView root = SessionsRoot(arena, repository);
+  if (!Fs_Exists(root))
+    return SessionResult_Error(SessionStatus::NotFound,
+                               SVL("session file was not found"));
+  bool listed = false;
+  Array<FsEntry> projects = Fs_ListDir(arena, root, &listed);
+  if (!listed) return IoError("failed to list session projects");
+  StrView found = {};
+  for (u32 i = 0; i < projects.Count; i++) {
+    if (!projects.Data[i].IsDir || !ValidProjectKey(projects.Data[i].Name))
+      continue;
+    StrView path =
+        SessionPath(arena, repository, projects.Data[i].Name, sessionId);
+    if (!Fs_Exists(path)) continue;
+    if (found.Length)
+      return SessionResult_Error(
+          SessionStatus::Conflict,
+          SVL("session ID exists in multiple projects"));
+    found = projects.Data[i].Name;
+  }
+  if (!found.Length)
+    return SessionResult_Error(SessionStatus::NotFound,
+                               SVL("session file was not found"));
+  *outProject = found;
+  return SessionResult_Ok();
+}
+
 bool ClaimMatches(const JsonlWriterClaim* claim, StrView projectKey,
                   DurableId sessionId) {
   return claim->Active && DurableId_Eq(claim->SessionId, sessionId) &&
@@ -262,32 +291,11 @@ SessionResult LoadRecords(Arena* arena, StrView path, bool repair,
   return SessionResult_Ok(records.Data[records.Count - 1].Seq);
 }
 
-SessionInfo BuildInfo(Arena* arena, const SessionRecord* records, u32 count,
-                      bool busy) {
-  SessionInfo info = {};
-  const SessionRecord* started = &records[0];
-  info.SessionId = started->SessionId;
-  info.ProjectKey = StrView_Dup(arena, started->SessionStarted.ProjectKey);
-  info.WorkingDirectory =
-      StrView_Dup(arena, started->SessionStarted.WorkingDirectory);
-  info.Label = StrView_Dup(arena, started->SessionStarted.Label);
-  info.CreatedAt = started->CreatedAt;
-  info.UpdatedAt = records[count - 1].CreatedAt;
-  info.LastSeq = records[count - 1].Seq;
-  info.Busy = busy;
-
-  Arena scratch = ArenaCreate();
-  SessionReduction reduction = {};
-  if (SessionResult_IsOk(
-          SessionReducer_Reduce(&scratch, records, count, &reduction))) {
-    for (u32 i = 0; i < reduction.Branch.Count; i++) {
-      if (reduction.Branch.Data[i]->Kind == SessionRecordKind::BranchLabel)
-        info.Label =
-            StrView_Dup(arena, reduction.Branch.Data[i]->BranchLabelEntry.Label);
-    }
-  }
-  ArenaRelease(&scratch);
-  return info;
+SessionResult BuildInfo(Arena* arena, const SessionRecord* records, u32 count,
+                        bool busy, SessionInfo* out) {
+  SessionMetadataBuildOptions options = {};
+  options.Busy = busy;
+  return SessionMetadata_Build(arena, records, count, &options, out);
 }
 
 SessionLog LogInterface(JsonlLogHandle* handle);
@@ -447,8 +455,18 @@ SessionResult InitializeHandle(JsonlRepository* repository, Arena* callerArena,
       return IoError("failed to open session file for append");
     }
   }
-  *outInfo = BuildInfo(callerArena, handle->Records.Data, handle->Records.Count,
-                       writable);
+  const SessionRecord* root = &handle->Records.Data[0];
+  bool busy =
+      writable ||
+      SessionBusy(repository, root->SessionStarted.ProjectKey,
+                  root->SessionId);
+  SessionResult built =
+      BuildInfo(callerArena, handle->Records.Data, handle->Records.Count,
+                busy, outInfo);
+  if (!SessionResult_IsOk(built)) {
+    DestroyHandle(handle, false);
+    return built;
+  }
   *outHandle = handle;
   return loaded;
 }
@@ -464,14 +482,28 @@ SessionResult Create(void* context, Arena* arena, const SessionCreateOptions* op
     return Invalid("create arguments are invalid");
 
   Arena scratch = ArenaCreate();
+  DurableId sessionId = options->RequestedId;
+  if (!DurableId_IsSet(sessionId)) sessionId = DurableId_Generate();
+  if (DurableId_IsSet(options->RequestedId)) {
+    StrView existingProject = {};
+    SessionResult existing = FindGlobalProject(
+        &scratch, repository, sessionId, &existingProject);
+    if (SessionResult_IsOk(existing) ||
+        existing.Status == SessionStatus::Conflict) {
+      ArenaRelease(&scratch);
+      return SessionResult_Error(SessionStatus::Conflict,
+                                 SVL("session ID already exists"));
+    }
+    if (existing.Status != SessionStatus::NotFound) {
+      ArenaRelease(&scratch);
+      return existing;
+    }
+  }
   StrView projectDir = ProjectDir(&scratch, repository, options->ProjectKey);
   if (!Fs_MkdirP(&scratch, projectDir)) {
     ArenaRelease(&scratch);
     return IoError("failed to create session directory");
   }
-
-  DurableId sessionId = options->RequestedId;
-  if (!DurableId_IsSet(sessionId)) sessionId = DurableId_Generate();
   StrView path = SessionPath(&scratch, repository, options->ProjectKey, sessionId);
   if (Fs_Exists(path)) {
     ArenaRelease(&scratch);
@@ -554,7 +586,15 @@ SessionResult Create(void* context, Arena* arena, const SessionCreateOptions* op
   handle->Writable = true;
   Mutex_Init(&handle->AppendLock);
   *outLog = LogInterface(handle);
-  *outInfo = BuildInfo(arena, handle->Records.Data, handle->Records.Count, true);
+  SessionResult built =
+      BuildInfo(arena, handle->Records.Data, handle->Records.Count, true,
+                outInfo);
+  if (!SessionResult_IsOk(built)) {
+    DestroyHandle(handle, true);
+    *outLog = {};
+    ArenaRelease(&scratch);
+    return built;
+  }
   ArenaRelease(&scratch);
   return SessionResult_Ok(1);
 }
@@ -595,49 +635,25 @@ SessionResult Open(void* context, Arena* arena, const SessionOpenOptions* option
     ArenaRelease(&scratch);
     return initialized;
   }
+  if (!StrView_Eq(outInfo->ProjectKey, options->ProjectKey)) {
+    DestroyHandle(handle, false);
+    ArenaRelease(&scratch);
+    return SessionResult_Error(
+        SessionStatus::Corrupt,
+        SVL("session project does not match its storage directory"));
+  }
   *outLog = LogInterface(handle);
   ArenaRelease(&scratch);
   return initialized;
 }
 
-SessionResult Inspect(void* context, Arena* arena, StrView projectKey,
-                      DurableId sessionId, SessionInfo* outInfo) {
-  JsonlRepository* repository = (JsonlRepository*)context;
-  if (!repository || !arena || !outInfo || !ValidProjectKey(projectKey) ||
-      !DurableId_IsSet(sessionId))
-    return Invalid("inspect arguments are invalid");
-  Arena scratch = ArenaCreate();
-  StrView path = SessionPath(&scratch, repository, projectKey, sessionId);
-  Array<SessionRecord> records = {};
-  SessionResult loaded = LoadRecords(&scratch, path, false, &records);
-  if (SessionResult_IsOk(loaded))
-    *outInfo = BuildInfo(arena, records.Data, records.Count,
-                         SessionBusy(repository, projectKey, sessionId));
-  ArenaRelease(&scratch);
-  return loaded;
-}
-
-void SortByUpdated(Array<SessionInfo>* items) {
-  for (u32 i = 1; i < items->Count; i++) {
-    SessionInfo value = items->Data[i];
-    u32 j = i;
-    while (j > 0 && items->Data[j - 1].UpdatedAt < value.UpdatedAt) {
-      items->Data[j] = items->Data[j - 1];
-      j--;
-    }
-    items->Data[j] = value;
-  }
-}
-
-SessionResult List(void* context, Arena* arena, StrView projectKey,
-                   Array<SessionInfo>* outItems) {
-  JsonlRepository* repository = (JsonlRepository*)context;
-  if (!repository || !arena || !outItems || !ValidProjectKey(projectKey))
-    return Invalid("list arguments are invalid");
+SessionResult AppendProjectItems(JsonlRepository* repository, Arena* arena,
+                                 StrView projectKey,
+                                 Array<SessionInfo>* items,
+                                 u32* skippedCount) {
   Arena scratch = ArenaCreate();
   StrView dir = ProjectDir(&scratch, repository, projectKey);
   if (!Fs_Exists(dir)) {
-    *outItems = Array_Make<SessionInfo>(arena, 1);
     ArenaRelease(&scratch);
     return SessionResult_Ok();
   }
@@ -647,7 +663,6 @@ SessionResult List(void* context, Arena* arena, StrView projectKey,
     ArenaRelease(&scratch);
     return IoError("failed to list session directory");
   }
-  Array<SessionInfo> items = Array_Make<SessionInfo>(arena, files.Count ? files.Count : 1);
   for (u32 i = 0; i < files.Count; i++) {
     if (files.Data[i].IsDir || files.Data[i].Name.Length <= 6) continue;
     StrView ext = {files.Data[i].Name.Data + files.Data[i].Name.Length - 6, 6};
@@ -660,35 +675,108 @@ SessionResult List(void* context, Arena* arena, StrView projectKey,
     StrView path = SessionPath(&fileArena, repository, projectKey, sessionId);
     Array<SessionRecord> records = {};
     SessionResult loaded = LoadRecords(&fileArena, path, false, &records);
-    if (SessionResult_IsOk(loaded))
-      Array_Push(&items,
-                 BuildInfo(arena, records.Data, records.Count,
-                           SessionBusy(repository, projectKey, sessionId)));
+    if (!SessionResult_IsOk(loaded)) {
+      if (skippedCount) (*skippedCount)++;
+      ArenaRelease(&fileArena);
+      continue;
+    }
+    SessionInfo info = {};
+    SessionResult built =
+        BuildInfo(arena, records.Data, records.Count,
+                  SessionBusy(repository, projectKey, sessionId), &info);
+    if (!SessionResult_IsOk(built)) {
+      if (skippedCount) (*skippedCount)++;
+      ArenaRelease(&fileArena);
+      continue;
+    }
+    if (!StrView_Eq(info.ProjectKey, projectKey)) {
+      if (skippedCount) (*skippedCount)++;
+      ArenaRelease(&fileArena);
+      continue;
+    }
+    Array_Push(items, info);
     ArenaRelease(&fileArena);
   }
-  SortByUpdated(&items);
-  *outItems = items;
   ArenaRelease(&scratch);
   return SessionResult_Ok();
 }
 
-DurableId SessionParentId(const SessionRecord* record) {
-  switch (record->Kind) {
-    case SessionRecordKind::Message: return record->MessageEntry.ParentId;
-    case SessionRecordKind::Model: return record->ModelEntry.ParentId;
-    case SessionRecordKind::Thinking: return record->ThinkingEntry.ParentId;
-    case SessionRecordKind::Tools: return record->ToolsEntry.ParentId;
-    case SessionRecordKind::Compaction: return record->CompactionEntry.ParentId;
-    case SessionRecordKind::BranchLabel: return record->BranchLabelEntry.ParentId;
-    default: return DurableId{};
+SessionResult Resolve(void* context, Arena* arena, DurableId sessionId,
+                      SessionInfo* outInfo) {
+  JsonlRepository* repository = (JsonlRepository*)context;
+  if (!repository || !arena || !outInfo || !DurableId_IsSet(sessionId))
+    return Invalid("resolve arguments are invalid");
+  Arena scratch = ArenaCreate();
+  StrView foundProject = {};
+  SessionResult found =
+      FindGlobalProject(&scratch, repository, sessionId, &foundProject);
+  if (!SessionResult_IsOk(found)) {
+    ArenaRelease(&scratch);
+    return found;
   }
+
+  StrView path = SessionPath(&scratch, repository, foundProject, sessionId);
+  Array<SessionRecord> records = {};
+  SessionResult loaded = LoadRecords(&scratch, path, false, &records);
+  if (SessionResult_IsOk(loaded))
+    loaded = BuildInfo(arena, records.Data, records.Count,
+                       SessionBusy(repository, foundProject, sessionId),
+                       outInfo);
+  if (SessionResult_IsOk(loaded) &&
+      !StrView_Eq(outInfo->ProjectKey, foundProject))
+    loaded = SessionResult_Error(
+        SessionStatus::Corrupt,
+        SVL("session project does not match its storage directory"));
+  ArenaRelease(&scratch);
+  return loaded;
 }
 
-DurableId RemapId(const Array<DurableId>* oldIds, const Array<DurableId>* newIds,
-                  DurableId oldId) {
-  for (u32 i = 0; i < oldIds->Count; i++)
-    if (DurableId_Eq(oldIds->Data[i], oldId)) return newIds->Data[i];
-  return DurableId{};
+SessionResult List(void* context, Arena* arena,
+                   const SessionListOptions* options,
+                   Array<SessionInfo>* outItems) {
+  JsonlRepository* repository = (JsonlRepository*)context;
+  if (!repository || !arena || !options || !outItems ||
+      (options->Scope != SessionListScope::CurrentProject &&
+       options->Scope != SessionListScope::AllProjects) ||
+      (options->Scope == SessionListScope::CurrentProject &&
+       !ValidProjectKey(options->ProjectKey)))
+    return Invalid("list arguments are invalid");
+  if (options->SkippedCount) *options->SkippedCount = 0;
+
+  Array<SessionInfo> items = Array_Make<SessionInfo>(arena, 16);
+  if (options->Scope == SessionListScope::CurrentProject) {
+    SessionResult appended =
+        AppendProjectItems(repository, arena, options->ProjectKey, &items,
+                           options->SkippedCount);
+    if (!SessionResult_IsOk(appended)) return appended;
+  } else {
+    Arena scratch = ArenaCreate();
+    StrView root = SessionsRoot(&scratch, repository);
+    if (Fs_Exists(root)) {
+      bool listed = false;
+      Array<FsEntry> projects = Fs_ListDir(&scratch, root, &listed);
+      if (!listed) {
+        ArenaRelease(&scratch);
+        return IoError("failed to list session projects");
+      }
+      for (u32 i = 0; i < projects.Count; i++) {
+        if (!projects.Data[i].IsDir ||
+            !ValidProjectKey(projects.Data[i].Name))
+          continue;
+        SessionResult appended = AppendProjectItems(
+            repository, arena, projects.Data[i].Name, &items,
+            options->SkippedCount);
+        if (!SessionResult_IsOk(appended)) {
+          ArenaRelease(&scratch);
+          return appended;
+        }
+      }
+    }
+    ArenaRelease(&scratch);
+  }
+  SessionInfo_SortByActivity(&items);
+  *outItems = items;
+  return SessionResult_Ok();
 }
 
 SessionResult Fork(void* context, Arena* arena, const SessionForkOptions* options,
@@ -759,44 +847,15 @@ SessionResult Fork(void* context, Arena* arena, const SessionForkOptions* option
       Array_Make<SessionRecord>(&scratch, branch.Count > 1 ? branch.Count - 1 : 1);
   for (u32 i = 1; i < branch.Count; i++) {
     const SessionRecord* source = branch.Data[i];
-    SessionRecord copy = *source;
-    copy.EntryId = DurableId_Generate();
-    copy.CreatedAt = NowMillis();
-    DurableId parent = RemapId(&oldIds, &newIds, SessionParentId(source));
-    if (!DurableId_IsSet(parent)) {
+    SessionRecord copy = {};
+    SessionResult prepared = SessionRecord_PrepareForkCopy(
+        source, targetRoot.Data[0].SessionId,
+        targetRoot.Count + copies.Count + 1, NowMillis(), &oldIds, &newIds,
+        &copy);
+    if (!SessionResult_IsOk(prepared)) {
       DestroyHandle((JsonlLogHandle*)targetLog.Ctx, true);
       ArenaRelease(&scratch);
-      return SessionResult_Error(SessionStatus::Corrupt,
-                                 SVL("fork branch parent could not be remapped"));
-    }
-    switch (copy.Kind) {
-      case SessionRecordKind::Message: copy.MessageEntry.ParentId = parent; break;
-      case SessionRecordKind::Model: copy.ModelEntry.ParentId = parent; break;
-      case SessionRecordKind::Thinking: copy.ThinkingEntry.ParentId = parent; break;
-      case SessionRecordKind::Tools: copy.ToolsEntry.ParentId = parent; break;
-      case SessionRecordKind::BranchLabel: copy.BranchLabelEntry.ParentId = parent; break;
-      case SessionRecordKind::Compaction:
-        copy.CompactionEntry.ParentId = parent;
-        copy.CompactionEntry.BaseEntryId =
-            RemapId(&oldIds, &newIds, copy.CompactionEntry.BaseEntryId);
-        copy.CompactionEntry.ThroughEntryId =
-            RemapId(&oldIds, &newIds, copy.CompactionEntry.ThroughEntryId);
-        copy.CompactionEntry.SourceHeadId =
-            RemapId(&oldIds, &newIds, copy.CompactionEntry.SourceHeadId);
-        if (!DurableId_IsSet(copy.CompactionEntry.BaseEntryId) ||
-            !DurableId_IsSet(copy.CompactionEntry.ThroughEntryId) ||
-            !DurableId_IsSet(copy.CompactionEntry.SourceHeadId)) {
-          DestroyHandle((JsonlLogHandle*)targetLog.Ctx, true);
-          ArenaRelease(&scratch);
-          return SessionResult_Error(
-              SessionStatus::Corrupt, SVL("fork compaction could not be remapped"));
-        }
-        break;
-      default:
-        DestroyHandle((JsonlLogHandle*)targetLog.Ctx, true);
-        ArenaRelease(&scratch);
-        return SessionResult_Error(SessionStatus::Corrupt,
-                                   SVL("fork branch contains a harness record"));
+      return prepared;
     }
     Array_Push(&copies, copy);
     Array_Push(&oldIds, source->EntryId);
@@ -813,81 +872,17 @@ SessionResult Fork(void* context, Arena* arena, const SessionForkOptions* option
     }
   }
   JsonlLogHandle* handle = (JsonlLogHandle*)targetLog.Ctx;
-  *outInfo = BuildInfo(arena, handle->Records.Data, handle->Records.Count, true);
+  SessionResult built =
+      BuildInfo(arena, handle->Records.Data, handle->Records.Count, true,
+                outInfo);
+  if (!SessionResult_IsOk(built)) {
+    DestroyHandle(handle, true);
+    ArenaRelease(&scratch);
+    return built;
+  }
   *outLog = targetLog;
   ArenaRelease(&scratch);
   return SessionResult_Ok(handle->Records.Data[handle->Records.Count - 1].Seq);
-}
-
-SessionResult Rename(void* context, DurableId sessionId, StrView projectKey,
-                     StrView label) {
-  JsonlRepository* repository = (JsonlRepository*)context;
-  if (!repository || !DurableId_IsSet(sessionId) ||
-      !ValidProjectKey(projectKey) || label.Length == 0)
-    return Invalid("rename arguments are invalid");
-  Arena scratch = ArenaCreate();
-  SessionOpenOptions options = {};
-  options.SessionId = sessionId;
-  options.ProjectKey = projectKey;
-  options.Writable = true;
-  SessionLog log = {};
-  SessionInfo info = {};
-  SessionResult opened = Open(repository, &scratch, &options, &log, &info);
-  if (!SessionResult_IsOk(opened)) {
-    ArenaRelease(&scratch);
-    return opened;
-  }
-  Array<SessionRecord> records = {};
-  SessionResult read = SessionLog_ReadAll(&log, &scratch, &records);
-  SessionReduction reduction = {};
-  SessionResult reduced =
-      SessionResult_IsOk(read)
-          ? SessionReducer_Reduce(&scratch, records.Data, records.Count, &reduction)
-          : read;
-  if (!SessionResult_IsOk(reduced)) {
-    SessionLog_Close(&log);
-    ArenaRelease(&scratch);
-    return reduced;
-  }
-  SessionRecord rename = {};
-  rename.EntryId = DurableId_Generate();
-  rename.Kind = SessionRecordKind::BranchLabel;
-  rename.BranchLabelEntry.ParentId = reduction.HeadId;
-  rename.BranchLabelEntry.Label = label;
-  SessionResult appended = SessionLog_Append(&log, &rename);
-  SessionLog_Close(&log);
-  ArenaRelease(&scratch);
-  return appended;
-}
-
-SessionResult Delete(void* context, DurableId sessionId, StrView projectKey) {
-  JsonlRepository* repository = (JsonlRepository*)context;
-  if (!repository || !DurableId_IsSet(sessionId) ||
-      !ValidProjectKey(projectKey))
-    return Invalid("delete arguments are invalid");
-  Arena scratch = ArenaCreate();
-  StrView path = SessionPath(&scratch, repository, projectKey, sessionId);
-  if (!Fs_Exists(path)) {
-    ArenaRelease(&scratch);
-    return SessionResult_Error(SessionStatus::NotFound,
-                               SVL("session file was not found"));
-  }
-  u32 claimIndex = 0;
-  ProcessFileLock writerLock = {};
-  SessionResult acquired =
-      AcquireWriter(repository, &scratch, projectKey, sessionId, &claimIndex,
-                    &writerLock);
-  if (!SessionResult_IsOk(acquired)) {
-    ArenaRelease(&scratch);
-    return acquired;
-  }
-  StrBuf native = StrBuf_Make(&scratch, path.Length + 1);
-  StrBuf_Append(&native, path);
-  bool removed = remove(StrBuf_CStr(&native)) == 0;
-  ProcessFileLock_Release(&writerLock);
-  ReleaseClaim(repository, claimIndex);
-  ArenaRelease(&scratch);
-  return removed ? SessionResult_Ok() : IoError("failed to delete session file");
 }
 
 void CloseRepository(void* context) {
@@ -918,11 +913,9 @@ SessionRepository JsonlRepository_AsRepository(JsonlRepository* repository) {
   result.Ctx = repository;
   result.Create = Create;
   result.Open = Open;
-  result.Inspect = Inspect;
+  result.Resolve = Resolve;
   result.List = List;
   result.Fork = Fork;
-  result.Rename = Rename;
-  result.Delete = Delete;
   result.Close = CloseRepository;
   return result;
 }

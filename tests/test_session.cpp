@@ -8,6 +8,7 @@
 #include "check.h"
 #include "session/entry.h"
 #include "session/jsonl_repository.h"
+#include "session/metadata.h"
 #include "session/memory_repository.h"
 #include "session/reducer.h"
 #include "tests.h"
@@ -50,6 +51,11 @@ static Message AssistantToolMessage(Arena* arena) {
   Message message = Message_AssistantEmpty(arena);
   message.Timestamp = 1700000000001ull;
   message.Stop = StopReason::ToolUse;
+  message.Use.Input = 10;
+  message.Use.Output = 2;
+  message.Use.CacheRead = 3;
+  message.Use.CacheWrite = 4;
+  message.Use.Reasoning = 1;
   message.Model = SVL("claude-test");
   message.Provider = SVL("anthropic");
   Array_Push(&message.Content, Content_Text(SVL("checking")));
@@ -121,6 +127,47 @@ static void TestRecordCodec(Arena* arena) {
       "\"type\":\"session_started\",\"createdAt\":1,\"payload\":{}}";
   CHECK(SessionRecord_Decode(arena, SV(future), &decoded).Status ==
         SessionStatus::UnsupportedVersion);
+
+  SessionRecord finished =
+      BaseRecord(sessionId, 5, 22, SessionRecordKind::GenerationFinished);
+  finished.GenerationFinished.OperationId = TestId(9);
+  finished.GenerationFinished.AttemptId = TestId(10);
+  finished.GenerationFinished.Outcome = GenerationOutcome::Failed;
+  finished.GenerationFinished.Error = SVL("retry");
+  finished.GenerationFinished.HasUsage = true;
+  finished.GenerationFinished.Use =
+      Usage{11, 12, 13, 14, 15, 65};
+  StrBuf finishedJson = StrBuf_Make(arena, 512);
+  CHECK(SessionResult_IsOk(
+      SessionRecord_Encode(&finishedJson, &finished)));
+  CHECK(StrView_Contains(StrBuf_View(&finishedJson), "\"usage\""));
+  CHECK(SessionResult_IsOk(SessionRecord_Decode(
+      arena, StrBuf_View(&finishedJson), &decoded)));
+  CHECK_ALL(decoded.GenerationFinished.HasUsage,
+            decoded.GenerationFinished.Use.Input == 11,
+            decoded.GenerationFinished.Use.TotalTokens == 65);
+
+  const char* oldFinished =
+      "{\"schemaVersion\":1,\"sessionId\":\"AQIDBAUGBwgJCgsMDQ4PEA\",\"seq\":5,"
+      "\"entryId\":\"FhcYGRobHB0eHyAhIiMkJQ\",\"entryClass\":\"harness\","
+      "\"type\":\"generation_finished\",\"createdAt\":5,\"payload\":{"
+      "\"operationId\":\"CQoLDA0ODxAREhMUFRYXGA\","
+      "\"attemptId\":\"CgsMDQ4PEBESExQVFhcYGQ\","
+      "\"outcome\":\"failed\",\"messageEntryId\":null,\"error\":\"old\"}}";
+  CHECK(SessionResult_IsOk(
+      SessionRecord_Decode(arena, SV(oldFinished), &decoded)));
+  CHECK(!decoded.GenerationFinished.HasUsage);
+
+  SessionRecord named =
+      BaseRecord(sessionId, 6, 23, SessionRecordKind::SessionName);
+  named.SessionNameEntry.Name = {};
+  StrBuf namedJson = StrBuf_Make(arena, 256);
+  CHECK(SessionResult_IsOk(SessionRecord_Encode(&namedJson, &named)));
+  CHECK(SessionResult_IsOk(
+      SessionRecord_Decode(arena, StrBuf_View(&namedJson), &decoded)));
+  CHECK_ALL(decoded.Kind == SessionRecordKind::SessionName,
+            decoded.EntryClass == SessionEntryClass::Session,
+            decoded.SessionNameEntry.Name.Length == 0);
 }
 
 static Array<SessionRecord> BuildValidTrace(Arena* arena) {
@@ -271,6 +318,80 @@ static void TestReducer(Arena* arena) {
             DurableId_Eq(suspended.HeadId, records.Data[2].EntryId));
 }
 
+static void TestMetadata(Arena* arena) {
+  Array<SessionRecord> records = BuildValidTrace(arena);
+  SessionMetadataBuildOptions legacyOptions = {};
+  SessionInfo legacy = {};
+  CHECK(SessionResult_IsOk(SessionMetadata_Build(
+      arena, records.Data, records.Count, &legacyOptions, &legacy)));
+  CHECK_ALL(legacy.TotalTokens == 19, legacy.InputTokens == 10,
+            legacy.OutputTokens == 2, legacy.CacheReadTokens == 3,
+            legacy.CacheWriteTokens == 4);
+
+  records.Data[5].GenerationFinished.HasUsage = true;
+  records.Data[5].GenerationFinished.Use =
+      Usage{20, 5, 2, 1, 7, 40};
+
+  SessionRecord name =
+      BaseRecord(records.Data[0].SessionId, 11, 40,
+                 SessionRecordKind::SessionName);
+  name.CreatedAt = records.Data[7].CreatedAt + 100;
+  name.SessionNameEntry.Name = SVL("  Named\n\tSession  ");
+  Array_Push(&records, name);
+
+  SessionMetadataBuildOptions options = {};
+  options.NowMs = name.CreatedAt + 1000;
+  SessionInfo info = {};
+  CHECK(SessionResult_IsOk(SessionMetadata_Build(
+      arena, records.Data, records.Count, &options, &info)));
+  CHECK_ALL(StrView_EqCStr(info.DisplayTitle, "Named Session"),
+            StrView_EqCStr(info.ExplicitName, "  Named\n\tSession  "),
+            info.MessageCount == 3, info.UserMessageCount == 1,
+            info.AssistantMessageCount == 1,
+            info.ToolResultMessageCount == 1, info.ToolCallCount == 1,
+            info.GenerationCount == 1, info.OperationCount == 1,
+            info.TotalTokens == 40, info.InputTokens == 20,
+            info.ReasoningTokens == 7,
+            StrView_EqCStr(info.CurrentProvider, "anthropic"),
+            StrView_EqCStr(info.CurrentModel, "claude-test"),
+            info.LastActivityAt == records.Data[7].CreatedAt,
+            info.StorageUpdatedAt == name.CreatedAt,
+            info.ActiveTimeMs == 8,
+            !info.Suspended && !info.Running);
+
+  SessionRecord clear =
+      BaseRecord(records.Data[0].SessionId, 12, 41,
+                 SessionRecordKind::SessionName);
+  clear.CreatedAt = name.CreatedAt + 1;
+  clear.SessionNameEntry.Name = {};
+  Array_Push(&records, clear);
+  CHECK(SessionResult_IsOk(SessionMetadata_Build(
+      arena, records.Data, records.Count, &options, &info)));
+  CHECK_ALL(info.ExplicitName.Length == 0,
+            StrView_EqCStr(info.DisplayTitle, "hello"),
+            info.LastActivityAt == records.Data[7].CreatedAt);
+
+  SessionMetadataBuildOptions suspendedOptions = {};
+  CHECK(SessionResult_IsOk(SessionMetadata_Build(
+      arena, records.Data, 4, &suspendedOptions, &info)));
+  CHECK_ALL(info.Suspended, info.ActiveTimePartial, !info.Running,
+            info.ActiveTimeMs == 2);
+  SessionMetadataBuildOptions runningOptions = {};
+  runningOptions.Busy = true;
+  runningOptions.Running = true;
+  runningOptions.NowMs = records.Data[1].CreatedAt + 250;
+  CHECK(SessionResult_IsOk(SessionMetadata_Build(
+      arena, records.Data, 4, &runningOptions, &info)));
+  CHECK_ALL(info.Running, !info.Suspended, !info.ActiveTimePartial,
+            info.ActiveTimeMs == 250);
+
+  StrView flattened = SessionMetadata_FlattenDisplayText(
+      arena, SVL(" \talpha\n\x01" "beta \xF0\x9F\x98\x80 tail"), 15);
+  CHECK_ALL(
+      StrView_EqCStr(flattened, "alpha beta \xF0\x9F\x98\x80"),
+      flattened.Length == 15);
+}
+
 static SessionResult RepositoryCreate(SessionRepository* repository, Arena* arena,
                                       DurableId id, StrView projectKey,
                                       SessionLog* outLog, SessionInfo* outInfo) {
@@ -289,8 +410,7 @@ static void RunRepositoryContract(Arena* arena, SessionRepository* repository,
   SessionInfo info = {};
   CHECK(SessionResult_IsOk(
       RepositoryCreate(repository, arena, sessionId, projectKey, &writer, &info)));
-  CHECK_ALL(DurableId_Eq(info.SessionId, sessionId), info.LastSeq == 1,
-            info.Busy);
+  CHECK_ALL(DurableId_Eq(info.SessionId, sessionId), info.Busy);
 
   SessionOpenOptions open = {};
   open.SessionId = sessionId;
@@ -300,8 +420,6 @@ static void RunRepositoryContract(Arena* arena, SessionRepository* repository,
   SessionInfo secondInfo = {};
   CHECK(repository->Open(repository->Ctx, arena, &open, &secondWriter, &secondInfo)
             .Status == SessionStatus::Busy);
-  CHECK(repository->Delete(repository->Ctx, sessionId, projectKey).Status ==
-        SessionStatus::Busy);
 
   Array<SessionRecord> initial = {};
   CHECK(SessionResult_IsOk(SessionLog_ReadAll(&writer, arena, &initial)));
@@ -329,14 +447,19 @@ static void RunRepositoryContract(Arena* arena, SessionRepository* repository,
   CHECK(SessionResult_IsOk(SessionLog_ReadAll(&writer, arena, &afterInvalid)));
   CHECK(afterInvalid.Count == 2);
 
+  SessionRecord name = {};
+  name.EntryId = TestId((u8)(seed + 3));
+  name.Kind = SessionRecordKind::SessionName;
+  name.SessionNameEntry.Name = SVL("renamed");
+  CHECK(SessionResult_IsOk(SessionLog_Append(&writer, &name)));
   SessionLog_Close(&writer);
-  CHECK(SessionResult_IsOk(
-      repository->Rename(repository->Ctx, sessionId, open.ProjectKey, SVL("renamed"))));
 
   SessionInfo inspected = {};
-  CHECK(SessionResult_IsOk(repository->Inspect(
-      repository->Ctx, arena, open.ProjectKey, sessionId, &inspected)));
-  CHECK(StrView_EqCStr(inspected.Label, "renamed"));
+  CHECK(SessionResult_IsOk(repository->Resolve(
+      repository->Ctx, arena, sessionId, &inspected)));
+  CHECK_ALL(StrView_EqCStr(inspected.ExplicitName, "renamed"),
+            StrView_EqCStr(inspected.DisplayTitle, "renamed"),
+            StrView_EqCStr(inspected.Label, "contract"));
 
   open.Writable = false;
   SessionLog reader = {};
@@ -370,21 +493,23 @@ static void RunRepositoryContract(Arena* arena, SessionRepository* repository,
             DurableId_Eq(forkRecords.Data[0].SessionStarted.ForkedFromSessionId,
                          sessionId),
             DurableId_Eq(forkRecords.Data[0].SessionStarted.ForkedFromEntryId,
-                         forkHead));
+                         forkHead),
+            DurableId_Eq(forkInfo.ForkedFromSessionId, sessionId),
+            DurableId_Eq(forkInfo.ForkedFromEntryId, forkHead),
+            StrView_EqCStr(forkInfo.DisplayTitle, "persist me"));
   SessionLog_Close(&forkLog);
 
   Array<SessionInfo> listed = {};
+  SessionListOptions list = {};
+  list.Scope = SessionListScope::CurrentProject;
+  list.ProjectKey = open.ProjectKey;
   CHECK(SessionResult_IsOk(
-      repository->List(repository->Ctx, arena, open.ProjectKey, &listed)));
+      repository->List(repository->Ctx, arena, &list, &listed)));
   CHECK(listed.Count == 2);
-
-  CHECK(SessionResult_IsOk(
-      repository->Delete(repository->Ctx, forkInfo.SessionId, open.ProjectKey)));
-  CHECK(repository->Inspect(repository->Ctx, arena, open.ProjectKey,
-                            forkInfo.SessionId, &inspected)
-            .Status == SessionStatus::NotFound);
-  CHECK(SessionResult_IsOk(
-      repository->Delete(repository->Ctx, sessionId, open.ProjectKey)));
+  SessionInfo resolved = {};
+  CHECK(SessionResult_IsOk(repository->Resolve(
+      repository->Ctx, arena, sessionId, &resolved)));
+  CHECK(StrView_Eq(resolved.ProjectKey, open.ProjectKey));
 }
 
 static void TestMemoryRepository(Arena* arena) {
@@ -392,6 +517,10 @@ static void TestMemoryRepository(Arena* arena) {
   MemoryRepository_Init(&memory);
   SessionRepository repository = MemoryRepository_AsRepository(&memory);
   RunRepositoryContract(arena, &repository, SVL("clank-memory-contract"), 70);
+  repository.Close(repository.Ctx);
+
+  MemoryRepository_Init(&memory);
+  repository = MemoryRepository_AsRepository(&memory);
 
   DurableId sessionId = TestId(90);
   StrView projectKey = SVL("clank-memory-failure");
@@ -422,8 +551,92 @@ static void TestMemoryRepository(Arena* arena) {
   CHECK(SessionResult_IsOk(SessionLog_ReadAll(&reader, arena, &records)));
   CHECK(records.Count == 1);
   SessionLog_Close(&reader);
+  repository.Close(repository.Ctx);
+
+  MemoryRepository_Init(&memory);
+  repository = MemoryRepository_AsRepository(&memory);
+
+  DurableId firstId = TestId(92);
+  DurableId secondId = TestId(93);
+  SessionLog firstLog = {};
+  SessionLog secondLog = {};
+  SessionInfo firstInfo = {};
+  SessionInfo secondInfo = {};
+  CHECK(SessionResult_IsOk(RepositoryCreate(
+      &repository, arena, firstId, SVL("memory-project-a"), &firstLog,
+      &firstInfo)));
+  CHECK(SessionResult_IsOk(RepositoryCreate(
+      &repository, arena, secondId, SVL("memory-project-b"), &secondLog,
+      &secondInfo)));
+  Array<SessionRecord> firstRoot = {};
+  Array<SessionRecord> secondRoot = {};
   CHECK(SessionResult_IsOk(
-      repository.Delete(repository.Ctx, sessionId, projectKey)));
+      SessionLog_ReadAll(&firstLog, arena, &firstRoot)));
+  CHECK(SessionResult_IsOk(
+      SessionLog_ReadAll(&secondLog, arena, &secondRoot)));
+  SessionRecord firstMessage = {};
+  firstMessage.EntryId = TestId(94);
+  firstMessage.Kind = SessionRecordKind::Message;
+  firstMessage.CreatedAt = firstRoot.Data[0].CreatedAt + 1000;
+  firstMessage.MessageEntry.ParentId = firstRoot.Data[0].EntryId;
+  firstMessage.MessageEntry.Value = UserMessage(arena, "first project");
+  SessionRecord secondMessage = {};
+  secondMessage.EntryId = TestId(95);
+  secondMessage.Kind = SessionRecordKind::Message;
+  secondMessage.CreatedAt = secondRoot.Data[0].CreatedAt + 2000;
+  secondMessage.MessageEntry.ParentId = secondRoot.Data[0].EntryId;
+  secondMessage.MessageEntry.Value = UserMessage(arena, "second project");
+  CHECK(SessionResult_IsOk(
+      SessionLog_Append(&firstLog, &firstMessage)));
+  CHECK(SessionResult_IsOk(
+      SessionLog_Append(&secondLog, &secondMessage)));
+  SessionRecord firstName = {};
+  firstName.EntryId = TestId(96);
+  firstName.Kind = SessionRecordKind::SessionName;
+  firstName.SessionNameEntry.Name = SVL("named first");
+  CHECK(SessionResult_IsOk(SessionLog_Append(&firstLog, &firstName)));
+  SessionLog_Close(&firstLog);
+  SessionLog_Close(&secondLog);
+
+  SessionListOptions currentList = {};
+  currentList.Scope = SessionListScope::CurrentProject;
+  currentList.ProjectKey = SVL("memory-project-a");
+  Array<SessionInfo> currentItems = {};
+  CHECK(SessionResult_IsOk(repository.List(
+      repository.Ctx, arena, &currentList, &currentItems)));
+  CHECK_ALL(currentItems.Count == 1,
+            StrView_EqCStr(currentItems.Data[0].DisplayTitle,
+                           "named first"));
+  SessionListOptions allList = {};
+  allList.Scope = SessionListScope::AllProjects;
+  Array<SessionInfo> allItems = {};
+  CHECK(SessionResult_IsOk(repository.List(
+      repository.Ctx, arena, &allList, &allItems)));
+  CHECK_ALL(allItems.Count == 2,
+            DurableId_Eq(allItems.Data[0].SessionId, secondId),
+            allItems.Data[0].LastActivityAt >
+                allItems.Data[1].LastActivityAt);
+  SessionInfo globallyResolved = {};
+  CHECK(SessionResult_IsOk(repository.Resolve(
+      repository.Ctx, arena, secondId, &globallyResolved)));
+  CHECK(StrView_EqCStr(globallyResolved.ProjectKey, "memory-project-b"));
+  SessionOpenOptions clearOpen = {};
+  clearOpen.SessionId = firstId;
+  clearOpen.ProjectKey = SVL("memory-project-a");
+  clearOpen.Writable = true;
+  SessionLog clearLog = {};
+  CHECK(SessionResult_IsOk(repository.Open(
+      repository.Ctx, arena, &clearOpen, &clearLog, &globallyResolved)));
+  SessionRecord clearName = {};
+  clearName.EntryId = TestId(97);
+  clearName.Kind = SessionRecordKind::SessionName;
+  CHECK(SessionResult_IsOk(SessionLog_Append(&clearLog, &clearName)));
+  SessionLog_Close(&clearLog);
+  CHECK(SessionResult_IsOk(repository.Resolve(
+      repository.Ctx, arena, firstId, &globallyResolved)));
+  CHECK_ALL(globallyResolved.ExplicitName.Length == 0,
+            StrView_EqCStr(globallyResolved.DisplayTitle,
+                           "first project"));
 
   repository.Close(repository.Ctx);
 }
@@ -488,23 +701,59 @@ static void TestJsonlRepository(Arena* arena) {
   StrView repairProject = SVL("clank-jsonl-repair");
   StrView corruptProject = SVL("clank-jsonl-corrupt");
   StrView harnessProject = SVL("clank-jsonl-harness");
+  StrView scopeProjectA = SVL("clank-jsonl-scope-a");
+  StrView scopeProjectB = SVL("clank-jsonl-scope-b");
   DurableId contractId = TestId(120);
   DurableId forkId = TestId(130);
   DurableId repairId = TestId(140);
   DurableId corruptId = TestId(150);
   DurableId harnessId = TestId(160);
   DurableId harnessForkId = TestId(170);
+  DurableId scopeIdA = TestId(180);
+  DurableId scopeIdB = TestId(190);
   RemoveJsonlArtifacts(arena, root, contractProject, contractId);
   RemoveJsonlArtifacts(arena, root, contractProject, forkId);
   RemoveJsonlArtifacts(arena, root, repairProject, repairId);
   RemoveJsonlArtifacts(arena, root, corruptProject, corruptId);
   RemoveJsonlArtifacts(arena, root, harnessProject, harnessId);
   RemoveJsonlArtifacts(arena, root, harnessProject, harnessForkId);
+  RemoveJsonlArtifacts(arena, root, scopeProjectA, scopeIdA);
+  RemoveJsonlArtifacts(arena, root, scopeProjectB, scopeIdB);
 
   JsonlRepository jsonl = {};
   JsonlRepository_Init(&jsonl, root);
   SessionRepository repository = JsonlRepository_AsRepository(&jsonl);
   RunRepositoryContract(arena, &repository, contractProject, 120);
+  RemoveJsonlArtifacts(arena, root, contractProject, contractId);
+  RemoveJsonlArtifacts(arena, root, contractProject, forkId);
+
+  SessionLog scopeLogA = {};
+  SessionLog scopeLogB = {};
+  SessionInfo scopeInfoA = {};
+  SessionInfo scopeInfoB = {};
+  CHECK(SessionResult_IsOk(RepositoryCreate(
+      &repository, arena, scopeIdA, scopeProjectA, &scopeLogA,
+      &scopeInfoA)));
+  SessionLog duplicateScopeLog = {};
+  SessionInfo duplicateScopeInfo = {};
+  CHECK(RepositoryCreate(&repository, arena, scopeIdA, scopeProjectB,
+                         &duplicateScopeLog, &duplicateScopeInfo)
+            .Status == SessionStatus::Conflict);
+  CHECK(SessionResult_IsOk(RepositoryCreate(
+      &repository, arena, scopeIdB, scopeProjectB, &scopeLogB,
+      &scopeInfoB)));
+  SessionLog_Close(&scopeLogA);
+  SessionLog_Close(&scopeLogB);
+  SessionListOptions allProjects = {};
+  allProjects.Scope = SessionListScope::AllProjects;
+  Array<SessionInfo> allProjectItems = {};
+  CHECK(SessionResult_IsOk(repository.List(
+      repository.Ctx, arena, &allProjects, &allProjectItems)));
+  CHECK(allProjectItems.Count == 2);
+  SessionInfo scopeResolved = {};
+  CHECK(SessionResult_IsOk(repository.Resolve(
+      repository.Ctx, arena, scopeIdB, &scopeResolved)));
+  CHECK(StrView_Eq(scopeResolved.ProjectKey, scopeProjectB));
 
   SessionLog harnessLog = {};
   SessionInfo harnessInfo = {};
@@ -544,10 +793,6 @@ static void TestJsonlRepository(Arena* arena) {
           harnessMessage.EntryId));
   SessionLog_Close(&harnessFork);
   CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
-  CHECK(SessionResult_IsOk(
-      repository.Delete(repository.Ctx, harnessForkId, harnessProject)));
-  CHECK(SessionResult_IsOk(
-      repository.Delete(repository.Ctx, harnessId, harnessProject)));
 
   SessionLog writer = {};
   SessionInfo info = {};
@@ -585,8 +830,6 @@ static void TestJsonlRepository(Arena* arena) {
   CHECK_ALL(repairedBytes.Length > 0,
             repairedBytes.Data[repairedBytes.Length - 1] == '\n',
             !StrView_Contains(repairedBytes, "\"torn\""));
-  CHECK(SessionResult_IsOk(
-      repository.Delete(repository.Ctx, repairId, repairProject)));
 
   CHECK(SessionResult_IsOk(RepositoryCreate(
       &repository, arena, corruptId, corruptProject, &writer, &info)));
@@ -594,13 +837,23 @@ static void TestJsonlRepository(Arena* arena) {
   StrView corruptPath =
       JsonlArtifactPath(arena, root, corruptProject, corruptId, ".jsonl");
   AppendRaw(arena, corruptPath, "not-json\n");
+  SessionListOptions corruptList = {};
+  corruptList.Scope = SessionListScope::CurrentProject;
+  corruptList.ProjectKey = corruptProject;
+  u32 skippedCount = 0;
+  corruptList.SkippedCount = &skippedCount;
+  Array<SessionInfo> corruptItems = {};
+  CHECK(SessionResult_IsOk(repository.List(
+      repository.Ctx, arena, &corruptList, &corruptItems)));
+  CHECK_ALL(corruptItems.Count == 0, skippedCount == 1);
+  SessionInfo corruptInfo = {};
+  CHECK(repository.Resolve(repository.Ctx, arena, corruptId, &corruptInfo)
+            .Status == SessionStatus::Corrupt);
   open.SessionId = corruptId;
   open.ProjectKey = corruptProject;
   open.Writable = true;
   CHECK(repository.Open(repository.Ctx, arena, &open, &writer, &info).Status ==
         SessionStatus::Corrupt);
-  CHECK(SessionResult_IsOk(
-      repository.Delete(repository.Ctx, corruptId, corruptProject)));
 
   repository.Close(repository.Ctx);
 
@@ -610,10 +863,14 @@ static void TestJsonlRepository(Arena* arena) {
   RemoveJsonlArtifacts(arena, root, corruptProject, corruptId);
   RemoveJsonlArtifacts(arena, root, harnessProject, harnessId);
   RemoveJsonlArtifacts(arena, root, harnessProject, harnessForkId);
+  RemoveJsonlArtifacts(arena, root, scopeProjectA, scopeIdA);
+  RemoveJsonlArtifacts(arena, root, scopeProjectB, scopeIdB);
   RemoveJsonlDirectories(arena, root, contractProject);
   RemoveJsonlDirectories(arena, root, repairProject);
   RemoveJsonlDirectories(arena, root, corruptProject);
   RemoveJsonlDirectories(arena, root, harnessProject);
+  RemoveJsonlDirectories(arena, root, scopeProjectA);
+  RemoveJsonlDirectories(arena, root, scopeProjectB);
   StrView sessions = Fs_Join(arena, root, SVL("sessions"));
   StrView version = Fs_Join(arena, sessions, SVL("v1"));
   StrBuf versionNative = StrBuf_Make(arena, version.Length + 1);
@@ -633,6 +890,7 @@ void TestSession() {
   TestRecordCodec(&arena);
   TestRecordValidation(&arena);
   TestReducer(&arena);
+  TestMetadata(&arena);
   TestMemoryRepository(&arena);
   TestJsonlRepository(&arena);
   ArenaRelease(&arena);

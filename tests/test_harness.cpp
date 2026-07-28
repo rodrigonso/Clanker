@@ -3,6 +3,7 @@
 #include "base/thread.h"
 #include "check.h"
 #include "llm/faux.h"
+#include "session/metadata.h"
 #include "session/memory_repository.h"
 
 namespace {
@@ -170,6 +171,23 @@ u32 CountKind(const Array<SessionRecord>* records, SessionRecordKind kind) {
   return count;
 }
 
+bool AllGenerationFinishesHaveUsage(const Array<SessionRecord>* records) {
+  for (u32 i = 0; i < records->Count; i++)
+    if (records->Data[i].Kind == SessionRecordKind::GenerationFinished &&
+        !records->Data[i].GenerationFinished.HasUsage)
+      return false;
+  return true;
+}
+
+u32 CountGenerationFinishesWithUsage(const Array<SessionRecord>* records) {
+  u32 count = 0;
+  for (u32 i = 0; i < records->Count; i++)
+    if (records->Data[i].Kind == SessionRecordKind::GenerationFinished &&
+        records->Data[i].GenerationFinished.HasUsage)
+      count++;
+  return count;
+}
+
 bool ContextTextEq(const Array<Message>* messages, u32 index, Role role,
                    const char* text) {
   if (index >= messages->Count) return false;
@@ -186,6 +204,33 @@ struct SuspendedToolTrace {
 struct CancelProviderState {
   volatile i32 Started;
 };
+
+struct UsageRetryProviderState {
+  u32 Calls;
+};
+
+bool UsageRetryProviderStream(void* context, Arena* arena, const Model* model,
+                              const LlmContext* llm,
+                              const StreamOptions* options, StreamSink sink,
+                              Message* out) {
+  (void)llm;
+  (void)options;
+  (void)sink;
+  UsageRetryProviderState* state = (UsageRetryProviderState*)context;
+  *out = Message_AssistantEmpty(arena);
+  out->Provider = model->Provider;
+  out->Model = model->Id;
+  if (state->Calls++ == 0) {
+    out->Stop = StopReason::Error;
+    out->ErrorMessage = SVL("provider overloaded; please retry");
+    out->Use = Usage{3, 2, 1, 0, 0, 9};
+    return false;
+  }
+  out->Stop = StopReason::Stop;
+  out->Use = Usage{5, 4, 2, 1, 3, 0};
+  Array_Push(&out->Content, Content_Text(SVL("completed")));
+  return true;
+}
 
 bool CancelProviderStream(void* context, Arena* arena, const Model* model,
                           const LlmContext* llm, const StreamOptions* options,
@@ -436,6 +481,57 @@ SessionResult AppendTornDeferredCheckpoint(SessionLog* log, Arena* arena) {
 }  // namespace
 
 void TestHarness() {
+  // Every provider attempt carries usage on its durable finish record, and
+  // lifetime metadata does not count the successful assistant twice.
+  {
+    Arena arena = ArenaCreate();
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+    UsageRetryProviderState providerState = {};
+    AgentHarnessConfig config = {};
+    config.SystemPrompt = SVL("usage");
+    config.ModelInfo.Id = SVL("usage-model");
+    config.ModelInfo.Provider = SVL("usage-provider");
+    config.ProviderImpl.Ctx = &providerState;
+    config.ProviderImpl.Stream = UsageRetryProviderStream;
+    config.Retry.Enabled = true;
+    config.Retry.MaxRetries = 1;
+    config.Retry.BaseDelayMs = 1;
+    config.Retry.MaxDelayMs = 1;
+    AgentHarness harness = {};
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+    CHECK(SessionResult_IsOk(
+        AgentHarness_SetName(&harness, SVL("usage retry"))));
+    CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("go"))));
+    Array<SessionRecord> records = {};
+    CHECK(SessionResult_IsOk(
+        SessionLog_ReadAll(&harness.Log, &arena, &records)));
+    u32 finishes = 0;
+    bool allHaveUsage = true;
+    for (u32 i = 0; i < records.Count; i++) {
+      if (records.Data[i].Kind !=
+          SessionRecordKind::GenerationFinished)
+        continue;
+      finishes++;
+      allHaveUsage =
+          allHaveUsage && records.Data[i].GenerationFinished.HasUsage;
+    }
+    SessionMetadataBuildOptions build = {};
+    SessionInfo info = {};
+    CHECK(SessionResult_IsOk(SessionMetadata_Build(
+        &arena, records.Data, records.Count, &build, &info)));
+    CHECK_ALL(providerState.Calls == 2, finishes == 2, allHaveUsage,
+              info.GenerationCount == 2, info.TotalTokens == 21,
+              info.InputTokens == 8, info.OutputTokens == 6,
+              StrView_EqCStr(info.ExplicitName, "usage retry"));
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    repository.Close(repository.Ctx);
+    ArenaRelease(&arena);
+  }
+
   // A complete tool run records every intent/result transition while exposing
   // only session messages to context assembly.
   {
@@ -973,7 +1069,11 @@ void TestHarness() {
     AgentHarnessConfig config = FauxConfig(&faux, nullptr, 0);
     CHECK(AgentHarness_Init(&harness, log, &config).Status ==
           SessionStatus::Suspended);
+    CHECK(AgentHarness_SetName(&harness, SVL("suspended run")).Status ==
+          SessionStatus::Suspended);
     CHECK(SessionResult_IsOk(AgentHarness_ResumeOperation(&harness)));
+    CHECK(SessionResult_IsOk(
+        AgentHarness_SetName(&harness, SVL("resumed run"))));
     SessionReduction snapshot = {};
     CHECK(SessionResult_IsOk(
         AgentHarness_Snapshot(&arena, &harness, &snapshot)));
@@ -1154,7 +1254,14 @@ void TestHarness() {
         SessionLog_ReadAll(&harness.Log, &arena, &records)));
     CHECK_ALL(faux.Index == 1,
               CountKind(&records, SessionRecordKind::GenerationStarted) == 2,
-              CountKind(&records, SessionRecordKind::GenerationFinished) == 2);
+              CountKind(&records, SessionRecordKind::GenerationFinished) == 2,
+              CountGenerationFinishesWithUsage(&records) == 1);
+    SessionMetadataBuildOptions metadataOptions = {};
+    SessionInfo metadata = {};
+    CHECK(SessionResult_IsOk(SessionMetadata_Build(
+        &arena, records.Data, records.Count, &metadataOptions, &metadata)));
+    CHECK_ALL(metadata.UsageIncomplete,
+              metadata.UnknownUsageCount == 1);
     CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
     repository.Close(repository.Ctx);
     ArenaRelease(&arena);
@@ -1210,7 +1317,8 @@ void TestHarness() {
                             "already durable"),
               CountKind(&records, SessionRecordKind::GenerationStarted) == 1,
               CountKind(&records, SessionRecordKind::GenerationFinished) == 1,
-              CountKind(&records, SessionRecordKind::OperationFinished) == 1);
+              CountKind(&records, SessionRecordKind::OperationFinished) == 1,
+              AllGenerationFinishesHaveUsage(&records));
     CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
     repository.Close(repository.Ctx);
     ArenaRelease(&arena);
@@ -1418,6 +1526,10 @@ void TestHarness() {
     for (u32 i = 0; i < records.Count; i++)
       if (records.Data[i].Kind == SessionRecordKind::Compaction)
         compactionIndex = i;
+    SessionMetadataBuildOptions metadataOptions = {};
+    SessionInfo metadata = {};
+    CHECK(SessionResult_IsOk(SessionMetadata_Build(
+        &arena, records.Data, records.Count, &metadataOptions, &metadata)));
     CHECK_ALL(
         CountKind(&records, SessionRecordKind::Compaction) == 1,
         CountKind(&records, SessionRecordKind::OperationStarted) == 2,
@@ -1432,7 +1544,10 @@ void TestHarness() {
         records.Data[compactionIndex + 1].Kind ==
             SessionRecordKind::GenerationFinished,
         records.Data[compactionIndex + 2].Kind ==
-            SessionRecordKind::OperationFinished);
+            SessionRecordKind::OperationFinished,
+        metadata.CompactionCount == 1, metadata.GenerationCount == 2,
+        metadata.OperationCount == 2, metadata.MessageCount == 2,
+        AllGenerationFinishesHaveUsage(&records));
 
     CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
     repository.Close(repository.Ctx);

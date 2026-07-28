@@ -659,6 +659,7 @@ void TestTui() {
     TuiCommandSpec commands[] = {
         {SVL("login"), {}, SVL("Sign in")},
         {SVL("model"), {}, SVL("Change model")},
+        {SVL("name"), {}, SVL("Name session")},
         {SVL("clear"), {}, SVL("Clear conversation")},
         {SVL("exit"), SVL("quit"), SVL("Exit")},
     };
@@ -666,14 +667,14 @@ void TestTui() {
     op.ModelName = SVL("m");
     op.Color = false;
     op.Commands = commands;
-    op.CommandCount = 4;
+    op.CommandCount = 5;
     Tui tp;
     Tui_InitModel(&tp, &ap, op);
 
     Feed(&tp, "/");
     CHECK(StrView_Eq(LineEdit_Text(&tp.Edit), SVL("/")));
     CHECK(tp.CommandPaletteSelected == 0);
-    Feed(&tp, "\x1b[B\x1b[B\r");
+    Feed(&tp, "\x1b[B\x1b[B\x1b[B\r");
     TuiSubmission paletteSubmission = {};
     CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
     CHECK_ALL(paletteSubmission.Kind == TuiSubmissionKind::Command,
@@ -702,10 +703,14 @@ void TestTui() {
     CHECK(StrView_Eq(paletteSubmission.Text, SVL("/model")));
 
     CHECK(Tui_ClearSession(&tp));
-    CHECK_ALL(tp.CommandCount == 4, !tp.CommandPaletteDismissed);
+    CHECK_ALL(tp.CommandCount == 5, !tp.CommandPaletteDismissed);
     Feed(&tp, "/c\r");
     CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
     CHECK(StrView_Eq(paletteSubmission.Text, SVL("/clear")));
+
+    Feed(&tp, "/n\r");
+    CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
+    CHECK(StrView_Eq(paletteSubmission.Text, SVL("/name")));
 
     Tui_Stop(&tp);
     ArenaRelease(&ap);
@@ -1445,6 +1450,20 @@ void TestTui() {
               LineEdit_Empty(&tm.ModalEdit));
     Feed(&tm, "\x7f");
     CHECK(Tui_GetModalResult(&tm, nullptr, nullptr) == TuiModalResult::Back);
+
+    CHECK(Tui_BeginTextEntry(&tm, SVL("Session name"),
+                             SVL("Name (empty clears)"),
+                             SVL("Existing title")));
+    Feed(&tm,
+         "\x7f\x7f\x7f\x7f\x7f\x7f\x7f"
+         "\x7f\x7f\x7f\x7f\x7f\x7f\x7f");
+    CHECK_ALL(LineEdit_Empty(&tm.ModalEdit),
+              Tui_GetModalResult(&tm, nullptr, nullptr) ==
+                  TuiModalResult::Pending);
+    Feed(&tm, "\r");
+    entered = SVL("not-empty");
+    result = Tui_GetModalResult(&tm, nullptr, &entered);
+    CHECK_ALL(result == TuiModalResult::Confirmed, entered.Length == 0);
 
     Tui_OpenCommandPalette(&tm);
     CHECK_ALL(StrView_Eq(LineEdit_Text(&tm.Edit), SVL("/")),

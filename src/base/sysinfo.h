@@ -10,6 +10,10 @@ u64 PeakRssBytes();
 // separator stripped. Empty if it cannot be determined.
 StrView Sys_CurrentDir(Arena* a);
 
+// Change the process working directory. Returns false when `path` is empty,
+// missing, not a directory, or cannot be entered.
+bool Sys_SetCurrentDir(StrView path);
+
 // User home directory from the environment (USERPROFILE on Windows, HOME
 // elsewhere), copied into `a` with any trailing separator stripped. Empty if
 // unset.

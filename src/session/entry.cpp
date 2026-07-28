@@ -705,6 +705,9 @@ void WritePayload(StrBuf* out, const SessionRecord* record) {
       WriteId(&w, "parentId", record->BranchLabelEntry.ParentId);
       WriteString(&w, "label", record->BranchLabelEntry.Label);
       break;
+    case SessionRecordKind::SessionName:
+      WriteString(&w, "name", record->SessionNameEntry.Name);
+      break;
     case SessionRecordKind::OperationStarted:
       WriteId(&w, "operationId", record->OperationStarted.OperationId);
       WriteString(&w, "operation", OperationKindName(record->OperationStarted.Operation));
@@ -734,6 +737,10 @@ void WritePayload(StrBuf* out, const SessionRecord* record) {
       WriteString(&w, "outcome", GenerationOutcomeName(record->GenerationFinished.Outcome));
       WriteOptionalId(&w, "messageEntryId", record->GenerationFinished.MessageEntryId);
       WriteString(&w, "error", record->GenerationFinished.Error);
+      if (record->GenerationFinished.HasUsage) {
+        ObjectKey(&w, "usage");
+        WriteUsage(out, &record->GenerationFinished.Use);
+      }
       break;
     case SessionRecordKind::ToolStarted:
       WriteId(&w, "operationId", record->ToolStarted.OperationId);
@@ -856,6 +863,9 @@ bool DecodePayload(Arena* arena, const JsonValue* payload, SessionRecord* record
     case SessionRecordKind::BranchLabel:
       return ReadRequiredId(payload, "parentId", &record->BranchLabelEntry.ParentId) &&
              ReadRequiredString(payload, "label", false, &record->BranchLabelEntry.Label);
+    case SessionRecordKind::SessionName:
+      return ReadRequiredString(payload, "name", true,
+                                &record->SessionNameEntry.Name);
     case SessionRecordKind::OperationStarted: {
       if (!ReadRequiredId(payload, "operationId",
                           &record->OperationStarted.OperationId) ||
@@ -892,16 +902,24 @@ bool DecodePayload(Arena* arena, const JsonValue* payload, SessionRecord* record
       return Json_IsObject(
           Json_Parse(arena, record->GenerationStarted.EffectiveRequestJson));
     }
-    case SessionRecordKind::GenerationFinished:
-      return ReadRequiredId(payload, "operationId",
-                            &record->GenerationFinished.OperationId) &&
-             ReadRequiredId(payload, "attemptId", &record->GenerationFinished.AttemptId) &&
-             ParseGenerationOutcome(Json_GetStr(payload, "outcome"),
-                                    &record->GenerationFinished.Outcome) &&
-             ReadOptionalId(payload, "messageEntryId",
-                            &record->GenerationFinished.MessageEntryId) &&
-             ReadRequiredString(payload, "error", true,
-                                &record->GenerationFinished.Error);
+    case SessionRecordKind::GenerationFinished: {
+      if (!ReadRequiredId(payload, "operationId",
+                          &record->GenerationFinished.OperationId) ||
+          !ReadRequiredId(payload, "attemptId",
+                          &record->GenerationFinished.AttemptId) ||
+          !ParseGenerationOutcome(Json_GetStr(payload, "outcome"),
+                                  &record->GenerationFinished.Outcome) ||
+          !ReadOptionalId(payload, "messageEntryId",
+                          &record->GenerationFinished.MessageEntryId) ||
+          !ReadRequiredString(payload, "error", true,
+                              &record->GenerationFinished.Error)) {
+        return false;
+      }
+      JsonValue* usage = Json_Get(payload, "usage");
+      if (!usage) return true;
+      record->GenerationFinished.HasUsage = true;
+      return DecodeUsage(usage, &record->GenerationFinished.Use);
+    }
     case SessionRecordKind::ToolStarted: {
       if (!ReadRequiredId(payload, "operationId", &record->ToolStarted.OperationId) ||
           !ReadRequiredId(payload, "toolExecutionId",
@@ -1086,7 +1104,7 @@ SessionResult ValidateReference(const SessionRecord* records, u32 before, Durabl
 }  // namespace
 
 SessionEntryClass SessionRecord_ClassForKind(SessionRecordKind kind) {
-  return kind <= SessionRecordKind::BranchLabel ? SessionEntryClass::Session
+  return kind <= SessionRecordKind::SessionName ? SessionEntryClass::Session
                                                 : SessionEntryClass::Harness;
 }
 
@@ -1099,6 +1117,7 @@ StrView SessionRecordKind_Name(SessionRecordKind kind) {
     case SessionRecordKind::Tools: return SVL("tools");
     case SessionRecordKind::Compaction: return SVL("compaction");
     case SessionRecordKind::BranchLabel: return SVL("branch_label");
+    case SessionRecordKind::SessionName: return SVL("session_name");
     case SessionRecordKind::OperationStarted: return SVL("operation_started");
     case SessionRecordKind::GenerationStarted: return SVL("generation_started");
     case SessionRecordKind::GenerationFinished: return SVL("generation_finished");
@@ -1115,6 +1134,69 @@ StrView SessionRecordKind_Name(SessionRecordKind kind) {
     case SessionRecordKind::RecoveryResolved: return SVL("recovery_resolved");
   }
   return StrView{};
+}
+
+DurableId SessionRecord_ParentId(const SessionRecord* record) {
+  return record ? ParentIdFor(record) : DurableId{};
+}
+
+static DurableId RemapId(const Array<DurableId>* oldIds,
+                         const Array<DurableId>* newIds, DurableId oldId) {
+  if (!oldIds || !newIds || oldIds->Count != newIds->Count)
+    return DurableId{};
+  for (u32 i = 0; i < oldIds->Count; i++)
+    if (DurableId_Eq(oldIds->Data[i], oldId)) return newIds->Data[i];
+  return DurableId{};
+}
+
+SessionResult SessionRecord_PrepareForkCopy(
+    const SessionRecord* source, DurableId targetSessionId, u64 targetSeq,
+    u64 createdAt, const Array<DurableId>* oldIds,
+    const Array<DurableId>* newIds, SessionRecord* out) {
+  if (!source || !out || !DurableId_IsSet(targetSessionId) ||
+      targetSeq == 0)
+    return Invalid("fork copy arguments are invalid");
+
+  SessionRecord copy = *source;
+  copy.SchemaVersion = SESSION_SCHEMA_VERSION;
+  copy.SessionId = targetSessionId;
+  copy.Seq = targetSeq;
+  copy.EntryId = DurableId_Generate();
+  copy.EntryClass = SessionEntryClass::Session;
+  copy.CreatedAt = createdAt;
+
+  DurableId parent =
+      RemapId(oldIds, newIds, SessionRecord_ParentId(source));
+  if (!DurableId_IsSet(parent))
+    return Corrupt("fork branch parent could not be remapped");
+
+  switch (copy.Kind) {
+    case SessionRecordKind::Message: copy.MessageEntry.ParentId = parent; break;
+    case SessionRecordKind::Model: copy.ModelEntry.ParentId = parent; break;
+    case SessionRecordKind::Thinking: copy.ThinkingEntry.ParentId = parent; break;
+    case SessionRecordKind::Tools: copy.ToolsEntry.ParentId = parent; break;
+    case SessionRecordKind::BranchLabel:
+      copy.BranchLabelEntry.ParentId = parent;
+      break;
+    case SessionRecordKind::Compaction:
+      copy.CompactionEntry.ParentId = parent;
+      copy.CompactionEntry.BaseEntryId = RemapId(
+          oldIds, newIds, copy.CompactionEntry.BaseEntryId);
+      copy.CompactionEntry.ThroughEntryId = RemapId(
+          oldIds, newIds, copy.CompactionEntry.ThroughEntryId);
+      copy.CompactionEntry.SourceHeadId = RemapId(
+          oldIds, newIds, copy.CompactionEntry.SourceHeadId);
+      if (!DurableId_IsSet(copy.CompactionEntry.BaseEntryId) ||
+          !DurableId_IsSet(copy.CompactionEntry.ThroughEntryId) ||
+          !DurableId_IsSet(copy.CompactionEntry.SourceHeadId))
+        return Corrupt("fork compaction could not be remapped");
+      break;
+    default:
+      return Corrupt("fork branch contains a harness record");
+  }
+
+  *out = copy;
+  return SessionResult_Ok(targetSeq);
 }
 
 SessionResult SessionRecord_Validate(const SessionRecord* record) {
@@ -1179,6 +1261,8 @@ SessionResult SessionRecord_Validate(const SessionRecord* record) {
       if (!DurableId_IsSet(record->BranchLabelEntry.ParentId) ||
           record->BranchLabelEntry.Label.Length == 0)
         return Invalid("branch label entry is invalid");
+      break;
+    case SessionRecordKind::SessionName:
       break;
     case SessionRecordKind::OperationStarted:
       if (!DurableId_IsSet(record->OperationStarted.OperationId) ||
@@ -1396,7 +1480,8 @@ SessionResult SessionRecords_Validate(const SessionRecord* records, u32 count) {
     }
 
     if (record->EntryClass == SessionEntryClass::Session &&
-        record->Kind != SessionRecordKind::SessionStarted) {
+        record->Kind != SessionRecordKind::SessionStarted &&
+        record->Kind != SessionRecordKind::SessionName) {
       SessionResult parent =
           ValidateReference(records, i, ParentIdFor(record), "session parent is invalid");
       if (!SessionResult_IsOk(parent)) {

@@ -11,6 +11,11 @@ SessionRecord NewRecord(SessionRecordKind kind) {
   return record;
 }
 
+void SetGenerationUsage(SessionRecord* record, const Message& assistant) {
+  record->GenerationFinished.HasUsage = true;
+  record->GenerationFinished.Use = assistant.Use;
+}
+
 struct HarnessStreamBridge {
   AgentHarness* Harness;
   StreamSink Downstream;
@@ -327,6 +332,7 @@ SessionResult RunProvider(AgentHarness* harness, DurableId operationId,
         failed.GenerationFinished.AttemptId = attemptId;
         failed.GenerationFinished.Outcome = GenerationOutcome::Failed;
         failed.GenerationFinished.Error = hooked.Message;
+        SetGenerationUsage(&failed, attempt.Assistant);
         SessionResult closed = AgentHarness_Append(harness, &failed, 1);
         ArenaRelease(&scratch);
         return SessionResult_IsOk(closed) ? hooked : closed;
@@ -341,6 +347,7 @@ SessionResult RunProvider(AgentHarness* harness, DurableId operationId,
       failed.GenerationFinished.AttemptId = attemptId;
       failed.GenerationFinished.Outcome = GenerationOutcome::Failed;
       failed.GenerationFinished.Error = attempt.Assistant.ErrorMessage;
+      SetGenerationUsage(&failed, attempt.Assistant);
       SessionResult closed = AgentHarness_Append(harness, &failed, 1);
       ArenaRelease(&scratch);
       if (!SessionResult_IsOk(closed)) return closed;
@@ -366,6 +373,7 @@ SessionResult RunProvider(AgentHarness* harness, DurableId operationId,
                    : GenerationOutcome::Failed);
     resultRecords[1].GenerationFinished.MessageEntryId = assistantId;
     resultRecords[1].GenerationFinished.Error = attempt.Assistant.ErrorMessage;
+    SetGenerationUsage(&resultRecords[1], attempt.Assistant);
     SessionResult committed = AgentHarness_Append(harness, resultRecords, 2);
     ArenaRelease(&scratch);
     if (!SessionResult_IsOk(committed)) return committed;
@@ -935,6 +943,7 @@ SessionResult ContinueCompaction(AgentHarness* harness, DurableId operationId,
         failed.GenerationFinished.AttemptId = attemptId;
         failed.GenerationFinished.Outcome = GenerationOutcome::Failed;
         failed.GenerationFinished.Error = hooked.Message;
+        SetGenerationUsage(&failed, attempt.Assistant);
         SessionResult closed = AgentHarness_Append(harness, &failed, 1);
         if (!SessionResult_IsOk(closed)) {
           ArenaRelease(&scratch);
@@ -955,6 +964,7 @@ SessionResult ContinueCompaction(AgentHarness* harness, DurableId operationId,
       failed.GenerationFinished.AttemptId = attemptId;
       failed.GenerationFinished.Outcome = GenerationOutcome::Failed;
       failed.GenerationFinished.Error = attempt.Assistant.ErrorMessage;
+      SetGenerationUsage(&failed, attempt.Assistant);
       SessionResult closed = AgentHarness_Append(harness, &failed, 1);
       ArenaRelease(&scratch);
       if (!SessionResult_IsOk(closed)) return closed;
@@ -987,6 +997,7 @@ SessionResult ContinueCompaction(AgentHarness* harness, DurableId operationId,
           summaryText.Length == 0 && success
               ? SVL("compaction provider returned an empty summary")
               : attempt.Assistant.ErrorMessage;
+      SetGenerationUsage(&failed, attempt.Assistant);
       SessionResult closed = AgentHarness_Append(harness, &failed, 1);
       if (!SessionResult_IsOk(closed)) {
         ArenaRelease(&scratch);
@@ -1026,6 +1037,7 @@ SessionResult ContinueCompaction(AgentHarness* harness, DurableId operationId,
     result[1].GenerationFinished.AttemptId = attemptId;
     result[1].GenerationFinished.Outcome = GenerationOutcome::Succeeded;
     result[1].GenerationFinished.MessageEntryId = compactionEntryId;
+    SetGenerationUsage(&result[1], attempt.Assistant);
     SessionResult committed = AgentHarness_Append(harness, result, 2);
     ArenaRelease(&scratch);
     if (!SessionResult_IsOk(committed)) return committed;
@@ -1150,6 +1162,7 @@ SessionResult AgentDriver_ResumeRun(AgentHarness* harness,
                      : GenerationOutcome::Succeeded);
       completed.GenerationFinished.MessageEntryId = existing->EntryId;
       completed.GenerationFinished.Error = assistant->ErrorMessage;
+      SetGenerationUsage(&completed, *assistant);
       SessionResult closed = AgentHarness_Append(harness, &completed, 1);
       ArenaRelease(&scratch);
       if (!SessionResult_IsOk(closed)) return closed;

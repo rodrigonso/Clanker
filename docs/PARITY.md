@@ -91,7 +91,7 @@ equivalents by default and names its command tool `shell`.
 |---|---|---|
 | System prompt assembly (cwd, tool docs, overrides, `AGENTS.md`/`CLAUDE.md` project context) | ✅ | active-tool prompt, global/project `SYSTEM.md` and `APPEND_SYSTEM.md`, root-to-cwd context discovery, CLI overrides, and transactional reload; like current pi, omits the date for prompt-cache stability |
 | Prompt templates (`$1`, `$@`, `$ARGUMENTS`) | ❌ | |
-| Sessions / persistence (JSONL/SQLite, resume, fork/clone, branch, tree, import/export, naming) | 🟡 | append-only JSONL, `--continue`/`--resume`, tree checkout, forks, labels, and operation recovery; no import/export, clone, or naming UX |
+| Sessions / persistence (JSONL/SQLite, resume, fork/clone, branch, tree, import/export, naming) | 🟡 | append-only JSONL, exact global-ID resume, rollback-safe cross-project cwd/session switching with trust re-resolution, tree checkout, forks, branch labels, session-global names, rich shared metadata with incomplete-usage markers, unreadable-file reporting, and operation recovery; no import/export or clone |
 | Compaction (auto + manual, custom instructions, branch summarization) | 🟡 | durable manual branch compaction; no automatic threshold policy or custom prompt |
 | Skills (discovery, frontmatter, `<available_skills>` injection, `/skill`) | ❌ | |
 | Subagent / task delegation | ✅ | neither harness ships built-in subagents; pi expects extensions/packages for this |
@@ -105,10 +105,14 @@ equivalents by default and names its command tool `shell`.
 | CLI flags | 🟡 | adds system/append prompt, context-disable, and trust overrides to model/print/login/logout/session flags; pi's provider, thinking, tool/resource, export, and mode breadth remains absent |
 | Interactive queue UX | 🟡 | steering during a run works; no distinct follow-up shortcut, queue retrieval, or one-at-a-time/all delivery settings |
 | TUI core: differential renderer, markdown, multi-line editor, reusable components, status line, scroll, selection, abort, `NO_COLOR` | ✅ core | |
-| TUI selectors/dialogs (model / session / theme / settings / login / oauth / extension / thinking / trust / diff / image / first-run) | 🟡 | generic list/text modals power login, model, session, tree, recovery, and project-trust flows |
+| TUI selectors/dialogs (model / session / theme / settings / login / oauth / extension / thinking / trust / diff / image / first-run) | 🟡 | generic list/text modals power login, model, rich current/all-project session browsing and naming, tree, recovery, and project-trust flows |
 | Rich editor/media features | 🟡 | bracketed paste, history, selection, and mouse are present; no path/file autocomplete, inline image rendering/paste, or external editor |
-| Slash commands | 🟡 | 14 built-ins, including `/trust` and `/reload`, versus pi's 22 plus dynamic extension/skill/template commands |
+| Slash commands | 🟡 | 15 built-ins, including `/name`, `/trust`, and `/reload`, versus pi's 22 plus dynamic extension/skill/template commands |
 | Themes · configurable keybindings | ❌ | |
+
+Session browsing intentionally remains simpler than pi: fuzzy/regex search,
+generated titles, pricing, deletion UX, and a derived metadata database/sidecar
+are deferred. Canonical JSONL records remain the only durable source.
 
 ## Platform features
 
