@@ -193,9 +193,11 @@ target_link_libraries(clank_tools PUBLIC clank_json clank_agent)
 add_library(clank_app STATIC
   src/app/command.cpp
   src/app/plain_select.cpp
+  src/app/project_trust.cpp
+  src/app/prompt_context.cpp
   src/app/provider_registry.cpp
   src/app/settings.cpp)
-target_link_libraries(clank_app PUBLIC clank_anthropic clank_auth clank_tui)
+target_link_libraries(clank_app PUBLIC clank_anthropic clank_auth clank_tui clank_tools)
 
 # ---- executables ---------------------------------------------------------
 add_executable(clank src/app/main.cpp)
@@ -218,6 +220,8 @@ add_executable(clank_tests EXCLUDE_FROM_ALL
   tests/test_crypto.cpp
   tests/test_auth.cpp
   tests/test_command.cpp
+  tests/test_prompt_context.cpp
+  tests/test_project_trust.cpp
   tests/test_loopback.cpp
   tests/test_provider_registry.cpp
   tests/test_settings.cpp

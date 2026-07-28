@@ -18,6 +18,8 @@ void TestInfra();
 void TestCrypto();
 void TestAuth();
 void TestCommand();
+void TestPromptContext();
+void TestProjectTrust();
 void TestLoopback();
 void TestProviderRegistry();
 void TestSettings();

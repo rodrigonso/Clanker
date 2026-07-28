@@ -29,18 +29,30 @@ AppSettingsLoadResult AppSettings_Load(Arena* a, StrView path, AppSettings* out)
   if (!Json_IsString(provider) || !Json_IsString(model) || provider->Str.Length == 0 || model->Str.Length == 0) {
     return AppSettingsLoadResult::Malformed;
   }
+  DefaultProjectTrust defaultTrust = DefaultProjectTrust::Ask;
+  JsonValue* trust = Json_Get(root, "defaultProjectTrust");
+  if (trust &&
+      (!Json_IsString(trust) ||
+       !DefaultProjectTrust_Parse(trust->Str, &defaultTrust)))
+    return AppSettingsLoadResult::Malformed;
 
   out->Provider = provider->Str;
   out->Model = model->Str;
+  out->DefaultTrust = defaultTrust;
   return AppSettingsLoadResult::Success;
 }
 
 bool AppSettings_Save(Arena* a, StrView path, const AppSettings* settings) {
-  StrBuf content = StrBuf_Make(a, settings->Provider.Length + settings->Model.Length + 40);
+  StrView trust = DefaultProjectTrust_Name(settings->DefaultTrust);
+  if (!trust.Length) return false;
+  StrBuf content = StrBuf_Make(
+      a, settings->Provider.Length + settings->Model.Length + trust.Length + 72);
   StrBuf_AppendCStr(&content, "{\"provider\":");
   Json_WriteString(&content, settings->Provider);
   StrBuf_AppendCStr(&content, ",\"model\":");
   Json_WriteString(&content, settings->Model);
+  StrBuf_AppendCStr(&content, ",\"defaultProjectTrust\":");
+  Json_WriteString(&content, trust);
   StrBuf_AppendChar(&content, '}');
   return ConfigFile_WriteAtomic(a, path, StrBuf_View(&content));
 }

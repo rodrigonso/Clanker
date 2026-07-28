@@ -14,6 +14,9 @@ const AppCommandSpec kCommands[] = {
     {AppCommandKind::Fork, SVL("fork"), {}, SVL("Fork the current or selected entry")},
     {AppCommandKind::Compact, SVL("compact"), {}, SVL("Compact the current branch")},
     {AppCommandKind::Recover, SVL("recover"), {}, SVL("Recover a suspended operation")},
+    {AppCommandKind::Trust, SVL("trust"), {}, SVL("Change saved project trust")},
+    {AppCommandKind::Reload, SVL("reload"), {},
+     SVL("Reload settings and prompt context")},
     {AppCommandKind::Exit, SVL("exit"), SVL("quit"),
      SVL("Exit Clank and return to the shell (alias: /quit)")},
 };
@@ -62,6 +65,10 @@ StrView Usage(AppCommandKind kind) {
       return SVL("Usage: /compact");
     case AppCommandKind::Recover:
       return SVL("Usage: /recover <resume|abort|tool ACTION [result]>");
+    case AppCommandKind::Trust:
+      return SVL("Usage: /trust");
+    case AppCommandKind::Reload:
+      return SVL("Usage: /reload");
     case AppCommandKind::Exit:
       return SVL("Usage: /exit (alias: /quit)");
     default:
@@ -187,6 +194,8 @@ AppCommandDispatchResult AppCommand_Dispatch(StrView input, const AppCommandHand
         case AppCommandKind::Fork: fn = handlers->Fork; break;
         case AppCommandKind::Compact: fn = handlers->Compact; break;
         case AppCommandKind::Recover: fn = handlers->Recover; break;
+        case AppCommandKind::Trust: fn = handlers->Trust; break;
+        case AppCommandKind::Reload: fn = handlers->Reload; break;
         default: break;
       }
     }

@@ -8,6 +8,8 @@ struct FakeCommandContext {
   int ModelCalls;
   int SessionCalls;
   int ResumeCalls;
+  int TrustCalls;
+  int ReloadCalls;
   int Notices;
   int Errors;
   AppCommandHandlerResult LoginResult;
@@ -61,14 +63,32 @@ AppCommandHandlerResult Resume(void* user, const AppCommandUx* ux,
   return {AppCommandHandlerStatus::Success, StrView{}};
 }
 
+AppCommandHandlerResult Trust(void* user, const AppCommandUx* ux,
+                              StrView arguments) {
+  (void)ux;
+  FakeCommandContext* ctx = (FakeCommandContext*)user;
+  ctx->TrustCalls++;
+  ctx->LastArguments = arguments;
+  return {AppCommandHandlerStatus::Success, SVL("Trust saved.")};
+}
+
+AppCommandHandlerResult Reload(void* user, const AppCommandUx* ux,
+                               StrView arguments) {
+  (void)ux;
+  FakeCommandContext* ctx = (FakeCommandContext*)user;
+  ctx->ReloadCalls++;
+  ctx->LastArguments = arguments;
+  return {AppCommandHandlerStatus::Success, SVL("Prompt reloaded.")};
+}
+
 void TestParse() {
-  CHECK_ALL(AppCommandSpec_Count() == 12,
+  CHECK_ALL(AppCommandSpec_Count() == 14,
             AppCommandSpec_At(AppCommandSpec_Count()) == nullptr,
             AppCommandSpec_At(0)->Kind == AppCommandKind::Login,
             StrView_EqCStr(AppCommandSpec_At(0)->Name, "login"),
-            AppCommandSpec_At(11)->Kind == AppCommandKind::Exit,
-            StrView_EqCStr(AppCommandSpec_At(11)->Alias, "quit"),
-            AppCommandSpec_At(11)->Description.Length != 0);
+            AppCommandSpec_At(13)->Kind == AppCommandKind::Exit,
+            StrView_EqCStr(AppCommandSpec_At(13)->Alias, "quit"),
+            AppCommandSpec_At(13)->Description.Length != 0);
 
   AppCommand plain = AppCommand_Parse(SVL("  hello  "));
   CHECK(plain.Kind == AppCommandKind::NotCommand);
@@ -92,6 +112,8 @@ void TestParse() {
       {SVL("/fork"), AppCommandKind::Fork},
       {SVL("/compact"), AppCommandKind::Compact},
       {SVL("/recover resume"), AppCommandKind::Recover},
+      {SVL("/trust"), AppCommandKind::Trust},
+      {SVL("/reload"), AppCommandKind::Reload},
       {SVL("/exit"), AppCommandKind::Exit},     {SVL("/quit"), AppCommandKind::Exit},
       {SVL("/LOGIN"), AppCommandKind::Unknown}, {SVL("/"), AppCommandKind::Unknown},
       {SVL("/wat"), AppCommandKind::Unknown},
@@ -119,6 +141,8 @@ void TestDispatch() {
   handlers.Model = Model;
   handlers.Session = Session;
   handlers.Resume = Resume;
+  handlers.Trust = Trust;
+  handlers.Reload = Reload;
 
   AppCommandDispatchResult plain = AppCommand_Dispatch(SVL("ordinary prompt"), &handlers, &ux);
   CHECK_ALL(!plain.Handled, plain.Action == AppLoopAction::Continue);
@@ -156,6 +180,10 @@ void TestDispatch() {
   AppCommandDispatchResult quit = AppCommand_Dispatch(SVL("\t/quit\n"), &handlers, &ux);
   CHECK(quit.Handled && quit.Action == AppLoopAction::Exit);
 
+  AppCommand_Dispatch(SVL("/trust"), &handlers, &ux);
+  AppCommand_Dispatch(SVL("/reload"), &handlers, &ux);
+  CHECK_ALL(ctx.TrustCalls == 1, ctx.ReloadCalls == 1);
+
   int calls = ctx.LoginCalls + ctx.ModelCalls;
   AppCommandDispatchResult args = AppCommand_Dispatch(SVL("/login anthropic"), &handlers, &ux);
   CHECK_ALL(args.Handled && args.Action == AppLoopAction::Continue,
@@ -175,8 +203,12 @@ void TestDispatch() {
   CHECK_ALL(quitArgs.Handled && quitArgs.Action == AppLoopAction::Continue,
             ctx.Errors == 4 && StrView_Contains(ctx.LastError, "Usage: /exit"));
 
+  AppCommand_Dispatch(SVL("/reload now"), &handlers, &ux);
+  CHECK_ALL(ctx.ReloadCalls == 1, ctx.Errors == 5,
+            StrView_Contains(ctx.LastError, "Usage: /reload"));
+
   AppCommandDispatchResult unknown = AppCommand_Dispatch(SVL(" /unknown "), &handlers, &ux);
-  CHECK_ALL(unknown.Handled && unknown.Action == AppLoopAction::Continue, ctx.Errors == 5,
+  CHECK_ALL(unknown.Handled && unknown.Action == AppLoopAction::Continue, ctx.Errors == 6,
             StrView_Contains(ctx.LastError, "Unknown slash command"));
 }
 

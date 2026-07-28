@@ -33,13 +33,29 @@ void TestSettings() {
   CHECK(ConfigFile_WriteAtomic(&a, SV(path), SVL("{\"provider\":\"anthropic\"}")));
   CHECK(AppSettings_Load(&a, SV(path), &loaded) == AppSettingsLoadResult::Malformed);
 
+  CHECK(ConfigFile_WriteAtomic(
+      &a, SV(path),
+      SVL("{\"provider\":\"anthropic\",\"model\":\"legacy\"}")));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+        AppSettingsLoadResult::Success);
+  CHECK(loaded.DefaultTrust == DefaultProjectTrust::Ask);
+
+  CHECK(ConfigFile_WriteAtomic(
+      &a, SV(path),
+      SVL("{\"provider\":\"anthropic\",\"model\":\"bad\","
+          "\"defaultProjectTrust\":\"sometimes\"}")));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+        AppSettingsLoadResult::Malformed);
+
   AppSettings saved = {};
   saved.Provider = SVL("anthropic");
   saved.Model = SVL("claude-\"test\"");
+  saved.DefaultTrust = DefaultProjectTrust::Always;
   CHECK(AppSettings_Save(&a, SV(path), &saved));
   CHECK(AppSettings_Load(&a, SV(path), &loaded) == AppSettingsLoadResult::Success);
   CHECK_ALL(StrView_Eq(loaded.Provider, saved.Provider),
-            StrView_Eq(loaded.Model, saved.Model));
+            StrView_Eq(loaded.Model, saved.Model),
+            loaded.DefaultTrust == DefaultProjectTrust::Always);
 
 #if !defined(_WIN32)
   struct stat st = {};

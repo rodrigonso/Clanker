@@ -7,6 +7,8 @@
 #include "agent/harness.h"
 #include "app/command.h"
 #include "app/plain_select.h"
+#include "app/project_trust.h"
+#include "app/prompt_context.h"
 #include "app/provider_registry.h"
 #include "app/settings.h"
 #include "auth/oauth.h"
@@ -22,6 +24,7 @@
 #include "tui/tui.h"
 #include "term/sanitize.h"
 #include "tools/tools.h"
+#include "tools/fs.h"
 #include "tools/filelock.h"
 #include "session/jsonl_repository.h"
 #include "session/memory_repository.h"
@@ -82,7 +85,16 @@ struct InteractiveRuntime {
   SessionRepository* Sessions;
   StrView ProjectKey;
   StrView WorkingDirectory;
+  StrView AgentDirectory;
+  StrView TrustPath;
   bool NoSession;
+  bool ProjectTrusted;
+  bool HasProjectResources;
+  bool TrustCoversProjectResources;
+  ProjectTrustOverride TrustOverride;
+  DefaultProjectTrust DefaultTrust;
+  PromptContext* Prompt;
+  PromptContextOptions PromptOptions;
   HarnessEventPump* EventPump;
   AgentSink EventSink;
   bool Faux;
@@ -90,6 +102,11 @@ struct InteractiveRuntime {
   Tui* TuiView;
   AppAuth* Auth;
   AuthWarmup* AuthWarmupState;
+};
+
+struct PromptContextLifetime {
+  PromptContext* Context;
+  ~PromptContextLifetime() { PromptContext_Release(Context); }
 };
 
 static void RunAuthWarmup(void* user) {
@@ -214,6 +231,7 @@ static StrView AuthGuidance(Arena* arena, const ProviderSpec* spec, bool interac
 struct RuntimeSelection {
   const ProviderSpec* Spec;
   StrView ModelId;
+  DefaultProjectTrust DefaultTrust;
 };
 
 static void WarnUsingDefaults(StrView path, const ProviderSpec* defaults, const char* reason) {
@@ -231,10 +249,12 @@ static RuntimeSelection LoadRuntimeSelection(Arena* arena, StrView settingsPath,
 
   selected.Spec = defaults;
   selected.ModelId = defaults->DefaultModel;
+  selected.DefaultTrust = DefaultProjectTrust::Ask;
 
   AppSettings settings = {};
   AppSettingsLoadResult load = AppSettings_Load(arena, settingsPath, &settings);
   if (load == AppSettingsLoadResult::Success) {
+    selected.DefaultTrust = settings.DefaultTrust;
     const ProviderSpec* configured = ProviderRegistry_Find(settings.Provider);
     if (configured) {
       selected.Spec = configured;
@@ -921,7 +941,8 @@ static bool RuntimeCheckAuth(InteractiveRuntime* rt, const AppCommandUx* ux, boo
 
 static bool PersistRuntimeSelection(InteractiveRuntime* rt, const AppCommandUx* ux) {
   Arena scratch = ArenaCreate((usize)8 << 20);
-  AppSettings settings = {rt->Spec->Id, rt->CurrentModel.Id};
+  AppSettings settings = {rt->Spec->Id, rt->CurrentModel.Id,
+                          rt->DefaultTrust};
   if (!AppSettings_Save(&scratch, rt->SettingsPath, &settings)) {
     StrBuf message = StrBuf_Make(&scratch, rt->SettingsPath.Length + 96);
     StrBuf_AppendCStr(
@@ -1665,6 +1686,225 @@ static AppCommandHandlerResult HandleRecoverCommand(
   return CommandResult(reconciled, SVL("tool recovery completed"));
 }
 
+static StrView PromptContextReport(Arena* arena, const PromptContext* context,
+                                   bool hasProjectResources,
+                                   bool projectTrusted, StrView heading) {
+  StrBuf message = StrBuf_Make(arena, 256);
+  StrBuf_Append(&message, heading);
+  StrBuf_AppendCStr(&message, "\nSystem prompt: ");
+  StrBuf_Append(&message, context->SystemPromptSource.Length
+                             ? context->SystemPromptSource
+                             : SVL("built-in"));
+  StrBuf_AppendCStr(&message, "\nAppend system prompt: ");
+  StrBuf_Append(&message, context->AppendPromptSource.Length
+                             ? context->AppendPromptSource
+                             : SVL("none"));
+  StrBuf_AppendCStr(&message, "\nProject prompt resources: ");
+  StrBuf_AppendCStr(&message, !hasProjectResources
+                                 ? "not present"
+                             : projectTrusted ? "enabled"
+                                              : "disabled (project untrusted)");
+  if (context->ContextFiles.Count) {
+    StrBuf_AppendCStr(&message, "\nProject instructions:");
+    for (u32 i = 0; i < context->ContextFiles.Count; i++) {
+      StrBuf_AppendCStr(&message, "\n- ");
+      StrBuf_Append(&message, context->ContextFiles.Data[i].Path);
+    }
+  } else {
+    StrBuf_AppendCStr(&message, "\nProject instructions: none");
+  }
+  return StrBuf_View(&message);
+}
+
+static void EmitPromptDiagnostics(const PromptContext* context,
+                                  const AppCommandUx* ux) {
+  if (!context || !ux) return;
+  Arena scratch = ArenaCreate((usize)4 << 20);
+  for (u32 i = 0; i < context->Diagnostics.Count; i++) {
+    const PromptDiagnostic& diagnostic = context->Diagnostics.Data[i];
+    StrBuf message =
+        StrBuf_Make(&scratch, diagnostic.Path.Length + diagnostic.Message.Length + 24);
+    if (diagnostic.Severity == PromptDiagnosticSeverity::Warning)
+      StrBuf_AppendCStr(&message, "warning: ");
+    if (diagnostic.Path.Length) {
+      StrBuf_Append(&message, diagnostic.Path);
+      StrBuf_AppendCStr(&message, ": ");
+    }
+    StrBuf_Append(&message, diagnostic.Message);
+    if (diagnostic.Severity == PromptDiagnosticSeverity::Error)
+      EmitCommandError(ux, StrBuf_View(&message));
+    else
+      EmitCommandNotice(ux, StrBuf_View(&message));
+    ArenaReset(&scratch);
+  }
+  ArenaRelease(&scratch);
+}
+
+static void PrintPromptDiagnostics(const PromptContext* context) {
+  if (!context) return;
+  for (u32 i = 0; i < context->Diagnostics.Count; i++) {
+    const PromptDiagnostic& diagnostic = context->Diagnostics.Data[i];
+    fprintf(stderr, "%s%.*s%s%.*s\n",
+            diagnostic.Severity == PromptDiagnosticSeverity::Warning
+                ? "warning: "
+                : "error: ",
+            (int)diagnostic.Path.Length, diagnostic.Path.Data,
+            diagnostic.Path.Length ? ": " : "", (int)diagnostic.Message.Length,
+            diagnostic.Message.Data);
+  }
+}
+
+static AppCommandHandlerResult RuntimeOwnedFailure(InteractiveRuntime* rt,
+                                                   StrView message) {
+  return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
+                                 StrView_Dup(rt->Mem, message)};
+}
+
+static AppCommandHandlerResult HandleTrustCommand(
+    void* user, const AppCommandUx*, StrView) {
+  InteractiveRuntime* rt = (InteractiveRuntime*)user;
+  Arena scratch = ArenaCreate((usize)16 << 20);
+  ProjectTrustStore store = {};
+  ProjectTrustStoreLoadResult loaded =
+      ProjectTrustStore_Load(&scratch, rt->TrustPath, &store);
+  if (loaded == ProjectTrustStoreLoadResult::Malformed ||
+      loaded == ProjectTrustStoreLoadResult::ReadFailure) {
+    StrView message =
+        loaded == ProjectTrustStoreLoadResult::Malformed
+            ? SVL("The project trust store is malformed.")
+            : SVL("The project trust store could not be read.");
+    AppCommandHandlerResult result = RuntimeOwnedFailure(rt, message);
+    ArenaRelease(&scratch);
+    return result;
+  }
+
+  StrView cwd = ProjectTrust_CanonicalPath(&scratch, rt->WorkingDirectory);
+  StrView parent = ProjectTrust_ParentPath(&scratch, cwd);
+  ProjectTrustMatch match = ProjectTrustStore_Find(&store, cwd);
+  StrBuf title = StrBuf_Make(&scratch, cwd.Length + match.Path.Length + 160);
+  StrBuf_AppendCStr(&title, "Project trust for ");
+  StrBuf_Append(&title, cwd);
+  StrBuf_AppendCStr(&title, "\nCurrent session: ");
+  StrBuf_AppendCStr(&title, rt->ProjectTrusted ? "trusted" : "untrusted");
+  StrBuf_AppendCStr(&title, "\nSaved decision: ");
+  if (match.Found) {
+    StrBuf_AppendCStr(&title, match.Trusted ? "trust " : "do not trust ");
+    StrBuf_Append(&title, match.Path);
+  } else {
+    StrBuf_AppendCStr(&title, "none");
+  }
+
+  enum class TrustAction : u8 { TrustCurrent, TrustParent, UntrustCurrent };
+  StrView options[3] = {};
+  TrustAction actions[3] = {};
+  u32 count = 0;
+  options[count] = SVL("Trust this folder");
+  actions[count++] = TrustAction::TrustCurrent;
+  StrBuf parentOption = StrBuf_Make(&scratch, parent.Length + 32);
+  if (parent.Length) {
+    StrBuf_AppendCStr(&parentOption, "Trust parent folder: ");
+    StrBuf_Append(&parentOption, parent);
+    options[count] = StrBuf_View(&parentOption);
+    actions[count++] = TrustAction::TrustParent;
+  }
+  options[count] = SVL("Do not trust this folder");
+  actions[count++] = TrustAction::UntrustCurrent;
+
+  u32 selected = 0;
+  RuntimeInputResult input =
+      RuntimeSelect(rt, StrBuf_View(&title), options, count, &selected);
+  if (input != RuntimeInputResult::Confirmed) {
+    ArenaRelease(&scratch);
+    return AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled,
+                                   SVL("Trust unchanged.")};
+  }
+
+  TrustAction action = actions[selected];
+  StrView decisionPath =
+      action == TrustAction::TrustParent ? parent : cwd;
+  bool trusted = action != TrustAction::UntrustCurrent;
+  StrView removePath =
+      action == TrustAction::TrustParent ? cwd : StrView{};
+  StrBuf error = StrBuf_Make(&scratch, 128);
+  if (!ProjectTrustStore_Update(&scratch, rt->TrustPath, decisionPath, trusted,
+                                removePath, &error)) {
+    AppCommandHandlerResult result =
+        RuntimeOwnedFailure(rt, StrBuf_View(&error));
+    ArenaRelease(&scratch);
+    return result;
+  }
+  ArenaRelease(&scratch);
+  return AppCommandHandlerResult{
+      AppCommandHandlerStatus::Success,
+      SVL("Trust decision saved. Restart Clank for it to take effect.")};
+}
+
+static AppCommandHandlerResult HandleReloadCommand(
+    void* user, const AppCommandUx* ux, StrView) {
+  InteractiveRuntime* rt = (InteractiveRuntime*)user;
+  if (!rt->Harness || !rt->Prompt || rt->Harness->Running ||
+      rt->Harness->Suspended) {
+    return AppCommandHandlerResult{
+        AppCommandHandlerStatus::Failed,
+        SVL("Prompt context can only be reloaded while the agent is idle.")};
+  }
+
+  Arena scratch = ArenaCreate((usize)16 << 20);
+  DefaultProjectTrust defaultTrust = DefaultProjectTrust::Ask;
+  AppSettings settings = {};
+  AppSettingsLoadResult settingsResult =
+      AppSettings_Load(&scratch, rt->SettingsPath, &settings);
+  if (settingsResult == AppSettingsLoadResult::Success) {
+    defaultTrust = settings.DefaultTrust;
+  } else if (settingsResult == AppSettingsLoadResult::Malformed ||
+             settingsResult == AppSettingsLoadResult::ReadFailure) {
+    StrView message =
+        settingsResult == AppSettingsLoadResult::Malformed
+            ? SVL("Settings are malformed; prompt context was not reloaded.")
+            : SVL("Settings could not be read; prompt context was not reloaded.");
+    AppCommandHandlerResult result = RuntimeOwnedFailure(rt, message);
+    ArenaRelease(&scratch);
+    return result;
+  }
+
+  PromptContext next = {};
+  bool hasProjectResources =
+      ProjectTrust_HasGatedResources(&scratch, rt->WorkingDirectory);
+  ProjectTrustReloadResolution trust = ProjectTrust_ResolveReload(
+      hasProjectResources, rt->TrustCoversProjectResources,
+      rt->TrustOverride, rt->ProjectTrusted);
+  if (!trust.CanReload) {
+    ArenaRelease(&scratch);
+    return AppCommandHandlerResult{
+        AppCommandHandlerStatus::Failed,
+        SVL("New project prompt files were detected. Restart Clank to resolve trust.")};
+  }
+  PromptContextOptions options = rt->PromptOptions;
+  options.ProjectTrusted = trust.Trusted;
+  StrBuf error = StrBuf_Make(&scratch, 160);
+  if (!PromptContext_Build(&options, &next, &error)) {
+    AppCommandHandlerResult result =
+        RuntimeOwnedFailure(rt, StrBuf_View(&error));
+    ArenaRelease(&scratch);
+    return result;
+  }
+
+  PromptContext previous = *rt->Prompt;
+  *rt->Prompt = next;
+  rt->Harness->Config.SystemPrompt = rt->Prompt->SystemPrompt;
+  rt->DefaultTrust = defaultTrust;
+  rt->ProjectTrusted = trust.Trusted;
+  rt->HasProjectResources = hasProjectResources;
+  PromptContext_Release(&previous);
+
+  EmitPromptDiagnostics(rt->Prompt, ux);
+  StrView report =
+      PromptContextReport(rt->Mem, rt->Prompt, rt->HasProjectResources,
+                          rt->ProjectTrusted, SVL("Prompt context reloaded."));
+  ArenaRelease(&scratch);
+  return AppCommandHandlerResult{AppCommandHandlerStatus::Success, report};
+}
+
 static bool RuntimeResetSession(InteractiveRuntime* rt, const AppCommandUx* ux) {
   if (!rt->Harness || !rt->Sessions || rt->Harness->Running) {
     EmitCommandError(ux, SVL("Unable to clear the session while the agent is active."));
@@ -1711,7 +1951,9 @@ static AppCommandHandlers RuntimeCommandHandlers(InteractiveRuntime* rt) {
   handlers.Fork = HandleForkCommand;
   handlers.Compact = HandleCompactCommand;
   handlers.Recover = HandleRecoverCommand;
+  handlers.Reload = HandleReloadCommand;
   bool selectorsAvailable = rt->TuiView || Term_IsInteractive();
+  if (selectorsAvailable) handlers.Trust = HandleTrustCommand;
   if (!rt->Faux && selectorsAvailable) {
     handlers.Login = HandleLoginCommand;
     handlers.Model = HandleModelCommand;
@@ -1780,6 +2022,14 @@ static void PrintHelp() {
       "  -c, --continue    Continue the most recent session for this project\n"
       "  -r, --resume ID   Resume a specific session for this project\n"
       "  --no-session      Keep the session in memory; write no session files\n"
+      "  --system-prompt VALUE\n"
+      "                    Replace the built-in prompt with text or file content\n"
+      "  --append-system-prompt VALUE\n"
+      "                    Append text or file content (repeatable)\n"
+      "  -nc, --no-context-files\n"
+      "                    Do not load AGENTS.md or CLAUDE.md files\n"
+      "  -a, --approve     Trust project prompt resources for this run\n"
+      "  -na, --no-approve Do not trust project prompt resources for this run\n"
       "  --login [prov]    OAuth login in your browser (default provider: anthropic)\n"
       "  --logout [prov]   Remove stored credentials (default: anthropic)\n"
       "  --no-open         Do not auto-open a browser for --login or interactive /login\n"
@@ -1788,7 +2038,103 @@ static void PrintHelp() {
       "Auth: run `--login anthropic` for a Claude Pro/Max subscription (a local\n"
       "callback server captures the redirect automatically), or set ANTHROPIC_API_KEY.\n"
       "Interactive commands: /session, /sessions, /resume, /tree, /checkout,\n"
-      "/fork, /compact, /recover, /login, /model, /clear, /exit.\n");
+      "/fork, /compact, /recover, /trust, /reload, /login, /model, /clear, /exit.\n");
+}
+
+static bool ResolveStartupProjectTrust(
+    Arena* arena, StrView trustPath, StrView workingDirectory,
+    DefaultProjectTrust defaultTrust, ProjectTrustOverride overrideValue,
+    bool interactive, bool* trusted, bool* hasResources) {
+  *hasResources =
+      ProjectTrust_HasGatedResources(arena, workingDirectory);
+  if (!*hasResources) {
+    *trusted = true;
+    return true;
+  }
+  if (overrideValue != ProjectTrustOverride::Unspecified) {
+    *trusted = overrideValue == ProjectTrustOverride::Trusted;
+    return true;
+  }
+
+  ProjectTrustStore store = {};
+  ProjectTrustStoreLoadResult loaded =
+      ProjectTrustStore_Load(arena, trustPath, &store);
+  if (loaded == ProjectTrustStoreLoadResult::Malformed ||
+      loaded == ProjectTrustStoreLoadResult::ReadFailure) {
+    fprintf(stderr, "error: project trust store %.*s %s\n",
+            (int)trustPath.Length, trustPath.Data,
+            loaded == ProjectTrustStoreLoadResult::Malformed
+                ? "is malformed"
+                : "could not be read");
+    return false;
+  }
+
+  StrView cwd = ProjectTrust_CanonicalPath(arena, workingDirectory);
+  ProjectTrustResolution resolution =
+      ProjectTrust_Resolve(true, overrideValue, &store, cwd, defaultTrust,
+                           interactive);
+  if (!resolution.NeedsPrompt) {
+    *trusted = resolution.Trusted;
+    return true;
+  }
+
+  enum class StartupTrustAction : u8 {
+    TrustCurrent,
+    TrustParent,
+    TrustSession,
+    UntrustCurrent,
+    UntrustSession,
+  };
+  StrView parent = ProjectTrust_ParentPath(arena, cwd);
+  StrView options[5] = {};
+  StartupTrustAction actions[5] = {};
+  u32 count = 0;
+  options[count] = SVL("Trust this folder");
+  actions[count++] = StartupTrustAction::TrustCurrent;
+  StrBuf parentOption = StrBuf_Make(arena, parent.Length + 32);
+  if (parent.Length) {
+    StrBuf_AppendCStr(&parentOption, "Trust parent folder: ");
+    StrBuf_Append(&parentOption, parent);
+    options[count] = StrBuf_View(&parentOption);
+    actions[count++] = StartupTrustAction::TrustParent;
+  }
+  options[count] = SVL("Trust for this session only");
+  actions[count++] = StartupTrustAction::TrustSession;
+  options[count] = SVL("Do not trust this folder");
+  actions[count++] = StartupTrustAction::UntrustCurrent;
+  options[count] = SVL("Do not trust for this session only");
+  actions[count++] = StartupTrustAction::UntrustSession;
+
+  StrBuf title = StrBuf_Make(arena, cwd.Length + 96);
+  StrBuf_AppendCStr(
+      &title,
+      "This project contains .clank prompt files that can replace system instructions:\n");
+  StrBuf_Append(&title, cwd);
+  u32 selected = 0;
+  if (!Plain_Select(StrBuf_View(&title), options, count, &selected)) {
+    *trusted = false;
+    return true;
+  }
+
+  StartupTrustAction action = actions[selected];
+  *trusted = action == StartupTrustAction::TrustCurrent ||
+             action == StartupTrustAction::TrustParent ||
+             action == StartupTrustAction::TrustSession;
+  if (action == StartupTrustAction::TrustSession ||
+      action == StartupTrustAction::UntrustSession)
+    return true;
+
+  StrView decisionPath =
+      action == StartupTrustAction::TrustParent ? parent : cwd;
+  StrView removePath =
+      action == StartupTrustAction::TrustParent ? cwd : StrView{};
+  StrBuf error = StrBuf_Make(arena, 128);
+  if (!ProjectTrustStore_Update(
+          arena, trustPath, decisionPath, *trusted, removePath, &error)) {
+    fprintf(stderr, "error: %.*s\n", (int)error.Length, error.Data);
+    return false;
+  }
+  return true;
 }
 
 static StrView SessionDataRoot(Arena* arena) {
@@ -1857,6 +2203,11 @@ static void RunPlainRepl(InteractiveRuntime* rt, Faux* fauxState) {
 
   char line[8192];
   AppCommandUx commandUx = {nullptr, PlainCommandNotice, PlainCommandError};
+  EmitCommandNotice(
+      &commandUx,
+      PromptContextReport(rt->Mem, rt->Prompt, rt->HasProjectResources,
+                          rt->ProjectTrusted, SVL("Prompt context loaded.")));
+  EmitPromptDiagnostics(rt->Prompt, &commandUx);
   if (!rt->Faux) RuntimeCheckAuth(rt, &commandUx, false);
   AppCommandHandlers handlers = RuntimeCommandHandlers(rt);
   for (;;) {
@@ -1935,6 +2286,11 @@ static void RunTuiRepl(InteractiveRuntime* rt, Faux* fauxState) {
   Tui_LoadStartupContext(&tui);
 
   AppCommandUx commandUx = {&tui, TuiCommandNotice, TuiCommandError};
+  EmitCommandNotice(
+      &commandUx,
+      PromptContextReport(rt->Mem, rt->Prompt, rt->HasProjectResources,
+                          rt->ProjectTrusted, SVL("Prompt context loaded.")));
+  EmitPromptDiagnostics(rt->Prompt, &commandUx);
   AppCommandHandlers handlers = RuntimeCommandHandlers(rt);
   for (;;) {
     TuiSubmission submission = {};
@@ -1964,21 +2320,73 @@ static void RunTuiRepl(InteractiveRuntime* rt, Faux* fauxState) {
 }
 
 int main(int argc, char** argv) {
+  Arena arena = ArenaCreate((usize)2 << 30);
   const char* modelOverride = nullptr;
   const char* onePrompt = nullptr;
   const char* loginProvider = nullptr;
   const char* logoutProvider = nullptr;
   const char* resumeSession = nullptr;
+  bool hasExplicitSystemPrompt = false;
+  StrView explicitSystemPrompt = {};
+  Array<StrView> explicitAppendPrompts = Array_Make<StrView>(&arena, 4);
+  ProjectTrustOverride trustOverride = ProjectTrustOverride::Unspecified;
   bool faux = false;
   bool noOpen = false;
   bool noSession = false;
+  bool noContextFiles = false;
   bool continueSession = false;
 
   for (int i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
+    if (strcmp(argv[i], "-m") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "error: -m requires a model\n");
+        ArenaRelease(&arena);
+        return 1;
+      }
       modelOverride = argv[++i];
-    } else if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
+    } else if (strcmp(argv[i], "-p") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "error: -p requires a prompt\n");
+        ArenaRelease(&arena);
+        return 1;
+      }
       onePrompt = argv[++i];
+    } else if (strcmp(argv[i], "--system-prompt") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "error: --system-prompt requires a value\n");
+        ArenaRelease(&arena);
+        return 1;
+      }
+      hasExplicitSystemPrompt = true;
+      explicitSystemPrompt = SV(argv[++i]);
+    } else if (strcmp(argv[i], "--append-system-prompt") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "error: --append-system-prompt requires a value\n");
+        ArenaRelease(&arena);
+        return 1;
+      }
+      Array_Push(&explicitAppendPrompts, SV(argv[++i]));
+    } else if (strcmp(argv[i], "-nc") == 0 ||
+               strcmp(argv[i], "--no-context-files") == 0) {
+      noContextFiles = true;
+    } else if (strcmp(argv[i], "-a") == 0 ||
+               strcmp(argv[i], "--approve") == 0) {
+      if (trustOverride == ProjectTrustOverride::Untrusted) {
+        fprintf(stderr,
+                "error: choose only one of --approve or --no-approve\n");
+        ArenaRelease(&arena);
+        return 1;
+      }
+      trustOverride = ProjectTrustOverride::Trusted;
+    } else if (strcmp(argv[i], "-na") == 0 ||
+               strcmp(argv[i], "--no-approve") == 0) {
+      if (trustOverride == ProjectTrustOverride::Trusted) {
+        fprintf(stderr,
+                "error: choose only one of --approve or --no-approve\n");
+        ArenaRelease(&arena);
+        return 1;
+      }
+      trustOverride = ProjectTrustOverride::Untrusted;
     } else if (strcmp(argv[i], "--faux") == 0) {
       faux = true;
     } else if (strcmp(argv[i], "--no-session") == 0) {
@@ -1987,8 +2395,12 @@ int main(int argc, char** argv) {
                strcmp(argv[i], "--continue") == 0) {
       continueSession = true;
     } else if ((strcmp(argv[i], "-r") == 0 ||
-                strcmp(argv[i], "--resume") == 0) &&
-               i + 1 < argc) {
+                strcmp(argv[i], "--resume") == 0)) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "error: --resume requires a session ID\n");
+        ArenaRelease(&arena);
+        return 1;
+      }
       resumeSession = argv[++i];
     } else if (strcmp(argv[i], "--no-open") == 0) {
       noOpen = true;
@@ -1998,7 +2410,12 @@ int main(int argc, char** argv) {
       logoutProvider = (i + 1 < argc && argv[i + 1][0] != '-') ? argv[++i] : "anthropic";
     } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
       PrintHelp();
+      ArenaRelease(&arena);
       return 0;
+    } else {
+      fprintf(stderr, "error: unknown option '%s'\n", argv[i]);
+      ArenaRelease(&arena);
+      return 1;
     }
   }
 
@@ -2006,10 +2423,10 @@ int main(int argc, char** argv) {
       (noSession && (continueSession || resumeSession))) {
     fprintf(stderr,
             "error: choose only one of --no-session, --continue, or --resume\n");
+    ArenaRelease(&arena);
     return 1;
   }
 
-  Arena arena = ArenaCreate((usize)2 << 30);
   StrView authPath = AuthStore_DefaultPath(&arena);
   StrView settingsPath = AppSettings_DefaultPath(&arena);
   signal(SIGINT, OnSigint);
@@ -2030,15 +2447,34 @@ int main(int argc, char** argv) {
 
   AppAuth appAuth = {};
   appAuth.Path = authPath;
-  RuntimeSelection selected = {};
+  RuntimeSelection selected =
+      LoadRuntimeSelection(&arena, settingsPath, faux ? nullptr : modelOverride);
   if (!faux) {
-    selected = LoadRuntimeSelection(&arena, settingsPath, modelOverride);
     if (!selected.Spec || !selected.Spec->CreateProvider || !selected.Spec->CreateModel) {
       fprintf(stderr, "error: no usable built-in provider is registered\n");
       Http_GlobalShutdown();
       ArenaRelease(&arena);
       return 1;
     }
+  }
+
+  StrView workingDirectory = Sys_CurrentDir(&arena);
+  if (!workingDirectory.Length) {
+    fprintf(stderr, "error: could not determine the current working directory\n");
+    ArenaRelease(&arena);
+    return 1;
+  }
+  StrView agentDirectory = Fs_Parent(settingsPath);
+  StrView trustPath = ProjectTrust_DefaultPath(&arena);
+  bool projectTrusted = false;
+  bool hasProjectResources = false;
+  bool trustInteractive = !onePrompt && Term_IsInteractive();
+  if (!ResolveStartupProjectTrust(
+          &arena, trustPath, workingDirectory, selected.DefaultTrust,
+          trustOverride, trustInteractive, &projectTrusted,
+          &hasProjectResources)) {
+    ArenaRelease(&arena);
+    return 1;
   }
 
   Model model = faux ? Model{} : selected.Spec->CreateModel(&arena, selected.ModelId);
@@ -2050,6 +2486,33 @@ int main(int argc, char** argv) {
   FileLock_Init();
   Tool tools[] = {ReadTool(), WriteTool(), EditTool(), LsTool(),
                   FindTool(), GrepTool(), ShellTool()};
+
+  PromptContextOptions promptOptions = {};
+  promptOptions.WorkingDirectory = workingDirectory;
+  promptOptions.AgentDirectory = agentDirectory;
+  promptOptions.Tools = tools;
+  promptOptions.ToolCount = sizeof(tools) / sizeof(tools[0]);
+  promptOptions.NoContextFiles = noContextFiles;
+  promptOptions.ProjectTrusted = projectTrusted;
+  promptOptions.HasExplicitSystemPrompt = hasExplicitSystemPrompt;
+  promptOptions.ExplicitSystemPrompt = explicitSystemPrompt;
+  promptOptions.ExplicitAppendPrompts = explicitAppendPrompts.Data;
+  promptOptions.ExplicitAppendPromptCount = explicitAppendPrompts.Count;
+  PromptContext promptContext = {};
+  StrBuf promptError = StrBuf_Make(&arena, 160);
+  if (!PromptContext_Build(&promptOptions, &promptContext, &promptError)) {
+    fprintf(stderr, "error: %.*s\n", (int)promptError.Length,
+            promptError.Data);
+    ArenaRelease(&arena);
+    return 1;
+  }
+  PromptContextLifetime promptLifetime = {&promptContext};
+  if (onePrompt) {
+    if (hasProjectResources && !projectTrusted)
+      fprintf(stderr,
+              "warning: project .clank prompt files are disabled because the project is untrusted\n");
+    PrintPromptDiagnostics(&promptContext);
+  }
 
   FauxStep steps[2] = {};
   Faux fauxState = {};
@@ -2065,10 +2528,7 @@ int main(int argc, char** argv) {
   }
 
   AgentHarnessConfig harnessConfig = {};
-  harnessConfig.SystemPrompt =
-      SV("You are Clank, a concise coding assistant. You have these tools: "
-         "read, write, edit, ls, find, grep, and shell. Use them when they help "
-         "answer the user.");
+  harnessConfig.SystemPrompt = promptContext.SystemPrompt;
   harnessConfig.ModelInfo = model;
   harnessConfig.Tools = tools;
   harnessConfig.ToolCount = sizeof(tools) / sizeof(tools[0]);
@@ -2084,7 +2544,6 @@ int main(int argc, char** argv) {
     harnessConfig.ResolveAuth = AppResolveAuth;
   }
 
-  StrView workingDirectory = Sys_CurrentDir(&arena);
   StrView projectKey = SessionProjectKey(&arena, workingDirectory);
   MemoryRepository memoryRepository = {};
   JsonlRepository jsonlRepository = {};
@@ -2246,7 +2705,18 @@ int main(int argc, char** argv) {
   runtime.Sessions = &sessions;
   runtime.ProjectKey = projectKey;
   runtime.WorkingDirectory = workingDirectory;
+  runtime.AgentDirectory = agentDirectory;
+  runtime.TrustPath = trustPath;
   runtime.NoSession = noSession;
+  runtime.ProjectTrusted = projectTrusted;
+  runtime.HasProjectResources = hasProjectResources;
+  runtime.TrustCoversProjectResources =
+      hasProjectResources ||
+      trustOverride != ProjectTrustOverride::Unspecified;
+  runtime.TrustOverride = trustOverride;
+  runtime.DefaultTrust = selected.DefaultTrust;
+  runtime.Prompt = &promptContext;
+  runtime.PromptOptions = promptOptions;
   runtime.Faux = faux;
   runtime.AutoOpen = !noOpen;
   runtime.Auth = &appAuth;

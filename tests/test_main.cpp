@@ -50,6 +50,8 @@ const Suite kSuites[] = {
     {"crypto", TestCrypto, TagDefault, "sha256 and random"},
     {"auth", TestAuth, TagDefault, "credential store and OAuth"},
     {"command", TestCommand, TagDefault, "slash command parsing"},
+    {"prompt_context", TestPromptContext, TagDefault, "system prompt and project context"},
+    {"project_trust", TestProjectTrust, TagDefault, "hierarchical project trust"},
     {"loopback", TestLoopback, TagDefault, "OAuth loopback server"},
     {"provider_registry", TestProviderRegistry, TagDefault, "provider registry"},
     {"settings", TestSettings, TagDefault, "settings load/save"},

@@ -14,6 +14,8 @@ enum class AppCommandKind : u8 {
   Fork,
   Compact,
   Recover,
+  Trust,
+  Reload,
   Exit,
   Unknown,
 };
@@ -79,6 +81,8 @@ struct AppCommandHandlers {
   AppCommandArgHandlerFn Fork;
   AppCommandArgHandlerFn Compact;
   AppCommandArgHandlerFn Recover;
+  AppCommandArgHandlerFn Trust;
+  AppCommandArgHandlerFn Reload;
 };
 
 struct AppCommandDispatchResult {

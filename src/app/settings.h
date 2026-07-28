@@ -2,10 +2,12 @@
 #include "base/arena.h"
 #include "base/basics.h"
 #include "base/str.h"
+#include "app/project_trust.h"
 
 struct AppSettings {
   StrView Provider;
   StrView Model;
+  DefaultProjectTrust DefaultTrust;
 };
 
 enum class AppSettingsLoadResult : u8 {
