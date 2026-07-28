@@ -13,6 +13,12 @@ const Tool* FindTool(const Tool* tools, u32 toolCount, StrView name) {
   return nullptr;
 }
 
+bool ShouldReplayMessage(const Message& message) {
+  return message.Kind != Role::Assistant ||
+         (message.Stop != StopReason::Error &&
+          message.Stop != StopReason::Aborted);
+}
+
 Content RelocateContent(Arena* arena, const Content& source) {
   Content result = source;
   result.Text = StrView_Dup(arena, source.Text);
@@ -109,14 +115,19 @@ void AgentProvider_BuildRequest(Arena* arena, StrView systemPrompt,
                                 const Tool* tools, u32 toolCount,
                                 AgentProviderRequest* out) {
   AgentProviderRequest request = {};
+  Array<Message> replay =
+      Array_Make<Message>(arena, messageCount ? messageCount : 1);
+  for (u32 i = 0; i < messageCount; i++) {
+    if (ShouldReplayMessage(messages[i])) Array_Push(&replay, messages[i]);
+  }
   if (toolCount) {
     request.ToolDefs = ArenaPushArray(arena, ToolDef, toolCount);
     for (u32 i = 0; i < toolCount; i++)
       request.ToolDefs[i] = Tool_ToDef(tools[i]);
   }
   request.Context.SystemPrompt = systemPrompt;
-  request.Context.Messages = messages;
-  request.Context.MessageCount = messageCount;
+  request.Context.Messages = replay.Data;
+  request.Context.MessageCount = replay.Count;
   request.Context.Tools = request.ToolDefs;
   request.Context.ToolCount = toolCount;
   *out = request;

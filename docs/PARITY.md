@@ -54,7 +54,7 @@ adapter. Clank collapses the core surfaces into its module tree.
 | 9 other text APIs plus OpenRouter image generation | ❌ | OpenAI completions/responses/codex, Google, Vertex, Bedrock, Mistral, Azure Responses, and pi-messages are absent |
 | Prompt caching (`cache_control`) | ✅ | Anthropic system/tool-prefix breakpoint plus the two most recent message groups |
 | Thinking / reasoning streaming | 🟡 | Anthropic thinking deltas parsed; no thinking-level control |
-| Cross-provider message normalization (`transform-messages`) | ❌ | n/a with a single provider |
+| Cross-provider message normalization (`transform-messages`) | 🟡 | error/aborted assistant turns are retained in the transcript but omitted from provider replay; broader provider-specific normalization is absent |
 | Model registry · `--list-models` · pricing/cost · scoped/image models | 🟡 | provider registry + live Anthropic `/v1/models` discovery; no pricing, list flag, scoped models, or image catalog |
 
 ## Tools

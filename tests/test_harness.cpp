@@ -205,6 +205,12 @@ struct CancelProviderState {
   volatile i32 Started;
 };
 
+struct AbortContinueProviderState {
+  volatile i32 Started;
+  u32 Calls;
+  bool FollowUpContextValid;
+};
+
 struct UsageRetryProviderState {
   u32 Calls;
 };
@@ -247,6 +253,41 @@ bool CancelProviderStream(void* context, Arena* arena, const Model* model,
   out->Stop = StopReason::Aborted;
   out->Timestamp = NowMillis();
   return false;
+}
+
+bool AbortContinueProviderStream(void* context, Arena* arena,
+                                 const Model* model, const LlmContext* llm,
+                                 const StreamOptions* options, StreamSink sink,
+                                 Message* out) {
+  (void)sink;
+  AbortContinueProviderState* state =
+      (AbortContinueProviderState*)context;
+  state->Calls++;
+  if (state->Calls == 1) {
+    state->Started = 1;
+    while (!options->Abort || !*options->Abort) Sleep_Ms(1);
+    *out = Message_AssistantEmpty(arena);
+    out->Provider = model->Provider;
+    out->Model = model->Id;
+    out->Stop = StopReason::Aborted;
+    out->ErrorMessage = SVL("aborted");
+    return false;
+  }
+
+  state->FollowUpContextValid =
+      llm->MessageCount == 2 &&
+      llm->Messages[0].Kind == Role::User &&
+      llm->Messages[0].Content.Count == 1 &&
+      StrView_EqCStr(llm->Messages[0].Content.Data[0].Text, "cancel me") &&
+      llm->Messages[1].Kind == Role::User &&
+      llm->Messages[1].Content.Count == 1 &&
+      StrView_EqCStr(llm->Messages[1].Content.Data[0].Text, "after cancel");
+  *out = Message_AssistantEmpty(arena);
+  out->Provider = model->Provider;
+  out->Model = model->Id;
+  out->Stop = StopReason::Stop;
+  Array_Push(&out->Content, Content_Text(SVL("continued")));
+  return true;
 }
 
 struct HarnessRunThread {
@@ -481,6 +522,34 @@ SessionResult AppendTornDeferredCheckpoint(SessionLog* log, Arena* arena) {
 }  // namespace
 
 void TestHarness() {
+  // Provider replay excludes incomplete assistant turns even when they contain
+  // partial output, while preserving the surrounding user messages.
+  {
+    Arena arena = ArenaCreate();
+    Message messages[5];
+    messages[0] = Message_User(&arena, SVL("first"));
+    messages[1] = Message_AssistantEmpty(&arena);
+    messages[1].Stop = StopReason::Aborted;
+    Array_Push(&messages[1].Content, Content_Text(SVL("partial abort")));
+    messages[2] = Message_User(&arena, SVL("second"));
+    messages[3] = Message_AssistantEmpty(&arena);
+    messages[3].Stop = StopReason::Error;
+    Array_Push(&messages[3].Content, Content_Text(SVL("partial error")));
+    messages[4] = Message_User(&arena, SVL("third"));
+    AgentProviderRequest request = {};
+    AgentProvider_BuildRequest(&arena, SVL("system"), messages, 5, nullptr,
+                               0, &request);
+    const Message* replay = request.Context.Messages;
+    CHECK_ALL(request.Context.MessageCount == 3,
+              replay[0].Kind == Role::User,
+              StrView_EqCStr(replay[0].Content.Data[0].Text, "first"),
+              replay[1].Kind == Role::User,
+              StrView_EqCStr(replay[1].Content.Data[0].Text, "second"),
+              replay[2].Kind == Role::User,
+              StrView_EqCStr(replay[2].Content.Data[0].Text, "third"));
+    ArenaRelease(&arena);
+  }
+
   // Every provider attempt carries usage on its durable finish record, and
   // lifetime metadata does not count the successful assistant twice.
   {
@@ -1133,6 +1202,58 @@ void TestHarness() {
     CHECK_ALL(
         CountKind(&records, SessionRecordKind::OperationCancelRequested) == 1,
         CountKind(&records, SessionRecordKind::OperationFinished) == 1);
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    repository.Close(repository.Ctx);
+    ArenaRelease(&arena);
+  }
+
+  // An empty aborted assistant remains in the durable transcript but is not
+  // replayed to the provider when the user continues the conversation.
+  {
+    Arena arena = ArenaCreate();
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+    AbortContinueProviderState providerState = {};
+    AgentHarnessConfig config = {};
+    config.SystemPrompt = SVL("abort continuation");
+    config.ModelInfo.Id = SVL("abort-model");
+    config.ModelInfo.Provider = SVL("test");
+    config.ProviderImpl.Ctx = &providerState;
+    config.ProviderImpl.Stream = AbortContinueProviderStream;
+    config.ToolExec = ToolExecution::Parallel;
+    AgentHarness harness = {};
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+    HarnessRunThread first = {};
+    first.Harness = &harness;
+    Thread thread = {};
+    CHECK(Thread_Start(&thread, RunHarnessThread, &first));
+    u32 waited = 0;
+    while (!providerState.Started && waited < 2000) {
+      Sleep_Ms(1);
+      waited++;
+    }
+    CHECK(providerState.Started != 0);
+    CHECK(SessionResult_IsOk(AgentHarness_RequestCancel(&harness)));
+    Thread_Join(&thread);
+    CHECK(first.Result.Status == SessionStatus::Cancelled);
+    CHECK(SessionResult_IsOk(
+        AgentHarness_Run(&harness, SVL("after cancel"))));
+
+    AgentHarnessSnapshot snapshot = {};
+    CHECK(SessionResult_IsOk(
+        AgentHarness_SnapshotFull(&arena, &harness, &snapshot)));
+    CHECK_ALL(
+        providerState.Calls == 2, providerState.FollowUpContextValid,
+        snapshot.Transcript.Count == 4,
+        ContextTextEq(&snapshot.Transcript, 0, Role::User, "cancel me"),
+        snapshot.Transcript.Data[1].Kind == Role::Assistant,
+        snapshot.Transcript.Data[1].Stop == StopReason::Aborted,
+        snapshot.Transcript.Data[1].Content.Count == 0,
+        ContextTextEq(&snapshot.Transcript, 2, Role::User, "after cancel"),
+        ContextTextEq(&snapshot.Transcript, 3, Role::Assistant, "continued"));
     CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
     repository.Close(repository.Ctx);
     ArenaRelease(&arena);

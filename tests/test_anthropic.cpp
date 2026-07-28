@@ -182,6 +182,47 @@ static void TestBuildRequestCachesToolsWithoutSystem() {
   ArenaRelease(&a);
 }
 
+static void TestBuildRequestOmitsIncompleteAssistantMessages() {
+  Arena a = ArenaCreate();
+  Model model = Anthropic_Model(SV("claude-x"));
+  Message msgs[7];
+  msgs[0] = Message_User(&a, SVL("before"));
+  msgs[1] = Message_AssistantEmpty(&a);
+  msgs[2] = Message_AssistantEmpty(&a);
+  Array_Push(&msgs[2].Content, Content_Text(SVL(" \t\r\n")));
+  msgs[3] = Message_AssistantEmpty(&a);
+  msgs[3].Stop = StopReason::Aborted;
+  Array_Push(&msgs[3].Content, Content_Text(SVL("partial aborted output")));
+  msgs[4] = Message_AssistantEmpty(&a);
+  msgs[4].Stop = StopReason::Error;
+  Array_Push(&msgs[4].Content, Content_Text(SVL("partial failed output")));
+  msgs[5] = Message_User(&a, SVL("after"));
+  msgs[6] = Message_AssistantEmpty(&a);
+  Array_Push(&msgs[6].Content, Content_Text(SVL("complete")));
+
+  LlmContext ctx = {};
+  ctx.Messages = msgs;
+  ctx.MessageCount = 7;
+  StrBuf body = Anthropic_BuildRequest(&a, &model, &ctx, nullptr);
+  JsonValue* j = Json_Parse(&a, StrBuf_View(&body));
+  JsonValue* arr = Json_Get(j, "messages");
+  CHECK(Json_IsArray(arr) && arr->Count == 3);
+  CHECK_ALL(
+      StrView_EqCStr(Json_GetStr(arr->Items[0], "role"), "user"),
+      StrView_EqCStr(Json_GetStr(LastContentBlock(arr->Items[0]), "text"),
+                     "before"),
+      !HasCacheBreakpoint(LastContentBlock(arr->Items[0])),
+      StrView_EqCStr(Json_GetStr(arr->Items[1], "role"), "user"),
+      StrView_EqCStr(Json_GetStr(LastContentBlock(arr->Items[1]), "text"),
+                     "after"),
+      HasCacheBreakpoint(LastContentBlock(arr->Items[1])),
+      StrView_EqCStr(Json_GetStr(arr->Items[2], "role"), "assistant"),
+      StrView_EqCStr(Json_GetStr(LastContentBlock(arr->Items[2]), "text"),
+                     "complete"),
+      HasCacheBreakpoint(LastContentBlock(arr->Items[2])));
+  ArenaRelease(&a);
+}
+
 static void TestParseModelsResponse() {
   Arena a = ArenaCreate();
   AnthropicModelPage page = {};
@@ -281,6 +322,7 @@ void TestAnthropic() {
   TestBuildRequest();
   TestBuildRequestOAuth();
   TestBuildRequestCachesToolsWithoutSystem();
+  TestBuildRequestOmitsIncompleteAssistantMessages();
   TestParseSSE();
   TestParseModelsResponse();
   TestParseModelsResponseRejectsMalformedData();

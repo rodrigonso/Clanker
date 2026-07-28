@@ -152,6 +152,44 @@ static void ConcatText(StrBuf* out, const Message* m) {
   }
 }
 
+static bool HasNonWhitespaceText(StrView text) {
+  for (u32 i = 0; i < text.Length; i++) {
+    char c = text.Data[i];
+    if (c != ' ' && c != '\t' && c != '\r' && c != '\n' &&
+        c != '\f' && c != '\v')
+      return true;
+  }
+  return false;
+}
+
+static bool HasUserContent(const Message* m) {
+  for (u32 i = 0; i < m->Content.Count; i++) {
+    const Content* c = &m->Content.Data[i];
+    if ((c->Kind == ContentKind::Text && c->Text.Length != 0) ||
+        c->Kind == ContentKind::Image)
+      return true;
+  }
+  return false;
+}
+
+static bool HasAssistantContent(const Message* m) {
+  if (m->Stop == StopReason::Error || m->Stop == StopReason::Aborted)
+    return false;
+  for (u32 i = 0; i < m->Content.Count; i++) {
+    const Content* c = &m->Content.Data[i];
+    if ((c->Kind == ContentKind::Text && HasNonWhitespaceText(c->Text)) ||
+        c->Kind == ContentKind::ToolCall)
+      return true;
+  }
+  return false;
+}
+
+static bool HasWireContent(const Message* m) {
+  if (m->Kind == Role::User) return HasUserContent(m);
+  if (m->Kind == Role::Assistant) return HasAssistantContent(m);
+  return true;
+}
+
 static void WriteUserContent(StrBuf* b, const Message* m) {
   bool first = true;
   for (u32 k = 0; k < m->Content.Count; k++) {
@@ -173,7 +211,6 @@ static void WriteUserContent(StrBuf* b, const Message* m) {
       StrBuf_AppendCStr(b, "}}");
     }
   }
-  if (first) StrBuf_AppendCStr(b, "{\"type\":\"text\",\"text\":\" \"}");  // never empty
 }
 
 static void WriteAssistantContent(StrBuf* b, const Message* m) {
@@ -181,7 +218,7 @@ static void WriteAssistantContent(StrBuf* b, const Message* m) {
   for (u32 k = 0; k < m->Content.Count; k++) {
     const Content* c = &m->Content.Data[k];
     if (c->Kind == ContentKind::Text) {
-      if (c->Text.Length == 0) continue;
+      if (!HasNonWhitespaceText(c->Text)) continue;
       if (!first) StrBuf_AppendChar(b, ',');
       first = false;
       StrBuf_AppendCStr(b, "{\"type\":\"text\",\"text\":");
@@ -202,7 +239,6 @@ static void WriteAssistantContent(StrBuf* b, const Message* m) {
       StrBuf_AppendChar(b, '}');
     }
   }
-  if (first) StrBuf_AppendCStr(b, "{\"type\":\"text\",\"text\":\" \"}");
 }
 
 StrBuf Anthropic_BuildRequest(Arena* arena, const Model* model, const LlmContext* ctx,
@@ -263,13 +299,24 @@ StrBuf Anthropic_BuildRequest(Arena* arena, const Model* model, const LlmContext
   }
 
   // Cache the two most recent emitted messages. Consecutive tool results emit
-  // as one message, so walk backward to the start of each group.
+  // as one message, and empty or incomplete assistant messages do not emit.
   u32 markFrom = ctx->MessageCount;
-  for (u32 marked = 0; marked < 2 && markFrom; marked++) {
-    markFrom--;
-    while (markFrom && ctx->Messages[markFrom].Kind == Role::ToolResult &&
-           ctx->Messages[markFrom - 1].Kind == Role::ToolResult)
-      markFrom--;
+  u32 cursor = ctx->MessageCount;
+  for (u32 marked = 0; marked < 2 && cursor;) {
+    u32 candidate = cursor - 1;
+    const Message* m = &ctx->Messages[candidate];
+    if (m->Kind == Role::ToolResult) {
+      while (candidate && ctx->Messages[candidate - 1].Kind == Role::ToolResult)
+        candidate--;
+      markFrom = candidate;
+      cursor = candidate;
+      marked++;
+    } else {
+      cursor = candidate;
+      if (!HasWireContent(m)) continue;
+      markFrom = candidate;
+      marked++;
+    }
   }
 
   StrBuf_AppendCStr(&b, ",\"messages\":[");
@@ -303,6 +350,10 @@ StrBuf Anthropic_BuildRequest(Arena* arena, const Model* model, const LlmContext
       continue;
     }
 
+    if (!HasWireContent(m)) {
+      i++;
+      continue;
+    }
     if (!firstMsg) StrBuf_AppendChar(&b, ',');
     firstMsg = false;
     if (m->Kind == Role::User) {
