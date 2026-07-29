@@ -56,13 +56,14 @@ static void Read_AppendNoticePrefix(StrBuf* b) {
   if (b->Length > 0) StrBuf_AppendCStr(b, "\n\n");
 }
 
-static bool ReadExec(void* ctx, Arena* arena, StrView id, StrView argsJson, volatile i32* abort,
+static bool ReadExec(void* ctx, Arena* arena, StrView id, const ToolArgs* args,
+                     volatile i32* abort, const ToolUpdateSink* updates,
                      ToolResult* out, StrBuf* err) {
   (void)ctx;
   (void)id;
   (void)abort;
-  JsonValue* j = Json_Parse(arena, argsJson);
-  StrView path = Json_GetStr(j, "path");
+  (void)updates;
+  StrView path = ToolArgs_GetStr(args, "path");
   if (path.Length == 0) {
     StrBuf_AppendCStr(err, "missing 'path' argument");
     return false;
@@ -102,8 +103,8 @@ static bool ReadExec(void* ctx, Arena* arena, StrView id, StrView argsJson, vola
     return true;
   }
 
-  i64 offset = Json_GetInt(j, "offset", 0);
-  i64 limit = Json_GetInt(j, "limit", 0);
+  i64 offset = ToolArgs_GetInt(args, "offset", 0);
+  i64 limit = ToolArgs_GetInt(args, "limit", 0);
   u32 totalLines = Read_CountLines(bytes);
   u32 startLine0 = 0;
   if (offset > 0) {

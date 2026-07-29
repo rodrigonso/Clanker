@@ -1,5 +1,6 @@
 #pragma once
 
+#include "agent/tool.h"
 #include "base/thread.h"
 #include "session/reducer.h"
 
@@ -11,6 +12,8 @@ constexpr u32 AGENT_HARNESS_MAX_WATCH_EVENTS = 256;
 enum class AgentHarnessEventKind : u8 {
   DurableRecord,
   TransientStream,
+  TransientToolUpdate,
+  TransientToolEnd,
 };
 
 struct AgentHarnessEvent {
@@ -20,6 +23,10 @@ struct AgentHarnessEvent {
   DurableId AttemptId;
   SessionRecord Record;
   StreamEvent Stream;
+  StrView ToolCallId;
+  StrView ToolName;
+  ToolResult ToolResultValue;
+  bool IsError;
 };
 
 struct AgentHarnessSnapshot {

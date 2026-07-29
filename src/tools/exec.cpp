@@ -177,7 +177,9 @@ ExecArgvResult Exec_RunArgv(Arena* arena, StrView program, const StrView* args, 
   return res;
 }
 
-ExecResult Exec_Run(Arena* arena, StrView command, u32 timeoutMs, volatile i32* abort) {
+ExecResult Exec_RunStreaming(Arena* arena, StrView command, u32 timeoutMs,
+                             volatile i32* abort, ExecChunkFn onData,
+                             void* user, StrBuf* output) {
   ExecResult res = {};
   res.ExitCode = -1;
 
@@ -240,7 +242,11 @@ ExecResult Exec_Run(Arena* arena, StrView command, u32 timeoutMs, volatile i32* 
   }
   res.Spawned = true;
 
-  StrBuf out = StrBuf_Make(arena, 4096);
+  StrBuf localOutput = {};
+  if (!output) {
+    localOutput = StrBuf_Make(arena, 4096);
+    output = &localOutput;
+  }
   DWORD start = GetTickCount();
   char buf[4096];
   for (;;) {
@@ -253,9 +259,13 @@ ExecResult Exec_Run(Arena* arena, StrView command, u32 timeoutMs, volatile i32* 
     if (PeekNamedPipe(rd, nullptr, 0, nullptr, &avail, nullptr) && avail > 0) {
       DWORD toRead = avail > sizeof(buf) ? (DWORD)sizeof(buf) : avail;
       DWORD n = 0;
-      if (ReadFile(rd, buf, toRead, &n, nullptr) && n > 0)
-        StrBuf_Append(&out, StrView{buf, (u32)n});
-      else
+      if (ReadFile(rd, buf, toRead, &n, nullptr) && n > 0) {
+        StrBuf_Append(output, StrView{buf, (u32)n});
+        if (onData && !onData(user, StrView{buf, (u32)n})) {
+          TerminateJobObject(job, 1);
+          break;
+        }
+      } else
         break;
     } else if (WaitForSingleObject(pinfo.hProcess, 10) == WAIT_OBJECT_0) {
       for (;;) {
@@ -263,9 +273,13 @@ ExecResult Exec_Run(Arena* arena, StrView command, u32 timeoutMs, volatile i32* 
         if (!(PeekNamedPipe(rd, nullptr, 0, nullptr, &a2, nullptr) && a2 > 0)) break;
         DWORD toRead = a2 > sizeof(buf) ? (DWORD)sizeof(buf) : a2;
         DWORD n = 0;
-        if (ReadFile(rd, buf, toRead, &n, nullptr) && n > 0)
-          StrBuf_Append(&out, StrView{buf, (u32)n});
-        else
+        if (ReadFile(rd, buf, toRead, &n, nullptr) && n > 0) {
+          StrBuf_Append(output, StrView{buf, (u32)n});
+          if (onData && !onData(user, StrView{buf, (u32)n})) {
+            TerminateJobObject(job, 1);
+            break;
+          }
+        } else
           break;
       }
       break;
@@ -280,7 +294,7 @@ ExecResult Exec_Run(Arena* arena, StrView command, u32 timeoutMs, volatile i32* 
   CloseHandle(pinfo.hProcess);
   CloseHandle(pinfo.hThread);
   CloseHandle(job);
-  res.Output = StrBuf_View(&out);
+  res.Output = StrBuf_View(output);
   return res;
 }
 
@@ -458,7 +472,9 @@ ExecArgvResult Exec_RunArgv(Arena* arena, StrView program, const StrView* args, 
   return res;
 }
 
-ExecResult Exec_Run(Arena* arena, StrView command, u32 timeoutMs, volatile i32* abort) {
+ExecResult Exec_RunStreaming(Arena* arena, StrView command, u32 timeoutMs,
+                             volatile i32* abort, ExecChunkFn onData,
+                             void* user, StrBuf* output) {
   ExecResult res = {};
   res.ExitCode = -1;
 
@@ -491,7 +507,11 @@ ExecResult Exec_Run(Arena* arena, StrView command, u32 timeoutMs, volatile i32* 
   setpgid(pid, pid);
   res.Spawned = true;
 
-  StrBuf out = StrBuf_Make(arena, 4096);
+  StrBuf localOutput = {};
+  if (!output) {
+    localOutput = StrBuf_Make(arena, 4096);
+    output = &localOutput;
+  }
   struct timespec t0;
   clock_gettime(CLOCK_MONOTONIC, &t0);
   char buf[4096];
@@ -500,9 +520,13 @@ ExecResult Exec_Run(Arena* arena, StrView command, u32 timeoutMs, volatile i32* 
     int pr = poll(&p, 1, 50);
     if (pr > 0 && (p.revents & (POLLIN | POLLHUP))) {
       ssize_t n = read(fds[0], buf, sizeof(buf));
-      if (n > 0)
-        StrBuf_Append(&out, StrView{buf, (u32)n});
-      else if (n == 0)
+      if (n > 0) {
+        StrBuf_Append(output, StrView{buf, (u32)n});
+        if (onData && !onData(user, StrView{buf, (u32)n})) {
+          kill(-pid, SIGKILL);
+          break;
+        }
+      } else if (n == 0)
         break;
     }
     struct timespec t1;
@@ -518,8 +542,14 @@ ExecResult Exec_Run(Arena* arena, StrView command, u32 timeoutMs, volatile i32* 
   int status = 0;
   waitpid(pid, &status, 0);
   res.ExitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-  res.Output = StrBuf_View(&out);
+  res.Output = StrBuf_View(output);
   return res;
 }
 
 #endif
+
+ExecResult Exec_Run(Arena* arena, StrView command, u32 timeoutMs,
+                    volatile i32* abort) {
+  return Exec_RunStreaming(arena, command, timeoutMs, abort, nullptr, nullptr,
+                           nullptr);
+}

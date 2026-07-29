@@ -1,4 +1,5 @@
 #include "json/json.h"
+#include "base/thread.h"
 #include "tools/exec.h"
 #include "tools/tools.h"
 #include "tools/truncate.h"
@@ -68,20 +69,71 @@ static void Shell_AppendTruncNotice(StrBuf* b, TruncResult tr, StrView path) {
   StrBuf_AppendChar(b, ']');
 }
 
-static bool ShellExec(void* ctx, Arena* arena, StrView id, StrView argsJson, volatile i32* abort,
-                      ToolResult* out, StrBuf* err) {
+struct ShellStreamCapture {
+  Arena Snapshot;
+  StrBuf Output;
+  const ToolUpdateSink* Updates;
+  u64 LastUpdateMs;
+  bool Dirty;
+};
+
+static void Shell_EmitPartial(ShellStreamCapture* capture, bool force) {
+  if (!capture->Updates || !capture->Updates->OnUpdate || !capture->Dirty)
+    return;
+  u64 now = MonotonicMillis();
+  if (!force && capture->LastUpdateMs &&
+      now - capture->LastUpdateMs < 100)
+    return;
+
+  ArenaReset(&capture->Snapshot);
+  TruncResult truncated =
+      Trunc_Tail(&capture->Snapshot, StrBuf_View(&capture->Output),
+                 TRUNC_MAX_LINES, TRUNC_MAX_BYTES);
+  ToolResult partial = {};
+  partial.Content = Array_Make<Content>(&capture->Snapshot, 1);
+  Array_Push(&partial.Content, Content_Text(truncated.Content));
+  ToolUpdateSink_Emit(capture->Updates, &partial);
+  capture->LastUpdateMs = now;
+  capture->Dirty = false;
+}
+
+static bool Shell_OnData(void* user, StrView chunk) {
+  ShellStreamCapture* capture = (ShellStreamCapture*)user;
+  (void)chunk;
+  capture->Dirty = true;
+  Shell_EmitPartial(capture, false);
+  return true;
+}
+
+static bool ShellExec(void* ctx, Arena* arena, StrView id,
+                      const ToolArgs* args, volatile i32* abort,
+                      const ToolUpdateSink* updates, ToolResult* out,
+                      StrBuf* err) {
   (void)ctx;
   (void)id;
-  JsonValue* j = Json_Parse(arena, argsJson);
-  StrView command = Json_GetStr(j, "command");
+  (void)updates;
+  StrView command = ToolArgs_GetStr(args, "command");
   if (command.Length == 0) {
     StrBuf_AppendCStr(err, "missing 'command' argument");
     return false;
   }
-  i64 sec = Json_GetInt(j, "timeout", 0);
+  i64 sec = ToolArgs_GetInt(args, "timeout", 0);
   u32 ms = sec > 0 ? (u32)(sec * 1000) : 0;
 
-  ExecResult r = Exec_Run(arena, command, ms, abort);
+  ToolResult initial = {};
+  initial.Content = Array_Make<Content>(arena, 1);
+  Array_Push(&initial.Content, Content_Text(SVL("")));
+  ToolUpdateSink_Emit(updates, &initial);
+
+  ShellStreamCapture capture = {};
+  capture.Snapshot = ArenaCreate((usize)16 << 20);
+  capture.Output = StrBuf_Make(arena, 4096);
+  capture.Updates = updates;
+  ExecResult r =
+      Exec_RunStreaming(arena, command, ms, abort, Shell_OnData, &capture,
+                        &capture.Output);
+  Shell_EmitPartial(&capture, true);
+  ArenaRelease(&capture.Snapshot);
   if (!r.Spawned) {
     StrBuf_AppendCStr(err, "failed to run command: ");
     StrBuf_Append(err, r.Output);

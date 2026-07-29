@@ -229,7 +229,8 @@ SessionResult SessionReducer_Reduce(Arena* arena, const SessionRecord* records, 
         const SessionRecord* durableResult =
             FindEntry(&result, record->ToolStarted.ProvisionedResultEntryId);
         if (durableResult ||
-            record->ToolStarted.ReplayPolicy == ToolReplayPolicy::ReplaySafe ||
+            record->ToolStarted.ReplayPolicy !=
+                ToolReplayPolicy::ManualReconcile ||
             recovery)
           pendingReplaySafe = true;
         else

@@ -290,10 +290,12 @@ static void Grep_AppendNotices(StrBuf* output, u32 limit, bool limitHit, bool by
   StrBuf_AppendChar(output, ']');
 }
 
-static bool GrepExec(void*, Arena* arena, StrView, StrView argsJson, volatile i32* abort,
+static bool GrepExec(void*, Arena* arena, StrView, const ToolArgs* args,
+                     volatile i32* abort, const ToolUpdateSink* updates,
                      ToolResult* out, StrBuf* err) {
-  JsonValue* argsJsonValue = Json_Parse(arena, argsJson);
-  JsonValue* patternValue = Json_Get(argsJsonValue, "pattern");
+  (void)updates;
+  const JsonValue* argsJsonValue = args->Root;
+  const JsonValue* patternValue = ToolArgs_Get(args, "pattern");
   if (!Json_IsString(patternValue)) {
     StrBuf_AppendCStr(err, "missing 'pattern' argument");
     return false;

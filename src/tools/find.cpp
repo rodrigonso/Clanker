@@ -63,23 +63,24 @@ static bool Find_Visit(void* user, StrView absPath, StrView relPath, const FsEnt
   return true;
 }
 
-static bool FindExec(void* ctx, Arena* arena, StrView id, StrView argsJson, volatile i32* abort,
-                     ToolResult* out, StrBuf* err) {
+static bool FindExec(void* ctx, Arena* arena, StrView id,
+                     const ToolArgs* args, volatile i32* abort,
+                     const ToolUpdateSink* updates, ToolResult* out,
+                     StrBuf* err) {
   (void)ctx;
   (void)id;
   (void)abort;
-
-  JsonValue* j = Json_Parse(arena, argsJson);
-  StrView pattern = Json_GetStr(j, "pattern");
+  (void)updates;
+  StrView pattern = ToolArgs_GetStr(args, "pattern");
   if (pattern.Length == 0) {
     StrBuf_AppendCStr(err, "missing 'pattern' argument");
     return false;
   }
 
-  StrView path = Json_GetStr(j, "path");
+  StrView path = ToolArgs_GetStr(args, "path");
   if (path.Length == 0) path = SVL(".");
 
-  i64 limitArg = Json_GetInt(j, "limit", 1000);
+  i64 limitArg = ToolArgs_GetInt(args, "limit", 1000);
   u32 limit = 1000;
   if (limitArg > 0) {
     limit = limitArg > (i64)0xFFFFFFFFu ? 0xFFFFFFFFu : (u32)limitArg;

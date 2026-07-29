@@ -45,7 +45,8 @@ endif()
 
 # ---- json ----------------------------------------------------------------
 add_library(clank_json STATIC
-  src/json/json.cpp)
+  src/json/json.cpp
+  src/json/schema.cpp)
 target_link_libraries(clank_json PUBLIC clank_base)
 
 # ---- crypto --------------------------------------------------------------

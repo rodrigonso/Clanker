@@ -48,17 +48,19 @@ static bool Write_DoLocked(Arena* arena, StrView path, StrView content, volatile
   return true;
 }
 
-static bool WriteExec(void* ctx, Arena* arena, StrView id, StrView argsJson, volatile i32* abort,
-                      ToolResult* out, StrBuf* err) {
+static bool WriteExec(void* ctx, Arena* arena, StrView id,
+                      const ToolArgs* args, volatile i32* abort,
+                      const ToolUpdateSink* updates, ToolResult* out,
+                      StrBuf* err) {
   (void)ctx;
   (void)id;
-  JsonValue* j = Json_Parse(arena, argsJson);
-  StrView path = Json_GetStr(j, "path");
+  (void)updates;
+  StrView path = ToolArgs_GetStr(args, "path");
   if (path.Length == 0) {
     StrBuf_AppendCStr(err, "missing 'path' argument");
     return false;
   }
-  StrView content = Json_GetStr(j, "content");
+  StrView content = ToolArgs_GetStr(args, "content");
 
   StrView key = Fs_RealPath(arena, path);
   FileLockToken tok = FileLock_Acquire(key);

@@ -1024,11 +1024,26 @@ void LineModel_AddTool(LineModel* m, StrView toolId, StrView name, StrView argsJ
   AdvanceDisplayRevision(m);
 }
 
-bool LineModel_FinishTool(LineModel* m, StrView toolId, StrView result, StrView preview, bool isError) {
+bool LineModel_UpdateTool(LineModel* m, StrView toolId, StrView preview) {
   for (u32 i = m->Entries.Count; i > 0; i--) {
     Entry* entry = &m->Entries.Data[i - 1];
     if (entry->Kind != EntryKind::Tool || entry->Tool.Done) continue;
     if (!StrView_Eq(entry->Tool.Id, toolId)) continue;
+    StrBuf_Clear(&entry->Tool.Preview);
+    StrBuf_Append(&entry->Tool.Preview, preview);
+    RebuildAll(m, true);
+    AdvanceDisplayRevision(m);
+    return true;
+  }
+  return false;
+}
+
+bool LineModel_FinishTool(LineModel* m, StrView toolId, StrView result, StrView preview, bool isError) {
+  for (u32 i = m->Entries.Count; i > 0; i--) {
+    Entry* entry = &m->Entries.Data[i - 1];
+    if (entry->Kind != EntryKind::Tool) continue;
+    if (!StrView_Eq(entry->Tool.Id, toolId)) continue;
+    if (entry->Tool.Done) return true;
     entry->Tool.Done = true;
     entry->Tool.Error = isError;
     StrBuf_Clear(&entry->Tool.Preview);

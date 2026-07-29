@@ -54,9 +54,15 @@ tests/     single CLI test harness (suite selection via args; offline by default
 - **Single-threaded loop, parallel tool batches.** A pluggable `Provider`
   streams one assistant turn (auto-retrying transient errors with capped
   exponential backoff); a turn's tool calls run **concurrently by default** (each
-  on a small worker pool, isolated in its own arena), matching pi, with results
-  appended to the transcript in original call order; set the agent to sequential
-  — or mark a tool sequential — to serialize. A `beforeTool` gate and an
+  on a small worker pool, isolated in its own arena), matching pi. Transient
+  completion events are published in actual finish order, while final results
+  remain durably appended in original call order. Tools receive centrally
+  parsed, schema-validated, coercion-normalized arguments; unsupported
+  validation keywords fail harness initialization. The `shell` tool also emits
+  bounded, replace-in-place partial output snapshots. These live updates never
+  enter model context or the session log, so the source-ordered durable result
+  remains authoritative for replay and recovery. Set the agent to sequential —
+  or mark a tool sequential — to serialize. A `beforeTool` gate and an
   `afterToolCall` hook bracket each call. Events are pushed to an `AgentSink`.
   Mirrors pi's event sequence (`agent_start → turn_start → message_* → tool_* →
   turn_end → agent_end`) plus its agent-owned steer / follow-up / next-turn

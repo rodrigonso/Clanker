@@ -1005,6 +1005,75 @@ void TestTui() {
     ArenaRelease(&a6);
   }
 
+  // Partial tool updates replace the pending preview without completing it;
+  // finalization is idempotent for live and durable completion delivery.
+  {
+    Arena au = ArenaCreate();
+    TuiOpts ou;
+    ou.ModelName = SVL("m");
+    Tui tu;
+    Tui_InitModel(&tu, &au, ou);
+
+    AgentEvent start = {};
+    start.Kind = AgentEventKind::ToolStart;
+    start.ToolCallId = SVL("streaming-shell");
+    start.ToolName = SVL("shell");
+    start.ToolArgsJson = SVL("{\"command\":\"echo\"}");
+    Tui_AgentEvent(&tu, start);
+
+    ToolResult partial = {};
+    partial.Content = Array_Make<Content>(&au, 1);
+    Array_Push(&partial.Content, Content_Text(SVL("partial output")));
+    AgentEvent update = {};
+    update.Kind = AgentEventKind::ToolUpdate;
+    update.ToolCallId = SVL("streaming-shell");
+    update.Result = &partial;
+    for (u32 i = 0; i < 100; i++) Tui_AgentEvent(&tu, update);
+    CHECK_ALL(tu.DisplayEvents.Count == 2,
+              tu.ToolUpdateMem.Used <= 1501);
+    DrainDisplay(&tu);
+    CHECK_ALL(tu.Model.Entries.Count == 1,
+              !tu.Model.Entries.Data[0].Tool.Done,
+              StrView_Contains(
+                  StrBuf_View(&tu.Model.Entries.Data[0].Tool.Preview),
+                  "partial output"));
+    for (u32 i = 0; i < 10; i++) {
+      Tui_AgentEvent(&tu, update);
+      DrainDisplay(&tu);
+    }
+    CHECK(tu.ToolUpdateMem.Used <= 1501);
+
+    ToolResult complete = {};
+    complete.Content = Array_Make<Content>(&au, 1);
+    Array_Push(&complete.Content, Content_Text(SVL("final output")));
+    AgentEvent finish = {};
+    finish.Kind = AgentEventKind::ToolEnd;
+    finish.ToolCallId = SVL("streaming-shell");
+    finish.Result = &complete;
+    Tui_AgentEvent(&tu, finish);
+    Tui_AgentEvent(&tu, finish);
+    DrainDisplay(&tu);
+    CHECK_ALL(tu.Model.Entries.Data[0].Tool.Done,
+              StrView_Contains(
+                  StrBuf_View(&tu.Model.Entries.Data[0].Tool.Preview),
+                  "final output"));
+
+    AgentEvent longUpdate = update;
+    longUpdate.ToolCallId = SVL("long-running-shell");
+    Tui_AgentEvent(&tu, longUpdate);
+    DrainDisplay(&tu);
+    for (u32 i = 0; i < 10; i++) {
+      Tui_AgentEvent(&tu, update);
+      DrainDisplay(&tu);
+      Tui_AgentEvent(&tu, finish);
+      DrainDisplay(&tu);
+    }
+    CHECK(tu.ToolUpdateMem.Used <= 3002);
+
+    Tui_Stop(&tu);
+    ArenaRelease(&au);
+  }
+
   // Composer mouse placement/dragging uses the last rendered wrapped layout,
   // and keyboard motion extends or collapses the editor selection.
   {

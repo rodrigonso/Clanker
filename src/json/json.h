@@ -29,6 +29,8 @@ struct JsonValue {
 
 // Returns nullptr on parse error.
 JsonValue* Json_Parse(Arena* arena, StrView text);
+JsonValue* Json_Clone(Arena* arena, const JsonValue* value);
+bool Json_Equals(const JsonValue* a, const JsonValue* b);
 
 JsonValue* Json_Get(const JsonValue* obj, const char* key);
 StrView Json_GetStr(const JsonValue* obj, const char* key);  // "" if absent/not a string
@@ -41,4 +43,6 @@ inline bool Json_IsArray(const JsonValue* v) { return v && v->Kind == JsonKind::
 inline bool Json_IsString(const JsonValue* v) { return v && v->Kind == JsonKind::String; }
 
 // Append `s` to `b` as a JSON-escaped, double-quoted string literal.
+u32 Json_FormatNumber(char* dst, u32 cap, f64 value);
 void Json_WriteString(StrBuf* b, StrView s);
+void Json_WriteValue(StrBuf* b, const JsonValue* value);

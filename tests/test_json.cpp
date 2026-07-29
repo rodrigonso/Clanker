@@ -3,6 +3,7 @@
 #include "base/arena.h"
 #include "check.h"
 #include "json/json.h"
+#include "json/schema.h"
 
 void TestJson() {
   Arena a = ArenaCreate();
@@ -55,6 +56,56 @@ void TestJson() {
   // Invalid input returns nullptr.
   CHECK(Json_Parse(&a, SV("{bad")) == nullptr);
   CHECK(Json_Parse(&a, SV("{} trailing")) == nullptr);
+
+  // Tool schemas are compiled once, coerce primitive arguments like Pi, and
+  // reject unsupported validation keywords instead of validating partially.
+  JsonSchema schema = {};
+  StrBuf schemaErr = StrBuf_Make(&a, 128);
+  CHECK(JsonSchema_Compile(
+      &a,
+      SV("{\"type\":\"object\",\"properties\":{\"count\":{\"type\":\"integer\","
+         "\"minimum\":1},\"enabled\":{\"type\":\"boolean\"},\"items\":{\"type\":"
+         "\"array\",\"items\":{\"type\":\"string\"},\"minItems\":1}},\"required\":"
+         "[\"count\",\"enabled\",\"items\"],\"additionalProperties\":false}"),
+      &schema, &schemaErr));
+  JsonValue* coerced =
+      Json_Parse(&a, SV("{\"count\":\"2\",\"enabled\":1,\"items\":[3]}"));
+  StrBuf validationErr = StrBuf_Make(&a, 128);
+  CHECK(JsonSchema_Validate(&a, &schema, coerced, &validationErr));
+  StrBuf canonical = StrBuf_Make(&a, 128);
+  Json_WriteValue(&canonical, coerced);
+  CHECK(StrView_EqCStr(StrBuf_View(&canonical),
+                      "{\"count\":2,\"enabled\":true,\"items\":[\"3\"]}"));
+
+  JsonSchema firstValid = {};
+  StrBuf firstValidSchemaErr = StrBuf_Make(&a, 128);
+  CHECK(JsonSchema_Compile(
+      &a,
+      SV("{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"number\"}]}"),
+      &firstValid, &firstValidSchemaErr));
+  JsonValue* ambiguous = Json_Parse(&a, SV("\"1\""));
+  StrBuf ambiguousErr = StrBuf_Make(&a, 128);
+  CHECK(JsonSchema_Validate(&a, &firstValid, ambiguous, &ambiguousErr));
+  CHECK(ambiguous->Kind == JsonKind::String);
+
+  JsonValue* readableNumber = Json_Parse(&a, SV("{\"n\":0.1}"));
+  StrBuf readable = StrBuf_Make(&a, 32);
+  Json_WriteValue(&readable, readableNumber);
+  CHECK(StrView_EqCStr(StrBuf_View(&readable), "{\"n\":0.1}"));
+
+  JsonValue* invalid =
+      Json_Parse(&a, SV("{\"count\":0,\"enabled\":true,\"items\":[]}"));
+  StrBuf invalidErr = StrBuf_Make(&a, 128);
+  CHECK(!JsonSchema_Validate(&a, &schema, invalid, &invalidErr));
+  CHECK(StrView_Contains(StrBuf_View(&invalidErr), "root.count"));
+
+  JsonSchema unsupported = {};
+  StrBuf unsupportedErr = StrBuf_Make(&a, 128);
+  CHECK(!JsonSchema_Compile(
+      &a, SV("{\"type\":\"string\",\"pattern\":\"^[a-z]+$\"}"),
+      &unsupported, &unsupportedErr));
+  CHECK(StrView_Contains(StrBuf_View(&unsupportedErr),
+                         "unsupported schema keyword"));
 
   ArenaRelease(&a);
 }

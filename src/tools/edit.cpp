@@ -321,23 +321,67 @@ static StrView Edit_Apply(Arena* arena, StrView original, Array<EditSpec>* edits
   return cur;
 }
 
-static bool Edit_ParseEdits(Arena* arena, JsonValue* j, Array<EditSpec>* edits) {
-  JsonValue* topOld = Json_Get(j, "oldText");
-  JsonValue* topNew = Json_Get(j, "newText");
-  if (Json_IsString(topOld) && Json_IsString(topNew)) {
-    EditSpec e;
-    e.OldText = topOld->Str;
-    e.NewText = topNew->Str;
-    Array_Push(edits, e);
+static JsonValue* Edit_NewValue(Arena* arena, JsonKind kind) {
+  JsonValue* value = ArenaPushStruct(arena, JsonValue);
+  *value = JsonValue{};
+  value->Kind = kind;
+  return value;
+}
+
+static bool EditPrepareArguments(void*, Arena* arena, JsonValue* input,
+                                 JsonValue** out, StrBuf* err) {
+  if (!Json_IsObject(input)) {
+    *out = input;
     return true;
   }
 
-  JsonValue* ev = Json_Get(j, "edits");
-  if (Json_IsString(ev)) ev = Json_Parse(arena, ev->Str);
+  JsonValue* edits = Json_Get(input, "edits");
+  if (Json_IsString(edits)) {
+    JsonValue* parsed = Json_Parse(arena, edits->Str);
+    if (!parsed) {
+      StrBuf_AppendCStr(err, "edits contains invalid JSON");
+      return false;
+    }
+    *edits = *parsed;
+    *out = input;
+    return true;
+  }
+
+  JsonValue* oldText = Json_Get(input, "oldText");
+  JsonValue* newText = Json_Get(input, "newText");
+  if (edits || !Json_IsString(oldText) || !Json_IsString(newText)) {
+    *out = input;
+    return true;
+  }
+
+  JsonValue* item = Edit_NewValue(arena, JsonKind::Object);
+  item->Members = ArenaPushArray(arena, JsonMember, 2);
+  item->MemberCount = 2;
+  item->Members[0] = JsonMember{SVL("oldText"), oldText};
+  item->Members[1] = JsonMember{SVL("newText"), newText};
+
+  JsonValue* array = Edit_NewValue(arena, JsonKind::Array);
+  array->Items = ArenaPushArray(arena, JsonValue*, 1);
+  array->Items[0] = item;
+  array->Count = 1;
+
+  JsonValue* path = Json_Get(input, "path");
+  JsonValue* root = Edit_NewValue(arena, JsonKind::Object);
+  root->Members = ArenaPushArray(arena, JsonMember, 2);
+  root->MemberCount = path ? 2u : 1u;
+  u32 member = 0;
+  if (path) root->Members[member++] = JsonMember{SVL("path"), path};
+  root->Members[member] = JsonMember{SVL("edits"), array};
+  *out = root;
+  return true;
+}
+
+static bool Edit_ParseEdits(const JsonValue* j, Array<EditSpec>* edits) {
+  const JsonValue* ev = Json_Get(j, "edits");
   if (!Json_IsArray(ev)) return false;
 
   for (u32 i = 0; i < ev->Count; i++) {
-    JsonValue* item = ev->Items[i];
+    const JsonValue* item = ev->Items[i];
     EditSpec e;
     e.OldText = Json_GetStr(item, "oldText");
     e.NewText = Json_GetStr(item, "newText");
@@ -346,16 +390,17 @@ static bool Edit_ParseEdits(Arena* arena, JsonValue* j, Array<EditSpec>* edits) 
   return true;
 }
 
-bool EditExec(void* ctx, Arena* arena, StrView id, StrView argsJson, volatile i32* abort, ToolResult* out,
-              StrBuf* err) {
+bool EditExec(void* ctx, Arena* arena, StrView id, const ToolArgs* args,
+              volatile i32* abort, const ToolUpdateSink* updates,
+              ToolResult* out, StrBuf* err) {
   (void)ctx;
   (void)id;
   (void)abort;
-
-  JsonValue* j = Json_Parse(arena, argsJson);
-  StrView path = Json_GetStr(j, "path");
+  (void)updates;
+  const JsonValue* j = args->Root;
+  StrView path = ToolArgs_GetStr(args, "path");
   Array<EditSpec> edits = Array_Make<EditSpec>(arena, 4);
-  if (path.Length == 0 || !Edit_ParseEdits(arena, j, &edits) || edits.Count == 0) {
+  if (path.Length == 0 || !Edit_ParseEdits(j, &edits) || edits.Count == 0) {
     StrBuf_AppendCStr(err, "Edit tool input is invalid. edits must contain at least one replacement.");
     return false;
   }
@@ -481,6 +526,7 @@ Tool EditTool() {
       "\"description\":\"Replacement text\"}},\"required\":[\"oldText\",\"newText\"]}}},\"required\":[\"path\","
       "\"edits\"]}");
   t.ReplayPolicy = ToolReplayPolicy::ManualReconcile;
+  t.PrepareArguments = EditPrepareArguments;
   t.Execute = EditExec;
   t.ExecMode = ToolExecMode::Default;
   return t;

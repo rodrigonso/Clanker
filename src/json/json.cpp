@@ -1,5 +1,6 @@
 #include "json/json.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -271,6 +272,56 @@ JsonValue* Json_Parse(Arena* arena, StrView text) {
   return s.ok && s.p == s.end ? v : nullptr;
 }
 
+JsonValue* Json_Clone(Arena* arena, const JsonValue* value) {
+  if (!value) return nullptr;
+  JsonValue* clone = ArenaPushStruct(arena, JsonValue);
+  *clone = *value;
+  clone->Str = StrView_Dup(arena, value->Str);
+  if (value->Kind == JsonKind::Array) {
+    clone->Items = ArenaPushArray(arena, JsonValue*, value->Count ? value->Count : 1);
+    for (u32 i = 0; i < value->Count; i++)
+      clone->Items[i] = Json_Clone(arena, value->Items[i]);
+  } else if (value->Kind == JsonKind::Object) {
+    clone->Members =
+        ArenaPushArray(arena, JsonMember, value->MemberCount ? value->MemberCount : 1);
+    for (u32 i = 0; i < value->MemberCount; i++) {
+      clone->Members[i].Key = StrView_Dup(arena, value->Members[i].Key);
+      clone->Members[i].Value = Json_Clone(arena, value->Members[i].Value);
+    }
+  }
+  return clone;
+}
+
+bool Json_Equals(const JsonValue* a, const JsonValue* b) {
+  if (a == b) return true;
+  if (!a || !b || a->Kind != b->Kind) return false;
+  switch (a->Kind) {
+    case JsonKind::Null: return true;
+    case JsonKind::Bool: return a->Bool == b->Bool;
+    case JsonKind::Number: return a->Number == b->Number;
+    case JsonKind::String: return StrView_Eq(a->Str, b->Str);
+    case JsonKind::Array:
+      if (a->Count != b->Count) return false;
+      for (u32 i = 0; i < a->Count; i++)
+        if (!Json_Equals(a->Items[i], b->Items[i])) return false;
+      return true;
+    case JsonKind::Object:
+      if (a->MemberCount != b->MemberCount) return false;
+      for (u32 i = 0; i < a->MemberCount; i++) {
+        const JsonValue* other = nullptr;
+        for (u32 j = 0; j < b->MemberCount; j++) {
+          if (StrView_Eq(a->Members[i].Key, b->Members[j].Key)) {
+            other = b->Members[j].Value;
+            break;
+          }
+        }
+        if (!other || !Json_Equals(a->Members[i].Value, other)) return false;
+      }
+      return true;
+  }
+  return false;
+}
+
 JsonValue* Json_Get(const JsonValue* obj, const char* key) {
   if (!obj || obj->Kind != JsonKind::Object) return nullptr;
   StrView k = SV(key);
@@ -324,4 +375,95 @@ void Json_WriteString(StrBuf* b, StrView s) {
     }
   }
   StrBuf_AppendChar(b, '"');
+}
+
+u32 Json_FormatNumber(char* dst, u32 cap, f64 value) {
+  if (!dst || cap == 0) return 0;
+  char candidate[64] = {};
+  u32 length = 0;
+  for (i32 precision = 1; precision <= 17; precision++) {
+    int n = snprintf(candidate, sizeof(candidate), "%.*g", precision, value);
+    if (n <= 0 || (u32)n >= sizeof(candidate)) continue;
+    char* end = nullptr;
+    f64 parsed = strtod(candidate, &end);
+    u64 parsedBits = 0;
+    u64 valueBits = 0;
+    memcpy(&parsedBits, &parsed, sizeof(parsedBits));
+    memcpy(&valueBits, &value, sizeof(valueBits));
+    if (end && *end == '\0' && parsedBits == valueBits) {
+      length = (u32)n;
+      break;
+    }
+  }
+  if (length == 0) {
+    int n = snprintf(candidate, sizeof(candidate), "%.17g", value);
+    if (n <= 0) return 0;
+    length = (u32)n;
+  }
+
+  char normalized[64] = {};
+  u32 normalizedLength = 0;
+  u32 exponent = length;
+  for (u32 i = 0; i < length; i++) {
+    if (candidate[i] == 'e' || candidate[i] == 'E') {
+      exponent = i;
+      break;
+    }
+  }
+  for (u32 i = 0; i < exponent; i++)
+    normalized[normalizedLength++] = candidate[i];
+  if (exponent < length) {
+    normalized[normalizedLength++] = 'e';
+    u32 i = exponent + 1;
+    if (i < length && (candidate[i] == '+' || candidate[i] == '-'))
+      normalized[normalizedLength++] = candidate[i++];
+    while (i + 1 < length && candidate[i] == '0') i++;
+    while (i < length) normalized[normalizedLength++] = candidate[i++];
+  }
+
+  u32 copied = normalizedLength < cap - 1 ? normalizedLength : cap - 1;
+  if (copied) memcpy(dst, normalized, copied);
+  dst[copied] = '\0';
+  return copied;
+}
+
+void Json_WriteValue(StrBuf* b, const JsonValue* value) {
+  if (!value) {
+    StrBuf_AppendCStr(b, "null");
+    return;
+  }
+  switch (value->Kind) {
+    case JsonKind::Null:
+      StrBuf_AppendCStr(b, "null");
+      break;
+    case JsonKind::Bool:
+      StrBuf_AppendCStr(b, value->Bool ? "true" : "false");
+      break;
+    case JsonKind::Number: {
+      char number[64];
+      u32 n = Json_FormatNumber(number, (u32)sizeof(number), value->Number);
+      if (n) StrBuf_Append(b, StrView{number, n});
+    } break;
+    case JsonKind::String:
+      Json_WriteString(b, value->Str);
+      break;
+    case JsonKind::Array:
+      StrBuf_AppendChar(b, '[');
+      for (u32 i = 0; i < value->Count; i++) {
+        if (i) StrBuf_AppendChar(b, ',');
+        Json_WriteValue(b, value->Items[i]);
+      }
+      StrBuf_AppendChar(b, ']');
+      break;
+    case JsonKind::Object:
+      StrBuf_AppendChar(b, '{');
+      for (u32 i = 0; i < value->MemberCount; i++) {
+        if (i) StrBuf_AppendChar(b, ',');
+        Json_WriteString(b, value->Members[i].Key);
+        StrBuf_AppendChar(b, ':');
+        Json_WriteValue(b, value->Members[i].Value);
+      }
+      StrBuf_AppendChar(b, '}');
+      break;
+  }
 }

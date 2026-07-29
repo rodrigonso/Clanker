@@ -86,8 +86,26 @@ SessionResult CloneHarnessEvent(Arena* arena,
     SessionResult copied =
         SessionRecord_Clone(arena, &source->Record, &clone.Record);
     if (!SessionResult_IsOk(copied)) return copied;
-  } else {
+  } else if (source->Kind == AgentHarnessEventKind::TransientStream) {
     clone.Stream.Delta = StrView_Dup(arena, source->Stream.Delta);
+  } else {
+    clone.ToolCallId = StrView_Dup(arena, source->ToolCallId);
+    clone.ToolName = StrView_Dup(arena, source->ToolName);
+    clone.ToolResultValue.Content =
+        Array_Make<Content>(arena, source->ToolResultValue.Content.Count
+                                       ? source->ToolResultValue.Content.Count
+                                       : 1);
+    for (u32 i = 0; i < source->ToolResultValue.Content.Count; i++) {
+      Content content = source->ToolResultValue.Content.Data[i];
+      content.Text = StrView_Dup(arena, content.Text);
+      content.Signature = StrView_Dup(arena, content.Signature);
+      content.ToolId = StrView_Dup(arena, content.ToolId);
+      content.ToolName = StrView_Dup(arena, content.ToolName);
+      content.ToolArgsJson = StrView_Dup(arena, content.ToolArgsJson);
+      content.ImageData = StrView_Dup(arena, content.ImageData);
+      content.ImageMimeType = StrView_Dup(arena, content.ImageMimeType);
+      Array_Push(&clone.ToolResultValue.Content, content);
+    }
   }
   *out = clone;
   return SessionResult_Ok(source->Cursor);
@@ -237,6 +255,43 @@ void AgentHarness_PublishTransient(AgentHarness* harness,
   }
 }
 
+void AgentHarness_PublishToolUpdate(AgentHarness* harness,
+                                    DurableId operationId,
+                                    StrView toolCallId, StrView toolName,
+                                    const ToolResult* partial) {
+  if (!harness || !harness->Initialized || !partial) return;
+  ScopedLock lock(&harness->StateLock);
+  AgentHarnessEvent event = {};
+  event.Kind = AgentHarnessEventKind::TransientToolUpdate;
+  event.OperationId = operationId;
+  event.ToolCallId = toolCallId;
+  event.ToolName = toolName;
+  event.ToolResultValue = *partial;
+  for (u32 i = 0; i < harness->WatcherCount; i++) {
+    event.Cursor = harness->Watchers[i]->Cursor;
+    EnqueueWatcherEvent(harness->Watchers[i], &event);
+  }
+}
+
+void AgentHarness_PublishToolEnd(AgentHarness* harness,
+                                 DurableId operationId,
+                                 StrView toolCallId, StrView toolName,
+                                 const ToolResult* result, bool isError) {
+  if (!harness || !harness->Initialized || !result) return;
+  ScopedLock lock(&harness->StateLock);
+  AgentHarnessEvent event = {};
+  event.Kind = AgentHarnessEventKind::TransientToolEnd;
+  event.OperationId = operationId;
+  event.ToolCallId = toolCallId;
+  event.ToolName = toolName;
+  event.ToolResultValue = *result;
+  event.IsError = isError;
+  for (u32 i = 0; i < harness->WatcherCount; i++) {
+    event.Cursor = harness->Watchers[i]->Cursor;
+    EnqueueWatcherEvent(harness->Watchers[i], &event);
+  }
+}
+
 SessionResult AgentHarness_Load(Arena* arena, AgentHarness* harness,
                                 Array<SessionRecord>* records,
                                 SessionReduction* reduction) {
@@ -252,9 +307,29 @@ SessionResult AgentHarness_Init(AgentHarness* harness, SessionLog log,
   *harness = AgentHarness{};
   harness->Log = log;
   harness->Config = *config;
+  harness->Runtime = ArenaCreate();
   harness->Work = ArenaCreate();
   Mutex_Init(&harness->StateLock);
   harness->Initialized = true;
+  if (config->ToolCount) {
+    harness->RuntimeTools =
+        ArenaPushArray(&harness->Runtime, ToolRuntime, config->ToolCount);
+    for (u32 i = 0; i < config->ToolCount; i++) {
+      ToolRuntime* runtime = &harness->RuntimeTools[i];
+      *runtime = ToolRuntime{};
+      runtime->Definition = &config->Tools[i];
+      StrBuf schemaError = StrBuf_Make(&harness->Runtime, 128);
+      StrView schema = config->Tools[i].ParamsJsonSchema.Length
+                           ? config->Tools[i].ParamsJsonSchema
+                           : SVL("{\"type\":\"object\",\"properties\":{}}");
+      if (!JsonSchema_Compile(&harness->Runtime,
+                              schema,
+                              &runtime->Schema, &schemaError)) {
+        AgentHarness_Close(harness);
+        return Invalid("tool parameter schema is invalid or unsupported");
+      }
+    }
+  }
 
   Arena scratch = ArenaCreate();
   Array<SessionRecord> records = {};
@@ -291,6 +366,7 @@ SessionResult AgentHarness_Close(AgentHarness* harness) {
   }
   SessionLog_Close(&harness->Log);
   Mutex_Destroy(&harness->StateLock);
+  ArenaRelease(&harness->Runtime);
   ArenaRelease(&harness->Work);
   *harness = AgentHarness{};
   return SessionResult_Ok();
@@ -905,6 +981,12 @@ SessionResult AgentHarness_ReconcileTool(AgentHarness* harness,
     ArenaRelease(&scratch);
     return SessionResult_Error(SessionStatus::Conflict,
                                SVL("tool recovery was already resolved"));
+  }
+  if (pending->ToolStarted.ReplayPolicy == ToolReplayPolicy::NoEffect) {
+    ArenaRelease(&scratch);
+    return SessionResult_Error(
+        SessionStatus::InvalidArgument,
+        SVL("pre-execution failures resume without reconciliation"));
   }
   if (pending->ToolStarted.ReplayPolicy == ToolReplayPolicy::ReplaySafe &&
       resolution != RecoveryResolution::RerunAnyway) {

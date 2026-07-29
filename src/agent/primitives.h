@@ -65,14 +65,26 @@ bool AgentProvider_SleepBackoff(u32 delayMs, volatile i32* abort);
 struct AgentToolHooks {
   void* User;
   bool (*BeforeTool)(void* user, Arena* arena, StrView toolName,
-                     StrView argsJson, StrView* outReason);
+                     const ToolArgs* args, StrView* outReason);
   void (*AfterTool)(void* user, Arena* arena, StrView toolName,
-                    StrView argsJson, ToolOutcome* io);
+                    const ToolArgs* args, ToolOutcome* io);
+};
+
+struct AgentToolEventSink {
+  void* User;
+  void (*OnUpdate)(void* user, StrView toolCallId, StrView toolName,
+                   const ToolResult* partial);
+  void (*OnEnd)(void* user, StrView toolCallId, StrView toolName,
+                const ToolResult* result, bool isError);
 };
 
 struct AgentPreparedTool {
   const Content* Call;
+  const ToolRuntime* Runtime;
   const Tool* Resolved;
+  ToolArgs Args;
+  StrView EffectiveArgumentsJson;
+  ToolReplayPolicy ReplayPolicy;
   volatile i32* Abort;
   bool Runnable;
   bool HasWorker;
@@ -104,17 +116,17 @@ struct AgentToolBatchResult {
   bool AllTerminate;
 };
 
-// Preparation performs only resolution and hooks. AgentToolBatch_Run is the
-// external-effect boundary. Finalize relocates worker results and applies
-// after-tool hooks in original call order.
-void AgentToolBatch_Prepare(Arena* arena, const Tool* tools, u32 toolCount,
+// Preparation resolves tools, normalizes and validates arguments, and runs the
+// before-tool gate. Run is the external-effect boundary; it finalizes each call
+// on the coordinator thread as soon as that call completes.
+void AgentToolBatch_Prepare(Arena* arena, const ToolRuntime* tools, u32 toolCount,
                             const Message* assistant, ToolExecution execution,
                             volatile i32* abort, const AgentToolHooks* hooks,
                             AgentToolBatchPlan* out);
-void AgentToolBatch_Run(AgentToolBatchPlan* plan, u32 maxParallelTools);
-void AgentToolBatch_Finalize(Arena* arena, AgentToolBatchPlan* plan,
-                             const AgentToolHooks* hooks,
-                             AgentToolBatchResult* out);
+void AgentToolBatch_Run(Arena* arena, AgentToolBatchPlan* plan,
+                        u32 maxParallelTools, const AgentToolHooks* hooks,
+                        const AgentToolEventSink* events,
+                        AgentToolBatchResult* out);
 
 Message AgentToolResult_Materialize(const AgentToolCallResult* result);
 

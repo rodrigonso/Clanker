@@ -235,6 +235,7 @@ StrView ReplayPolicyName(ToolReplayPolicy value) {
   switch (value) {
     case ToolReplayPolicy::ManualReconcile: return SVL("manual_reconcile");
     case ToolReplayPolicy::ReplaySafe: return SVL("replay_safe");
+    case ToolReplayPolicy::NoEffect: return SVL("no_effect");
   }
   return StrView{};
 }
@@ -246,6 +247,10 @@ bool ParseReplayPolicy(StrView text, ToolReplayPolicy* out) {
   }
   if (StrView_Eq(text, SVL("replay_safe"))) {
     *out = ToolReplayPolicy::ReplaySafe;
+    return true;
+  }
+  if (StrView_Eq(text, SVL("no_effect"))) {
+    *out = ToolReplayPolicy::NoEffect;
     return true;
   }
   return false;

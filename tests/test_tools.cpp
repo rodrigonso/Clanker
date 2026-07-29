@@ -39,8 +39,25 @@ static StrView Slurp(Arena* a, const char* path) {
   return StrBuf_View(&b);
 }
 
-static bool RunTool(const Tool& t, Arena* a, StrView args, ToolResult* out, StrBuf* err) {
-  return t.Execute(t.Ctx, a, SV("id"), args, nullptr, out, err);
+static bool RunTool(const Tool& t, Arena* a, StrView argsJson, ToolResult* out,
+                    StrBuf* err, const ToolUpdateSink* updates = nullptr) {
+  JsonSchema schema = {};
+  if (!JsonSchema_Compile(a, t.ParamsJsonSchema, &schema, err)) return false;
+  JsonValue* root = Json_Parse(a, argsJson);
+  if (!root) {
+    StrBuf_AppendCStr(err, "invalid JSON");
+    return false;
+  }
+  if (t.PrepareArguments) {
+    JsonValue* prepared = root;
+    if (!t.PrepareArguments(t.Ctx, a, root, &prepared, err)) return false;
+    root = prepared;
+  }
+  if (!JsonSchema_Validate(a, &schema, root, err)) return false;
+  StrBuf canonical = StrBuf_Make(a, argsJson.Length + 32);
+  Json_WriteValue(&canonical, root);
+  ToolArgs args = {root, StrBuf_View(&canonical)};
+  return t.Execute(t.Ctx, a, SV("id"), &args, nullptr, updates, out, err);
 }
 
 static void SetTestEnv(const char* name, const char* value) {
@@ -139,6 +156,31 @@ static void TestShell(Arena* a) {
             StrView_Contains(out.Content.Data[0].Text, "hello123"),
             !StrView_Contains(out.Content.Data[0].Text, "exit code"));
 
+  struct UpdateCapture {
+    StrBuf Last;
+    u32 Count;
+    bool SawEmpty;
+  } capture = {StrBuf_Make(a, 64), 0, false};
+  bool accepting = true;
+  ToolUpdateSink updates = {};
+  updates.User = &capture;
+  updates.Accepting = &accepting;
+  updates.OnUpdate = [](void* user, const ToolResult* partial) {
+    UpdateCapture* capture = (UpdateCapture*)user;
+    capture->Count++;
+    StrBuf_Clear(&capture->Last);
+    StrView text = {};
+    if (partial->Content.Count) text = partial->Content.Data[0].Text;
+    if (text.Length == 0) capture->SawEmpty = true;
+    StrBuf_Append(&capture->Last, text);
+  };
+  ToolResult streamed = {};
+  StrBuf streamedErr = StrBuf_Make(a, 32);
+  CHECK(RunTool(shell, a, SV("{\"command\":\"echo stream123\"}"),
+                &streamed, &streamedErr, &updates));
+  CHECK_ALL(capture.Count >= 2, capture.SawEmpty,
+            StrView_Contains(StrBuf_View(&capture.Last), "stream123"));
+
   // non-zero exit => error result
   ToolResult o2 = {};
   StrBuf e2 = StrBuf_Make(a, 32);
@@ -188,6 +230,13 @@ static void TestEdit(Arena* a) {
       &o1, &e1);
   CHECK_ALL(ok1, StrView_EqCStr(Slurp(a, p1), "HELLO\nsecond line\n"));
   remove(p1);
+
+  ToolResult missingPath = {};
+  StrBuf missingPathErr = StrBuf_Make(a, 32);
+  CHECK(!RunTool(
+      et, a, SV("{\"oldText\":\"hello\",\"newText\":\"goodbye\"}"),
+      &missingPath, &missingPathErr));
+  CHECK(StrView_Contains(StrBuf_View(&missingPathErr), "root.path"));
 
   // fuzzy match (different internal whitespace)
   const char* p2 = "clank_tool_edit_fuzzy.txt";

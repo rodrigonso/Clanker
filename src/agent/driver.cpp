@@ -4,6 +4,36 @@
 
 namespace {
 
+struct ToolEventBridge {
+  AgentHarness* Harness;
+  DurableId OperationId;
+};
+
+void PublishToolUpdate(void* user, StrView toolCallId, StrView toolName,
+                       const ToolResult* partial) {
+  ToolEventBridge* bridge = (ToolEventBridge*)user;
+  AgentHarness_PublishToolUpdate(bridge->Harness, bridge->OperationId,
+                                 toolCallId, toolName, partial);
+}
+
+void PublishToolEnd(void* user, StrView toolCallId, StrView toolName,
+                    const ToolResult* result, bool isError) {
+  ToolEventBridge* bridge = (ToolEventBridge*)user;
+  AgentHarness_PublishToolEnd(bridge->Harness, bridge->OperationId,
+                              toolCallId, toolName, result, isError);
+}
+
+AgentToolEventSink ToolEvents(AgentHarness* harness, DurableId operationId,
+                              ToolEventBridge* bridge) {
+  bridge->Harness = harness;
+  bridge->OperationId = operationId;
+  AgentToolEventSink sink = {};
+  sink.User = bridge;
+  sink.OnUpdate = PublishToolUpdate;
+  sink.OnEnd = PublishToolEnd;
+  return sink;
+}
+
 SessionRecord NewRecord(SessionRecordKind kind) {
   SessionRecord record = {};
   record.EntryId = DurableId_Generate();
@@ -416,13 +446,14 @@ SessionResult RunTools(AgentHarness* harness, DurableId operationId,
   }
   AgentToolBatchPlan plan = {};
   AgentToolBatch_Prepare(
-      &harness->Work, harness->Config.Tools, harness->Config.ToolCount,
+      &harness->Work, harness->RuntimeTools, harness->Config.ToolCount,
       &effectiveAssistant,
       harness->Config.ToolExec, &harness->AbortFlag, &harness->Config.ToolHooks,
       &plan);
   if (!SessionResult_IsOk(beforeToolFailure)) {
     for (u32 i = 0; i < plan.Calls.Count; i++) {
       plan.Calls.Data[i].Runnable = false;
+      plan.Calls.Data[i].ReplayPolicy = ToolReplayPolicy::NoEffect;
       plan.Calls.Data[i].Result =
           Array_Make<Content>(&harness->Work, 1);
       Array_Push(&plan.Calls.Data[i].Result,
@@ -452,11 +483,10 @@ SessionResult RunTools(AgentHarness* harness, DurableId operationId,
     started.ToolStarted.ToolExecutionId = DurableId_Generate();
     started.ToolStarted.ToolCallId = prepared->Call->ToolId;
     started.ToolStarted.ToolName = prepared->Call->ToolName;
-    started.ToolStarted.EffectiveArgumentsJson = prepared->Call->ToolArgsJson;
+    started.ToolStarted.EffectiveArgumentsJson =
+        prepared->EffectiveArgumentsJson;
     started.ToolStarted.ProvisionedResultEntryId = resultId;
-    started.ToolStarted.ReplayPolicy =
-        prepared->Resolved ? prepared->Resolved->ReplayPolicy
-                           : ToolReplayPolicy::ManualReconcile;
+    started.ToolStarted.ReplayPolicy = prepared->ReplayPolicy;
     Array_Push(&starts, started);
   }
   SessionResult persisted =
@@ -466,10 +496,12 @@ SessionResult RunTools(AgentHarness* harness, DurableId operationId,
     return persisted;
   }
 
-  AgentToolBatch_Run(&plan, harness->Config.MaxParallelTools);
   AgentToolBatchResult results = {};
-  AgentToolBatch_Finalize(&harness->Work, &plan, &harness->Config.ToolHooks,
-                          &results);
+  ToolEventBridge eventBridge = {};
+  AgentToolEventSink events = ToolEvents(harness, operationId, &eventBridge);
+  AgentToolBatch_Run(&harness->Work, &plan,
+                     harness->Config.MaxParallelTools,
+                     &harness->Config.ToolHooks, &events, &results);
   Array<SessionRecord> finishes =
       Array_Make<SessionRecord>(&scratch, results.Calls.Count * 2);
   DurableId head = *ioHead;
@@ -589,7 +621,7 @@ SessionResult RecoverPendingTools(AgentHarness* harness, DurableId operationId,
   AgentToolHooks prepareHooks = {};
   AgentToolBatchPlan plan = {};
   AgentToolBatch_Prepare(
-      &harness->Work, harness->Config.Tools, harness->Config.ToolCount,
+      &harness->Work, harness->RuntimeTools, harness->Config.ToolCount,
       &synthetic, harness->Config.ToolExec, &harness->AbortFlag, &prepareHooks,
       &plan);
 
@@ -603,6 +635,15 @@ SessionResult RecoverPendingTools(AgentHarness* harness, DurableId operationId,
       plan.Calls.Data[i].Runnable = false;
       plan.Calls.Data[i].Result = existing->MessageEntry.Value.Content;
       plan.Calls.Data[i].IsError = existing->MessageEntry.Value.IsError;
+      plan.Calls.Data[i].Terminate = false;
+    } else if (pending->ToolStarted.ReplayPolicy ==
+               ToolReplayPolicy::NoEffect) {
+      plan.Calls.Data[i].Runnable = false;
+      plan.Calls.Data[i].Result = Array_Make<Content>(&harness->Work, 1);
+      Array_Push(
+          &plan.Calls.Data[i].Result,
+          Content_Text(SVL("Tool did not execute before the interruption")));
+      plan.Calls.Data[i].IsError = true;
       plan.Calls.Data[i].Terminate = false;
     } else if (recovery &&
         recovery->RecoveryResolved.Resolution ==
@@ -643,12 +684,15 @@ SessionResult RecoverPendingTools(AgentHarness* harness, DurableId operationId,
     }
   }
 
-  AgentToolBatch_Run(&plan, harness->Config.MaxParallelTools);
   AgentToolHooks finalizeHooks = {};
   finalizeHooks.User = harness->Config.ToolHooks.User;
   finalizeHooks.AfterTool = harness->Config.ToolHooks.AfterTool;
   AgentToolBatchResult results = {};
-  AgentToolBatch_Finalize(&harness->Work, &plan, &finalizeHooks, &results);
+  ToolEventBridge eventBridge = {};
+  AgentToolEventSink events = ToolEvents(harness, operationId, &eventBridge);
+  AgentToolBatch_Run(&harness->Work, &plan,
+                     harness->Config.MaxParallelTools,
+                     &finalizeHooks, &events, &results);
 
   Array<SessionRecord> finishes =
       Array_Make<SessionRecord>(&scratch, results.Calls.Count * 2);

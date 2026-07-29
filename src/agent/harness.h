@@ -26,7 +26,9 @@ struct AgentHarnessConfig {
 struct AgentHarness {
   SessionLog Log;
   AgentHarnessConfig Config;
+  Arena Runtime;
   Arena Work;
+  ToolRuntime* RuntimeTools;
   Mutex StateLock;
   DurableId ActiveOperationId;
   volatile i32 AbortFlag;

@@ -33,16 +33,16 @@ static void Ls_AppendKb(StrBuf* b, u32 bytes) {
   StrBuf_AppendCStr(b, "KB");
 }
 
-bool LsExec(void* ctx, Arena* arena, StrView id, StrView argsJson, volatile i32* abort,
+bool LsExec(void* ctx, Arena* arena, StrView id, const ToolArgs* args,
+            volatile i32* abort, const ToolUpdateSink* updates,
             ToolResult* out, StrBuf* err) {
   (void)ctx;
   (void)id;
   (void)abort;
-
-  JsonValue* j = Json_Parse(arena, argsJson);
-  StrView path = Json_GetStr(j, "path");
+  (void)updates;
+  StrView path = ToolArgs_GetStr(args, "path");
   if (path.Length == 0) path = SVL(".");
-  i64 limit = Json_GetInt(j, "limit", 500);
+  i64 limit = ToolArgs_GetInt(args, "limit", 500);
   if (limit <= 0) limit = 500;
 
   if (!Fs_Exists(path)) {

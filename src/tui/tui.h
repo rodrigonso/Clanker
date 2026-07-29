@@ -32,6 +32,7 @@ enum class TuiDisplayEventKind : u8 {
   Text,
   MessageEnd,
   ToolStart,
+  ToolUpdate,
   ToolEnd,
   User,
   Notice,
@@ -48,8 +49,18 @@ struct TuiDisplayEvent {
   StopReason Stop;
   Usage Use;
   u64 Timestamp;
+  u16 ToolUpdateSlot;
   bool IsError;
 };
+
+struct TuiToolUpdateSlot {
+  StrView ToolCallId;
+  StrBuf Payload;
+  bool Active;
+  bool Queued;
+};
+
+enum { TUI_TOOL_UPDATE_SLOT_COUNT = 64 };
 
 struct TuiCommandSpec {
   StrView Name;
@@ -69,6 +80,7 @@ struct Tui {
   // Resettable conversation/UI arena. Terminal, screen, synchronization, cwd,
   // branch, and current model survive Tui_ClearSession.
   Arena SessionMem;
+  Arena ToolUpdateMem;
   Arena ScreenMem;
   AgentHarness* Harness;
   Term Trm;
@@ -90,6 +102,7 @@ struct Tui {
   bool RenderThreadUp;
   bool SyncUp;
   bool SessionUp;
+  bool ToolUpdateUp;
   bool ScreenUp;
   bool UiUp;
   bool Color;
@@ -183,6 +196,7 @@ struct Tui {
   StreamReveal Reveal;
   Array<TuiDisplayEvent> DisplayEvents;
   u32 DisplayHead;
+  TuiToolUpdateSlot ToolUpdates[TUI_TOOL_UPDATE_SLOT_COUNT];
 };
 
 // Enter the alt screen, paint the first frame synchronously, then start input

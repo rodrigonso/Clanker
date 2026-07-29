@@ -26,3 +26,11 @@ void AgentHarness_PublishTransient(AgentHarness* harness,
                                    DurableId operationId,
                                    DurableId attemptId,
                                    const StreamEvent* event);
+void AgentHarness_PublishToolUpdate(AgentHarness* harness,
+                                    DurableId operationId,
+                                    StrView toolCallId, StrView toolName,
+                                    const ToolResult* partial);
+void AgentHarness_PublishToolEnd(AgentHarness* harness,
+                                 DurableId operationId,
+                                 StrView toolCallId, StrView toolName,
+                                 const ToolResult* result, bool isError);

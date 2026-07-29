@@ -28,7 +28,7 @@ struct AgentEvent {
   StrView ToolCallId;        // tool_start/update/end
   StrView ToolName;          // tool_start/update/end
   StrView ToolArgsJson;      // tool_start
-  const ToolResult* Result;  // tool_end
+  const ToolResult* Result;  // tool_update/tool_end
   bool IsError;              // tool_end
   // retry_start / retry_end (transient provider error backoff)
   u32 RetryAttempt;        // 1-based attempt number

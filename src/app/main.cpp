@@ -334,6 +334,8 @@ struct HarnessEventPump {
   AgentHarness* Harness;
   Tui* TuiView;
   AgentSink Sink;
+  Arena CompletionMem;
+  Array<StrView> LiveToolEnds;
   Thread Worker;
   Mutex WatchGuard;
   bool WatchGuardInitialized;
@@ -342,6 +344,28 @@ struct HarnessEventPump {
   bool Started;
 };
 
+static void ClearLiveToolEnds(HarnessEventPump* pump) {
+  ArenaReset(&pump->CompletionMem);
+  pump->LiveToolEnds = Array_Make<StrView>(&pump->CompletionMem, 16);
+}
+
+static void RememberLiveToolEnd(HarnessEventPump* pump, StrView toolCallId) {
+  Array_Push(&pump->LiveToolEnds,
+             StrView_Dup(&pump->CompletionMem, toolCallId));
+}
+
+static bool ConsumeLiveToolEnd(HarnessEventPump* pump, StrView toolCallId) {
+  for (u32 i = 0; i < pump->LiveToolEnds.Count; i++) {
+    if (!StrView_Eq(pump->LiveToolEnds.Data[i], toolCallId)) continue;
+    for (u32 j = i + 1; j < pump->LiveToolEnds.Count; j++)
+      pump->LiveToolEnds.Data[j - 1] = pump->LiveToolEnds.Data[j];
+    pump->LiveToolEnds.Count--;
+    if (pump->LiveToolEnds.Count == 0) ClearLiveToolEnds(pump);
+    return true;
+  }
+  return false;
+}
+
 static void PumpHarnessEvent(HarnessEventPump* pump,
                              const AgentHarnessEvent* event) {
   AgentEvent translated = {};
@@ -349,6 +373,21 @@ static void PumpHarnessEvent(HarnessEventPump* pump,
     translated.Kind = AgentEventKind::MessageUpdate;
     translated.Stream = event->Stream;
     AgentSink_Emit(pump->Sink, translated);
+    return;
+  }
+  if (event->Kind == AgentHarnessEventKind::TransientToolUpdate ||
+      event->Kind == AgentHarnessEventKind::TransientToolEnd) {
+    translated.Kind =
+        event->Kind == AgentHarnessEventKind::TransientToolUpdate
+            ? AgentEventKind::ToolUpdate
+            : AgentEventKind::ToolEnd;
+    translated.ToolCallId = event->ToolCallId;
+    translated.ToolName = event->ToolName;
+    translated.Result = &event->ToolResultValue;
+    translated.IsError = event->IsError;
+    AgentSink_Emit(pump->Sink, translated);
+    if (event->Kind == AgentHarnessEventKind::TransientToolEnd)
+      RememberLiveToolEnd(pump, event->ToolCallId);
     return;
   }
 
@@ -375,6 +414,9 @@ static void PumpHarnessEvent(HarnessEventPump* pump,
         translated.Msg = &record->MessageEntry.Value;
         AgentSink_Emit(pump->Sink, translated);
       } else if (record->MessageEntry.Value.Kind == Role::ToolResult) {
+        if (ConsumeLiveToolEnd(
+                pump, record->MessageEntry.Value.ToolCallId))
+          break;
         ToolResult toolResult = {};
         toolResult.Content = record->MessageEntry.Value.Content;
         translated.Kind = AgentEventKind::ToolEnd;
@@ -388,6 +430,7 @@ static void PumpHarnessEvent(HarnessEventPump* pump,
     case SessionRecordKind::OperationAborted:
       translated.Kind = AgentEventKind::AgentEnd;
       AgentSink_Emit(pump->Sink, translated);
+      ClearLiveToolEnds(pump);
       break;
     default:
       break;
@@ -414,6 +457,7 @@ static void RunHarnessEventPump(void* user) {
           AgentHarness_Watch(&scratch, pump->Harness,
                              AGENT_HARNESS_MAX_WATCH_EVENTS, &snapshot,
                              &pump->Watch);
+      ClearLiveToolEnds(pump);
       if (SessionResult_IsOk(watched) && pump->TuiView)
         Tui_ReplaceTranscript(pump->TuiView, snapshot.Transcript.Data,
                               snapshot.Transcript.Count);
@@ -437,6 +481,8 @@ static SessionResult StartHarnessEventPump(Arena* arena, AgentHarness* harness,
   pump->Harness = harness;
   pump->TuiView = tuiView;
   pump->Sink = sink;
+  pump->CompletionMem = ArenaCreate((usize)4 << 20);
+  ClearLiveToolEnds(pump);
   Mutex_Init(&pump->WatchGuard);
   pump->WatchGuardInitialized = true;
   SessionResult watched = AgentHarness_Watch(
@@ -446,6 +492,7 @@ static SessionResult StartHarnessEventPump(Arena* arena, AgentHarness* harness,
     if (!Thread_Start(&pump->Worker, RunHarnessEventPump, pump)) {
       AgentHarness_WatchClose(&pump->Watch);
       Mutex_Destroy(&pump->WatchGuard);
+      ArenaRelease(&pump->CompletionMem);
       pump->WatchGuardInitialized = false;
       watched = SessionResult_Error(SessionStatus::IoError,
                                     SVL("failed to start session event pump"));
@@ -455,6 +502,7 @@ static SessionResult StartHarnessEventPump(Arena* arena, AgentHarness* harness,
   }
   if (!SessionResult_IsOk(watched) && pump->WatchGuardInitialized) {
     Mutex_Destroy(&pump->WatchGuard);
+    ArenaRelease(&pump->CompletionMem);
     pump->WatchGuardInitialized = false;
   }
   return watched;
@@ -471,6 +519,7 @@ static void StopHarnessEventPump(HarnessEventPump* pump) {
   if (pump->Watch.Initialized) AgentHarness_WatchClose(&pump->Watch);
   Mutex_Unlock(&pump->WatchGuard);
   Mutex_Destroy(&pump->WatchGuard);
+  ArenaRelease(&pump->CompletionMem);
   pump->WatchGuardInitialized = false;
   pump->Started = false;
 }

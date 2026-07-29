@@ -1,3 +1,5 @@
+#include <string.h>
+
 #include "agent/harness.h"
 #include "base/arena.h"
 #include "base/thread.h"
@@ -18,25 +20,29 @@ SessionResult CreateSession(SessionRepository* repository, Arena* arena,
   return repository->Create(repository->Ctx, arena, &options, out, &info);
 }
 
-bool EchoExec(void* context, Arena* arena, StrView id, StrView argsJson,
-              volatile i32* abort, ToolResult* out, StrBuf* error) {
+bool EchoExec(void* context, Arena* arena, StrView id, const ToolArgs* args,
+              volatile i32* abort, const ToolUpdateSink* updates,
+              ToolResult* out, StrBuf* error) {
   (void)context;
   (void)id;
   (void)abort;
+  (void)updates;
   (void)error;
   StrBuf text = StrBuf_Make(arena, 32);
   StrBuf_AppendCStr(&text, "echo:");
-  StrBuf_Append(&text, argsJson);
+  StrBuf_Append(&text, args->Json);
   out->Content = Array_Make<Content>(arena, 1);
   Array_Push(&out->Content, Content_Text(StrBuf_View(&text)));
   return true;
 }
 
-bool SteerExec(void* context, Arena* arena, StrView id, StrView argsJson,
-               volatile i32* abort, ToolResult* out, StrBuf* error) {
+bool SteerExec(void* context, Arena* arena, StrView id, const ToolArgs* args,
+               volatile i32* abort, const ToolUpdateSink* updates,
+               ToolResult* out, StrBuf* error) {
   (void)id;
-  (void)argsJson;
+  (void)args;
   (void)abort;
+  (void)updates;
   AgentHarness* harness = (AgentHarness*)context;
   SessionResult queued =
       AgentHarness_QueueSteering(harness, SVL("steered durably"));
@@ -49,15 +55,39 @@ bool SteerExec(void* context, Arena* arena, StrView id, StrView argsJson,
   return true;
 }
 
-bool CountReplayExec(void* context, Arena* arena, StrView id, StrView argsJson,
-                     volatile i32* abort, ToolResult* out, StrBuf* error) {
+bool CountReplayExec(void* context, Arena* arena, StrView id,
+                     const ToolArgs* args, volatile i32* abort,
+                     const ToolUpdateSink* updates, ToolResult* out,
+                     StrBuf* error) {
   (void)id;
-  (void)argsJson;
+  (void)args;
   (void)abort;
+  (void)updates;
   (void)error;
   (*(u32*)context)++;
   out->Content = Array_Make<Content>(arena, 1);
   Array_Push(&out->Content, Content_Text(SVL("replayed")));
+  return true;
+}
+
+bool DelayExec(void* context, Arena* arena, StrView id, const ToolArgs* args,
+               volatile i32* abort, const ToolUpdateSink* updates,
+               ToolResult* out, StrBuf* error) {
+  (void)id;
+  (void)abort;
+  (void)error;
+  (*(u32*)context)++;
+  StrView label = ToolArgs_GetStr(args, "label");
+  StrBuf updateText = StrBuf_Make(arena, label.Length + 16);
+  StrBuf_AppendCStr(&updateText, "started:");
+  StrBuf_Append(&updateText, label);
+  ToolResult partial = {};
+  partial.Content = Array_Make<Content>(arena, 1);
+  Array_Push(&partial.Content, Content_Text(StrBuf_View(&updateText)));
+  ToolUpdateSink_Emit(updates, &partial);
+  Sleep_Ms((u32)ToolArgs_GetInt(args, "delay", 0));
+  out->Content = Array_Make<Content>(arena, 1);
+  Array_Push(&out->Content, Content_Text(label));
   return true;
 }
 
@@ -519,6 +549,74 @@ SessionResult AppendTornDeferredCheckpoint(SessionLog* log, Arena* arena) {
   return SessionLog_AppendBatch(log, records, 6);
 }
 
+void TestNoEffectRecovery() {
+  Arena arena = ArenaCreate();
+  Message unknownAssistant = Message_AssistantEmpty(&arena);
+  Array_Push(&unknownAssistant.Content,
+             Content_ToolCall(SVL("unknown-call"), SVL("missing"),
+                              SVL("{\"value\":1}")));
+  AgentToolBatchPlan unknownPlan = {};
+  AgentToolBatch_Prepare(&arena, nullptr, 0, &unknownAssistant,
+                         ToolExecution::Parallel, nullptr, nullptr,
+                         &unknownPlan);
+  CHECK(unknownPlan.Calls.Count == 1);
+  if (unknownPlan.Calls.Count == 1)
+    CHECK_ALL(unknownPlan.Calls.Data[0].ReplayPolicy ==
+                  ToolReplayPolicy::NoEffect,
+              StrView_EqCStr(
+                  unknownPlan.Calls.Data[0].EffectiveArgumentsJson,
+                  "{\"value\":1}"));
+
+  MemoryRepository memory = {};
+  MemoryRepository_Init(&memory);
+  SessionRepository repository = MemoryRepository_AsRepository(&memory);
+  SessionLog recoveryLog = {};
+  CHECK(SessionResult_IsOk(
+      CreateSession(&repository, &arena, &recoveryLog)));
+  SuspendedToolTrace trace = {};
+  CHECK(SessionResult_IsOk(AppendSuspendedTool(
+      &recoveryLog, &arena, ToolReplayPolicy::NoEffect, &trace)));
+  u32 executions = 0;
+  Tool recoveryTool = {};
+  recoveryTool.Name = SVL("recover");
+  recoveryTool.Description = SVL("must not execute");
+  recoveryTool.ParamsJsonSchema = SVL("{\"type\":\"object\"}");
+  recoveryTool.ReplayPolicy = ToolReplayPolicy::ManualReconcile;
+  recoveryTool.Ctx = &executions;
+  recoveryTool.Execute = CountReplayExec;
+  FauxStep recoveryStep = {};
+  recoveryStep.Text = SVL("after no-effect recovery");
+  recoveryStep.Stop = StopReason::Stop;
+  Faux recoveryFaux = {&recoveryStep, 1, 0};
+  AgentHarness* recoveryHarness = ArenaPushStruct(&arena, AgentHarness);
+  *recoveryHarness = AgentHarness{};
+  AgentHarnessConfig recoveryConfig =
+      FauxConfig(&recoveryFaux, &recoveryTool, 1);
+  CHECK(AgentHarness_Init(recoveryHarness, recoveryLog, &recoveryConfig)
+            .Status == SessionStatus::Suspended);
+  CHECK(SessionResult_IsOk(AgentHarness_ResumeOperation(recoveryHarness)));
+  SessionReduction snapshot = {};
+  CHECK(SessionResult_IsOk(
+      AgentHarness_Snapshot(&arena, recoveryHarness, &snapshot)));
+  Array<Message> context = {};
+  CHECK(SessionResult_IsOk(SessionReducer_Context(
+      &arena, &snapshot, snapshot.HeadId, &context)));
+  Array<SessionRecord> recoveryRecords = {};
+  CHECK(SessionResult_IsOk(SessionLog_ReadAll(
+      &recoveryHarness->Log, &arena, &recoveryRecords)));
+  CHECK_ALL(
+      executions == 0, context.Count == 4,
+      context.Data[2].Kind == Role::ToolResult, context.Data[2].IsError,
+      StrView_Contains(context.Data[2].Content.Data[0].Text,
+                       "did not execute"),
+      CountKind(&recoveryRecords, SessionRecordKind::RecoveryResolved) == 0,
+      CountKind(&recoveryRecords, SessionRecordKind::ToolFinished) == 1);
+  CHECK(SessionResult_IsOk(AgentHarness_Close(recoveryHarness)));
+
+  repository.Close(repository.Ctx);
+  ArenaRelease(&arena);
+}
+
 }  // namespace
 
 void TestHarness() {
@@ -679,9 +777,10 @@ void TestHarness() {
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
 
     AgentHarnessSnapshot initial = {};
-    AgentHarnessWatch watch = {};
+    AgentHarnessWatch* watch = ArenaPushStruct(&arena, AgentHarnessWatch);
+    memset(watch, 0, sizeof(*watch));
     CHECK(SessionResult_IsOk(
-        AgentHarness_Watch(&arena, &harness, 16, &initial, &watch)));
+        AgentHarness_Watch(&arena, &harness, 16, &initial, watch)));
     CHECK_ALL(initial.Cursor == 1, initial.Transcript.Count == 0,
               !initial.Running, !initial.Suspended, !initial.Faulted);
     CHECK(SessionResult_IsOk(
@@ -694,7 +793,7 @@ void TestHarness() {
     for (u32 i = 0; i < 11; i++) {
       AgentHarnessEvent event = {};
       CHECK(SessionResult_IsOk(
-          AgentHarness_WatchNext(&arena, &watch, &event)));
+          AgentHarness_WatchNext(&arena, watch, &event)));
       if (event.Kind == AgentHarnessEventKind::DurableRecord) {
         durableCount++;
         durableCursor++;
@@ -719,7 +818,7 @@ void TestHarness() {
                             "watched prompt"),
               ContextTextEq(&complete.Transcript, 1, Role::Assistant,
                             "watched response"));
-    CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
+    CHECK(SessionResult_IsOk(AgentHarness_WatchClose(watch)));
     CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
     repository.Close(repository.Ctx);
     ArenaRelease(&arena);
@@ -744,15 +843,16 @@ void TestHarness() {
     AgentHarnessConfig config = FauxConfig(&faux, nullptr, 0);
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
     AgentHarnessSnapshot snapshot = {};
-    AgentHarnessWatch watch = {};
+    AgentHarnessWatch* watch = ArenaPushStruct(&arena, AgentHarnessWatch);
+    memset(watch, 0, sizeof(*watch));
     CHECK(SessionResult_IsOk(
-        AgentHarness_Watch(&arena, &harness, 2, &snapshot, &watch)));
+        AgentHarness_Watch(&arena, &harness, 2, &snapshot, watch)));
     CHECK(SessionResult_IsOk(
         AgentHarness_Run(&harness, SVL("overflow prompt"))));
     AgentHarnessEvent event = {};
-    CHECK(AgentHarness_WatchNext(&arena, &watch, &event).Status ==
+    CHECK(AgentHarness_WatchNext(&arena, watch, &event).Status ==
           SessionStatus::WatcherLagged);
-    CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
+    CHECK(SessionResult_IsOk(AgentHarness_WatchClose(watch)));
     CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
     repository.Close(repository.Ctx);
     ArenaRelease(&arena);
@@ -778,9 +878,10 @@ void TestHarness() {
     AgentHarness harness = {};
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
     AgentHarnessSnapshot snapshot = {};
-    AgentHarnessWatch watch = {};
+    AgentHarnessWatch* watch = ArenaPushStruct(&arena, AgentHarnessWatch);
+    memset(watch, 0, sizeof(*watch));
     CHECK(SessionResult_IsOk(
-        AgentHarness_Watch(&arena, &harness, 32, &snapshot, &watch)));
+        AgentHarness_Watch(&arena, &harness, 32, &snapshot, watch)));
 
     HarnessRunThread run = {};
     run.Harness = &harness;
@@ -806,13 +907,13 @@ void TestHarness() {
     for (u32 i = 0; i < expected; i++) {
       AgentHarnessEvent event = {};
       CHECK(SessionResult_IsOk(
-          AgentHarness_WatchNext(&arena, &watch, &event)));
+          AgentHarness_WatchNext(&arena, watch, &event)));
       CHECK(event.Kind == AgentHarnessEventKind::DurableRecord);
       cursor++;
       CHECK(event.Cursor == cursor);
     }
     CHECK(cursor == records.Data[records.Count - 1].Seq);
-    CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
+    CHECK(SessionResult_IsOk(AgentHarness_WatchClose(watch)));
     CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
     repository.Close(repository.Ctx);
     ArenaRelease(&arena);
@@ -832,28 +933,33 @@ void TestHarness() {
     AgentHarnessConfig config = FauxConfig(&faux, nullptr, 0);
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
     AgentHarnessSnapshot snapshot = {};
-    AgentHarnessWatch watch = {};
+    AgentHarnessWatch* watch = ArenaPushStruct(&arena, AgentHarnessWatch);
+    memset(watch, 0, sizeof(*watch));
     CHECK(SessionResult_IsOk(
-        AgentHarness_Watch(&arena, &harness, 4, &snapshot, &watch)));
+        AgentHarness_Watch(&arena, &harness, 4, &snapshot, watch)));
     WatchWaitThread wait = {};
-    wait.Watch = &watch;
+    wait.Watch = watch;
     Thread thread = {};
     CHECK(Thread_Start(&thread, WaitForWatchThread, &wait));
     u32 waited = 0;
     bool consumerWaiting = false;
     while (!consumerWaiting && waited < 2000) {
-      Mutex_Lock(&watch.Lock);
-      consumerWaiting = watch.Waiting != 0;
-      Mutex_Unlock(&watch.Lock);
+      Mutex_Lock(&watch->Lock);
+      consumerWaiting = watch->Waiting != 0;
+      Mutex_Unlock(&watch->Lock);
       if (!consumerWaiting) Sleep_Ms(1);
       waited++;
     }
     CHECK_ALL(wait.Started != 0, consumerWaiting);
-    CHECK(SessionResult_IsOk(AgentHarness_WatchRequestClose(&watch)));
-    CHECK(AgentHarness_WatchClose(&watch).Status == SessionStatus::Busy);
+    CHECK(SessionResult_IsOk(AgentHarness_WatchRequestClose(watch)));
+    SessionResult closeWhileWaiting = AgentHarness_WatchClose(watch);
+    CHECK(closeWhileWaiting.Status == SessionStatus::Busy ||
+          SessionResult_IsOk(closeWhileWaiting));
     Thread_Join(&thread);
     CHECK(wait.Result.Status == SessionStatus::InvalidState);
-    CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
+    if (closeWhileWaiting.Status == SessionStatus::Busy)
+      closeWhileWaiting = AgentHarness_WatchClose(watch);
+    CHECK(SessionResult_IsOk(closeWhileWaiting));
     CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
     repository.Close(repository.Ctx);
     ArenaRelease(&arena);
@@ -889,6 +995,170 @@ void TestHarness() {
     repository.Close(repository.Ctx);
     ArenaRelease(&arena);
   }
+
+  // Parallel tools publish updates and finalized completions in actual finish
+  // order while durable tool-result messages remain in assistant source order.
+  {
+    Arena arena = ArenaCreate();
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+
+    u32 executions = 0;
+    Tool delay = {};
+    delay.Name = SVL("delay");
+    delay.Description = SVL("delay for a test");
+    delay.ParamsJsonSchema = SVL(
+        "{\"type\":\"object\",\"properties\":{\"label\":{\"type\":\"string\"},"
+        "\"delay\":{\"type\":\"integer\",\"minimum\":0}},\"required\":"
+        "[\"label\",\"delay\"],\"additionalProperties\":false}");
+    delay.ReplayPolicy = ToolReplayPolicy::ReplaySafe;
+    delay.Ctx = &executions;
+    delay.Execute = DelayExec;
+
+    FauxToolCall calls[2] = {};
+    calls[0] = FauxToolCall{SVL("delay"), SVL("slow"),
+                            SVL("{\"label\":\"slow\",\"delay\":40}")};
+    calls[1] = FauxToolCall{SVL("delay"), SVL("fast"),
+                            SVL("{\"label\":\"fast\",\"delay\":1}")};
+    FauxStep steps[2] = {};
+    steps[0].Tools = calls;
+    steps[0].ToolCount = 2;
+    steps[1].Text = SVL("complete");
+    steps[1].Stop = StopReason::Stop;
+    Faux faux = {steps, 2, 0};
+
+    AgentHarness harness = {};
+    AgentHarnessConfig config = FauxConfig(&faux, &delay, 1);
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+    AgentHarnessSnapshot initial = {};
+    AgentHarnessWatch* watch =
+        ArenaPushStruct(&arena, AgentHarnessWatch);
+    memset(watch, 0, sizeof(*watch));
+    CHECK(SessionResult_IsOk(
+        AgentHarness_Watch(&arena, &harness, 64, &initial, watch)));
+    CHECK(SessionResult_IsOk(
+        AgentHarness_Run(&harness, SVL("run parallel tools"))));
+
+    StrView liveEnds[2] = {};
+    StrView durableResults[2] = {};
+    u32 liveEndCount = 0;
+    u32 durableResultCount = 0;
+    u32 updateCount = 0;
+    bool finished = false;
+    while (!finished) {
+      AgentHarnessEvent event = {};
+      CHECK(SessionResult_IsOk(
+          AgentHarness_WatchNext(&arena, watch, &event)));
+      if (event.Kind == AgentHarnessEventKind::TransientToolUpdate) {
+        updateCount++;
+      } else if (event.Kind == AgentHarnessEventKind::TransientToolEnd &&
+                 liveEndCount < 2) {
+        liveEnds[liveEndCount++] = StrView_Dup(&arena, event.ToolCallId);
+      } else if (event.Kind == AgentHarnessEventKind::DurableRecord) {
+        if (event.Record.Kind == SessionRecordKind::Message &&
+            event.Record.MessageEntry.Value.Kind == Role::ToolResult &&
+            durableResultCount < 2) {
+          durableResults[durableResultCount++] = StrView_Dup(
+              &arena, event.Record.MessageEntry.Value.ToolCallId);
+        }
+        finished =
+            event.Record.Kind == SessionRecordKind::OperationFinished;
+      }
+    }
+    CHECK_ALL(executions == 2, updateCount == 2, liveEndCount == 2,
+              StrView_EqCStr(liveEnds[0], "fast"),
+              StrView_EqCStr(liveEnds[1], "slow"),
+              durableResultCount == 2,
+              StrView_EqCStr(durableResults[0], "slow"),
+              StrView_EqCStr(durableResults[1], "fast"));
+    CHECK(SessionResult_IsOk(AgentHarness_WatchClose(watch)));
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    repository.Close(repository.Ctx);
+    ArenaRelease(&arena);
+  }
+
+  // Central validation rejects malformed arguments before the tool executes,
+  // and unsupported custom schemas fail closed during harness initialization.
+  {
+    Arena arena = ArenaCreate();
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+    u32 executions = 0;
+    Tool delay = {};
+    delay.Name = SVL("delay");
+    delay.Description = SVL("validated delay");
+    delay.ParamsJsonSchema = SVL(
+        "{\"type\":\"object\",\"properties\":{\"label\":{\"type\":\"string\"},"
+        "\"delay\":{\"type\":\"integer\"}},\"required\":[\"label\",\"delay\"]}");
+    delay.ReplayPolicy = ToolReplayPolicy::ReplaySafe;
+    delay.Ctx = &executions;
+    delay.Execute = DelayExec;
+    FauxStep step = {};
+    step.ToolName = SVL("delay");
+    step.ToolId = SVL("invalid-delay");
+    step.ToolArgsJson = SVL("{\"label\":\"bad\",\"delay\":\"later\"}");
+    Faux faux = {&step, 1, 0};
+    AgentHarness harness = {};
+    AgentHarnessConfig config = FauxConfig(&faux, &delay, 1);
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+    CHECK(SessionResult_IsOk(
+        AgentHarness_Run(&harness, SVL("validate tool"))));
+    SessionReduction snapshot = {};
+    CHECK(SessionResult_IsOk(
+        AgentHarness_Snapshot(&arena, &harness, &snapshot)));
+    Array<Message> context = {};
+    CHECK(SessionResult_IsOk(SessionReducer_Context(
+        &arena, &snapshot, snapshot.HeadId, &context)));
+    Array<SessionRecord> records = {};
+    CHECK(SessionResult_IsOk(
+        SessionLog_ReadAll(&harness.Log, &arena, &records)));
+    const SessionRecord* invalidStart = nullptr;
+    for (u32 i = 0; i < records.Count; i++)
+      if (records.Data[i].Kind == SessionRecordKind::ToolStarted)
+        invalidStart = &records.Data[i];
+    CHECK_ALL(executions == 0, context.Count == 4, invalidStart,
+              invalidStart->ToolStarted.ReplayPolicy ==
+                  ToolReplayPolicy::NoEffect,
+              context.Data[2].Kind == Role::ToolResult,
+              context.Data[2].IsError,
+              StrView_Contains(context.Data[2].Content.Data[0].Text,
+                               "Validation failed for tool"));
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+
+    SessionLog emptySchemaLog = {};
+    CHECK(SessionResult_IsOk(
+        CreateSession(&repository, &arena, &emptySchemaLog)));
+    Tool emptySchema = delay;
+    emptySchema.ParamsJsonSchema = {};
+    AgentHarness* emptySchemaHarness =
+        ArenaPushStruct(&arena, AgentHarness);
+    memset(emptySchemaHarness, 0, sizeof(*emptySchemaHarness));
+    AgentHarnessConfig emptySchemaConfig =
+        FauxConfig(&faux, &emptySchema, 1);
+    CHECK(SessionResult_IsOk(AgentHarness_Init(
+        emptySchemaHarness, emptySchemaLog, &emptySchemaConfig)));
+    CHECK(SessionResult_IsOk(AgentHarness_Close(emptySchemaHarness)));
+
+    SessionLog invalidLog = {};
+    CHECK(SessionResult_IsOk(
+        CreateSession(&repository, &arena, &invalidLog)));
+    Tool unsupported = delay;
+    unsupported.ParamsJsonSchema =
+        SVL("{\"type\":\"string\",\"pattern\":\"x\"}");
+    AgentHarness invalidHarness = {};
+    AgentHarnessConfig invalidConfig = FauxConfig(&faux, &unsupported, 1);
+    CHECK(AgentHarness_Init(&invalidHarness, invalidLog, &invalidConfig).Status ==
+          SessionStatus::InvalidArgument);
+    repository.Close(repository.Ctx);
+    ArenaRelease(&arena);
+  }
+  TestNoEffectRecovery();
 
   // Awaited hooks may alter accepted input, request context, provider settings,
   // and tool arguments; all effect-facing values are applied before intents.
@@ -1021,6 +1291,14 @@ void TestHarness() {
     Array<SessionRecord> records = {};
     CHECK(SessionResult_IsOk(
         SessionLog_ReadAll(&harness.Log, &arena, &records)));
+    const SessionRecord* blockedStart = nullptr;
+    for (u32 i = 0; i < records.Count; i++)
+      if (records.Data[i].Kind == SessionRecordKind::ToolStarted)
+        blockedStart = &records.Data[i];
+    CHECK(blockedStart != nullptr);
+    if (blockedStart)
+      CHECK(blockedStart->ToolStarted.ReplayPolicy ==
+            ToolReplayPolicy::NoEffect);
     CHECK_ALL(
         hookCalls == 1, executions == 0, context.Count == 3,
         context.Data[2].Kind == Role::ToolResult, context.Data[2].IsError,

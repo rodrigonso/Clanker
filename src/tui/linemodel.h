@@ -133,4 +133,5 @@ void LineModel_EndAssistant(LineModel* m);
 void LineModel_AddNotice(LineModel* m, EntryKind kind, StrView text);  // Info or Error
 void LineModel_AddUser(LineModel* m, StrView text, u64 timestampMs);
 void LineModel_AddTool(LineModel* m, StrView toolId, StrView name, StrView argsJson);
+bool LineModel_UpdateTool(LineModel* m, StrView toolId, StrView preview);
 bool LineModel_FinishTool(LineModel* m, StrView toolId, StrView result, StrView preview, bool isError);

@@ -167,6 +167,47 @@ TuiDisplayEvent* QueueDisplayEvent(Tui* t, TuiDisplayEventKind kind) {
   return Array_Push(&t->DisplayEvents, ev);
 }
 
+void ResetToolUpdates(Tui* t) {
+  ArenaReset(&t->ToolUpdateMem);
+  memset(t->ToolUpdates, 0, sizeof(t->ToolUpdates));
+}
+
+TuiToolUpdateSlot* FindToolUpdate(Tui* t, StrView toolCallId) {
+  for (u32 i = 0; i < TUI_TOOL_UPDATE_SLOT_COUNT; i++) {
+    TuiToolUpdateSlot* slot = &t->ToolUpdates[i];
+    if ((slot->Active || slot->Queued) &&
+        StrView_Eq(slot->ToolCallId, toolCallId))
+      return slot;
+  }
+  return nullptr;
+}
+
+TuiToolUpdateSlot* AcquireToolUpdate(Tui* t, StrView toolCallId,
+                                     u16* outIndex) {
+  if (TuiToolUpdateSlot* existing = FindToolUpdate(t, toolCallId)) {
+    *outIndex = (u16)(existing - t->ToolUpdates);
+    return existing;
+  }
+
+  bool anyInUse = false;
+  for (u32 i = 0; i < TUI_TOOL_UPDATE_SLOT_COUNT; i++)
+    if (t->ToolUpdates[i].Active || t->ToolUpdates[i].Queued)
+      anyInUse = true;
+  if (!anyInUse) ResetToolUpdates(t);
+
+  for (u32 i = 0; i < TUI_TOOL_UPDATE_SLOT_COUNT; i++) {
+    TuiToolUpdateSlot* slot = &t->ToolUpdates[i];
+    if (slot->Active || slot->Queued) continue;
+    slot->ToolCallId = StrView_Dup(&t->SessionMem, toolCallId);
+    if (!slot->Payload.Data)
+      slot->Payload = StrBuf_Make(&t->ToolUpdateMem, 1501);
+    slot->Active = true;
+    *outIndex = (u16)i;
+    return slot;
+  }
+  return nullptr;
+}
+
 void SetDisplayPayload(Tui* t, TuiDisplayEvent* ev, StrView text) {
   ev->Payload = StrBuf_Make(&t->SessionMem, text.Length + 1);
   StrBuf_Append(&ev->Payload, text);
@@ -443,6 +484,14 @@ void ApplyDisplayEvent(Tui* t, const TuiDisplayEvent& ev) {
       LineModel_AddTool(&t->Model, ev.ToolCallId, ev.ToolName, ev.ToolArgsJson);
       t->State = TuiState::Tool;
       t->StateTool = ev.ToolName;
+      break;
+    case TuiDisplayEventKind::ToolUpdate:
+      if (ev.ToolUpdateSlot < TUI_TOOL_UPDATE_SLOT_COUNT) {
+        TuiToolUpdateSlot* slot = &t->ToolUpdates[ev.ToolUpdateSlot];
+        LineModel_UpdateTool(&t->Model, ev.ToolCallId,
+                             Truncate(StrBuf_View(&slot->Payload), 1500));
+        slot->Queued = false;
+      }
       break;
     case TuiDisplayEventKind::ToolEnd:
       {
@@ -1937,6 +1986,8 @@ void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts) {
   Ui_Init(&t->Ui);
   t->UiUp = true;
   t->SessionMem = ArenaCreate();
+  t->ToolUpdateMem = ArenaCreate((usize)4 << 20);
+  t->ToolUpdateUp = true;
   LineModel_Init(&t->Model, &t->SessionMem, 80, 5000, opts.Color);
   LineEdit_Init(&t->Edit, &t->SessionMem);
   t->InputUi.Edit = &t->Edit;
@@ -1944,6 +1995,7 @@ void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts) {
   KeyDecoder_Init(&t->Dec);
   StreamReveal_Init(&t->Reveal, &t->SessionMem);
   t->DisplayEvents = Array_Make<TuiDisplayEvent>(&t->SessionMem, 16);
+  ResetToolUpdates(t);
   t->ClipboardRaw = StrBuf_Make(mem, 256);
   t->ClipboardOsc = StrBuf_Make(mem, 384);
   Mutex_Init(&t->Lock);
@@ -1989,6 +2041,7 @@ bool Tui_ClearSession(Tui* t) {
   StreamReveal_Init(&t->Reveal, &t->SessionMem);
   t->DisplayEvents = Array_Make<TuiDisplayEvent>(&t->SessionMem, 16);
   t->DisplayHead = 0;
+  ResetToolUpdates(t);
 
   memset(t->Queue, 0, sizeof(t->Queue));
   for (u32 i = 0; i < preservedCount; i++) t->Queue[i] = preserved[i];
@@ -2078,6 +2131,10 @@ void Tui_Stop(Tui* t) {
     LineModel_Release(&t->Model);
     ArenaRelease(&t->SessionMem);
     t->SessionUp = false;
+  }
+  if (t->ToolUpdateUp) {
+    ArenaRelease(&t->ToolUpdateMem);
+    t->ToolUpdateUp = false;
   }
   if (t->SyncUp) {
     Cond_Destroy(&t->RenderCv);
@@ -2355,6 +2412,7 @@ void Tui_ReplaceTranscript(Tui* t, const Message* messages, u32 count) {
   StreamReveal_Init(&t->Reveal, &t->SessionMem);
   t->DisplayEvents = Array_Make<TuiDisplayEvent>(&t->SessionMem, 16);
   t->DisplayHead = 0;
+  ResetToolUpdates(t);
   t->Use = {};
   t->StateTool = {};
   t->State = t->AgentRunning ? TuiState::Thinking : TuiState::Idle;
@@ -2417,6 +2475,25 @@ void Tui_AgentEvent(void* user, const AgentEvent& ev) {
       display->ToolArgsJson = StrView_Dup(&t->SessionMem, ev.ToolArgsJson);
       break;
     }
+    case AgentEventKind::ToolUpdate: {
+      StrView preview = StrView{nullptr, 0};
+      if (ev.Result && ev.Result->Content.Count > 0)
+        preview = ev.Result->Content.Data[0].Text;
+      u16 slotIndex = 0;
+      TuiToolUpdateSlot* slot =
+          AcquireToolUpdate(t, ev.ToolCallId, &slotIndex);
+      if (!slot) break;
+      StrBuf_Clear(&slot->Payload);
+      Sanitize_Display(&slot->Payload, Truncate(preview, 1500));
+      if (!slot->Queued) {
+        TuiDisplayEvent* display =
+            QueueDisplayEvent(t, TuiDisplayEventKind::ToolUpdate);
+        display->ToolCallId = slot->ToolCallId;
+        display->ToolUpdateSlot = slotIndex;
+        slot->Queued = true;
+      }
+      break;
+    }
     case AgentEventKind::ToolEnd: {
       StrView preview = StrView{nullptr, 0};
       if (ev.Result && ev.Result->Content.Count > 0) preview = ev.Result->Content.Data[0].Text;
@@ -2425,6 +2502,8 @@ void Tui_AgentEvent(void* user, const AgentEvent& ev) {
       display->Payload = StrBuf_Make(&t->SessionMem, preview.Length + 1);
       Sanitize_Display(&display->Payload, preview);
       display->IsError = ev.IsError;
+      if (TuiToolUpdateSlot* slot = FindToolUpdate(t, ev.ToolCallId))
+        slot->Active = false;
       break;
     }
     case AgentEventKind::AgentEnd:
