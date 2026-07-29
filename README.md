@@ -93,6 +93,25 @@ use the VS-bundled CMake/Ninja). `build.ps1` builds only the `clank` executable
 by default, skips redundant configure passes, and accepts `-Test` to build and
 run the unit tests.
 
+### Visual Studio 2026
+
+Open the repository folder in Visual Studio 2026. The checked-in `.vsconfig`
+declares the Desktop development with C++ and CMake components, and Visual
+Studio will discover the `vs2026-x64` configure preset automatically. Select
+`clank.exe` as the startup target and choose Debug or Release in the toolbar.
+The debugger starts Clank with the repository root as its working directory.
+
+The same presets can be used from a Developer PowerShell:
+
+```powershell
+cmake --preset vs2026-x64
+cmake --build --preset vs2026-debug
+
+# Optional offline tests:
+cmake --build --preset vs2026-debug-tests
+ctest --preset vs2026-debug
+```
+
 ## Run
 
 ```sh

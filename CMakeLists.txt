@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-if(NOT CMAKE_BUILD_TYPE)
+if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
@@ -204,6 +204,9 @@ target_link_libraries(clank_app PUBLIC clank_anthropic clank_auth clank_tui clan
 # ---- executables ---------------------------------------------------------
 add_executable(clank src/app/main.cpp)
 target_link_libraries(clank PRIVATE clank_app clank_anthropic clank_tools clank_agent clank_auth clank_tui)
+set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT clank)
+set_target_properties(clank PROPERTIES
+  VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # ---- tests ---------------------------------------------------------------
 # One harness for everything: tests/test_main.cpp is a CLI that selects suites

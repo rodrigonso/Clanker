@@ -1,0 +1,70 @@
+{
+  "version": 2,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "vs2026-x64",
+      "displayName": "Visual Studio 2026 x64",
+      "description": "Generate an x64 Visual Studio 2026 build tree.",
+      "generator": "Visual Studio 18 2026",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/out/build/${presetName}"
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "vs2026-debug",
+      "displayName": "Visual Studio 2026 x64 - Debug",
+      "configurePreset": "vs2026-x64",
+      "configuration": "Debug"
+    },
+    {
+      "name": "vs2026-release",
+      "displayName": "Visual Studio 2026 x64 - Release",
+      "configurePreset": "vs2026-x64",
+      "configuration": "Release"
+    },
+    {
+      "name": "vs2026-debug-tests",
+      "displayName": "Visual Studio 2026 x64 tests - Debug",
+      "configurePreset": "vs2026-x64",
+      "configuration": "Debug",
+      "targets": [
+        "clank_tests"
+      ]
+    },
+    {
+      "name": "vs2026-release-tests",
+      "displayName": "Visual Studio 2026 x64 tests - Release",
+      "configurePreset": "vs2026-x64",
+      "configuration": "Release",
+      "targets": [
+        "clank_tests"
+      ]
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "vs2026-debug",
+      "displayName": "Visual Studio 2026 x64 tests - Debug",
+      "configurePreset": "vs2026-x64",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "vs2026-release",
+      "displayName": "Visual Studio 2026 x64 tests - Release",
+      "configurePreset": "vs2026-x64",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}
