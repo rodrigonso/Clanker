@@ -21,6 +21,26 @@ Style TuiSt(const Tui* t, u8 fg, u8 attr) {
 void Put(char* buf, u32 cap, u32* len, const char* s) {
   while (*s && *len < cap - 1) buf[(*len)++] = *s++;
 }
+void PutView(char* buf, u32 cap, u32* len, StrView s) {
+  for (u32 i = 0; i < s.Length && *len < cap - 1; i++)
+    buf[(*len)++] = s.Data[i];
+}
+u32 PutViewCells(char* buf, u32 cap, u32* len, StrView s,
+                 u32 maxCells) {
+  u32 offset = 0;
+  u32 cells = 0;
+  while (offset < s.Length) {
+    u32 start = offset;
+    u32 cp = Utf8Decode(s, &offset);
+    u32 width = CharWidth(cp);
+    if (width < 1) width = 1;
+    if (cells + width > maxCells || *len + offset - start >= cap)
+      break;
+    for (u32 i = start; i < offset; i++) buf[(*len)++] = s.Data[i];
+    cells += width;
+  }
+  return cells;
+}
 void PutNum(char* buf, u32 cap, u32* len, u32 v) {
   char tmp[16];
   u32 n = 0;
@@ -357,7 +377,7 @@ bool GetTranscriptSelection(Tui* t, TranscriptSelection* selection) {
 }
 
 void FormatStatus(Tui* t, char* left, u32 leftCap, u32* ll, char* right,
-                  u32 rightCap, u32* rl) {
+                  u32 rightCap, u32* rl, u16 cols) {
   *ll = 0;
   if (t->OperationActive) {
     Put(left, leftCap, ll, kSpinner[t->Spinner % 10]);
@@ -386,13 +406,50 @@ void FormatStatus(Tui* t, char* left, u32 leftCap, u32* ll, char* right,
   }
 
   *rl = 0;
-  for (u32 i = 0; i < t->ModelName.Length && *rl < rightCap - 1; i++)
-    right[(*rl)++] = t->ModelName.Data[i];
+  u32 rightLimit = cols;
+  if (rightLimit > rightCap - 1) rightLimit = rightCap - 1;
+  u32 rightCells =
+      PutViewCells(right, rightCap, rl, t->ModelName, rightLimit);
+
+  char usage[64] = {};
+  u32 usageLength = 0;
   if (t->Use.Input || t->Use.Output) {
-    Put(right, rightCap, rl, "  \xe2\x86\x91");
-    PutScaled(right, rightCap, rl, t->Use.Input);
-    Put(right, rightCap, rl, " \xe2\x86\x93");
-    PutScaled(right, rightCap, rl, t->Use.Output);
+    Put(usage, 64, &usageLength, "  \xe2\x86\x91");
+    PutScaled(usage, 64, &usageLength, t->Use.Input);
+    Put(usage, 64, &usageLength, " \xe2\x86\x93");
+    PutScaled(usage, 64, &usageLength, t->Use.Output);
+  }
+
+  char effort[24] = {};
+  u32 effortLength = 0;
+  if (t->Profile.Effort != ModelEffort::None) {
+    Put(effort, 24, &effortLength, "  e:");
+    PutView(effort, 24, &effortLength,
+            ModelEffort_Name(t->Profile.Effort));
+  }
+  u32 usageCells = TextWidth(StrView{usage, usageLength});
+  u32 effortCells = TextWidth(StrView{effort, effortLength});
+  if (rightCells + effortCells + usageCells <= rightLimit) {
+    PutView(right, rightCap, rl, StrView{effort, effortLength});
+    rightCells += effortCells;
+  }
+
+  char context[24] = {};
+  u32 contextLength = 0;
+  if (t->Profile.ContextWindow) {
+    Put(context, 24, &contextLength, "  ctx:");
+    contextLength += ModelContextWindow_Format(
+        context + contextLength, 24 - contextLength,
+        t->Profile.ContextWindow);
+  }
+  u32 contextCells = TextWidth(StrView{context, contextLength});
+  if (rightCells + contextCells + usageCells <= rightLimit) {
+    PutView(right, rightCap, rl, StrView{context, contextLength});
+    rightCells += contextCells;
+  }
+
+  if (rightCells + usageCells <= rightLimit) {
+    PutView(right, rightCap, rl, StrView{usage, usageLength});
   }
 }
 
@@ -907,7 +964,7 @@ void BuildStatusComponents(Tui* t, u16 statusY, u16 cols) {
   char* right = (char*)Ui_FrameAlloc(&t->Ui, 256, alignof(char));
   u32 leftLength = 0;
   u32 rightLength = 0;
-  FormatStatus(t, left, 256, &leftLength, right, 256, &rightLength);
+  FormatStatus(t, left, 256, &leftLength, right, 256, &rightLength, cols);
 
   UiLayoutStyle row = Positioned(0, statusY, cols, 1);
   row.Padding.Left = 1;
@@ -1971,6 +2028,7 @@ void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts) {
   t->Mem = mem;
   t->Color = opts.Color;
   t->ModelName = StrView_Dup(mem, opts.ModelName);
+  t->Profile = opts.Profile;
   if (opts.Commands && opts.CommandCount) {
     t->Commands = ArenaPushArray(mem, TuiCommandSpec, opts.CommandCount);
     t->CommandCount = opts.CommandCount;
@@ -2191,9 +2249,11 @@ void Tui_CommandError(Tui* t, StrView text) {
   Mutex_Unlock(&t->Lock);
 }
 
-void Tui_SetModelName(Tui* t, StrView modelName) {
+void Tui_SetModelProfile(Tui* t, StrView modelName,
+                         ModelRequestProfile profile) {
   Mutex_Lock(&t->Lock);
   t->ModelName = StrView_Dup(t->Mem, modelName);
+  t->Profile = profile;
   Wake(t);
   Mutex_Unlock(&t->Lock);
 }

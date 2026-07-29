@@ -81,6 +81,7 @@ struct InteractiveRuntime {
   StrView SettingsPath;
   const ProviderSpec* Spec;
   Model CurrentModel;
+  ModelRequestProfile PreferredProfile;
   AgentHarness* Harness;
   SessionRepository* Sessions;
   StrView ProjectKey;
@@ -234,6 +235,7 @@ static StrView AuthGuidance(Arena* arena, const ProviderSpec* spec, bool interac
 struct RuntimeSelection {
   const ProviderSpec* Spec;
   StrView ModelId;
+  ModelRequestProfile RequestedProfile;
   DefaultProjectTrust DefaultTrust;
 };
 
@@ -262,6 +264,7 @@ static RuntimeSelection LoadRuntimeSelection(Arena* arena, StrView settingsPath,
     if (configured) {
       selected.Spec = configured;
       selected.ModelId = settings.Model;
+      selected.RequestedProfile = settings.Profile;
     } else {
       fprintf(stderr,
               "warning: settings %.*s names unknown provider '%.*s'; using built-in defaults "
@@ -817,6 +820,7 @@ struct RuntimeModelChoice {
   RuntimeChoiceStatus Status;
   Model Selected;
   StrView Message;
+  ModelRequestProfile Profile;
 };
 
 static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
@@ -915,6 +919,7 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
   StrBuf_AppendCStr(&title, " model");
 
   Model chosen = {};
+  ModelRequestProfile chosenProfile = {};
   for (;;) {
     u32 selected = 0;
     RuntimeInputResult selection =
@@ -933,42 +938,117 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
 
     if (selected != models.Count) {
       chosen = Model_Dup(rt->Mem, models.Models[selected]);
-      break;
+    } else {
+      StrView initialId =
+          rt->Spec && StrView_Eq(rt->Spec->Id, spec->Id)
+              ? rt->CurrentModel.Id
+              : spec->DefaultModel;
+      bool returnToModels = false;
+      for (;;) {
+        StrView entered = {};
+        RuntimeInputResult entry =
+            RuntimeReadText(rt, &scratch, StrBuf_View(&title), SVL("Model ID"),
+                            initialId, &entered);
+        if (entry == RuntimeInputResult::Back) {
+          returnToModels = true;
+          break;
+        }
+        if (entry != RuntimeInputResult::Confirmed) {
+          ArenaRelease(&scratch);
+          return RuntimeModelChoice{RuntimeChoiceStatus::Cancelled, Model{},
+                                    StrView{}};
+        }
+        entered = TrimAscii(entered);
+        if (entered.Length) {
+          chosen = spec->CreateModel(rt->Mem, entered);
+          break;
+        }
+        EmitCommandError(ux, SVL("A model ID is required."));
+      }
+      if (returnToModels) continue;
     }
 
-    StrView initialId =
-        rt->Spec && StrView_Eq(rt->Spec->Id, spec->Id) ? rt->CurrentModel.Id
-                                                       : spec->DefaultModel;
-    bool returnToModels = false;
-    for (;;) {
-      StrView entered = {};
-      RuntimeInputResult entry =
-          RuntimeReadText(rt, &scratch, StrBuf_View(&title), SVL("Model ID"),
-                          initialId, &entered);
-      if (entry == RuntimeInputResult::Back) {
-        returnToModels = true;
-        break;
+    chosen.Provider = StrView_Dup(rt->Mem, spec->Id);
+    if (!chosen.Name.Length) chosen.Name = chosen.Id;
+    if (!Model_MetadataIsValid(&chosen)) {
+      ArenaRelease(&scratch);
+      return RuntimeModelChoice{
+          RuntimeChoiceStatus::Failed, Model{},
+          SVL("The selected model has invalid capability metadata.")};
+    }
+    bool sameModel =
+        rt->Spec && StrView_Eq(rt->Spec->Id, spec->Id) &&
+        StrView_Eq(rt->CurrentModel.Id, chosen.Id);
+    ModelRequestProfile activeProfile =
+        sameModel ? rt->Harness->Config.Stream.Profile
+                  : Model_DefaultRequestProfile(&chosen);
+    ModelRequestProfile preference = {};
+
+    if (Model_EffortOptionCount(&chosen) > 1) {
+      StrView effortOptions[MODEL_EFFORT_OPTION_CAPACITY] = {};
+      ModelEffort effortValues[MODEL_EFFORT_OPTION_CAPACITY] = {};
+      u32 effortCount = 0;
+      u32 effortInitial = 0;
+      for (u8 i = (u8)ModelEffort::Low; i <= (u8)ModelEffort::Max; i++) {
+        ModelEffort effort = (ModelEffort)i;
+        if (!Model_SupportsEffort(&chosen, effort)) continue;
+        effortOptions[effortCount] = ModelEffort_Name(effort);
+        effortValues[effortCount] = effort;
+        if (activeProfile.Effort == effort)
+          effortInitial = effortCount;
+        effortCount++;
       }
-      if (entry != RuntimeInputResult::Confirmed) {
+      u32 effortSelected = 0;
+      RuntimeInputResult effortResult =
+          RuntimeSelect(rt, SVL("Choose model effort"), effortOptions,
+                        effortCount, &effortSelected, effortInitial);
+      if (effortResult == RuntimeInputResult::Back) continue;
+      if (effortResult != RuntimeInputResult::Confirmed) {
         ArenaRelease(&scratch);
         return RuntimeModelChoice{RuntimeChoiceStatus::Cancelled, Model{},
                                   StrView{}};
       }
-      entered = TrimAscii(entered);
-      if (entered.Length) {
-        chosen = spec->CreateModel(rt->Mem, entered);
-        break;
-      }
-      EmitCommandError(ux, SVL("A model ID is required."));
+      preference.Effort = effortValues[effortSelected];
     }
-    if (returnToModels) continue;
+
+    if (chosen.ContextWindowOptionCount > 1) {
+      char contextStorage[MODEL_CONTEXT_WINDOW_OPTION_CAPACITY]
+                         [MODEL_CONTEXT_WINDOW_LABEL_CAPACITY] = {};
+      StrView contextOptions[MODEL_CONTEXT_WINDOW_OPTION_CAPACITY] = {};
+      u32 contextInitial = 0;
+      for (u32 i = 0; i < chosen.ContextWindowOptionCount; i++) {
+        u32 length = ModelContextWindow_Format(
+            contextStorage[i], MODEL_CONTEXT_WINDOW_LABEL_CAPACITY,
+            chosen.ContextWindowOptions[i]);
+        contextOptions[i] = StrView{contextStorage[i], length};
+        if (activeProfile.ContextWindow ==
+            chosen.ContextWindowOptions[i])
+          contextInitial = i;
+      }
+      u32 contextSelected = 0;
+      RuntimeInputResult contextResult =
+          RuntimeSelect(rt, SVL("Choose model context window"),
+                        contextOptions, chosen.ContextWindowOptionCount,
+                        &contextSelected, contextInitial);
+      if (contextResult == RuntimeInputResult::Back) continue;
+      if (contextResult != RuntimeInputResult::Confirmed) {
+        ArenaRelease(&scratch);
+        return RuntimeModelChoice{RuntimeChoiceStatus::Cancelled, Model{},
+                                  StrView{}};
+      }
+      preference.ContextWindow =
+          chosen.ContextWindowOptions[contextSelected];
+    }
+
+    chosenProfile = preference;
     break;
   }
 
-  chosen.Provider = StrView_Dup(rt->Mem, spec->Id);
-  if (!chosen.Name.Length) chosen.Name = chosen.Id;
   ArenaRelease(&scratch);
-  return RuntimeModelChoice{RuntimeChoiceStatus::Selected, chosen, StrView{}};
+  RuntimeModelChoice result = {
+      RuntimeChoiceStatus::Selected, chosen, StrView{}};
+  result.Profile = chosenProfile;
+  return result;
 }
 
 static bool RuntimeCheckAuth(InteractiveRuntime* rt, const AppCommandUx* ux, bool asError) {
@@ -993,13 +1073,16 @@ static bool RuntimeCheckAuth(InteractiveRuntime* rt, const AppCommandUx* ux, boo
 
 static bool PersistRuntimeSelection(InteractiveRuntime* rt, const AppCommandUx* ux) {
   Arena scratch = ArenaCreate((usize)8 << 20);
-  AppSettings settings = {rt->Spec->Id, rt->CurrentModel.Id,
-                          rt->DefaultTrust};
+  AppSettings settings = {};
+  settings.Provider = rt->Spec->Id;
+  settings.Model = rt->CurrentModel.Id;
+  settings.DefaultTrust = rt->DefaultTrust;
+  settings.Profile = rt->PreferredProfile;
   if (!AppSettings_Save(&scratch, rt->SettingsPath, &settings)) {
     StrBuf message = StrBuf_Make(&scratch, rt->SettingsPath.Length + 96);
     StrBuf_AppendCStr(
         &message,
-        "The provider/model selection is active, but settings could not be saved to ");
+        "The model configuration is active, but settings could not be saved to ");
     StrBuf_Append(&message, rt->SettingsPath);
     StrBuf_AppendChar(&message, '.');
     EmitCommandError(ux, StrBuf_View(&message));
@@ -1011,22 +1094,29 @@ static bool PersistRuntimeSelection(InteractiveRuntime* rt, const AppCommandUx* 
 }
 
 static bool ActivateRuntimeSelection(InteractiveRuntime* rt, const ProviderSpec* spec,
-                                     const Model& model, const AppCommandUx* ux,
+                                     const Model& model,
+                                     ModelRequestProfile preference,
+                                     const AppCommandUx* ux,
                                      bool* persisted = nullptr) {
-  if (!rt->Harness || !spec || !spec->CreateProvider || !model.Id.Length)
+  if (!rt->Harness || !spec || !spec->CreateProvider || !model.Id.Length ||
+      !Model_MetadataIsValid(&model))
     return false;
 
+  preference = Model_NormalizeRequestPreference(&model, preference);
+  ModelRequestProfile activeProfile =
+      Model_ResolveRequestProfile(&model, preference);
   Provider provider = spec->CreateProvider(rt->Mem);
   SessionResult changed =
-      AgentHarness_SetModel(rt->Harness, model, provider);
+      AgentHarness_SetModel(rt->Harness, model, provider, activeProfile);
   if (!SessionResult_IsOk(changed)) {
     EmitCommandError(ux, changed.Message);
     return false;
   }
   rt->Spec = spec;
   rt->CurrentModel = model;
-  rt->Harness->Config.Stream.ApiKey = {};
-  if (rt->TuiView) Tui_SetModelName(rt->TuiView, model.Id);
+  rt->PreferredProfile = preference;
+  if (rt->TuiView)
+    Tui_SetModelProfile(rt->TuiView, model.Id, activeProfile);
   bool saved = PersistRuntimeSelection(rt, ux);
   if (persisted) *persisted = saved;
   RuntimeCheckAuth(rt, ux, false);
@@ -1034,13 +1124,29 @@ static bool ActivateRuntimeSelection(InteractiveRuntime* rt, const ProviderSpec*
 }
 
 static StrView SelectionMessage(InteractiveRuntime* rt, const char* prefix) {
+  ModelRequestProfile profile = rt->Harness->Config.Stream.Profile;
   StrBuf message =
-      StrBuf_Make(rt->Mem, rt->Spec->Name.Length + rt->CurrentModel.Id.Length + 48);
+      StrBuf_Make(rt->Mem, rt->Spec->Name.Length +
+                               rt->CurrentModel.Id.Length + 96);
   StrBuf_AppendCStr(&message, prefix);
   StrBuf_Append(&message, rt->Spec->Name);
   StrBuf_AppendCStr(&message, " model '");
   StrBuf_Append(&message, rt->CurrentModel.Id);
-  StrBuf_AppendCStr(&message, "'.");
+  StrBuf_AppendChar(&message, '\'');
+  if (profile.Effort != ModelEffort::None) {
+    StrBuf_AppendCStr(&message, " at ");
+    StrBuf_Append(&message, ModelEffort_Name(profile.Effort));
+    StrBuf_AppendCStr(&message, " effort");
+  }
+  if (profile.ContextWindow) {
+    char context[MODEL_CONTEXT_WINDOW_LABEL_CAPACITY];
+    u32 length = ModelContextWindow_Format(
+        context, sizeof(context), profile.ContextWindow);
+    StrBuf_AppendCStr(&message, " with ");
+    StrBuf_Append(&message, StrView{context, length});
+    StrBuf_AppendCStr(&message, " context");
+  }
+  StrBuf_AppendChar(&message, '.');
   return StrBuf_View(&message);
 }
 
@@ -1070,7 +1176,8 @@ static AppCommandHandlerResult HandleModelCommand(void* user, const AppCommandUx
     if (model.Status == RuntimeChoiceStatus::Failed)
       return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
                                      model.Message};
-    if (!ActivateRuntimeSelection(rt, provider.Spec, model.Selected, ux))
+    if (!ActivateRuntimeSelection(rt, provider.Spec, model.Selected,
+                                  model.Profile, ux))
       return AppCommandHandlerResult{
           AppCommandHandlerStatus::Failed,
           SVL("The selected model could not be activated.")};
@@ -1109,7 +1216,8 @@ static AppCommandHandlerResult HandleLoginCommand(void* user, const AppCommandUx
       Model fallback =
           provider.Spec->CreateModel(rt->Mem, provider.Spec->DefaultModel);
       bool persisted = false;
-      if (!ActivateRuntimeSelection(rt, provider.Spec, fallback, ux, &persisted))
+      if (!ActivateRuntimeSelection(rt, provider.Spec, fallback,
+                                    ModelRequestProfile{}, ux, &persisted))
         return AppCommandHandlerResult{
             AppCommandHandlerStatus::Failed,
             SVL("Login succeeded, but the provider could not be activated.")};
@@ -1128,7 +1236,8 @@ static AppCommandHandlerResult HandleLoginCommand(void* user, const AppCommandUx
           &notice, persisted ? "' and saved the provider selection."
                              : "' in memory; settings were not saved.");
       EmitCommandNotice(ux, StrBuf_View(&notice));
-    } else if (!ActivateRuntimeSelection(rt, provider.Spec, model.Selected, ux)) {
+    } else if (!ActivateRuntimeSelection(rt, provider.Spec, model.Selected,
+                                         model.Profile, ux)) {
       return AppCommandHandlerResult{
           AppCommandHandlerStatus::Failed,
           SVL("Login succeeded, but the selected model could not be activated.")};
@@ -1354,6 +1463,7 @@ static SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
   }
   const ProviderSpec* targetSpec = rt->Spec;
   Model targetModel = rt->CurrentModel;
+  ModelRequestProfile targetProfile = config.Stream.Profile;
   if (targetState && targetState->Provider.Length &&
       targetState->Model.Length) {
     if (rt->Faux) {
@@ -1377,9 +1487,12 @@ static SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
             SVL("the target session uses an unavailable provider"));
       }
       targetModel = targetSpec->CreateModel(rt->Mem, targetState->Model);
+      targetProfile = Model_ResolveRequestPreference(
+          &targetModel, rt->PreferredProfile);
       config.ModelInfo = targetModel;
       config.ProviderImpl = targetSpec->CreateProvider(rt->Mem);
       config.Stream.ApiKey = {};
+      config.Stream.Profile = targetProfile;
     }
   }
 
@@ -1472,7 +1585,7 @@ static SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
     EmitPromptDiagnostics(rt->Prompt, ux);
   }
   if (rt->TuiView) {
-    Tui_SetModelName(rt->TuiView, targetModel.Id);
+    Tui_SetModelProfile(rt->TuiView, targetModel.Id, targetProfile);
     Tui_LoadStartupContext(rt->TuiView);
   }
   ArenaRelease(&scratch);
@@ -2498,7 +2611,8 @@ static bool RuntimeResetSession(InteractiveRuntime* rt, const AppCommandUx* ux) 
   }
   SessionResult selected =
       AgentHarness_SetModel(rt->Harness, rt->CurrentModel,
-                            rt->Harness->Config.ProviderImpl);
+                            rt->Harness->Config.ProviderImpl,
+                            rt->Harness->Config.Stream.Profile);
   if (!SessionResult_IsOk(selected)) {
     EmitCommandError(ux, selected.Message);
     return false;
@@ -2808,6 +2922,7 @@ static void RunPlainRepl(InteractiveRuntime* rt, Faux* fauxState) {
 static void RunTuiRepl(InteractiveRuntime* rt, Faux* fauxState) {
   TuiOpts opts;
   opts.ModelName = rt->Faux ? SVL("faux") : rt->CurrentModel.Id;
+  opts.Profile = rt->Harness->Config.Stream.Profile;
   opts.Color = (getenv("NO_COLOR") == nullptr);
   u32 catalogCount = AppCommandSpec_Count();
   TuiCommandSpec* commands = ArenaPushArray(rt->Mem, TuiCommandSpec, catalogCount);
@@ -3105,6 +3220,21 @@ int main(int argc, char** argv) {
     model.Name = model.Id;
     model.Provider = SVL("faux");
   }
+  bool unsupportedProfilePreference = false;
+  ModelRequestProfile preference =
+      faux ? ModelRequestProfile{}
+           : Model_NormalizeRequestPreference(
+                 &model, selected.RequestedProfile,
+                 &unsupportedProfilePreference);
+  ModelRequestProfile profile =
+      faux ? ModelRequestProfile{}
+           : Model_ResolveRequestProfile(&model, preference);
+  if (unsupportedProfilePreference) {
+    fprintf(stderr,
+            "warning: saved effort/context preferences are unsupported by model "
+            "'%.*s'; using model defaults where needed\n",
+            (int)model.Id.Length, model.Id.Data);
+  }
   FileLock_Init();
   Tool tools[] = {ReadTool(), WriteTool(), EditTool(), LsTool(),
                   FindTool(), GrepTool(), ShellTool()};
@@ -3157,6 +3287,7 @@ int main(int argc, char** argv) {
   harnessConfig.ToolCount = sizeof(tools) / sizeof(tools[0]);
   harnessConfig.ProviderImpl =
       faux ? Faux_Provider(&fauxState) : selected.Spec->CreateProvider(&arena);
+  harnessConfig.Stream.Profile = profile;
   harnessConfig.ToolExec = ToolExecution::Parallel;
   harnessConfig.Retry.Enabled = true;
   harnessConfig.Retry.MaxRetries = 3;
@@ -3265,11 +3396,13 @@ int main(int argc, char** argv) {
         selected.Spec = restored;
         model = restored->CreateModel(
             &arena, modelOverride ? SV(modelOverride) : state.Model);
+        profile = Model_ResolveRequestPreference(&model, preference);
         harness.Config.ModelInfo = model;
         harness.Config.ProviderImpl = restored->CreateProvider(&arena);
+        harness.Config.Stream.Profile = profile;
         if (modelOverride && !harness.Suspended) {
           SessionResult overridden = AgentHarness_SetModel(
-              &harness, model, harness.Config.ProviderImpl);
+              &harness, model, harness.Config.ProviderImpl, profile);
           if (!SessionResult_IsOk(overridden)) {
             fprintf(stderr, "error: failed to apply model override: %.*s\n",
                     (int)overridden.Message.Length, overridden.Message.Data);
@@ -3283,7 +3416,7 @@ int main(int argc, char** argv) {
       }
     } else if (SessionResult_IsOk(snapshot) && !harness.Suspended) {
       SessionResult selectedModel = AgentHarness_SetModel(
-          &harness, model, harness.Config.ProviderImpl);
+          &harness, model, harness.Config.ProviderImpl, profile);
       if (!SessionResult_IsOk(selectedModel)) {
         fprintf(stderr, "error: failed to initialize session model: %.*s\n",
                 (int)selectedModel.Message.Length,
@@ -3298,7 +3431,7 @@ int main(int argc, char** argv) {
     ArenaRelease(&scratch);
   } else {
     SessionResult selectedModel = AgentHarness_SetModel(
-        &harness, model, harnessConfig.ProviderImpl);
+        &harness, model, harnessConfig.ProviderImpl, profile);
     if (!SessionResult_IsOk(selectedModel)) {
       fprintf(stderr, "error: failed to persist initial model: %.*s\n",
               (int)selectedModel.Message.Length, selectedModel.Message.Data);
@@ -3315,6 +3448,7 @@ int main(int argc, char** argv) {
   runtime.SettingsPath = settingsPath;
   runtime.Spec = selected.Spec;
   runtime.CurrentModel = model;
+  runtime.PreferredProfile = preference;
   runtime.Harness = &harness;
   runtime.Sessions = &sessions;
   runtime.ProjectKey = projectKey;

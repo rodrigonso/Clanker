@@ -10,6 +10,102 @@
 
 static bool EqC(StrView s, const char* c) { return StrView_EqCStr(s, c); }
 
+static bool StartsWith(StrView value, StrView prefix) {
+  return prefix.Length <= value.Length &&
+         memcmp(value.Data, prefix.Data, prefix.Length) == 0;
+}
+
+static const Model ANTHROPIC_FALLBACK_MODELS[] = {
+    {
+        SVL("claude-sonnet-4-6"),
+        SVL("Claude Sonnet 4.6"),
+        SVL("anthropic"),
+        SVL("anthropic-messages"),
+        SVL("https://api.anthropic.com"),
+        1000000,
+        8192,
+        true,
+        MODEL_EFFORT_STANDARD_MASK |
+            ModelEffort_Bit(ModelEffort::Max),
+        ModelEffort::High,
+    },
+    {
+        SVL("claude-opus-4-6"),
+        SVL("Claude Opus 4.6"),
+        SVL("anthropic"),
+        SVL("anthropic-messages"),
+        SVL("https://api.anthropic.com"),
+        1000000,
+        8192,
+        true,
+        MODEL_EFFORT_STANDARD_MASK |
+            ModelEffort_Bit(ModelEffort::Max),
+        ModelEffort::High,
+    },
+    {
+        SVL("claude-haiku-4-5"),
+        SVL("Claude Haiku 4.5"),
+        SVL("anthropic"),
+        SVL("anthropic-messages"),
+        SVL("https://api.anthropic.com"),
+        200000,
+        8192,
+        true,
+    },
+};
+
+struct AnthropicCapabilitySpec {
+  StrView Prefix;
+  u32 ContextWindow;
+  u8 EffortMask;
+};
+
+static const AnthropicCapabilitySpec ANTHROPIC_CAPABILITIES[] = {
+    {SVL("claude-opus-5"), 1000000, MODEL_EFFORT_ALL_MASK},
+    {SVL("claude-opus-4-8"), 1000000, MODEL_EFFORT_ALL_MASK},
+    {SVL("claude-opus-4-7"), 1000000, MODEL_EFFORT_ALL_MASK},
+    {SVL("claude-sonnet-5"), 1000000, MODEL_EFFORT_ALL_MASK},
+    {SVL("claude-fable-5"), 1000000, MODEL_EFFORT_ALL_MASK},
+    {SVL("claude-mythos"), 1000000, MODEL_EFFORT_ALL_MASK},
+    {SVL("claude-opus-4-5"), 200000, MODEL_EFFORT_STANDARD_MASK},
+    {SVL("claude-sonnet-4-5"), 200000, 0},
+};
+
+static void ApplyKnownModelMetadata(Model* model) {
+  for (u32 i = 0; i < Anthropic_FallbackModelCount(); i++) {
+    const Model* fallback = &ANTHROPIC_FALLBACK_MODELS[i];
+    if (!StartsWith(model->Id, fallback->Id)) continue;
+    model->ContextWindow = fallback->ContextWindow;
+    model->Reasoning = fallback->Reasoning;
+    model->EffortMask = fallback->EffortMask;
+    model->DefaultEffort = fallback->DefaultEffort;
+    if (StrView_Eq(model->Id, fallback->Id)) model->Name = fallback->Name;
+    return;
+  }
+  for (u32 i = 0;
+       i < sizeof(ANTHROPIC_CAPABILITIES) /
+               sizeof(ANTHROPIC_CAPABILITIES[0]);
+       i++) {
+    const AnthropicCapabilitySpec* capability =
+        &ANTHROPIC_CAPABILITIES[i];
+    if (!StartsWith(model->Id, capability->Prefix)) continue;
+    model->ContextWindow = capability->ContextWindow;
+    model->Reasoning = true;
+    model->EffortMask = capability->EffortMask;
+    if (model->EffortMask) model->DefaultEffort = ModelEffort::High;
+    return;
+  }
+}
+
+const Model* Anthropic_FallbackModels() {
+  return ANTHROPIC_FALLBACK_MODELS;
+}
+
+u32 Anthropic_FallbackModelCount() {
+  return (u32)(sizeof(ANTHROPIC_FALLBACK_MODELS) /
+               sizeof(ANTHROPIC_FALLBACK_MODELS[0]));
+}
+
 // Model metadata (pure data; lives here so tests need not link the HTTP layer).
 Model Anthropic_Model(StrView id) {
   Model m = {};
@@ -18,10 +114,23 @@ Model Anthropic_Model(StrView id) {
   m.Provider = SVL("anthropic");
   m.Api = SVL("anthropic-messages");
   m.BaseUrl = SVL("https://api.anthropic.com");
-  m.ContextWindow = 200000;
   m.MaxTokens = 8192;
-  m.Reasoning = false;
+  ApplyKnownModelMetadata(&m);
   return m;
+}
+
+StrView Anthropic_ContextBeta(const Model* model,
+                              const StreamOptions* options) {
+  if (!model || !options || model->ContextWindowOptionCount < 2)
+    return {};
+  ModelRequestProfile profile =
+      Model_ResolveRequestProfile(model, options->Profile);
+  if (!Model_RequestProfileIsValid(model, profile))
+    return {};
+  if (profile.ContextWindow == 1000000 &&
+      model->ContextWindow != 1000000)
+    return SVL("context-1m-2025-08-07");
+  return {};
 }
 
 static bool ModelU32(JsonValue* object, const char* key, u32* value, bool* present) {
@@ -243,6 +352,9 @@ static void WriteAssistantContent(StrBuf* b, const Message* m) {
 
 StrBuf Anthropic_BuildRequest(Arena* arena, const Model* model, const LlmContext* ctx,
                               const StreamOptions* opt) {
+  ModelRequestProfile profile =
+      Model_ResolveRequestProfile(model, opt ? opt->Profile
+                                             : ModelRequestProfile{});
   StrBuf b = StrBuf_Make(arena, 4096);
   StrBuf_AppendCStr(&b, "{\"model\":");
   Json_WriteString(&b, model->Id);
@@ -251,6 +363,11 @@ StrBuf Anthropic_BuildRequest(Arena* arena, const Model* model, const LlmContext
   StrBuf_AppendCStr(&b, ",\"max_tokens\":");
   StrBuf_AppendU64(&b, (u64)maxTok);
   StrBuf_AppendCStr(&b, ",\"stream\":true");
+  if (profile.Effort != ModelEffort::None) {
+    StrBuf_AppendCStr(&b, ",\"output_config\":{\"effort\":");
+    Json_WriteString(&b, ModelEffort_Name(profile.Effort));
+    StrBuf_AppendChar(&b, '}');
+  }
 
   // OAuth (subscription) tokens require the Claude Code identity as the first
   // system block, with the caller's system prompt appended after it.

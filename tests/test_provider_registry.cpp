@@ -81,7 +81,9 @@ static void TestAnthropicModelDiscovery() {
       StrView_EqCStr(fixture.Versions[0], "2023-06-01"));
   CHECK_ALL(StrView_EqCStr(live.Models[0].Name, "Live Sonnet"),
             live.Models[0].ContextWindow == 1000000, live.Models[0].MaxTokens == 64000,
-            live.Models[0].Reasoning, StrView_EqCStr(live.Models[1].Id, "claude-extra"));
+            live.Models[0].Reasoning,
+            Model_SupportsEffort(&live.Models[0], ModelEffort::Max),
+            StrView_EqCStr(live.Models[1].Id, "claude-extra"));
 
   const ProviderSpec* spec = ProviderRegistry_Find(SVL("anthropic"));
   ProviderModelList merged =
@@ -186,11 +188,16 @@ void TestProviderRegistry() {
   manualId[0] = 'x';
   CHECK_ALL(StrView_EqCStr(manual.Id, "claude-manual"),
             StrView_EqCStr(manual.Name, "claude-manual"),
-            StrView_Eq(manual.Provider, spec->Id));
+            StrView_Eq(manual.Provider, spec->Id),
+            manual.ContextWindow == 0, manual.EffortMask == 0);
 
   Model fallback = spec->CreateModel(&arena, spec->FallbackModels[0].Id);
   CHECK_ALL(StrView_Eq(fallback.Id, spec->DefaultModel),
-            StrView_EqCStr(fallback.Name, "Claude Sonnet 4.6"));
+            StrView_EqCStr(fallback.Name, "Claude Sonnet 4.6"),
+            fallback.ContextWindow == 1000000,
+            fallback.MaxTokens == 8192,
+            Model_SupportsEffort(&fallback, ModelEffort::Medium),
+            Model_SupportsEffort(&fallback, ModelEffort::Max));
 
   Provider provider = spec->CreateProvider(&arena);
   CHECK(provider.Stream != nullptr);

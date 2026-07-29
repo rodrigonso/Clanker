@@ -53,8 +53,11 @@ void AnthropicParse_Feed(AnthropicParse* st, StrView chunk);
 
 // ---- provider (anthropic.cpp) --------------------------------------------
 
-// Build a Model entry with Anthropic defaults (base URL, context window).
+// Build a Model entry with Anthropic defaults and known capability metadata.
 Model Anthropic_Model(StrView id);
+const Model* Anthropic_FallbackModels();
+u32 Anthropic_FallbackModelCount();
+StrView Anthropic_ContextBeta(const Model* model, const StreamOptions* options);
 
 // Provider that streams over HTTP. Requires libcurl (clank_http).
 Provider Anthropic_Provider();

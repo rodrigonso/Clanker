@@ -302,11 +302,15 @@ SessionResult AgentHarness_Load(Arena* arena, AgentHarness* harness,
 
 SessionResult AgentHarness_Init(AgentHarness* harness, SessionLog log,
                                 const AgentHarnessConfig* config) {
-  if (!harness || !config || !log.ReadAll || !log.Append || !log.Writable)
+  if (!harness || !config || !log.ReadAll || !log.Append || !log.Writable ||
+      !Model_RequestProfileIsValid(&config->ModelInfo,
+                                   config->Stream.Profile))
     return Invalid("harness initialization arguments are invalid");
   *harness = AgentHarness{};
   harness->Log = log;
   harness->Config = *config;
+  harness->Config.Stream.Profile = Model_ResolveRequestProfile(
+      &harness->Config.ModelInfo, harness->Config.Stream.Profile);
   harness->Runtime = ArenaCreate();
   harness->Work = ArenaCreate();
   Mutex_Init(&harness->StateLock);
@@ -727,12 +731,14 @@ SessionResult AgentHarness_SetName(AgentHarness* harness, StrView name) {
   return AgentHarness_Append(harness, &record, 1);
 }
 
-SessionResult AgentHarness_SetModel(AgentHarness* harness,
-                                    Model model,
-                                    Provider provider) {
+SessionResult AgentHarness_SetModel(AgentHarness* harness, Model model,
+                                    Provider provider,
+                                    ModelRequestProfile profile) {
   if (!harness || !harness->Initialized || model.Id.Length == 0 ||
-      model.Provider.Length == 0 || !provider.Stream)
+      model.Provider.Length == 0 || !provider.Stream ||
+      !Model_RequestProfileIsValid(&model, profile))
     return Invalid("model arguments are invalid");
+  profile = Model_ResolveRequestProfile(&model, profile);
   {
     ScopedLock lock(&harness->StateLock);
     SessionResult idle =
@@ -766,6 +772,7 @@ SessionResult AgentHarness_SetModel(AgentHarness* harness,
       harness->Config.ModelInfo = model;
       harness->Config.ProviderImpl = provider;
       harness->Config.Stream.ApiKey = {};
+      harness->Config.Stream.Profile = profile;
     }
     harness->Running = false;
   }

@@ -4,26 +4,43 @@
 
 // Anthropic Messages provider: HTTP glue around the protocol module.
 
+constexpr u32 ANTHROPIC_HEADER_CAPACITY = 6;
+
 static bool OnHttpData(void* user, StrView chunk) {
   AnthropicParse_Feed((AnthropicParse*)user, chunk);
   return true;
 }
 
-static u32 Anthropic_BuildHeaders(Arena* arena, StrView token, HttpHeader* headers) {
+static u32 Anthropic_BuildHeaders(Arena* arena, StrView token,
+                                  const Model* model,
+                                  const StreamOptions* options,
+                                  HttpHeader* headers) {
   u32 count = 0;
   headers[count++] = HttpHeader{SVL("anthropic-version"), SVL("2023-06-01")};
   headers[count++] = HttpHeader{SVL("content-type"), SVL("application/json")};
-  if (Anthropic_IsOAuthToken(token)) {
+  StrView contextBeta = Anthropic_ContextBeta(model, options);
+  bool oauth = Anthropic_IsOAuthToken(token);
+  if (oauth) {
     StrBuf bearer = StrBuf_Make(arena, token.Length + 8);
     StrBuf_AppendCStr(&bearer, "Bearer ");
     StrBuf_Append(&bearer, token);
     headers[count++] = HttpHeader{SVL("authorization"), StrBuf_View(&bearer)};
-    headers[count++] =
-        HttpHeader{SVL("anthropic-beta"), SVL("claude-code-20250219,oauth-2025-04-20")};
     headers[count++] = HttpHeader{SVL("user-agent"), SVL("claude-cli/2.1.75")};
     headers[count++] = HttpHeader{SVL("x-app"), SVL("cli")};
   } else {
     headers[count++] = HttpHeader{SVL("x-api-key"), token};
+  }
+  if (oauth || contextBeta.Length) {
+    StrView oauthBetas = SVL("claude-code-20250219,oauth-2025-04-20");
+    StrBuf betas =
+        StrBuf_Make(arena, oauthBetas.Length + contextBeta.Length + 2);
+    if (oauth) StrBuf_Append(&betas, oauthBetas);
+    if (contextBeta.Length) {
+      if (betas.Length) StrBuf_AppendChar(&betas, ',');
+      StrBuf_Append(&betas, contextBeta);
+    }
+    headers[count++] =
+        HttpHeader{SVL("anthropic-beta"), StrBuf_View(&betas)};
   }
   return count;
 }
@@ -31,16 +48,32 @@ static u32 Anthropic_BuildHeaders(Arena* arena, StrView token, HttpHeader* heade
 static bool Anthropic_Stream(void* ctx, Arena* arena, const Model* model, const LlmContext* context,
                              const StreamOptions* options, StreamSink sink, Message* out) {
   (void)ctx;
-  StrBuf body = Anthropic_BuildRequest(arena, model, context, options);
+  StreamOptions resolved = options ? *options : StreamOptions{};
+  if (!Model_RequestProfileIsValid(model, resolved.Profile)) {
+    Message invalid = Message_AssistantEmpty(arena);
+    invalid.Model = model ? model->Id : StrView{};
+    invalid.Provider = model ? model->Provider : StrView{};
+    invalid.Stop = StopReason::Error;
+    invalid.ErrorMessage =
+        SVL("the selected model does not support the requested effort or context window");
+    StreamEvent error = {};
+    error.Kind = StreamEventKind::Error;
+    StreamSink_Emit(sink, error);
+    *out = invalid;
+    return false;
+  }
+  resolved.Profile =
+      Model_ResolveRequestProfile(model, resolved.Profile);
+  StrBuf body = Anthropic_BuildRequest(arena, model, context, &resolved);
 
   StrBuf url = StrBuf_Make(arena, model->BaseUrl.Length + 16);
   StrBuf_Append(&url, model->BaseUrl);
   StrBuf_AppendCStr(&url, "/v1/messages");
 
-  StrView token = options ? options->ApiKey : StrView{"", 0};
+  StrView token = resolved.ApiKey;
 
-  HttpHeader headers[6];
-  u32 hc = Anthropic_BuildHeaders(arena, token, headers);
+  HttpHeader headers[ANTHROPIC_HEADER_CAPACITY];
+  u32 hc = Anthropic_BuildHeaders(arena, token, model, &resolved, headers);
 
   Message m = Message_AssistantEmpty(arena);
   m.Model = model->Id;
@@ -64,7 +97,7 @@ static bool Anthropic_Stream(void* ctx, Arena* arena, const Model* model, const 
   hsink.User = &st;
   hsink.OnData = OnHttpData;
 
-  HttpResult r = Http_Stream(arena, &req, hsink, options ? options->Abort : nullptr);
+  HttpResult r = Http_Stream(arena, &req, hsink, resolved.Abort);
 
   m.Use = st.Use;
   m.Timestamp = NowMillis();
@@ -165,8 +198,9 @@ ProviderModelList Anthropic_ListModelsWithFetch(Arena* arena, StrView token, vol
       AppendQueryValue(&url, afterId);
     }
 
-    HttpHeader headers[6];
-    u32 headerCount = Anthropic_BuildHeaders(arena, token, headers);
+    HttpHeader headers[ANTHROPIC_HEADER_CAPACITY];
+    u32 headerCount =
+        Anthropic_BuildHeaders(arena, token, nullptr, nullptr, headers);
     HttpRequest request = {};
     request.Method = SVL("GET");
     request.Url = StrBuf_View(&url);

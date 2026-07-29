@@ -38,7 +38,23 @@ void TestSettings() {
       SVL("{\"provider\":\"anthropic\",\"model\":\"legacy\"}")));
   CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
         AppSettingsLoadResult::Success);
-  CHECK(loaded.DefaultTrust == DefaultProjectTrust::Ask);
+  CHECK_ALL(loaded.DefaultTrust == DefaultProjectTrust::Ask,
+            loaded.Profile.Effort == ModelEffort::None,
+            loaded.Profile.ContextWindow == 0);
+
+  CHECK(ConfigFile_WriteAtomic(
+      &a, SV(path),
+      SVL("{\"provider\":\"anthropic\",\"model\":\"bad\","
+          "\"effort\":\"extreme\"}")));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+        AppSettingsLoadResult::Malformed);
+
+  CHECK(ConfigFile_WriteAtomic(
+      &a, SV(path),
+      SVL("{\"provider\":\"anthropic\",\"model\":\"bad\","
+          "\"contextWindow\":1.5}")));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+        AppSettingsLoadResult::Malformed);
 
   CHECK(ConfigFile_WriteAtomic(
       &a, SV(path),
@@ -51,11 +67,15 @@ void TestSettings() {
   saved.Provider = SVL("anthropic");
   saved.Model = SVL("claude-\"test\"");
   saved.DefaultTrust = DefaultProjectTrust::Always;
+  saved.Profile.Effort = ModelEffort::Medium;
+  saved.Profile.ContextWindow = 1000000;
   CHECK(AppSettings_Save(&a, SV(path), &saved));
   CHECK(AppSettings_Load(&a, SV(path), &loaded) == AppSettingsLoadResult::Success);
   CHECK_ALL(StrView_Eq(loaded.Provider, saved.Provider),
             StrView_Eq(loaded.Model, saved.Model),
-            loaded.DefaultTrust == DefaultProjectTrust::Always);
+            loaded.DefaultTrust == DefaultProjectTrust::Always,
+  loaded.Profile.Effort == ModelEffort::Medium,
+  loaded.Profile.ContextWindow == 1000000);
 
 #if !defined(_WIN32)
   struct stat st = {};

@@ -1,5 +1,6 @@
 #include "agent/event.h"
 #include "agent/harness.h"
+#include <string.h>
 #include "base/arena.h"
 #include "base/array.h"
 #include "check.h"
@@ -99,6 +100,23 @@ u64 FrameHash(const Tui* t) {
   return hash;
 }
 
+bool ScreenRowContains(const Tui* t, u16 row, const char* needle) {
+  u32 length = (u32)strlen(needle);
+  if (!length || row >= t->Scr.Rows || length > t->Scr.Cols) return false;
+  for (u16 x = 0; x + length <= t->Scr.Cols; x++) {
+    bool match = true;
+    for (u32 i = 0; i < length; i++) {
+      if (Screen_BackAt(&t->Scr, (u16)(x + i), row).Ch !=
+          (u8)needle[i]) {
+        match = false;
+        break;
+      }
+    }
+    if (match) return true;
+  }
+  return false;
+}
+
 u16 ScrollbarColumn(const Tui* t) { return (u16)(t->Scr.Cols - 1); }
 
 u32 ScrollMaxTop(const Tui* t) {
@@ -135,6 +153,8 @@ bool SessionUiCleared(const Tui* t, usize usedBefore) {
 
 bool SessionContextPreserved(const Tui* t, const AgentHarness* harness) {
   return StrView_Eq(t->ModelName, SVL("kept-model")) &&
+         t->Profile.Effort == ModelEffort::Medium &&
+         t->Profile.ContextWindow == 1000000 &&
          StrView_Eq(t->Cwd, SVL("kept-cwd")) &&
          StrView_Eq(t->Branch, SVL("kept-branch")) &&
          t->Harness == harness;
@@ -1564,6 +1584,7 @@ void TestTui() {
     Arena ac = ArenaCreate();
     TuiOpts oc;
     oc.ModelName = SVL("before");
+    oc.Profile = ModelRequestProfile{ModelEffort::Low, 200000};
     oc.Color = false;
     Tui tc;
     Tui_InitModel(&tc, &ac, oc);
@@ -1574,8 +1595,19 @@ void TestTui() {
     CHECK_ALL(AnyRow(&ac, &tc, "model discovery unavailable"),
               AnyRow(&ac, &tc, "settings write failed"));
 
-    Tui_SetModelName(&tc, SVL("after"));
-    CHECK(StrView_Eq(tc.ModelName, SVL("after")));
+    Tui_SetModelProfile(
+        &tc, SVL("after"),
+        ModelRequestProfile{ModelEffort::Medium, 1000000});
+    CHECK_ALL(StrView_Eq(tc.ModelName, SVL("after")),
+              tc.Profile.Effort == ModelEffort::Medium,
+              tc.Profile.ContextWindow == 1000000);
+    Tui_ComposeFrame(&tc, 80, 12);
+    CHECK_ALL(ScreenRowContains(&tc, 11, "after"),
+              ScreenRowContains(&tc, 11, "e:medium"),
+              ScreenRowContains(&tc, 11, "ctx:1M"));
+    Tui_ComposeFrame(&tc, 20, 12);
+    CHECK_ALL(ScreenRowContains(&tc, 11, "after"),
+              !ScreenRowContains(&tc, 11, "ctx:1M"));
 
     Tui_BeginOperation(&tc, SVL("login"));
     Tui_SetOperationStatus(&tc, SVL("waiting for approval"));
@@ -1609,6 +1641,7 @@ void TestTui() {
     Arena ar = ArenaCreate();
     TuiOpts orr;
     orr.ModelName = SVL("kept-model");
+    orr.Profile = ModelRequestProfile{ModelEffort::Medium, 1000000};
     orr.Color = false;
     Tui resetTui;
     Tui_InitModel(&resetTui, &ar, orr);

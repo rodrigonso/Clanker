@@ -7,7 +7,7 @@ const AppCommandSpec kCommands[] = {
      SVL("Sign in and choose a provider"), SVL("Usage: /login"),
      AppCommandArgumentPolicy::None},
     {AppCommandKind::Model, SVL("model"), {},
-     SVL("Change the active provider and model"), SVL("Usage: /model"),
+     SVL("Change the active model, effort, and context"), SVL("Usage: /model"),
      AppCommandArgumentPolicy::None},
     {AppCommandKind::Clear, SVL("clear"), {}, SVL("Start a new session"),
      SVL("Usage: /clear"), AppCommandArgumentPolicy::None},

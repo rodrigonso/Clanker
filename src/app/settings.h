@@ -3,11 +3,13 @@
 #include "base/basics.h"
 #include "base/str.h"
 #include "app/project_trust.h"
+#include "llm/types.h"
 
 struct AppSettings {
   StrView Provider;
   StrView Model;
   DefaultProjectTrust DefaultTrust;
+  ModelRequestProfile Profile;
 };
 
 enum class AppSettingsLoadResult : u8 {

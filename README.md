@@ -158,14 +158,20 @@ the current process's resolved trust. If gated project prompt files first
 appear after startup, `/reload` fails closed and requires a restart unless an
 explicit CLI trust override covers the run.
 
+`~/.clank/settings.json` also stores the active provider/model and explicit
+effort or selectable context-window preferences. Unsupported saved values fall
+back to the selected model's defaults. Current Anthropic context windows are
+fixed metadata, so they are displayed without an extra chooser.
+
 ## TUI
 
 Running interactively on a real terminal launches a full-screen TUI: an
 alternate-screen, double-buffered **differential renderer** (own cell grid +
 scrollback), markdown-rendered assistant output, a **sticky working-directory +
 git-branch line** just above the prompt, a minimal status line along the bottom
-(spinner and state on the left; model and token usage right-aligned), and a
-**multi-line input editor**. The first frame is painted synchronously before
+(spinner and state on the left; model, supported effort/context, and token
+usage right-aligned), and a **multi-line input editor**. The first frame is
+painted synchronously before
 HTTP initialization, cwd/git context discovery, and credential warmup; key input
 starts before the remaining post-frame work. It runs three threads — the agent
 loop, a key-input thread, and a render thread (~20fps) so the spinner stays live
@@ -202,7 +208,9 @@ selectors such as `/login` and `/model` require a TTY.
 Interactive commands:
 
 - `/login` — choose an OAuth-capable provider, authenticate, then choose a model.
-- `/model` — choose a provider and a live-discovered, fallback, or manual model ID.
+- `/model` — choose a provider and a live-discovered, fallback, or manual model
+  ID, then choose the effort and context tier when that model exposes those
+  controls. Fixed context windows are displayed without an unnecessary prompt.
 - `/session` — inspect the current title, IDs, project, status, times, model,
   counts, token categories, and fork ancestry. Token totals use a trailing `+`
   when interrupted attempts have unavailable usage.
@@ -217,7 +225,8 @@ Interactive commands:
 - `/recover ...` — resume, abort, or reconcile an interrupted operation.
 - `/trust` — save project trust for a future Clank process.
 - `/reload` — transactionally reload settings and prompt context while idle.
-- `/clear` — create a fresh session while preserving provider/model selection.
+- `/clear` — create a fresh session while preserving the provider, model,
+  effort, and context selection.
 - `/exit` (or `/quit`) — close Clank and return to the shell.
 
 In the TUI, typing `/` opens a prefix-filtered command flyout over the content
@@ -230,8 +239,9 @@ Commands entered during a TUI turn run afterward; ordinary text still steers the
 active turn. In `--faux` mode, session commands work while `/login` and `/model`
 are unavailable.
 
-The selected provider/model and `defaultProjectTrust` policy are written
-atomically to `~/.clank/settings.json`.
+The selected provider/model, explicit effort/context preferences, and
+`defaultProjectTrust` policy are written atomically to
+`~/.clank/settings.json`.
 New sessions use built-in defaults, then settings, then the runtime-only `-m`
 override. Resumed sessions restore their durable provider/model ancestry; `-m`
 adds a new durable model selection. Direct IDs are exact opaque durable IDs.

@@ -70,6 +70,7 @@ struct TuiCommandSpec {
 
 struct TuiOpts {
   StrView ModelName = {};
+  ModelRequestProfile Profile = {};
   bool Color = true;
   const TuiCommandSpec* Commands = nullptr;
   u32 CommandCount = 0;
@@ -127,6 +128,7 @@ struct Tui {
   Usage Use;
   u32 Spinner;
   StrView ModelName;
+  ModelRequestProfile Profile;
   u32 QueuedCount;  // messages queued (steer/followUp/nextTurn) per last queue_update
   TuiCommandSpec* Commands;
   u32 CommandCount;
@@ -236,7 +238,8 @@ bool Tui_AcceptPrompt(Tui* t, StrView text);
 // perform network, credential, and other blocking work after the call returns.
 void Tui_CommandNotice(Tui* t, StrView text);
 void Tui_CommandError(Tui* t, StrView text);
-void Tui_SetModelName(Tui* t, StrView modelName);
+void Tui_SetModelProfile(Tui* t, StrView modelName,
+                         ModelRequestProfile profile);
 void Tui_BeginOperation(Tui* t, StrView label);
 void Tui_SetOperationStatus(Tui* t, StrView status);
 // End the operation and atomically return whether cancellation was requested.

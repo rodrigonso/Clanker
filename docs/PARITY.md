@@ -53,9 +53,9 @@ adapter. Clank collapses the core surfaces into its module tree.
 | 37 other built-in text providers (OpenAI, Google, Vertex, Bedrock, GitHub Copilot, Groq, xAI, OpenRouter, …) | ❌ | |
 | 9 other text APIs plus OpenRouter image generation | ❌ | OpenAI completions/responses/codex, Google, Vertex, Bedrock, Mistral, Azure Responses, and pi-messages are absent |
 | Prompt caching (`cache_control`) | ✅ | Anthropic system/tool-prefix breakpoint plus the two most recent message groups |
-| Thinking / reasoning streaming | 🟡 | Anthropic thinking deltas parsed; no thinking-level control |
+| Thinking / reasoning streaming | 🟡 | Anthropic thinking deltas parsed; supported models expose request-level effort control, but explicit thinking-mode/budget control remains absent |
 | Cross-provider message normalization (`transform-messages`) | 🟡 | error/aborted assistant turns are retained in the transcript but omitted from provider replay; broader provider-specific normalization is absent |
-| Model registry · `--list-models` · pricing/cost · scoped/image models | 🟡 | provider registry + live Anthropic `/v1/models` discovery; no pricing, list flag, scoped models, or image catalog |
+| Model registry · `--list-models` · pricing/cost · scoped/image models | 🟡 | provider registry + live Anthropic `/v1/models` discovery, capability metadata, effort selection, fixed Anthropic context display, and generic selectable context profiles; no pricing, list flag, scoped models, or image catalog |
 
 ## Tools
 
@@ -105,7 +105,7 @@ equivalents by default and names its command tool `shell`.
 | CLI flags | 🟡 | adds system/append prompt, context-disable, and trust overrides to model/print/login/logout/session flags; pi's provider, thinking, tool/resource, export, and mode breadth remains absent |
 | Interactive queue UX | 🟡 | steering during a run works; no distinct follow-up shortcut, queue retrieval, or one-at-a-time/all delivery settings |
 | TUI core: differential renderer, markdown, multi-line editor, reusable components, status line, scroll, selection, abort, `NO_COLOR` | ✅ core | |
-| TUI selectors/dialogs (model / session / theme / settings / login / oauth / extension / thinking / trust / diff / image / first-run) | 🟡 | generic list/text modals power login, model, rich current/all-project session browsing and naming, tree, recovery, and project-trust flows |
+| TUI selectors/dialogs (model / session / theme / settings / login / oauth / extension / thinking / trust / diff / image / first-run) | 🟡 | generic list/text modals power login, model/effort/context, rich current/all-project session browsing and naming, tree, recovery, and project-trust flows |
 | Rich editor/media features | 🟡 | bracketed paste, history, selection, and mouse are present; no path/file autocomplete, inline image rendering/paste, or external editor |
 | Slash commands | 🟡 | 15 built-ins, including `/name`, `/trust`, and `/reload`, versus pi's 22 plus dynamic extension/skill/template commands |
 | Themes · configurable keybindings | ❌ | |

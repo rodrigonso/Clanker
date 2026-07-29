@@ -965,7 +965,8 @@ void TestHarness() {
     ArenaRelease(&arena);
   }
 
-  // Model changes are durable settings and release their admission reservation.
+  // Model/profile changes atomically replace the active request configuration
+  // and release their admission reservation.
   {
     Arena arena = ArenaCreate();
     MemoryRepository memory = {};
@@ -981,16 +982,30 @@ void TestHarness() {
     Model model = {};
     model.Provider = SVL("faux-next");
     model.Id = SVL("model-next");
+    model.ContextWindow = 200000;
+    model.EffortMask = ModelEffort_Bit(ModelEffort::Medium);
+    model.DefaultEffort = ModelEffort::Medium;
+    ModelRequestProfile profile = {ModelEffort::Medium, 200000};
     Provider provider = Faux_Provider(&second);
     CHECK(SessionResult_IsOk(
-        AgentHarness_SetModel(&harness, model, provider)));
+        AgentHarness_SetModel(&harness, model, provider, profile)));
     SessionReduction state = {};
     CHECK(SessionResult_IsOk(
         AgentHarness_Snapshot(&arena, &harness, &state)));
     CHECK_ALL(!harness.Running,
               StrView_Eq(state.Provider, model.Provider),
               StrView_Eq(state.Model, model.Id),
-              StrView_Eq(harness.Config.ModelInfo.Id, model.Id));
+              StrView_Eq(harness.Config.ModelInfo.Id, model.Id),
+              harness.Config.Stream.Profile.Effort == ModelEffort::Medium,
+              harness.Config.Stream.Profile.ContextWindow == 200000);
+    Model invalid = model;
+    invalid.Id = SVL("invalid-profile");
+    CHECK(AgentHarness_SetModel(
+              &harness, invalid, provider,
+              ModelRequestProfile{ModelEffort::High, 200000})
+              .Status == SessionStatus::InvalidArgument);
+    CHECK_ALL(StrView_Eq(harness.Config.ModelInfo.Id, model.Id),
+              harness.Config.Stream.Profile.Effort == ModelEffort::Medium);
     CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
     repository.Close(repository.Ctx);
     ArenaRelease(&arena);
@@ -1236,7 +1251,13 @@ void TestHarness() {
             records.Data[i].GenerationStarted.MaxTokens == 321,
             StrView_Contains(
                 records.Data[i].GenerationStarted.EffectiveRequestJson,
-                "\"model\":\"hook-model\""));
+                "\"model\":\"hook-model\""),
+            StrView_Contains(
+                records.Data[i].GenerationStarted.EffectiveRequestJson,
+                "\"effort\":\"\""),
+            StrView_Contains(
+                records.Data[i].GenerationStarted.EffectiveRequestJson,
+                "\"contextWindow\":0"));
       }
       if (records.Data[i].Kind == SessionRecordKind::ToolStarted &&
           StrView_EqCStr(

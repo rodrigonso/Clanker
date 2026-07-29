@@ -27,8 +27,32 @@ inline Model Model_Dup(Arena* arena, const Model& source) {
   return result;
 }
 
+namespace model_list_detail {
+
+inline void MergeFallbackMetadata(Model* target, const Model& fallback) {
+  if (!target->Name.Length) target->Name = fallback.Name;
+  if (!target->Provider.Length) target->Provider = fallback.Provider;
+  if (!target->Api.Length) target->Api = fallback.Api;
+  if (!target->BaseUrl.Length) target->BaseUrl = fallback.BaseUrl;
+  if (!target->ContextWindow) target->ContextWindow = fallback.ContextWindow;
+  if (!target->MaxTokens) target->MaxTokens = fallback.MaxTokens;
+  if (!target->EffortMask) {
+    target->EffortMask = fallback.EffortMask;
+    target->DefaultEffort = fallback.DefaultEffort;
+  }
+  if (!target->ContextWindowOptionCount &&
+      fallback.ContextWindowOptionCount) {
+    target->ContextWindowOptionCount = fallback.ContextWindowOptionCount;
+    for (u32 i = 0; i < fallback.ContextWindowOptionCount; i++)
+      target->ContextWindowOptions[i] = fallback.ContextWindowOptions[i];
+  }
+}
+
+}  // namespace model_list_detail
+
 // Keep the first model for each ID. Live entries are considered first, so their
-// metadata wins while fallback entries only add models absent from discovery.
+// authoritative metadata wins while fallback entries fill missing capabilities
+// and add models absent from discovery.
 inline ProviderModelList ProviderModelList_Merge(Arena* arena, const ProviderModelList& live,
                                                  const Model* fallback, u32 fallbackCount) {
   if (live.Status != ProviderModelListStatus::Success) return live;
@@ -45,6 +69,10 @@ inline ProviderModelList ProviderModelList_Merge(Arena* arena, const ProviderMod
       bool duplicate = false;
       for (u32 k = 0; k < result.Count; k++) {
         if (StrView_Eq(result.Models[k].Id, models[i].Id)) {
+          if (sourceIndex == 1) {
+            model_list_detail::MergeFallbackMetadata(
+                &result.Models[k], models[i]);
+          }
           duplicate = true;
           break;
         }

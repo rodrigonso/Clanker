@@ -17,7 +17,7 @@ static JsonValue* LastContentBlock(JsonValue* msg) {
 
 static void TestBuildRequest() {
   Arena a = ArenaCreate();
-  Model model = Anthropic_Model(SV("claude-x"));
+  Model model = Anthropic_Model(SV("claude-sonnet-4-6"));
 
   Message msgs[3];
   msgs[0] = Message_User(&a, SV("hi"));
@@ -35,13 +35,18 @@ static void TestBuildRequest() {
   ctx.ToolCount = 1;
   StreamOptions opt = {};
   opt.MaxTokens = 1000;
+  opt.Profile.Effort = ModelEffort::Medium;
+  opt.Profile.ContextWindow = 1000000;
 
   StrBuf body = Anthropic_BuildRequest(&a, &model, &ctx, &opt);
   JsonValue* j = Json_Parse(&a, StrBuf_View(&body));
   CHECK(j != nullptr);
-  CHECK_ALL(StrView_EqCStr(Json_GetStr(j, "model"), "claude-x"),
+  CHECK_ALL(StrView_EqCStr(Json_GetStr(j, "model"), "claude-sonnet-4-6"),
             Json_GetInt(j, "max_tokens", 0) == 1000,
             Json_GetBool(j, "stream", false) == true);
+  JsonValue* outputConfig = Json_Get(j, "output_config");
+  CHECK(Json_IsObject(outputConfig));
+  CHECK(StrView_EqCStr(Json_GetStr(outputConfig, "effort"), "medium"));
   JsonValue* sys = Json_Get(j, "system");
   CHECK(Json_IsArray(sys) && sys->Count == 1);
   CHECK_ALL(StrView_EqCStr(Json_GetStr(sys->Items[0], "text"), "You are pi."),
@@ -76,6 +81,38 @@ static void TestBuildRequest() {
   CHECK(StrView_EqCStr(Json_GetStr(tools->Items[0], "name"), "read"));
 
   ArenaRelease(&a);
+}
+
+static void TestModelCapabilities() {
+  Model sonnet = Anthropic_Model(SVL("claude-sonnet-4-6-20260101"));
+  CHECK_ALL(sonnet.ContextWindow == 1000000,
+            sonnet.MaxTokens == 8192, sonnet.Reasoning,
+            Model_SupportsEffort(&sonnet, ModelEffort::Low),
+            Model_SupportsEffort(&sonnet, ModelEffort::Max),
+            !Model_SupportsEffort(&sonnet, ModelEffort::XHigh),
+            Model_DefaultEffort(&sonnet) == ModelEffort::High);
+
+  Model opus = Anthropic_Model(SVL("claude-opus-4-8"));
+  CHECK(Model_SupportsEffort(&opus, ModelEffort::XHigh));
+
+  Model unknown = Anthropic_Model(SVL("claude-unknown"));
+  CHECK_ALL(unknown.ContextWindow == 0, unknown.EffortMask == 0);
+
+  Model selectable = Anthropic_Model(SVL("claude-unknown"));
+  selectable.ContextWindow = 200000;
+  selectable.ContextWindowOptions[0] = 200000;
+  selectable.ContextWindowOptions[1] = 1000000;
+  selectable.ContextWindowOptionCount = 2;
+  StreamOptions options = {};
+  options.Profile.ContextWindow = 1000000;
+  CHECK(StrView_EqCStr(Anthropic_ContextBeta(&selectable, &options),
+                       "context-1m-2025-08-07"));
+  options.Profile.ContextWindow = 200000;
+  CHECK(Anthropic_ContextBeta(&selectable, &options).Length == 0);
+
+  StreamOptions fixed = {};
+  fixed.Profile.ContextWindow = sonnet.ContextWindow;
+  CHECK(Anthropic_ContextBeta(&sonnet, &fixed).Length == 0);
 }
 
 static void TestParseSSE() {
@@ -244,7 +281,7 @@ static void TestParseModelsResponse() {
             StrView_EqCStr(page.Models[0].Provider, "anthropic"),
             StrView_EqCStr(page.Models[0].Api, "anthropic-messages"));
   CHECK_ALL(StrView_EqCStr(page.Models[1].Name, "claude-basic"),
-            page.Models[1].ContextWindow == 200000, page.Models[1].MaxTokens == 8192,
+            page.Models[1].ContextWindow == 0, page.Models[1].MaxTokens == 8192,
             !page.Models[1].Reasoning);
 
   AnthropicModelPage empty = {};
@@ -299,12 +336,15 @@ static void TestMergeModels() {
       Anthropic_Model(SVL("claude-fallback")),
   };
   fallback[0].Name = SVL("Fallback shared");
+  fallback[0].EffortMask = ModelEffort_Bit(ModelEffort::High);
+  fallback[0].DefaultEffort = ModelEffort::High;
   fallback[1].Name = SVL("Fallback only");
   ProviderModelList merged = ProviderModelList_Merge(&a, live, fallback, 2);
   CHECK_ALL(merged.Status == ProviderModelListStatus::Success, merged.Count == 3,
             StrView_EqCStr(merged.Models[0].Id, "claude-shared"),
             StrView_EqCStr(merged.Models[0].Name, "Live shared"),
             merged.Models[0].ContextWindow == 999999,
+            Model_SupportsEffort(&merged.Models[0], ModelEffort::High),
             StrView_EqCStr(merged.Models[1].Id, "claude-live"),
             StrView_EqCStr(merged.Models[2].Id, "claude-fallback"),
             StrView_EqCStr(merged.Models[2].Name, "Fallback only"));
@@ -319,6 +359,7 @@ static void TestMergeModels() {
 }
 
 void TestAnthropic() {
+  TestModelCapabilities();
   TestBuildRequest();
   TestBuildRequestOAuth();
   TestBuildRequestCachesToolsWithoutSystem();

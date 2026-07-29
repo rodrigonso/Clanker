@@ -35,24 +35,54 @@ AppSettingsLoadResult AppSettings_Load(Arena* a, StrView path, AppSettings* out)
       (!Json_IsString(trust) ||
        !DefaultProjectTrust_Parse(trust->Str, &defaultTrust)))
     return AppSettingsLoadResult::Malformed;
+  ModelRequestProfile profile = {};
+  JsonValue* effortValue = Json_Get(root, "effort");
+  if (effortValue) {
+    if (!Json_IsString(effortValue) || !effortValue->Str.Length ||
+        !ModelEffort_Parse(effortValue->Str, &profile.Effort))
+      return AppSettingsLoadResult::Malformed;
+  }
+  JsonValue* contextValue = Json_Get(root, "contextWindow");
+  if (contextValue) {
+    if (contextValue->Kind != JsonKind::Number ||
+        contextValue->Number < 1.0 ||
+        contextValue->Number > 4294967295.0)
+      return AppSettingsLoadResult::Malformed;
+    profile.ContextWindow = (u32)contextValue->Number;
+    if ((f64)profile.ContextWindow != contextValue->Number)
+      return AppSettingsLoadResult::Malformed;
+  }
 
   out->Provider = provider->Str;
   out->Model = model->Str;
   out->DefaultTrust = defaultTrust;
+  out->Profile = profile;
   return AppSettingsLoadResult::Success;
 }
 
 bool AppSettings_Save(Arena* a, StrView path, const AppSettings* settings) {
   StrView trust = DefaultProjectTrust_Name(settings->DefaultTrust);
-  if (!trust.Length) return false;
+  StrView effort = ModelEffort_Name(settings->Profile.Effort);
+  if (!trust.Length ||
+      (settings->Profile.Effort != ModelEffort::None && !effort.Length))
+    return false;
   StrBuf content = StrBuf_Make(
-      a, settings->Provider.Length + settings->Model.Length + trust.Length + 72);
+      a, settings->Provider.Length + settings->Model.Length + trust.Length +
+             effort.Length + 128);
   StrBuf_AppendCStr(&content, "{\"provider\":");
   Json_WriteString(&content, settings->Provider);
   StrBuf_AppendCStr(&content, ",\"model\":");
   Json_WriteString(&content, settings->Model);
   StrBuf_AppendCStr(&content, ",\"defaultProjectTrust\":");
   Json_WriteString(&content, trust);
+  if (settings->Profile.Effort != ModelEffort::None) {
+    StrBuf_AppendCStr(&content, ",\"effort\":");
+    Json_WriteString(&content, effort);
+  }
+  if (settings->Profile.ContextWindow) {
+    StrBuf_AppendCStr(&content, ",\"contextWindow\":");
+    StrBuf_AppendU64(&content, settings->Profile.ContextWindow);
+  }
   StrBuf_AppendChar(&content, '}');
   return ConfigFile_WriteAtomic(a, path, StrBuf_View(&content));
 }

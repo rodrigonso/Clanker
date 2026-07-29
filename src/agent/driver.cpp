@@ -88,8 +88,24 @@ StrView EffectiveRequestJson(Arena* arena, const Model* model,
   StrBuf_AppendU64(&json, context->ToolCount);
   StrBuf_AppendCStr(&json, ",\"maxTokens\":");
   StrBuf_AppendI64(&json, options->MaxTokens);
+  StrBuf_AppendCStr(&json, ",\"effort\":");
+  Json_WriteString(&json, ModelEffort_Name(options->Profile.Effort));
+  StrBuf_AppendCStr(&json, ",\"contextWindow\":");
+  StrBuf_AppendU64(&json, options->Profile.ContextWindow);
   StrBuf_AppendChar(&json, '}');
   return StrBuf_View(&json);
+}
+
+bool ResolveProviderInput(AgentHarnessProviderInput* input) {
+  if (!input || input->ModelInfo.Provider.Length == 0 ||
+      input->ModelInfo.Id.Length == 0 ||
+      input->Options.MaxTokens < 0 ||
+      !Model_RequestProfileIsValid(&input->ModelInfo,
+                                   input->Options.Profile))
+    return false;
+  input->Options.Profile = Model_ResolveRequestProfile(
+      &input->ModelInfo, input->Options.Profile);
+  return true;
 }
 
 const SessionRecord* FindDeferred(const Array<SessionRecord>* records,
@@ -307,9 +323,7 @@ SessionResult RunProvider(AgentHarness* harness, DurableId operationId,
         return hooked;
       }
     }
-    if (effective.ModelInfo.Provider.Length == 0 ||
-        effective.ModelInfo.Id.Length == 0 ||
-        effective.Options.MaxTokens < 0) {
+    if (!ResolveProviderInput(&effective)) {
       ArenaRelease(&scratch);
       return SessionResult_Error(
           SessionStatus::HookError,
@@ -928,9 +942,7 @@ SessionResult ContinueCompaction(AgentHarness* harness, DurableId operationId,
         return SessionResult_IsOk(finished) ? hooked : finished;
       }
     }
-    if (effective.ModelInfo.Provider.Length == 0 ||
-        effective.ModelInfo.Id.Length == 0 ||
-        effective.Options.MaxTokens < 0) {
+    if (!ResolveProviderInput(&effective)) {
       SessionResult hooked = SessionResult_Error(
           SessionStatus::HookError,
           SVL("before-provider hook produced invalid settings"));
