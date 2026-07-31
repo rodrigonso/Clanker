@@ -35,7 +35,8 @@ static const char* const NON_RETRYABLE[] = {
 static const char* const RETRYABLE[] = {
     "overloaded",      "rate limit",         "rate-limit",
     "rate_limit",      "ratelimit",          "too many requests",
-    "429",             "500",                "502",
+    "408",             "409",                "429",
+    "500",             "502",
     "503",             "504",                "service unavailable",
     "service_unavailable", "server error",   "internal error",
     "provider returned error",               "network error",
@@ -52,4 +53,23 @@ bool IsRetryableError(StrView errorMessage) {
   if (ContainsAny(errorMessage, NON_RETRYABLE, (u32)(sizeof(NON_RETRYABLE) / sizeof(NON_RETRYABLE[0]))))
     return false;
   return ContainsAny(errorMessage, RETRYABLE, (u32)(sizeof(RETRYABLE) / sizeof(RETRYABLE[0])));
+}
+
+u32 AssistantRetry_DelayMs(u32 baseDelayMs, u32 maxDelayMs, u32 attemptIndex) {
+  if (maxDelayMs == 0) return 0;
+  u64 delay = baseDelayMs ? baseDelayMs : 1;
+  for (u32 i = 0; i < attemptIndex; i++) {
+    delay *= 2;
+    if (delay >= maxDelayMs) {
+      delay = maxDelayMs;
+      break;
+    }
+  }
+  if (delay > maxDelayMs) delay = maxDelayMs;
+  return (u32)delay;
+}
+
+bool AssistantRetry_ShouldRetry(StrView errorMessage, bool hasUsableContent) {
+  if (hasUsableContent) return false;
+  return IsRetryableError(errorMessage);
 }

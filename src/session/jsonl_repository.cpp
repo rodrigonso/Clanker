@@ -22,6 +22,11 @@ struct JsonlLogHandle {
   ProcessFileLock WriterLock;
   Arena State;
   Array<SessionRecord> Records;
+  // Persistent fold state, arena-backed by `State` so it lives as long as
+  // the handle. Built once (index+fold over every loaded/created record)
+  // and updated in O(1) per appended record; AppendBatch never re-validates
+  // or re-folds prior history.
+  SessionReduction Reduction;
   StrView Path;
   FILE* AppendFile;
   Mutex AppendLock;
@@ -29,6 +34,18 @@ struct JsonlLogHandle {
   bool Faulted;
   bool Closed;
 };
+
+namespace {
+// Builds `handle->Reduction` from already-validated records without
+// re-running SessionRecords_Validate (the caller -- LoadRecords or the
+// initial Created record -- has already validated them).
+void FoldAllValidated(JsonlLogHandle* handle) {
+  DurableIdIndex_Init(&handle->Reduction.Index, &handle->State,
+                      handle->Records.Count ? handle->Records.Count : 1);
+  for (u32 i = 0; i < handle->Records.Count; i++)
+    SessionReducer_Fold(&handle->Reduction, handle->Records.Data, i + 1);
+}
+}  // namespace
 
 namespace {
 
@@ -55,7 +72,55 @@ bool ValidProjectKey(StrView key) {
 
 StrView SessionsRoot(Arena* arena, JsonlRepository* repository) {
   StrView sessions = Fs_Join(arena, repository->Root, SVL("sessions"));
+  return Fs_Join(arena, sessions, SVL("v2"));
+}
+
+// v1's storage layout, kept only so JsonlRepository_Init can detect leftover
+// pre-v2 data for the one-time "old sessions were not migrated" notice (see
+// JsonlRepository::HasUnmigratedV1). v1 sessions are intentionally never
+// migrated: nothing else in this file ever reads, lists, opens, or writes
+// through this path -- SessionsRoot above always resolves to v2.
+StrView LegacyV1SessionsRoot(Arena* arena, StrView dataRoot) {
+  StrView sessions = Fs_Join(arena, dataRoot, SVL("sessions"));
   return Fs_Join(arena, sessions, SVL("v1"));
+}
+
+// True if a project directory (already known to exist) contains at least one
+// "<durableId>.jsonl" session file, mirroring the recognition rule
+// AppendProjectItems uses when actually listing sessions.
+bool ProjectDirHasSessionFile(Arena* arena, StrView projectDir) {
+  bool listed = false;
+  Array<FsEntry> files = Fs_ListDir(arena, projectDir, &listed);
+  if (!listed) return false;
+  for (u32 i = 0; i < files.Count; i++) {
+    if (files.Data[i].IsDir || files.Data[i].Name.Length <= 6) continue;
+    StrView ext = {files.Data[i].Name.Data + files.Data[i].Name.Length - 6, 6};
+    if (!StrView_Eq(ext, SVL(".jsonl"))) continue;
+    StrView idText = {files.Data[i].Name.Data, files.Data[i].Name.Length - 6};
+    DurableId parsed = {};
+    if (DurableId_Parse(idText, &parsed)) return true;
+  }
+  return false;
+}
+
+// True if `sessionsRoot` (a "sessions/v1" or "sessions/v2" directory) exists
+// and has at least one project subdirectory with at least one session file
+// in it. Only used for the one-time migration notice below -- never on the
+// normal create/open/list/fork paths.
+bool HasAnySessionData(Arena* arena, StrView sessionsRoot) {
+  if (!Fs_Exists(sessionsRoot)) return false;
+  bool listed = false;
+  Array<FsEntry> projects = Fs_ListDir(arena, sessionsRoot, &listed);
+  if (!listed) return false;
+  for (u32 i = 0; i < projects.Count; i++) {
+    if (!projects.Data[i].IsDir || !ValidProjectKey(projects.Data[i].Name)) continue;
+    Arena probe = ArenaCreate();
+    StrView projectDir = Fs_Join(&probe, sessionsRoot, projects.Data[i].Name);
+    bool hasFile = ProjectDirHasSessionFile(&probe, projectDir);
+    ArenaRelease(&probe);
+    if (hasFile) return true;
+  }
+  return false;
 }
 
 StrView ProjectDir(Arena* arena, JsonlRepository* repository, StrView projectKey) {
@@ -295,6 +360,7 @@ SessionResult BuildInfo(Arena* arena, const SessionRecord* records, u32 count,
                         bool busy, SessionInfo* out) {
   SessionMetadataBuildOptions options = {};
   options.Busy = busy;
+  options.NowMs = NowMillis();
   return SessionMetadata_Build(arena, records, count, &options, out);
 }
 
@@ -353,10 +419,10 @@ SessionResult AppendBatch(void* context, SessionRecord* input, u32 count) {
     return SessionResult_Error(SessionStatus::Faulted, SVL("session log is faulted"));
 
   Arena scratch = ArenaCreate();
-  Array<SessionRecord> candidate =
-      Array_Make<SessionRecord>(&scratch, handle->Records.Count + count);
-  for (u32 i = 0; i < handle->Records.Count; i++)
-    Array_Push(&candidate, handle->Records.Data[i]);
+  // Two-phase, O(1)-per-record validation against the already-folded
+  // `handle->Reduction` (plus a bounded scan over just this small batch);
+  // never rebuilds a full existing+new candidate array or re-validates
+  // prior history.
   Array<SessionRecord> prepared = Array_Make<SessionRecord>(&scratch, count);
   u64 firstSeq = (u64)handle->Records.Count + 1;
   for (u32 i = 0; i < count; i++) {
@@ -364,16 +430,16 @@ SessionResult AppendBatch(void* context, SessionRecord* input, u32 count) {
     record.SchemaVersion = SESSION_SCHEMA_VERSION;
     record.SessionId = handle->Records.Data[0].SessionId;
     record.Seq = firstSeq + i;
-    record.EntryClass = SessionRecord_ClassForKind(record.Kind);
+    if (!DurableId_IsSet(record.EntryId)) record.EntryId = DurableId_Generate();
     if (record.CreatedAt == 0) record.CreatedAt = NowMillis();
+    SessionResult valid = SessionReducer_ValidateAppend(
+        &handle->Reduction, &record, prepared.Data, prepared.Count);
+    if (!SessionResult_IsOk(valid)) {
+      ArenaRelease(&scratch);
+      valid.Status = SessionStatus::InvalidArgument;
+      return valid;
+    }
     Array_Push(&prepared, record);
-    Array_Push(&candidate, record);
-  }
-  SessionResult valid = SessionRecords_Validate(candidate.Data, candidate.Count);
-  if (!SessionResult_IsOk(valid)) {
-    ArenaRelease(&scratch);
-    valid.Status = SessionStatus::InvalidArgument;
-    return valid;
   }
 
   StrBuf bytes = StrBuf_Make(&scratch, count * 512);
@@ -402,6 +468,7 @@ SessionResult AppendBatch(void* context, SessionRecord* input, u32 count) {
                                  SVL("failed to retain appended session record"));
     }
     Array_Push(&handle->Records, persistent);
+    SessionReducer_Fold(&handle->Reduction, handle->Records.Data, handle->Records.Count);
     input[i] = prepared.Data[i];
   }
   u64 seq = handle->Records.Data[handle->Records.Count - 1].Seq;
@@ -446,6 +513,7 @@ SessionResult InitializeHandle(JsonlRepository* repository, Arena* callerArena,
     DestroyHandle(handle, false);
     return loaded;
   }
+  FoldAllValidated(handle);
   if (writable) {
     StrBuf native = StrBuf_Make(&handle->State, handle->Path.Length + 1);
     StrBuf_Append(&native, handle->Path);
@@ -533,7 +601,6 @@ SessionResult Create(void* context, Arena* arena, const SessionCreateOptions* op
   started.SessionId = sessionId;
   started.Seq = 1;
   started.EntryId = DurableId_Generate();
-  started.EntryClass = SessionEntryClass::Session;
   started.Kind = SessionRecordKind::SessionStarted;
   started.CreatedAt = NowMillis();
   started.SessionStarted.WorkingDirectory = options->WorkingDirectory;
@@ -582,6 +649,8 @@ SessionResult Create(void* context, Arena* arena, const SessionCreateOptions* op
     return copied;
   }
   Array_Push(&handle->Records, persistent);
+  DurableIdIndex_Init(&handle->Reduction.Index, &handle->State, 32);
+  SessionReducer_Fold(&handle->Reduction, handle->Records.Data, handle->Records.Count);
   handle->AppendFile = file;
   handle->Writable = true;
   Mutex_Init(&handle->AppendLock);
@@ -808,7 +877,7 @@ SessionResult Fork(void* context, Arena* arena, const SessionForkOptions* option
   }
   Array<const SessionRecord*> branch = {};
   SessionResult ancestry = SessionReducer_Ancestry(
-      &scratch, &reduction, options->SourceHeadId, &branch);
+      &reduction, &scratch, options->SourceHeadId, &branch);
   if (!SessionResult_IsOk(ancestry)) {
     ArenaRelease(&scratch);
     return ancestry;
@@ -899,6 +968,16 @@ void JsonlRepository_Init(JsonlRepository* repository, StrView dataRoot) {
   repository->Claims = Array_Make<JsonlWriterClaim>(&repository->Mem, 8);
   Mutex_Init(&repository->Lock);
   repository->Initialized = true;
+
+  // One-time check: v1 sessions are never migrated, read, listed, or opened
+  // by this (v2) repository, so the only thing left to do with v1 data is
+  // let a caller (e.g. app startup) inform the user it is still there,
+  // untouched, under the old directory.
+  Arena scratch = ArenaCreate();
+  bool hasV1 = HasAnySessionData(&scratch, LegacyV1SessionsRoot(&scratch, repository->Root));
+  bool hasV2 = HasAnySessionData(&scratch, SessionsRoot(&scratch, repository));
+  repository->HasUnmigratedV1 = hasV1 && !hasV2;
+  ArenaRelease(&scratch);
 }
 
 void JsonlRepository_Destroy(JsonlRepository* repository) {

@@ -43,11 +43,6 @@ void WriteU64(ObjectWriter* w, const char* key, u64 value) {
   StrBuf_AppendU64(w->Out, value);
 }
 
-void WriteI64(ObjectWriter* w, const char* key, i64 value) {
-  ObjectKey(w, key);
-  StrBuf_AppendI64(w->Out, value);
-}
-
 void WriteId(ObjectWriter* w, const char* key, DurableId id) {
   ObjectKey(w, key);
   Json_WriteString(w->Out, DurableId_View(&id));
@@ -59,226 +54,6 @@ void WriteOptionalId(ObjectWriter* w, const char* key, DurableId id) {
     Json_WriteString(w->Out, DurableId_View(&id));
   else
     StrBuf_AppendCStr(w->Out, "null");
-}
-
-StrView ClassName(SessionEntryClass value) {
-  switch (value) {
-    case SessionEntryClass::Session: return SVL("session");
-    case SessionEntryClass::Harness: return SVL("harness");
-  }
-  return StrView{};
-}
-
-bool ParseClass(StrView text, SessionEntryClass* out) {
-  if (StrView_Eq(text, SVL("session"))) {
-    *out = SessionEntryClass::Session;
-    return true;
-  }
-  if (StrView_Eq(text, SVL("harness"))) {
-    *out = SessionEntryClass::Harness;
-    return true;
-  }
-  return false;
-}
-
-StrView OperationKindName(OperationKind value) {
-  switch (value) {
-    case OperationKind::Run: return SVL("run");
-    case OperationKind::Compaction: return SVL("compaction");
-    case OperationKind::Navigation: return SVL("navigation");
-  }
-  return StrView{};
-}
-
-bool ParseOperationKind(StrView text, OperationKind* out) {
-  if (StrView_Eq(text, SVL("run"))) {
-    *out = OperationKind::Run;
-    return true;
-  }
-  if (StrView_Eq(text, SVL("compaction"))) {
-    *out = OperationKind::Compaction;
-    return true;
-  }
-  if (StrView_Eq(text, SVL("navigation"))) {
-    *out = OperationKind::Navigation;
-    return true;
-  }
-  return false;
-}
-
-StrView GenerationOutcomeName(GenerationOutcome value) {
-  switch (value) {
-    case GenerationOutcome::Succeeded: return SVL("succeeded");
-    case GenerationOutcome::Failed: return SVL("failed");
-    case GenerationOutcome::Aborted: return SVL("aborted");
-  }
-  return StrView{};
-}
-
-bool ParseGenerationOutcome(StrView text, GenerationOutcome* out) {
-  if (StrView_Eq(text, SVL("succeeded"))) {
-    *out = GenerationOutcome::Succeeded;
-    return true;
-  }
-  if (StrView_Eq(text, SVL("failed"))) {
-    *out = GenerationOutcome::Failed;
-    return true;
-  }
-  if (StrView_Eq(text, SVL("aborted"))) {
-    *out = GenerationOutcome::Aborted;
-    return true;
-  }
-  return false;
-}
-
-StrView ToolOutcomeName(ToolOutcomeKind value) {
-  switch (value) {
-    case ToolOutcomeKind::Succeeded: return SVL("succeeded");
-    case ToolOutcomeKind::Failed: return SVL("failed");
-    case ToolOutcomeKind::Aborted: return SVL("aborted");
-  }
-  return StrView{};
-}
-
-bool ParseToolOutcome(StrView text, ToolOutcomeKind* out) {
-  if (StrView_Eq(text, SVL("succeeded"))) {
-    *out = ToolOutcomeKind::Succeeded;
-    return true;
-  }
-  if (StrView_Eq(text, SVL("failed"))) {
-    *out = ToolOutcomeKind::Failed;
-    return true;
-  }
-  if (StrView_Eq(text, SVL("aborted"))) {
-    *out = ToolOutcomeKind::Aborted;
-    return true;
-  }
-  return false;
-}
-
-StrView OperationOutcomeName(OperationOutcome value) {
-  switch (value) {
-    case OperationOutcome::Succeeded: return SVL("succeeded");
-    case OperationOutcome::Failed: return SVL("failed");
-    case OperationOutcome::Cancelled: return SVL("cancelled");
-  }
-  return StrView{};
-}
-
-bool ParseOperationOutcome(StrView text, OperationOutcome* out) {
-  if (StrView_Eq(text, SVL("succeeded"))) {
-    *out = OperationOutcome::Succeeded;
-    return true;
-  }
-  if (StrView_Eq(text, SVL("failed"))) {
-    *out = OperationOutcome::Failed;
-    return true;
-  }
-  if (StrView_Eq(text, SVL("cancelled"))) {
-    *out = OperationOutcome::Cancelled;
-    return true;
-  }
-  return false;
-}
-
-StrView QueueKindName(QueueKind value) {
-  switch (value) {
-    case QueueKind::Steering: return SVL("steering");
-    case QueueKind::FollowUp: return SVL("follow_up");
-    case QueueKind::NextTurn: return SVL("next_turn");
-  }
-  return StrView{};
-}
-
-bool ParseQueueKind(StrView text, QueueKind* out) {
-  if (StrView_Eq(text, SVL("steering"))) {
-    *out = QueueKind::Steering;
-    return true;
-  }
-  if (StrView_Eq(text, SVL("follow_up"))) {
-    *out = QueueKind::FollowUp;
-    return true;
-  }
-  if (StrView_Eq(text, SVL("next_turn"))) {
-    *out = QueueKind::NextTurn;
-    return true;
-  }
-  return false;
-}
-
-StrView CheckpointName(QueueCheckpointKind value) {
-  switch (value) {
-    case QueueCheckpointKind::BeforeAssistant: return SVL("before_assistant");
-    case QueueCheckpointKind::AfterToolBatch: return SVL("after_tool_batch");
-    case QueueCheckpointKind::AfterRun: return SVL("after_run");
-  }
-  return StrView{};
-}
-
-bool ParseCheckpoint(StrView text, QueueCheckpointKind* out) {
-  if (StrView_Eq(text, SVL("before_assistant"))) {
-    *out = QueueCheckpointKind::BeforeAssistant;
-    return true;
-  }
-  if (StrView_Eq(text, SVL("after_tool_batch"))) {
-    *out = QueueCheckpointKind::AfterToolBatch;
-    return true;
-  }
-  if (StrView_Eq(text, SVL("after_run"))) {
-    *out = QueueCheckpointKind::AfterRun;
-    return true;
-  }
-  return false;
-}
-
-StrView ReplayPolicyName(ToolReplayPolicy value) {
-  switch (value) {
-    case ToolReplayPolicy::ManualReconcile: return SVL("manual_reconcile");
-    case ToolReplayPolicy::ReplaySafe: return SVL("replay_safe");
-    case ToolReplayPolicy::NoEffect: return SVL("no_effect");
-  }
-  return StrView{};
-}
-
-bool ParseReplayPolicy(StrView text, ToolReplayPolicy* out) {
-  if (StrView_Eq(text, SVL("manual_reconcile"))) {
-    *out = ToolReplayPolicy::ManualReconcile;
-    return true;
-  }
-  if (StrView_Eq(text, SVL("replay_safe"))) {
-    *out = ToolReplayPolicy::ReplaySafe;
-    return true;
-  }
-  if (StrView_Eq(text, SVL("no_effect"))) {
-    *out = ToolReplayPolicy::NoEffect;
-    return true;
-  }
-  return false;
-}
-
-StrView RecoveryResolutionName(RecoveryResolution value) {
-  switch (value) {
-    case RecoveryResolution::RecordFailure: return SVL("record_failure");
-    case RecoveryResolution::SupplyResult: return SVL("supply_result");
-    case RecoveryResolution::RerunAnyway: return SVL("rerun_anyway");
-  }
-  return StrView{};
-}
-
-bool ParseRecoveryResolution(StrView text, RecoveryResolution* out) {
-  if (StrView_Eq(text, SVL("record_failure"))) {
-    *out = RecoveryResolution::RecordFailure;
-    return true;
-  }
-  if (StrView_Eq(text, SVL("supply_result"))) {
-    *out = RecoveryResolution::SupplyResult;
-    return true;
-  }
-  if (StrView_Eq(text, SVL("rerun_anyway"))) {
-    *out = RecoveryResolution::RerunAnyway;
-    return true;
-  }
-  return false;
 }
 
 StrView RoleName(Role value) {
@@ -372,7 +147,7 @@ bool ParseContentKind(StrView text, ContentKind* out) {
 }
 
 bool ParseRecordKind(StrView text, SessionRecordKind* out) {
-  for (u32 i = 0; i <= (u32)SessionRecordKind::RecoveryResolved; i++) {
+  for (u32 i = 0; i <= (u32)SessionRecordKind::Leaf; i++) {
     SessionRecordKind kind = (SessionRecordKind)i;
     if (StrView_Eq(text, SessionRecordKind_Name(kind))) {
       *out = kind;
@@ -412,18 +187,6 @@ bool ReadRequiredU64(const JsonValue* object, const char* key, u64* out) {
     return false;
   }
   u64 converted = (u64)value->Number;
-  if ((f64)converted != value->Number) return false;
-  *out = converted;
-  return true;
-}
-
-bool ReadRequiredI32(const JsonValue* object, const char* key, i32* out) {
-  JsonValue* value = Json_Get(object, key);
-  if (!value || value->Kind != JsonKind::Number || value->Number < -2147483648.0 ||
-      value->Number > 2147483647.0) {
-    return false;
-  }
-  i32 converted = (i32)value->Number;
   if ((f64)converted != value->Number) return false;
   *out = converted;
   return true;
@@ -533,8 +296,6 @@ bool DecodeContent(Arena* arena, const JsonValue* object, Content* out) {
           !ReadRequiredString(object, "argumentsJson", false, &result.ToolArgsJson)) {
         return false;
       }
-      JsonValue* args = Json_Parse(arena, result.ToolArgsJson);
-      if (!Json_IsObject(args)) return false;
       break;
     }
     case ContentKind::Image:
@@ -641,26 +402,35 @@ bool MessageValid(const Message* message) {
   return true;
 }
 
-void WriteIdArray(StrBuf* out, const Array<DurableId>* ids) {
-  StrBuf_AppendChar(out, '[');
-  for (u32 i = 0; i < ids->Count; i++) {
-    if (i) StrBuf_AppendChar(out, ',');
-    Json_WriteString(out, DurableId_View(&ids->Data[i]));
-  }
-  StrBuf_AppendChar(out, ']');
+Content CloneContent(Arena* arena, const Content& source) {
+  Content result = source;
+  result.Text = StrView_Dup(arena, source.Text);
+  result.Signature = StrView_Dup(arena, source.Signature);
+  result.ToolId = StrView_Dup(arena, source.ToolId);
+  result.ToolName = StrView_Dup(arena, source.ToolName);
+  result.ToolArgsJson = StrView_Dup(arena, source.ToolArgsJson);
+  result.ImageData = StrView_Dup(arena, source.ImageData);
+  result.ImageMimeType = StrView_Dup(arena, source.ImageMimeType);
+  return result;
 }
 
-bool DecodeIdArray(Arena* arena, const JsonValue* value, Array<DurableId>* out) {
-  if (!Json_IsArray(value)) return false;
-  Array<DurableId> ids = Array_Make<DurableId>(arena, value->Count ? value->Count : 1);
-  for (u32 i = 0; i < value->Count; i++) {
-    DurableId id = {};
-    if (!Json_IsString(value->Items[i]) || !DurableId_Parse(value->Items[i]->Str, &id))
-      return false;
-    Array_Push(&ids, id);
-  }
-  *out = ids;
-  return true;
+Array<Content> CloneContentArray(Arena* arena, const Array<Content>& source) {
+  Array<Content> result =
+      Array_Make<Content>(arena, source.Count ? source.Count : 1);
+  for (u32 i = 0; i < source.Count; i++)
+    Array_Push(&result, CloneContent(arena, source.Data[i]));
+  return result;
+}
+
+Message CloneMessage(Arena* arena, const Message& source) {
+  Message result = source;
+  result.Content = CloneContentArray(arena, source.Content);
+  result.ErrorMessage = StrView_Dup(arena, source.ErrorMessage);
+  result.Model = StrView_Dup(arena, source.Model);
+  result.Provider = StrView_Dup(arena, source.Provider);
+  result.ToolCallId = StrView_Dup(arena, source.ToolCallId);
+  result.ToolName = StrView_Dup(arena, source.ToolName);
+  return result;
 }
 
 void WritePayload(StrBuf* out, const SessionRecord* record) {
@@ -705,6 +475,10 @@ void WritePayload(StrBuf* out, const SessionRecord* record) {
       WriteId(&w, "sourceHeadId", record->CompactionEntry.SourceHeadId);
       ObjectKey(&w, "summary");
       WriteMessage(out, &record->CompactionEntry.Summary);
+      if (record->CompactionEntry.HasUsage) {
+        ObjectKey(&w, "usage");
+        WriteUsage(out, &record->CompactionEntry.Use);
+      }
       break;
     case SessionRecordKind::BranchLabel:
       WriteId(&w, "parentId", record->BranchLabelEntry.ParentId);
@@ -713,108 +487,8 @@ void WritePayload(StrBuf* out, const SessionRecord* record) {
     case SessionRecordKind::SessionName:
       WriteString(&w, "name", record->SessionNameEntry.Name);
       break;
-    case SessionRecordKind::OperationStarted:
-      WriteId(&w, "operationId", record->OperationStarted.OperationId);
-      WriteString(&w, "operation", OperationKindName(record->OperationStarted.Operation));
-      WriteOptionalId(&w, "startingHeadId", record->OperationStarted.StartingHeadId);
-      WriteBool(&w, "hasAcceptedMessage", record->OperationStarted.HasAcceptedMessage);
-      if (record->OperationStarted.HasAcceptedMessage) {
-        ObjectKey(&w, "acceptedMessage");
-        WriteMessage(out, &record->OperationStarted.AcceptedMessage);
-      }
-      WriteOptionalId(&w, "provisionedEntryId", record->OperationStarted.ProvisionedEntryId);
-      WriteOptionalId(&w, "targetEntryId", record->OperationStarted.TargetEntryId);
-      break;
-    case SessionRecordKind::GenerationStarted:
-      WriteId(&w, "operationId", record->GenerationStarted.OperationId);
-      WriteId(&w, "attemptId", record->GenerationStarted.AttemptId);
-      WriteString(&w, "provider", record->GenerationStarted.Provider);
-      WriteString(&w, "model", record->GenerationStarted.Model);
-      WriteString(&w, "effectiveRequestJson",
-                  record->GenerationStarted.EffectiveRequestJson);
-      WriteI64(&w, "maxTokens", record->GenerationStarted.MaxTokens);
-      WriteId(&w, "provisionedAssistantEntryId",
-              record->GenerationStarted.ProvisionedAssistantEntryId);
-      break;
-    case SessionRecordKind::GenerationFinished:
-      WriteId(&w, "operationId", record->GenerationFinished.OperationId);
-      WriteId(&w, "attemptId", record->GenerationFinished.AttemptId);
-      WriteString(&w, "outcome", GenerationOutcomeName(record->GenerationFinished.Outcome));
-      WriteOptionalId(&w, "messageEntryId", record->GenerationFinished.MessageEntryId);
-      WriteString(&w, "error", record->GenerationFinished.Error);
-      if (record->GenerationFinished.HasUsage) {
-        ObjectKey(&w, "usage");
-        WriteUsage(out, &record->GenerationFinished.Use);
-      }
-      break;
-    case SessionRecordKind::ToolStarted:
-      WriteId(&w, "operationId", record->ToolStarted.OperationId);
-      WriteId(&w, "toolExecutionId", record->ToolStarted.ToolExecutionId);
-      WriteString(&w, "toolCallId", record->ToolStarted.ToolCallId);
-      WriteString(&w, "toolName", record->ToolStarted.ToolName);
-      WriteString(&w, "effectiveArgumentsJson",
-                  record->ToolStarted.EffectiveArgumentsJson);
-      WriteId(&w, "provisionedResultEntryId",
-              record->ToolStarted.ProvisionedResultEntryId);
-      WriteString(&w, "replayPolicy", ReplayPolicyName(record->ToolStarted.ReplayPolicy));
-      break;
-    case SessionRecordKind::ToolFinished:
-      WriteId(&w, "operationId", record->ToolFinished.OperationId);
-      WriteId(&w, "toolExecutionId", record->ToolFinished.ToolExecutionId);
-      WriteString(&w, "outcome", ToolOutcomeName(record->ToolFinished.Outcome));
-      WriteOptionalId(&w, "resultEntryId", record->ToolFinished.ResultEntryId);
-      WriteBool(&w, "terminate", record->ToolFinished.Terminate);
-      WriteString(&w, "error", record->ToolFinished.Error);
-      break;
-    case SessionRecordKind::QueueItemAccepted:
-      WriteOptionalId(&w, "operationId", record->QueueItemAccepted.OperationId);
-      WriteId(&w, "itemId", record->QueueItemAccepted.ItemId);
-      WriteString(&w, "queue", QueueKindName(record->QueueItemAccepted.Queue));
-      ObjectKey(&w, "message");
-      WriteMessage(out, &record->QueueItemAccepted.Value);
-      break;
-    case SessionRecordKind::QueueCheckpoint:
-      WriteId(&w, "operationId", record->QueueCheckpoint.OperationId);
-      WriteString(&w, "checkpoint", CheckpointName(record->QueueCheckpoint.Checkpoint));
-      ObjectKey(&w, "itemIds");
-      WriteIdArray(out, &record->QueueCheckpoint.ItemIds);
-      break;
-    case SessionRecordKind::DeferredWrite:
-      WriteId(&w, "operationId", record->DeferredWrite.OperationId);
-      WriteId(&w, "deferredId", record->DeferredWrite.DeferredId);
-      WriteId(&w, "queueItemId", record->DeferredWrite.QueueItemId);
-      WriteId(&w, "provisionedEntryId", record->DeferredWrite.ProvisionedEntryId);
-      ObjectKey(&w, "message");
-      WriteMessage(out, &record->DeferredWrite.Value);
-      break;
-    case SessionRecordKind::DeferredWriteCommitted:
-      WriteId(&w, "operationId", record->DeferredWriteCommitted.OperationId);
-      WriteId(&w, "deferredId", record->DeferredWriteCommitted.DeferredId);
-      WriteId(&w, "messageEntryId", record->DeferredWriteCommitted.MessageEntryId);
-      break;
-    case SessionRecordKind::OperationCancelRequested:
-      WriteId(&w, "operationId", record->OperationCancelRequested.OperationId);
-      break;
-    case SessionRecordKind::OperationFinished:
-      WriteId(&w, "operationId", record->OperationFinished.OperationId);
-      WriteString(&w, "outcome", OperationOutcomeName(record->OperationFinished.Outcome));
-      WriteOptionalId(&w, "resultHeadId", record->OperationFinished.ResultHeadId);
-      WriteString(&w, "error", record->OperationFinished.Error);
-      break;
-    case SessionRecordKind::OperationAborted:
-      WriteId(&w, "operationId", record->OperationAborted.OperationId);
-      WriteString(&w, "reason", record->OperationAborted.Reason);
-      break;
-    case SessionRecordKind::RecoveryResolved:
-      WriteId(&w, "operationId", record->RecoveryResolved.OperationId);
-      WriteId(&w, "toolExecutionId", record->RecoveryResolved.ToolExecutionId);
-      WriteString(&w, "resolution",
-                  RecoveryResolutionName(record->RecoveryResolved.Resolution));
-      WriteBool(&w, "hasSuppliedResult", record->RecoveryResolved.HasSuppliedResult);
-      if (record->RecoveryResolved.HasSuppliedResult) {
-        ObjectKey(&w, "suppliedResult");
-        WriteMessage(out, &record->RecoveryResolved.SuppliedResult);
-      }
+    case SessionRecordKind::Leaf:
+      WriteId(&w, "leafId", record->LeafEntry.LeafId);
       break;
   }
   ObjectEnd(&w);
@@ -855,165 +529,31 @@ bool DecodePayload(Arena* arena, const JsonValue* payload, SessionRecord* record
       }
       return true;
     }
-    case SessionRecordKind::Compaction:
-      return ReadRequiredId(payload, "parentId", &record->CompactionEntry.ParentId) &&
-             ReadRequiredId(payload, "baseEntryId",
-                            &record->CompactionEntry.BaseEntryId) &&
-             ReadRequiredId(payload, "throughEntryId",
-                            &record->CompactionEntry.ThroughEntryId) &&
-             ReadRequiredId(payload, "sourceHeadId",
-                            &record->CompactionEntry.SourceHeadId) &&
-             DecodeMessage(arena, Json_Get(payload, "summary"),
-                           &record->CompactionEntry.Summary);
+    case SessionRecordKind::Compaction: {
+      if (!ReadRequiredId(payload, "parentId", &record->CompactionEntry.ParentId) ||
+          !ReadRequiredId(payload, "baseEntryId",
+                          &record->CompactionEntry.BaseEntryId) ||
+          !ReadRequiredId(payload, "throughEntryId",
+                          &record->CompactionEntry.ThroughEntryId) ||
+          !ReadRequiredId(payload, "sourceHeadId",
+                          &record->CompactionEntry.SourceHeadId) ||
+          !DecodeMessage(arena, Json_Get(payload, "summary"),
+                        &record->CompactionEntry.Summary)) {
+        return false;
+      }
+      JsonValue* usage = Json_Get(payload, "usage");
+      if (!usage) return true;
+      record->CompactionEntry.HasUsage = true;
+      return DecodeUsage(usage, &record->CompactionEntry.Use);
+    }
     case SessionRecordKind::BranchLabel:
       return ReadRequiredId(payload, "parentId", &record->BranchLabelEntry.ParentId) &&
              ReadRequiredString(payload, "label", false, &record->BranchLabelEntry.Label);
     case SessionRecordKind::SessionName:
       return ReadRequiredString(payload, "name", true,
                                 &record->SessionNameEntry.Name);
-    case SessionRecordKind::OperationStarted: {
-      if (!ReadRequiredId(payload, "operationId",
-                          &record->OperationStarted.OperationId) ||
-          !ParseOperationKind(Json_GetStr(payload, "operation"),
-                              &record->OperationStarted.Operation) ||
-          !ReadOptionalId(payload, "startingHeadId",
-                          &record->OperationStarted.StartingHeadId) ||
-          !ReadRequiredBool(payload, "hasAcceptedMessage",
-                            &record->OperationStarted.HasAcceptedMessage) ||
-          !ReadOptionalId(payload, "provisionedEntryId",
-                          &record->OperationStarted.ProvisionedEntryId) ||
-          !ReadOptionalId(payload, "targetEntryId",
-                          &record->OperationStarted.TargetEntryId)) {
-        return false;
-      }
-      return !record->OperationStarted.HasAcceptedMessage ||
-             DecodeMessage(arena, Json_Get(payload, "acceptedMessage"),
-                           &record->OperationStarted.AcceptedMessage);
-    }
-    case SessionRecordKind::GenerationStarted: {
-      if (!ReadRequiredId(payload, "operationId",
-                          &record->GenerationStarted.OperationId) ||
-          !ReadRequiredId(payload, "attemptId", &record->GenerationStarted.AttemptId) ||
-          !ReadRequiredString(payload, "provider", false,
-                              &record->GenerationStarted.Provider) ||
-          !ReadRequiredString(payload, "model", false, &record->GenerationStarted.Model) ||
-          !ReadRequiredString(payload, "effectiveRequestJson", false,
-                              &record->GenerationStarted.EffectiveRequestJson) ||
-          !ReadRequiredI32(payload, "maxTokens", &record->GenerationStarted.MaxTokens) ||
-          !ReadRequiredId(payload, "provisionedAssistantEntryId",
-                          &record->GenerationStarted.ProvisionedAssistantEntryId)) {
-        return false;
-      }
-      return Json_IsObject(
-          Json_Parse(arena, record->GenerationStarted.EffectiveRequestJson));
-    }
-    case SessionRecordKind::GenerationFinished: {
-      if (!ReadRequiredId(payload, "operationId",
-                          &record->GenerationFinished.OperationId) ||
-          !ReadRequiredId(payload, "attemptId",
-                          &record->GenerationFinished.AttemptId) ||
-          !ParseGenerationOutcome(Json_GetStr(payload, "outcome"),
-                                  &record->GenerationFinished.Outcome) ||
-          !ReadOptionalId(payload, "messageEntryId",
-                          &record->GenerationFinished.MessageEntryId) ||
-          !ReadRequiredString(payload, "error", true,
-                              &record->GenerationFinished.Error)) {
-        return false;
-      }
-      JsonValue* usage = Json_Get(payload, "usage");
-      if (!usage) return true;
-      record->GenerationFinished.HasUsage = true;
-      return DecodeUsage(usage, &record->GenerationFinished.Use);
-    }
-    case SessionRecordKind::ToolStarted: {
-      if (!ReadRequiredId(payload, "operationId", &record->ToolStarted.OperationId) ||
-          !ReadRequiredId(payload, "toolExecutionId",
-                          &record->ToolStarted.ToolExecutionId) ||
-          !ReadRequiredString(payload, "toolCallId", false,
-                              &record->ToolStarted.ToolCallId) ||
-          !ReadRequiredString(payload, "toolName", false, &record->ToolStarted.ToolName) ||
-          !ReadRequiredString(payload, "effectiveArgumentsJson", false,
-                              &record->ToolStarted.EffectiveArgumentsJson) ||
-          !ReadRequiredId(payload, "provisionedResultEntryId",
-                          &record->ToolStarted.ProvisionedResultEntryId) ||
-          !ParseReplayPolicy(Json_GetStr(payload, "replayPolicy"),
-                             &record->ToolStarted.ReplayPolicy)) {
-        return false;
-      }
-      return Json_IsObject(Json_Parse(arena, record->ToolStarted.EffectiveArgumentsJson));
-    }
-    case SessionRecordKind::ToolFinished:
-      return ReadRequiredId(payload, "operationId", &record->ToolFinished.OperationId) &&
-             ReadRequiredId(payload, "toolExecutionId",
-                            &record->ToolFinished.ToolExecutionId) &&
-             ParseToolOutcome(Json_GetStr(payload, "outcome"),
-                              &record->ToolFinished.Outcome) &&
-             ReadOptionalId(payload, "resultEntryId",
-                            &record->ToolFinished.ResultEntryId) &&
-             ReadRequiredBool(payload, "terminate",
-                              &record->ToolFinished.Terminate) &&
-             ReadRequiredString(payload, "error", true, &record->ToolFinished.Error);
-    case SessionRecordKind::QueueItemAccepted:
-      return ReadOptionalId(payload, "operationId",
-                            &record->QueueItemAccepted.OperationId) &&
-             ReadRequiredId(payload, "itemId", &record->QueueItemAccepted.ItemId) &&
-             ParseQueueKind(Json_GetStr(payload, "queue"),
-                            &record->QueueItemAccepted.Queue) &&
-             DecodeMessage(arena, Json_Get(payload, "message"),
-                           &record->QueueItemAccepted.Value);
-    case SessionRecordKind::QueueCheckpoint:
-      return ReadRequiredId(payload, "operationId",
-                            &record->QueueCheckpoint.OperationId) &&
-             ParseCheckpoint(Json_GetStr(payload, "checkpoint"),
-                             &record->QueueCheckpoint.Checkpoint) &&
-             DecodeIdArray(arena, Json_Get(payload, "itemIds"),
-                           &record->QueueCheckpoint.ItemIds);
-    case SessionRecordKind::DeferredWrite:
-      return ReadRequiredId(payload, "operationId", &record->DeferredWrite.OperationId) &&
-             ReadRequiredId(payload, "deferredId", &record->DeferredWrite.DeferredId) &&
-             ReadRequiredId(payload, "queueItemId", &record->DeferredWrite.QueueItemId) &&
-             ReadRequiredId(payload, "provisionedEntryId",
-                            &record->DeferredWrite.ProvisionedEntryId) &&
-             DecodeMessage(arena, Json_Get(payload, "message"),
-                           &record->DeferredWrite.Value);
-    case SessionRecordKind::DeferredWriteCommitted:
-      return ReadRequiredId(payload, "operationId",
-                            &record->DeferredWriteCommitted.OperationId) &&
-             ReadRequiredId(payload, "deferredId",
-                            &record->DeferredWriteCommitted.DeferredId) &&
-             ReadRequiredId(payload, "messageEntryId",
-                            &record->DeferredWriteCommitted.MessageEntryId);
-    case SessionRecordKind::OperationCancelRequested:
-      return ReadRequiredId(payload, "operationId",
-                            &record->OperationCancelRequested.OperationId);
-    case SessionRecordKind::OperationFinished:
-      return ReadRequiredId(payload, "operationId",
-                            &record->OperationFinished.OperationId) &&
-             ParseOperationOutcome(Json_GetStr(payload, "outcome"),
-                                   &record->OperationFinished.Outcome) &&
-             ReadOptionalId(payload, "resultHeadId",
-                            &record->OperationFinished.ResultHeadId) &&
-             ReadRequiredString(payload, "error", true, &record->OperationFinished.Error);
-    case SessionRecordKind::OperationAborted:
-      return ReadRequiredId(payload, "operationId",
-                            &record->OperationAborted.OperationId) &&
-             ReadRequiredString(payload, "reason", false,
-                                &record->OperationAborted.Reason);
-    case SessionRecordKind::RecoveryResolved: {
-      if (!ReadRequiredId(payload, "operationId",
-                          &record->RecoveryResolved.OperationId) ||
-          !ReadRequiredId(payload, "toolExecutionId",
-                          &record->RecoveryResolved.ToolExecutionId) ||
-          !ParseRecoveryResolution(Json_GetStr(payload, "resolution"),
-                                   &record->RecoveryResolved.Resolution) ||
-          !ReadRequiredBool(payload, "hasSuppliedResult",
-                            &record->RecoveryResolved.HasSuppliedResult)) {
-        return false;
-      }
-      return !record->RecoveryResolved.HasSuppliedResult ||
-             DecodeMessage(arena, Json_Get(payload, "suppliedResult"),
-                           &record->RecoveryResolved.SuppliedResult);
-    }
+    case SessionRecordKind::Leaf:
+      return ReadRequiredId(payload, "leafId", &record->LeafEntry.LeafId);
   }
   return false;
 }
@@ -1030,87 +570,10 @@ DurableId ParentIdFor(const SessionRecord* record) {
   }
 }
 
-DurableId OperationIdFor(const SessionRecord* record) {
-  switch (record->Kind) {
-    case SessionRecordKind::OperationStarted: return record->OperationStarted.OperationId;
-    case SessionRecordKind::GenerationStarted: return record->GenerationStarted.OperationId;
-    case SessionRecordKind::GenerationFinished: return record->GenerationFinished.OperationId;
-    case SessionRecordKind::ToolStarted: return record->ToolStarted.OperationId;
-    case SessionRecordKind::ToolFinished: return record->ToolFinished.OperationId;
-    case SessionRecordKind::QueueItemAccepted: return record->QueueItemAccepted.OperationId;
-    case SessionRecordKind::QueueCheckpoint: return record->QueueCheckpoint.OperationId;
-    case SessionRecordKind::DeferredWrite: return record->DeferredWrite.OperationId;
-    case SessionRecordKind::DeferredWriteCommitted:
-      return record->DeferredWriteCommitted.OperationId;
-    case SessionRecordKind::OperationCancelRequested:
-      return record->OperationCancelRequested.OperationId;
-    case SessionRecordKind::OperationFinished: return record->OperationFinished.OperationId;
-    case SessionRecordKind::OperationAborted: return record->OperationAborted.OperationId;
-    case SessionRecordKind::RecoveryResolved: return record->RecoveryResolved.OperationId;
-    default: return DurableId{};
-  }
-}
-
-const SessionRecord* FindEarlierEntry(const SessionRecord* records, u32 before,
-                                      DurableId entryId) {
-  for (u32 i = 0; i < before; i++) {
-    if (DurableId_Eq(records[i].EntryId, entryId)) return &records[i];
-  }
-  return nullptr;
-}
-
-const SessionRecord* FindEarlierKindId(const SessionRecord* records, u32 before,
-                                       SessionRecordKind kind, DurableId id) {
-  for (u32 i = 0; i < before; i++) {
-    if (records[i].Kind != kind) continue;
-    DurableId candidate = {};
-    switch (kind) {
-      case SessionRecordKind::GenerationStarted:
-        candidate = records[i].GenerationStarted.AttemptId;
-        break;
-      case SessionRecordKind::ToolStarted:
-        candidate = records[i].ToolStarted.ToolExecutionId;
-        break;
-      case SessionRecordKind::QueueItemAccepted:
-        candidate = records[i].QueueItemAccepted.ItemId;
-        break;
-      case SessionRecordKind::DeferredWrite:
-        candidate = records[i].DeferredWrite.DeferredId;
-        break;
-      default: break;
-    }
-    if (DurableId_Eq(candidate, id)) return &records[i];
-  }
-  return nullptr;
-}
-
-const SessionRecord* FindEarlierOperation(const SessionRecord* records, u32 before,
-                                          DurableId operationId) {
-  for (u32 i = 0; i < before; i++) {
-    if (records[i].Kind == SessionRecordKind::OperationStarted &&
-        DurableId_Eq(records[i].OperationStarted.OperationId, operationId))
-      return &records[i];
-  }
-  return nullptr;
-}
-
-bool IsEarlierSessionEntry(const SessionRecord* records, u32 before, DurableId id) {
-  const SessionRecord* found = FindEarlierEntry(records, before, id);
-  return found && found->EntryClass == SessionEntryClass::Session;
-}
-
-SessionResult ValidateReference(const SessionRecord* records, u32 before, DurableId id,
-                                const char* message) {
-  if (!DurableId_IsSet(id) || !IsEarlierSessionEntry(records, before, id))
-    return Corrupt(message);
-  return SessionResult_Ok();
-}
-
 }  // namespace
 
-SessionEntryClass SessionRecord_ClassForKind(SessionRecordKind kind) {
-  return kind <= SessionRecordKind::SessionName ? SessionEntryClass::Session
-                                                : SessionEntryClass::Harness;
+bool SessionRecord_IsTreeNode(SessionRecordKind kind) {
+  return kind != SessionRecordKind::SessionName && kind != SessionRecordKind::Leaf;
 }
 
 StrView SessionRecordKind_Name(SessionRecordKind kind) {
@@ -1123,20 +586,7 @@ StrView SessionRecordKind_Name(SessionRecordKind kind) {
     case SessionRecordKind::Compaction: return SVL("compaction");
     case SessionRecordKind::BranchLabel: return SVL("branch_label");
     case SessionRecordKind::SessionName: return SVL("session_name");
-    case SessionRecordKind::OperationStarted: return SVL("operation_started");
-    case SessionRecordKind::GenerationStarted: return SVL("generation_started");
-    case SessionRecordKind::GenerationFinished: return SVL("generation_finished");
-    case SessionRecordKind::ToolStarted: return SVL("tool_started");
-    case SessionRecordKind::ToolFinished: return SVL("tool_finished");
-    case SessionRecordKind::QueueItemAccepted: return SVL("queue_item_accepted");
-    case SessionRecordKind::QueueCheckpoint: return SVL("queue_checkpoint");
-    case SessionRecordKind::DeferredWrite: return SVL("deferred_write");
-    case SessionRecordKind::DeferredWriteCommitted: return SVL("deferred_write_committed");
-    case SessionRecordKind::OperationCancelRequested:
-      return SVL("operation_cancel_requested");
-    case SessionRecordKind::OperationFinished: return SVL("operation_finished");
-    case SessionRecordKind::OperationAborted: return SVL("operation_aborted");
-    case SessionRecordKind::RecoveryResolved: return SVL("recovery_resolved");
+    case SessionRecordKind::Leaf: return SVL("leaf");
   }
   return StrView{};
 }
@@ -1167,7 +617,6 @@ SessionResult SessionRecord_PrepareForkCopy(
   copy.SessionId = targetSessionId;
   copy.Seq = targetSeq;
   copy.EntryId = DurableId_Generate();
-  copy.EntryClass = SessionEntryClass::Session;
   copy.CreatedAt = createdAt;
 
   DurableId parent =
@@ -1197,7 +646,7 @@ SessionResult SessionRecord_PrepareForkCopy(
         return Corrupt("fork compaction could not be remapped");
       break;
     default:
-      return Corrupt("fork branch contains a harness record");
+      return Corrupt("fork branch contains a non-tree record");
   }
 
   *out = copy;
@@ -1220,8 +669,6 @@ SessionResult SessionRecord_Validate(const SessionRecord* record) {
     return Invalid("createdAt must be a JSON-safe integer");
   if (SessionRecordKind_Name(record->Kind).Length == 0)
     return Invalid("record kind is invalid");
-  if (record->EntryClass != SessionRecord_ClassForKind(record->Kind))
-    return Invalid("entryClass does not match record kind");
 
   switch (record->Kind) {
     case SessionRecordKind::SessionStarted:
@@ -1269,115 +716,9 @@ SessionResult SessionRecord_Validate(const SessionRecord* record) {
       break;
     case SessionRecordKind::SessionName:
       break;
-    case SessionRecordKind::OperationStarted:
-      if (!DurableId_IsSet(record->OperationStarted.OperationId) ||
-          OperationKindName(record->OperationStarted.Operation).Length == 0)
-        return Invalid("operation start is invalid");
-      if (record->OperationStarted.HasAcceptedMessage &&
-          (!MessageValid(&record->OperationStarted.AcceptedMessage) ||
-           !DurableId_IsSet(record->OperationStarted.ProvisionedEntryId)))
-        return Invalid("accepted message requires a provisioned entry ID");
-      if (record->OperationStarted.Operation == OperationKind::Run &&
-          !record->OperationStarted.HasAcceptedMessage)
-        return Invalid("run requires an accepted message");
-      if (record->OperationStarted.Operation == OperationKind::Compaction &&
-          !DurableId_IsSet(record->OperationStarted.ProvisionedEntryId))
-        return Invalid("compaction requires a provisioned entry ID");
-      if (record->OperationStarted.Operation == OperationKind::Navigation &&
-          !DurableId_IsSet(record->OperationStarted.TargetEntryId))
-        return Invalid("navigation requires a target entry ID");
-      break;
-    case SessionRecordKind::GenerationStarted:
-      if (!DurableId_IsSet(record->GenerationStarted.OperationId) ||
-          !DurableId_IsSet(record->GenerationStarted.AttemptId) ||
-          record->GenerationStarted.Provider.Length == 0 ||
-          record->GenerationStarted.Model.Length == 0 ||
-          record->GenerationStarted.EffectiveRequestJson.Length == 0 ||
-          record->GenerationStarted.MaxTokens < 0 ||
-          !DurableId_IsSet(record->GenerationStarted.ProvisionedAssistantEntryId))
-        return Invalid("generation start is invalid");
-      break;
-    case SessionRecordKind::GenerationFinished:
-      if (!DurableId_IsSet(record->GenerationFinished.OperationId) ||
-          !DurableId_IsSet(record->GenerationFinished.AttemptId) ||
-          GenerationOutcomeName(record->GenerationFinished.Outcome).Length == 0)
-        return Invalid("generation result is invalid");
-      if (record->GenerationFinished.Outcome == GenerationOutcome::Succeeded &&
-          !DurableId_IsSet(record->GenerationFinished.MessageEntryId))
-        return Invalid("successful generation requires a message entry");
-      break;
-    case SessionRecordKind::ToolStarted:
-      if (!DurableId_IsSet(record->ToolStarted.OperationId) ||
-          !DurableId_IsSet(record->ToolStarted.ToolExecutionId) ||
-          record->ToolStarted.ToolCallId.Length == 0 ||
-          record->ToolStarted.ToolName.Length == 0 ||
-          record->ToolStarted.EffectiveArgumentsJson.Length == 0 ||
-          !DurableId_IsSet(record->ToolStarted.ProvisionedResultEntryId) ||
-          ReplayPolicyName(record->ToolStarted.ReplayPolicy).Length == 0)
-        return Invalid("tool start is invalid");
-      break;
-    case SessionRecordKind::ToolFinished:
-      if (!DurableId_IsSet(record->ToolFinished.OperationId) ||
-          !DurableId_IsSet(record->ToolFinished.ToolExecutionId) ||
-          ToolOutcomeName(record->ToolFinished.Outcome).Length == 0)
-        return Invalid("tool result is invalid");
-      if (record->ToolFinished.Outcome != ToolOutcomeKind::Aborted &&
-          !DurableId_IsSet(record->ToolFinished.ResultEntryId))
-        return Invalid("completed tool requires a result entry");
-      break;
-    case SessionRecordKind::QueueItemAccepted:
-      if (!DurableId_IsSet(record->QueueItemAccepted.ItemId) ||
-          QueueKindName(record->QueueItemAccepted.Queue).Length == 0 ||
-          !MessageValid(&record->QueueItemAccepted.Value))
-        return Invalid("queue item is invalid");
-      break;
-    case SessionRecordKind::QueueCheckpoint:
-      if (!DurableId_IsSet(record->QueueCheckpoint.OperationId) ||
-          CheckpointName(record->QueueCheckpoint.Checkpoint).Length == 0)
-        return Invalid("queue checkpoint is invalid");
-      for (u32 i = 0; i < record->QueueCheckpoint.ItemIds.Count; i++)
-        if (!DurableId_IsSet(record->QueueCheckpoint.ItemIds.Data[i]))
-          return Invalid("queue checkpoint item ID is invalid");
-      break;
-    case SessionRecordKind::DeferredWrite:
-      if (!DurableId_IsSet(record->DeferredWrite.OperationId) ||
-          !DurableId_IsSet(record->DeferredWrite.DeferredId) ||
-          !DurableId_IsSet(record->DeferredWrite.QueueItemId) ||
-          !DurableId_IsSet(record->DeferredWrite.ProvisionedEntryId) ||
-          !MessageValid(&record->DeferredWrite.Value))
-        return Invalid("deferred write is invalid");
-      break;
-    case SessionRecordKind::DeferredWriteCommitted:
-      if (!DurableId_IsSet(record->DeferredWriteCommitted.OperationId) ||
-          !DurableId_IsSet(record->DeferredWriteCommitted.DeferredId) ||
-          !DurableId_IsSet(record->DeferredWriteCommitted.MessageEntryId))
-        return Invalid("deferred write commit is invalid");
-      break;
-    case SessionRecordKind::OperationCancelRequested:
-      if (!DurableId_IsSet(record->OperationCancelRequested.OperationId))
-        return Invalid("cancel request operationId is required");
-      break;
-    case SessionRecordKind::OperationFinished:
-      if (!DurableId_IsSet(record->OperationFinished.OperationId) ||
-          OperationOutcomeName(record->OperationFinished.Outcome).Length == 0)
-        return Invalid("operation result is invalid");
-      break;
-    case SessionRecordKind::OperationAborted:
-      if (!DurableId_IsSet(record->OperationAborted.OperationId) ||
-          record->OperationAborted.Reason.Length == 0)
-        return Invalid("operation abort is invalid");
-      break;
-    case SessionRecordKind::RecoveryResolved:
-      if (!DurableId_IsSet(record->RecoveryResolved.OperationId) ||
-          !DurableId_IsSet(record->RecoveryResolved.ToolExecutionId) ||
-          RecoveryResolutionName(record->RecoveryResolved.Resolution).Length == 0)
-        return Invalid("recovery resolution is invalid");
-      if (record->RecoveryResolved.HasSuppliedResult !=
-          (record->RecoveryResolved.Resolution == RecoveryResolution::SupplyResult))
-        return Invalid("only supply_result may include a supplied result");
-      if (record->RecoveryResolved.HasSuppliedResult &&
-          !MessageValid(&record->RecoveryResolved.SuppliedResult))
-        return Invalid("supplied recovery result is invalid");
+    case SessionRecordKind::Leaf:
+      if (!DurableId_IsSet(record->LeafEntry.LeafId))
+        return Invalid("leaf marker requires a target entry ID");
       break;
   }
   return SessionResult_Ok(record->Seq);
@@ -1394,7 +735,6 @@ SessionResult SessionRecord_Encode(StrBuf* out, const SessionRecord* record) {
   WriteId(&w, "sessionId", record->SessionId);
   WriteU64(&w, "seq", record->Seq);
   WriteId(&w, "entryId", record->EntryId);
-  WriteString(&w, "entryClass", ClassName(record->EntryClass));
   WriteString(&w, "type", SessionRecordKind_Name(record->Kind));
   WriteU64(&w, "createdAt", record->CreatedAt);
   ObjectKey(&w, "payload");
@@ -1422,7 +762,6 @@ SessionResult SessionRecord_Decode(Arena* arena, StrView text, SessionRecord* ou
   if (!ReadRequiredId(root, "sessionId", &record.SessionId) ||
       !ReadRequiredU64(root, "seq", &record.Seq) ||
       !ReadRequiredId(root, "entryId", &record.EntryId) ||
-      !ParseClass(Json_GetStr(root, "entryClass"), &record.EntryClass) ||
       !ParseRecordKind(Json_GetStr(root, "type"), &record.Kind) ||
       !ReadRequiredU64(root, "createdAt", &record.CreatedAt) ||
       !DecodePayload(arena, Json_Get(root, "payload"), &record)) {
@@ -1443,208 +782,46 @@ SessionResult SessionRecord_Decode(Arena* arena, StrView text, SessionRecord* ou
 SessionResult SessionRecord_Clone(Arena* arena, const SessionRecord* source,
                                   SessionRecord* out) {
   if (!arena || !source || !out) return Invalid("clone arguments are invalid");
-  StrBuf encoded = StrBuf_Make(arena, 512);
-  SessionResult write = SessionRecord_Encode(&encoded, source);
-  if (!SessionResult_IsOk(write)) return write;
-  return SessionRecord_Decode(arena, StrBuf_View(&encoded), out);
-}
-
-SessionResult SessionRecords_Validate(const SessionRecord* records, u32 count) {
-  if (!records || count == 0) return Corrupt("session log is empty");
-  DurableId sessionId = records[0].SessionId;
-  DurableId activeOperation = {};
-
-  for (u32 i = 0; i < count; i++) {
-    const SessionRecord* record = &records[i];
-    SessionResult valid = SessionRecord_Validate(record);
-    if (!SessionResult_IsOk(valid)) {
-      valid.Status = valid.Status == SessionStatus::UnsupportedVersion
-                         ? SessionStatus::UnsupportedVersion
-                         : SessionStatus::Corrupt;
-      valid.Seq = record->Seq;
-      return valid;
+  SessionRecord clone = *source;
+  switch (source->Kind) {
+    case SessionRecordKind::SessionStarted:
+      clone.SessionStarted.WorkingDirectory =
+          StrView_Dup(arena, source->SessionStarted.WorkingDirectory);
+      clone.SessionStarted.ProjectKey =
+          StrView_Dup(arena, source->SessionStarted.ProjectKey);
+      clone.SessionStarted.Label = StrView_Dup(arena, source->SessionStarted.Label);
+      break;
+    case SessionRecordKind::Message:
+      clone.MessageEntry.Value = CloneMessage(arena, source->MessageEntry.Value);
+      break;
+    case SessionRecordKind::Model:
+      clone.ModelEntry.Provider = StrView_Dup(arena, source->ModelEntry.Provider);
+      clone.ModelEntry.Model = StrView_Dup(arena, source->ModelEntry.Model);
+      break;
+    case SessionRecordKind::Thinking:
+      clone.ThinkingEntry.Level = StrView_Dup(arena, source->ThinkingEntry.Level);
+      break;
+    case SessionRecordKind::Tools: {
+      const Array<StrView>& names = source->ToolsEntry.ToolNames;
+      Array<StrView> cloned = Array_Make<StrView>(arena, names.Count ? names.Count : 1);
+      for (u32 i = 0; i < names.Count; i++)
+        Array_Push(&cloned, StrView_Dup(arena, names.Data[i]));
+      clone.ToolsEntry.ToolNames = cloned;
+      break;
     }
-    if (!DurableId_Eq(record->SessionId, sessionId))
-      return SessionResult_Error(SessionStatus::Corrupt, SVL("sessionId changed within log"),
-                                 record->Seq);
-    if (record->Seq != (u64)i + 1)
-      return SessionResult_Error(SessionStatus::Corrupt, SVL("sequence is not contiguous"),
-                                 record->Seq);
-    for (u32 j = 0; j < i; j++) {
-      if (DurableId_Eq(record->EntryId, records[j].EntryId))
-        return SessionResult_Error(SessionStatus::Corrupt, SVL("duplicate entryId"),
-                                   record->Seq);
-    }
-    if (i == 0) {
-      if (record->Kind != SessionRecordKind::SessionStarted)
-        return SessionResult_Error(SessionStatus::Corrupt,
-                                   SVL("first record must start the session"), record->Seq);
-    } else if (record->Kind == SessionRecordKind::SessionStarted) {
-      return SessionResult_Error(SessionStatus::Corrupt, SVL("duplicate session start"),
-                                 record->Seq);
-    }
-
-    if (record->EntryClass == SessionEntryClass::Session &&
-        record->Kind != SessionRecordKind::SessionStarted &&
-        record->Kind != SessionRecordKind::SessionName) {
-      SessionResult parent =
-          ValidateReference(records, i, ParentIdFor(record), "session parent is invalid");
-      if (!SessionResult_IsOk(parent)) {
-        parent.Seq = record->Seq;
-        return parent;
-      }
-    }
-
-    if (record->Kind == SessionRecordKind::Compaction) {
-      DurableId refs[] = {record->CompactionEntry.BaseEntryId,
-                          record->CompactionEntry.ThroughEntryId,
-                          record->CompactionEntry.SourceHeadId};
-      for (u32 r = 0; r < 3; r++) {
-        SessionResult ref =
-            ValidateReference(records, i, refs[r], "compaction reference is invalid");
-        if (!SessionResult_IsOk(ref)) {
-          ref.Seq = record->Seq;
-          return ref;
-        }
-      }
-    }
-
-    if (record->Kind == SessionRecordKind::OperationStarted) {
-      if (DurableId_IsSet(activeOperation))
-        return SessionResult_Error(SessionStatus::Corrupt,
-                                   SVL("multiple operations are active"), record->Seq);
-      for (u32 j = 0; j < i; j++) {
-        if (records[j].Kind == SessionRecordKind::OperationStarted &&
-            DurableId_Eq(records[j].OperationStarted.OperationId,
-                         record->OperationStarted.OperationId)) {
-          return SessionResult_Error(SessionStatus::Corrupt, SVL("duplicate operationId"),
-                                     record->Seq);
-        }
-      }
-      if (DurableId_IsSet(record->OperationStarted.StartingHeadId) &&
-          !IsEarlierSessionEntry(records, i, record->OperationStarted.StartingHeadId))
-        return SessionResult_Error(SessionStatus::Corrupt,
-                                   SVL("operation starting head is invalid"), record->Seq);
-      if (DurableId_IsSet(record->OperationStarted.TargetEntryId) &&
-          !IsEarlierSessionEntry(records, i, record->OperationStarted.TargetEntryId))
-        return SessionResult_Error(SessionStatus::Corrupt,
-                                   SVL("operation target is invalid"), record->Seq);
-      activeOperation = record->OperationStarted.OperationId;
-      continue;
-    }
-
-    DurableId operationId = OperationIdFor(record);
-    if (DurableId_IsSet(operationId)) {
-      bool idleQueueItem =
-          record->Kind == SessionRecordKind::QueueItemAccepted &&
-          !DurableId_IsSet(record->QueueItemAccepted.OperationId);
-      if (!idleQueueItem &&
-          (!DurableId_IsSet(activeOperation) ||
-           !DurableId_Eq(operationId, activeOperation))) {
-        return SessionResult_Error(SessionStatus::Corrupt,
-                                   SVL("record does not belong to the active operation"),
-                                   record->Seq);
-      }
-    }
-
-    if (record->Kind == SessionRecordKind::GenerationStarted) {
-      if (FindEarlierKindId(records, i, SessionRecordKind::GenerationStarted,
-                            record->GenerationStarted.AttemptId))
-        return SessionResult_Error(SessionStatus::Corrupt, SVL("duplicate attemptId"),
-                                   record->Seq);
-    } else if (record->Kind == SessionRecordKind::GenerationFinished) {
-      const SessionRecord* started =
-          FindEarlierKindId(records, i, SessionRecordKind::GenerationStarted,
-                            record->GenerationFinished.AttemptId);
-      if (!started ||
-          !DurableId_Eq(started->GenerationStarted.OperationId,
-                        record->GenerationFinished.OperationId))
-        return SessionResult_Error(SessionStatus::Corrupt,
-                                   SVL("generation result has no matching attempt"),
-                                   record->Seq);
-      if (record->GenerationFinished.Outcome == GenerationOutcome::Succeeded) {
-        const SessionRecord* result =
-            FindEarlierEntry(records, i, record->GenerationFinished.MessageEntryId);
-        const SessionRecord* operation =
-            FindEarlierOperation(records, i, record->GenerationFinished.OperationId);
-        bool validMessage =
-            result && result->Kind == SessionRecordKind::Message &&
-            result->MessageEntry.Value.Kind == Role::Assistant;
-        bool validCompaction =
-            result && result->Kind == SessionRecordKind::Compaction && operation &&
-            operation->OperationStarted.Operation == OperationKind::Compaction;
-        if ((!validMessage && !validCompaction) ||
-            !DurableId_Eq(record->GenerationFinished.MessageEntryId,
-                          started->GenerationStarted.ProvisionedAssistantEntryId))
-          return SessionResult_Error(SessionStatus::Corrupt,
-                                     SVL("generation result entry is invalid"), record->Seq);
-      }
-    } else if (record->Kind == SessionRecordKind::ToolStarted) {
-      if (FindEarlierKindId(records, i, SessionRecordKind::ToolStarted,
-                            record->ToolStarted.ToolExecutionId))
-        return SessionResult_Error(SessionStatus::Corrupt,
-                                   SVL("duplicate toolExecutionId"), record->Seq);
-    } else if (record->Kind == SessionRecordKind::ToolFinished) {
-      const SessionRecord* started =
-          FindEarlierKindId(records, i, SessionRecordKind::ToolStarted,
-                            record->ToolFinished.ToolExecutionId);
-      if (!started ||
-          !DurableId_Eq(started->ToolStarted.OperationId,
-                        record->ToolFinished.OperationId))
-        return SessionResult_Error(SessionStatus::Corrupt,
-                                   SVL("tool result has no matching start"), record->Seq);
-      if (record->ToolFinished.Outcome != ToolOutcomeKind::Aborted) {
-        const SessionRecord* result =
-            FindEarlierEntry(records, i, record->ToolFinished.ResultEntryId);
-        if (!result || result->Kind != SessionRecordKind::Message ||
-            result->MessageEntry.Value.Kind != Role::ToolResult ||
-            !DurableId_Eq(record->ToolFinished.ResultEntryId,
-                          started->ToolStarted.ProvisionedResultEntryId))
-          return SessionResult_Error(SessionStatus::Corrupt,
-                                     SVL("tool result message is invalid"), record->Seq);
-      }
-    } else if (record->Kind == SessionRecordKind::QueueCheckpoint) {
-      for (u32 item = 0; item < record->QueueCheckpoint.ItemIds.Count; item++) {
-        if (!FindEarlierKindId(records, i, SessionRecordKind::QueueItemAccepted,
-                               record->QueueCheckpoint.ItemIds.Data[item]))
-          return SessionResult_Error(SessionStatus::Corrupt,
-                                     SVL("checkpoint queue item is invalid"), record->Seq);
-      }
-    } else if (record->Kind == SessionRecordKind::DeferredWrite) {
-      if (!FindEarlierKindId(records, i, SessionRecordKind::QueueItemAccepted,
-                             record->DeferredWrite.QueueItemId))
-        return SessionResult_Error(SessionStatus::Corrupt,
-                                   SVL("deferred write queue item is invalid"), record->Seq);
-      if (FindEarlierKindId(records, i, SessionRecordKind::DeferredWrite,
-                            record->DeferredWrite.DeferredId))
-        return SessionResult_Error(SessionStatus::Corrupt, SVL("duplicate deferredId"),
-                                   record->Seq);
-    } else if (record->Kind == SessionRecordKind::DeferredWriteCommitted) {
-      const SessionRecord* deferred =
-          FindEarlierKindId(records, i, SessionRecordKind::DeferredWrite,
-                            record->DeferredWriteCommitted.DeferredId);
-      const SessionRecord* message =
-          FindEarlierEntry(records, i, record->DeferredWriteCommitted.MessageEntryId);
-      if (!deferred || !message || message->Kind != SessionRecordKind::Message ||
-          !DurableId_Eq(deferred->DeferredWrite.ProvisionedEntryId,
-                        record->DeferredWriteCommitted.MessageEntryId))
-        return SessionResult_Error(SessionStatus::Corrupt,
-                                   SVL("deferred write commit is invalid"), record->Seq);
-    } else if (record->Kind == SessionRecordKind::RecoveryResolved) {
-      if (!FindEarlierKindId(records, i, SessionRecordKind::ToolStarted,
-                             record->RecoveryResolved.ToolExecutionId))
-        return SessionResult_Error(SessionStatus::Corrupt,
-                                   SVL("recovery tool reference is invalid"), record->Seq);
-    } else if (record->Kind == SessionRecordKind::OperationFinished ||
-               record->Kind == SessionRecordKind::OperationAborted) {
-      if (record->Kind == SessionRecordKind::OperationFinished &&
-          DurableId_IsSet(record->OperationFinished.ResultHeadId) &&
-          !IsEarlierSessionEntry(records, i, record->OperationFinished.ResultHeadId))
-        return SessionResult_Error(SessionStatus::Corrupt,
-                                   SVL("operation result head is invalid"), record->Seq);
-      activeOperation = DurableId{};
-    }
+    case SessionRecordKind::Compaction:
+      clone.CompactionEntry.Summary =
+          CloneMessage(arena, source->CompactionEntry.Summary);
+      break;
+    case SessionRecordKind::BranchLabel:
+      clone.BranchLabelEntry.Label = StrView_Dup(arena, source->BranchLabelEntry.Label);
+      break;
+    case SessionRecordKind::SessionName:
+      clone.SessionNameEntry.Name = StrView_Dup(arena, source->SessionNameEntry.Name);
+      break;
+    case SessionRecordKind::Leaf:
+      break;
   }
-
-  return SessionResult_Ok(records[count - 1].Seq);
+  *out = clone;
+  return SessionResult_Ok(source->Seq);
 }

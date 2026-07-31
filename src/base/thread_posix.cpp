@@ -13,11 +13,29 @@ static void* Trampoline(void* p) {
   return nullptr;
 }
 
+static void* PoolTrampoline(void* context) {
+  ThreadPoolTask* task = (ThreadPoolTask*)context;
+  task->Fn(task->Arg);
+  return nullptr;
+}
+
 bool Thread_Start(Thread* t, ThreadFn fn, void* arg) {
   t->Fn = fn;
   t->Arg = arg;
   pthread_t* th = (pthread_t*)t->Storage;
   return pthread_create(th, nullptr, Trampoline, t) == 0;
+}
+
+bool ThreadPool_Submit(ThreadPoolTask* task, ThreadFn fn, void* arg) {
+  task->Fn = fn;
+  task->Arg = arg;
+  pthread_attr_t attributes;
+  if (pthread_attr_init(&attributes) != 0) return false;
+  pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
+  pthread_t thread;
+  int created = pthread_create(&thread, &attributes, PoolTrampoline, task);
+  pthread_attr_destroy(&attributes);
+  return created == 0;
 }
 
 void Thread_Join(Thread* t) {

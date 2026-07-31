@@ -35,10 +35,6 @@ const AppCommandSpec kCommands[] = {
     {AppCommandKind::Compact, SVL("compact"), {},
      SVL("Compact the current branch"), SVL("Usage: /compact"),
      AppCommandArgumentPolicy::None},
-    {AppCommandKind::Recover, SVL("recover"), {},
-     SVL("Recover a suspended operation"),
-     SVL("Usage: /recover <resume|abort|tool ACTION [result]>"),
-     AppCommandArgumentPolicy::Required},
     {AppCommandKind::Trust, SVL("trust"), {},
      SVL("Change saved project trust"), SVL("Usage: /trust"),
      AppCommandArgumentPolicy::None},
@@ -199,7 +195,6 @@ AppCommandDispatchResult AppCommand_Dispatch(StrView input, const AppCommandHand
         case AppCommandKind::Checkout: fn = handlers->Checkout; break;
         case AppCommandKind::Fork: fn = handlers->Fork; break;
         case AppCommandKind::Compact: fn = handlers->Compact; break;
-        case AppCommandKind::Recover: fn = handlers->Recover; break;
         case AppCommandKind::Trust: fn = handlers->Trust; break;
         case AppCommandKind::Reload: fn = handlers->Reload; break;
         default: break;

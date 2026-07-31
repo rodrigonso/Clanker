@@ -6,6 +6,11 @@
 
 typedef void (*ThreadFn)(void* arg);
 
+struct ThreadPoolTask {
+  ThreadFn Fn;
+  void* Arg;
+};
+
 struct Thread {
   alignas(16) unsigned char Storage[16];  // HANDLE / pthread_t
   ThreadFn Fn;
@@ -14,6 +19,10 @@ struct Thread {
 
 bool Thread_Start(Thread* t, ThreadFn fn, void* arg);
 void Thread_Join(Thread* t);
+
+// Dispatch short-lived work through the platform's worker facility.
+// `task` must remain alive until the submitted callback has completed.
+bool ThreadPool_Submit(ThreadPoolTask* task, ThreadFn fn, void* arg);
 
 struct Mutex {
   alignas(16) unsigned char Storage[64];  // CRITICAL_SECTION / pthread_mutex_t

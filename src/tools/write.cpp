@@ -78,7 +78,6 @@ Tool WriteTool() {
       "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Path to "
       "the file to write (relative or absolute)\"},\"content\":{\"type\":\"string\","
       "\"description\":\"Content to write to the file\"}},\"required\":[\"path\",\"content\"]}");
-  t.ReplayPolicy = ToolReplayPolicy::ManualReconcile;
   t.Execute = WriteExec;
   t.ExecMode = ToolExecMode::Default;
   return t;

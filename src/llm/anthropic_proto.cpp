@@ -1,3 +1,4 @@
+#include <limits.h>
 #include <string.h>
 
 #include "json/json.h"
@@ -27,7 +28,7 @@ static const Model ANTHROPIC_FALLBACK_MODELS[] = {
         true,
         MODEL_EFFORT_STANDARD_MASK |
             ModelEffort_Bit(ModelEffort::Max),
-        ModelEffort::High,
+        ModelEffort::Medium,
     },
     {
         SVL("claude-opus-4-6"),
@@ -40,7 +41,7 @@ static const Model ANTHROPIC_FALLBACK_MODELS[] = {
         true,
         MODEL_EFFORT_STANDARD_MASK |
             ModelEffort_Bit(ModelEffort::Max),
-        ModelEffort::High,
+        ModelEffort::Medium,
     },
     {
         SVL("claude-haiku-4-5"),
@@ -92,7 +93,8 @@ static void ApplyKnownModelMetadata(Model* model) {
     model->ContextWindow = capability->ContextWindow;
     model->Reasoning = true;
     model->EffortMask = capability->EffortMask;
-    if (model->EffortMask) model->DefaultEffort = ModelEffort::High;
+    if (Model_SupportsEffort(model, ModelEffort::Medium))
+      model->DefaultEffort = ModelEffort::Medium;
     return;
   }
 }
@@ -341,10 +343,20 @@ static void WriteAssistantContent(StrBuf* b, const Message* m) {
       StrBuf_AppendCStr(b, ",\"name\":");
       Json_WriteString(b, c->ToolName);
       StrBuf_AppendCStr(b, ",\"input\":");
-      if (c->ToolArgsJson.Length)
-        StrBuf_Append(b, c->ToolArgsJson);
+      u32 reserve = c->ToolArgsJson.Length <= (UINT_MAX - 64) / 2
+                        ? c->ToolArgsJson.Length * 2 + 64
+                        : c->ToolArgsJson.Length;
+      StrBuf_Ensure(b, reserve);
+      usize mark = b->Backing->Used;
+      JsonValue* arguments =
+          c->ToolArgsJson.Length
+              ? Json_Parse(b->Backing, c->ToolArgsJson)
+              : nullptr;
+      if (Json_IsObject(arguments))
+        Json_WriteValue(b, arguments);
       else
         StrBuf_AppendCStr(b, "{}");
+      ArenaRestore(b->Backing, mark);
       StrBuf_AppendChar(b, '}');
     }
   }

@@ -421,7 +421,6 @@ Tool GrepTool() {
       "regex\"},\"context\":{\"type\":\"number\",\"default\":0,\"description\":\"Number of lines to "
       "show before and after each match\"},\"limit\":{\"type\":\"number\",\"default\":100,\"description\":"
       "\"Maximum number of matches to return\"}},\"required\":[\"pattern\"]}");
-  tool.ReplayPolicy = ToolReplayPolicy::ReplaySafe;
   tool.Execute = GrepExec;
   return tool;
 }

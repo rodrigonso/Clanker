@@ -4,6 +4,8 @@
 // as a child process (e.g. the cross-process file lock test) use this.
 extern const char* g_test_executable;
 
+int RunAgentBenchmark(int argc, char** argv);
+
 void TestArena();
 void TestArray();
 void TestStr();
@@ -36,3 +38,4 @@ void TestUiWidgets();
 void TestUiDemo();
 void TestTui();
 void TestHttp();
+void TestHttpLive();

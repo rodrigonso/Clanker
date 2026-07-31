@@ -67,14 +67,14 @@ void TestSettings() {
   saved.Provider = SVL("anthropic");
   saved.Model = SVL("claude-\"test\"");
   saved.DefaultTrust = DefaultProjectTrust::Always;
-  saved.Profile.Effort = ModelEffort::Medium;
+  saved.Profile.Effort = ModelEffort::High;
   saved.Profile.ContextWindow = 1000000;
   CHECK(AppSettings_Save(&a, SV(path), &saved));
   CHECK(AppSettings_Load(&a, SV(path), &loaded) == AppSettingsLoadResult::Success);
   CHECK_ALL(StrView_Eq(loaded.Provider, saved.Provider),
             StrView_Eq(loaded.Model, saved.Model),
             loaded.DefaultTrust == DefaultProjectTrust::Always,
-  loaded.Profile.Effort == ModelEffort::Medium,
+  loaded.Profile.Effort == ModelEffort::High,
   loaded.Profile.ContextWindow == 1000000);
 
 #if !defined(_WIN32)

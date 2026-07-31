@@ -92,12 +92,16 @@ static bool Anthropic_Stream(void* ctx, Arena* arena, const Model* model, const 
   req.Headers = headers;
   req.HeaderCount = hc;
   req.Body = StrBuf_View(&body);
+  // A non-2xx response body is JSON error text, not SSE; never let it reach
+  // the SSE parser (see AnthropicParse_Feed) -- use HttpResult::Body instead.
+  req.BufferNonSuccessBody = true;
 
   HttpStreamSink hsink = {};
   hsink.User = &st;
   hsink.OnData = OnHttpData;
 
-  HttpResult r = Http_Stream(arena, &req, hsink, resolved.Abort);
+  HttpResult r = resolved.Retry ? Http_StreamWithRetry(arena, &req, hsink, resolved.Abort, resolved.Retry)
+                                : Http_Stream(arena, &req, hsink, resolved.Abort);
 
   m.Use = st.Use;
   m.Timestamp = NowMillis();
@@ -111,9 +115,9 @@ static bool Anthropic_Stream(void* ctx, Arena* arena, const Model* model, const 
     } else if (r.Status >= 400) {
       StrBuf_AppendCStr(&e, "HTTP ");
       StrBuf_AppendU64(&e, (u64)r.Status);
-      if (st.Buffer.Length) {
+      if (r.Body.Length) {
         StrBuf_AppendCStr(&e, ": ");
-        StrBuf_Append(&e, StrBuf_View(&st.Buffer));
+        StrBuf_Append(&e, r.Body);
       }
     } else {
       StrBuf_Append(&e, r.Error);

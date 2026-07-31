@@ -389,11 +389,17 @@ inline void StreamSink_Emit(const StreamSink& sink, const StreamEvent& ev) {
   if (sink.OnEvent) sink.OnEvent(sink.User, ev);
 }
 
+struct HttpRetryPolicy;  // net/http.h; forward-declared so types.h stays net-independent
+
 struct StreamOptions {
   StrView ApiKey;
   i32 MaxTokens;            // 0 => use model default
   ModelRequestProfile Profile;
   volatile i32* Abort;     // non-zero => abort in progress
+  // Opt-in transport-level HTTP retry policy for this request (transport
+  // failures and HTTP 408/409/429/5xx). Null (the default) disables it, so
+  // provider behavior is unchanged unless a caller explicitly sets this.
+  const HttpRetryPolicy* Retry;
 };
 
 // A provider streams one assistant turn. Emits StreamEvents to `sink`, writes

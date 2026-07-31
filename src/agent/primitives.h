@@ -3,6 +3,7 @@
 #include "agent/tool.h"
 #include "base/thread.h"
 #include "llm/types.h"
+#include "session/replay.h"
 
 enum class ToolExecution : u8 { Parallel, Sequential };
 
@@ -78,13 +79,17 @@ struct AgentToolEventSink {
                 const ToolResult* result, bool isError);
 };
 
+struct AgentToolDispatchGate {
+  void* User;
+  bool (*TryStart)(void* user);
+};
+
 struct AgentPreparedTool {
   const Content* Call;
   const ToolRuntime* Runtime;
   const Tool* Resolved;
   ToolArgs Args;
   StrView EffectiveArgumentsJson;
-  ToolReplayPolicy ReplayPolicy;
   volatile i32* Abort;
   bool Runnable;
   bool HasWorker;
@@ -104,7 +109,6 @@ struct AgentToolCallResult {
   StrView ToolCallId;
   StrView ToolName;
   StrView EffectiveArgumentsJson;
-  ToolReplayPolicy ReplayPolicy;
   Array<Content> Content;
   bool IsError;
   bool Terminate;
@@ -125,6 +129,7 @@ void AgentToolBatch_Prepare(Arena* arena, const ToolRuntime* tools, u32 toolCoun
                             AgentToolBatchPlan* out);
 void AgentToolBatch_Run(Arena* arena, AgentToolBatchPlan* plan,
                         u32 maxParallelTools, const AgentToolHooks* hooks,
+                        const AgentToolDispatchGate* dispatch,
                         const AgentToolEventSink* events,
                         AgentToolBatchResult* out);
 

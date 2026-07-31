@@ -250,6 +250,20 @@ void TestTui() {
   Tui_AgentEvent(&t, ev);
   CHECK(t.State == TuiState::Thinking);
 
+  ev = {};
+  ev.Kind = AgentEventKind::RetryStart;
+  ev.Layer = RetryLayer::AssistantTurn;
+  ev.RetryAttempt = 1;
+  ev.RetryMaxAttempts = 3;
+  ev.RetryDelayMs = 250;
+  Tui_AgentEvent(&t, ev);
+  CHECK_ALL(t.State == TuiState::Retry,
+            StrView_Contains(t.RetryStatus, "assistant turn"),
+            StrView_Contains(t.RetryStatus, "250 ms"));
+  ev.Kind = AgentEventKind::RetryEnd;
+  Tui_AgentEvent(&t, ev);
+  CHECK_ALL(t.State == TuiState::Thinking, !t.RetryStatus.Length);
+
   // Mirror the real agent loop: message_start for the assistant turn carries a
   // not-yet-built message (null), so the entry must be begun lazily on the first
   // text delta. (Passing &m here previously masked that the streamed assistant
@@ -266,11 +280,13 @@ void TestTui() {
   Tui_AgentEvent(&t, ev);
   CHECK(Tui_AdvanceStream(&t, 1000));
   CHECK_ALL(t.Model.Entries.Count == 1,
-            t.Model.Entries.Data[0].Text.Content.Length == 1);
+            t.Model.Entries.Data[0].Text.Content.Length ==
+                sizeof("Hello ") - 1);
   ev.Stream.Delta = SVL("**world**");
   Tui_AgentEvent(&t, ev);
   CHECK(Tui_AdvanceStream(&t, 1016));
-  CHECK_ALL(t.Model.Entries.Data[0].Text.Content.Length < sizeof("Hello **world**") - 1,
+  CHECK_ALL(t.Model.Entries.Data[0].Text.Content.Length ==
+                sizeof("Hello **world**") - 1,
             t.State == TuiState::Streaming);
 
   m.Stop = StopReason::ToolUse;
@@ -559,17 +575,14 @@ void TestTui() {
 
     t2.AgentRunning = true;  // a turn is running
     Feed(&t2, "steer me\r");
-    SessionReduction queued = {};
-    CHECK(AgentHarness_Snapshot(&a2, &harness, &queued).Status ==
-          SessionStatus::Ok);
-    CHECK_ALL(queued.PendingQueueItems.Count == 1, t2.QCount == 0);
+    CHECK_ALL(harness.Queues.Steering.Count == 1, t2.QCount == 0);
     DrainDisplay(&t2);
     CHECK_ALL(!AnyRow(&a2, &t2, "you"), AnyRow(&a2, &t2, "steer me"),
               t2.Model.Entries.Data[t2.Model.Entries.Count - 1].Text.Timestamp.Length == 5);
 
     u32 entriesAfterSteer = t2.Model.Entries.Count;
     Feed(&t2, "  /model  \r");
-    CHECK_ALL(t2.QCount == 1, queued.PendingQueueItems.Count == 1);
+    CHECK_ALL(t2.QCount == 1, harness.Queues.Steering.Count == 1);
     DrainDisplay(&t2);
     CHECK_ALL(t2.Model.Entries.Count == entriesAfterSteer + 1,
               AnyRow(&a2, &t2, "Queued command:"), AnyRow(&a2, &t2, "/model"));
@@ -581,7 +594,7 @@ void TestTui() {
 
     t2.AgentRunning = false;  // between turns
     Feed(&t2, "next prompt\r");
-    CHECK_ALL(t2.QCount == 1, queued.PendingQueueItems.Count == 1);
+    CHECK_ALL(t2.QCount == 1, harness.Queues.Steering.Count == 1);
     CHECK(Tui_WaitForSubmit(&t2, &submission));
     CHECK_ALL(submission.Kind == TuiSubmissionKind::Prompt,
               StrView_Eq(submission.Text, SVL("next prompt")));

@@ -25,7 +25,7 @@ agent. jcode is the stronger fit for a comprehensive coding-agent product.
 | Binary size | 689 KiB | Not documented |
 | Tool concurrency | Automatic parallel batches, maximum 8 workers | Explicit `batch` tool, maximum 10 calls; background jobs and swarm |
 | Multi-session model | Independent process with append-only JSONL state per session | Shared daemon amortizes state; claimed approximately 9.9 MB per additional session |
-| Long-session behavior | Durable manual compaction, branching, resume, and explicit crash recovery | Background compaction, persistence, and crash recovery |
+| Long-session behavior | Durable manual compaction, branching, and resume; interrupted tool calls are normalized transiently on replay | Background compaction, persistence, and crash recovery |
 
 These measurements are directional rather than directly comparable. They use
 different operating systems and memory metrics: Clank was measured using
@@ -63,7 +63,7 @@ not committed physical memory.
 | Editing | Exact and whitespace-tolerant multi-edit with unified diff | Edit, multiedit, unified patch, and Codex-compatible `apply_patch` |
 | Code intelligence | Ripgrep-backed grep plus native find | Ripgrep-backed grep/find plus outline, trace, smart search, and context-aware result truncation |
 | LSP/tree-sitter | None | None found |
-| Sessions | Append-only JSONL sessions with continue/resume, branches, tree checkout, forks, and explicit recovery | Persistent server sessions, resume/import, journals, and crash recovery |
+| Sessions | Append-only message-oriented v2 JSONL with continue/resume, branches, tree checkout, and forks | Persistent server sessions, resume/import, journals, and crash recovery |
 | Context management | Durable manual branch compaction | Reactive, proactive, and semantic compaction |
 | Memory | Transcript only | Persistent long-term memory, embeddings, retrieval, and prior-session search |
 | Subagents | None | Worktree-aware swarm, recursive workers, messaging, and file-conflict notifications |

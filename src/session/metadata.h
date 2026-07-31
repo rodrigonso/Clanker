@@ -4,6 +4,10 @@
 
 constexpr u32 SESSION_DISPLAY_TITLE_MAX_BYTES = 96;
 
+// Derived, read-only view of a session for listing/display purposes. Every
+// field here is recomputed from the record log (or supplied by the caller
+// for the transient Busy/NowMs signal); v2 has no durable operation/recovery
+// state, so there is nothing to reconcile against.
 struct SessionInfo {
   DurableId SessionId;
   StrView ProjectKey;
@@ -21,7 +25,6 @@ struct SessionInfo {
   u64 StorageUpdatedAt;
   u64 LastActivityAt;
   u64 WallSpanMs;
-  u64 ActiveTimeMs;
 
   u64 InputTokens;
   u64 OutputTokens;
@@ -35,23 +38,16 @@ struct SessionInfo {
   u32 AssistantMessageCount;
   u32 ToolResultMessageCount;
   u32 ToolCallCount;
-  u32 GenerationCount;
-  u32 UnknownUsageCount;
   u32 CompactionCount;
-  u32 OperationCount;
 
+  // Transient: whether the harness currently has an in-memory turn running
+  // for this session. Never derived from (or persisted to) the record log.
   bool Busy;
-  bool Running;
-  bool Suspended;
-  bool ActiveTimePartial;
-  bool UsageIncomplete;
 };
 
 struct SessionMetadataBuildOptions {
   bool Busy;
-  bool Running;
-  bool Suspended;
-  u64 NowMs;
+  u64 NowMs;  // when Busy, extends WallSpanMs up to "now"
 };
 
 StrView SessionMetadata_FlattenDisplayText(

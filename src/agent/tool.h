@@ -4,7 +4,6 @@
 #include "json/json.h"
 #include "json/schema.h"
 #include "llm/types.h"
-#include "session/replay.h"
 
 // Result returned by a tool on success.
 struct ToolResult {
@@ -58,7 +57,6 @@ struct Tool {
   StrView Description;
   StrView ParamsJsonSchema;
   ToolExecMode ExecMode;  // Default => may run in parallel; Sequential => forces serial batch
-  ToolReplayPolicy ReplayPolicy;  // zero/default requires explicit recovery reconciliation
   void* Ctx;
   bool (*PrepareArguments)(void* ctx, Arena* arena, JsonValue* input,
                            JsonValue** out, StrBuf* err);

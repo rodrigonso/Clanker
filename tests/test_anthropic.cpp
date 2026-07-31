@@ -80,6 +80,25 @@ static void TestBuildRequest() {
   CHECK(Json_IsArray(tools) && tools->Count == 1);
   CHECK(StrView_EqCStr(Json_GetStr(tools->Items[0], "name"), "read"));
 
+  msgs[1].Content.Data[0].ToolArgsJson = SVL("not-json");
+  StrBuf sanitized = Anthropic_BuildRequest(&a, &model, &ctx, &opt);
+  JsonValue* sanitizedJson = Json_Parse(&a, StrBuf_View(&sanitized));
+  CHECK(sanitizedJson != nullptr);
+  JsonValue* sanitizedMessages = Json_Get(sanitizedJson, "messages");
+  JsonValue* sanitizedContent =
+      Json_Get(sanitizedMessages->Items[1], "content");
+  CHECK(Json_IsObject(Json_Get(sanitizedContent->Items[0], "input")));
+
+  msgs[1].Content.Data[0].ToolArgsJson = SVL("{\"x\":01}");
+  StrBuf canonical = Anthropic_BuildRequest(&a, &model, &ctx, &opt);
+  JsonValue* canonicalJson = Json_Parse(&a, StrBuf_View(&canonical));
+  CHECK(canonicalJson != nullptr);
+  JsonValue* canonicalMessages = Json_Get(canonicalJson, "messages");
+  JsonValue* canonicalContent =
+      Json_Get(canonicalMessages->Items[1], "content");
+  CHECK(Json_GetInt(Json_Get(canonicalContent->Items[0], "input"), "x", 0) ==
+        1);
+
   ArenaRelease(&a);
 }
 
@@ -90,7 +109,7 @@ static void TestModelCapabilities() {
             Model_SupportsEffort(&sonnet, ModelEffort::Low),
             Model_SupportsEffort(&sonnet, ModelEffort::Max),
             !Model_SupportsEffort(&sonnet, ModelEffort::XHigh),
-            Model_DefaultEffort(&sonnet) == ModelEffort::High);
+            Model_DefaultEffort(&sonnet) == ModelEffort::Medium);
 
   Model opus = Anthropic_Model(SVL("claude-opus-4-8"));
   CHECK(Model_SupportsEffort(&opus, ModelEffort::XHigh));

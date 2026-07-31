@@ -214,6 +214,7 @@ set_target_properties(clank PROPERTIES
 enable_testing()
 add_executable(clank_tests EXCLUDE_FROM_ALL
   tests/test_main.cpp
+  tests/benchmark_agent.cpp
   tests/test_base.cpp
   tests/test_types.cpp
   tests/test_json.cpp
@@ -247,5 +248,5 @@ target_link_libraries(clank_tests PRIVATE clank_app clank_proto clank_agent clan
 
 # Default ctest run stays offline; the network suite is opt-in.
 add_test(NAME unit COMMAND clank_tests)
-add_test(NAME network COMMAND clank_tests http)
+add_test(NAME network COMMAND clank_tests http_live)
 set_tests_properties(network PROPERTIES LABELS network DISABLED TRUE)

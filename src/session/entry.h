@@ -4,12 +4,16 @@
 #include "base/str.h"
 #include "llm/types.h"
 #include "session/id.h"
-#include "session/replay.h"
 #include "session/result.h"
 
-constexpr u32 SESSION_SCHEMA_VERSION = 1;
-
-enum class SessionEntryClass : u8 { Session, Harness };
+// v2 is an intentionally incompatible, Pi-style message-oriented schema: it
+// persists only the session tree and its model-visible state (messages,
+// model/thinking/tool settings, compactions, branch labels/names, and the
+// active leaf). Crash-recovery journal records (operations, generations,
+// tool-execution intents, queues, deferred writes, cancellation, recovery
+// resolutions) are gone; the harness keeps active turns and queues in memory
+// only, matching Pi's simpler persistence and crash semantics.
+constexpr u32 SESSION_SCHEMA_VERSION = 2;
 
 enum class SessionRecordKind : u8 {
   SessionStarted,
@@ -20,28 +24,8 @@ enum class SessionRecordKind : u8 {
   Compaction,
   BranchLabel,
   SessionName,
-  OperationStarted,
-  GenerationStarted,
-  GenerationFinished,
-  ToolStarted,
-  ToolFinished,
-  QueueItemAccepted,
-  QueueCheckpoint,
-  DeferredWrite,
-  DeferredWriteCommitted,
-  OperationCancelRequested,
-  OperationFinished,
-  OperationAborted,
-  RecoveryResolved,
+  Leaf,
 };
-
-enum class OperationKind : u8 { Run, Compaction, Navigation };
-enum class GenerationOutcome : u8 { Succeeded, Failed, Aborted };
-enum class ToolOutcomeKind : u8 { Succeeded, Failed, Aborted };
-enum class OperationOutcome : u8 { Succeeded, Failed, Cancelled };
-enum class QueueKind : u8 { Steering, FollowUp, NextTurn };
-enum class QueueCheckpointKind : u8 { BeforeAssistant, AfterToolBatch, AfterRun };
-enum class RecoveryResolution : u8 { RecordFailure, SupplyResult, RerunAnyway };
 
 struct SessionStartedData {
   StrView WorkingDirectory;
@@ -78,6 +62,8 @@ struct CompactionEntryData {
   DurableId ThroughEntryId;
   DurableId SourceHeadId;
   Message Summary;
+  bool HasUsage;
+  Usage Use;
 };
 
 struct BranchLabelEntryData {
@@ -89,104 +75,13 @@ struct SessionNameEntryData {
   StrView Name;
 };
 
-struct OperationStartedData {
-  DurableId OperationId;
-  OperationKind Operation;
-  DurableId StartingHeadId;
-  bool HasAcceptedMessage;
-  Message AcceptedMessage;
-  DurableId ProvisionedEntryId;
-  DurableId TargetEntryId;
-};
-
-struct GenerationStartedData {
-  DurableId OperationId;
-  DurableId AttemptId;
-  StrView Provider;
-  StrView Model;
-  StrView EffectiveRequestJson;
-  i32 MaxTokens;
-  DurableId ProvisionedAssistantEntryId;
-};
-
-struct GenerationFinishedData {
-  DurableId OperationId;
-  DurableId AttemptId;
-  GenerationOutcome Outcome;
-  DurableId MessageEntryId;
-  StrView Error;
-  bool HasUsage;
-  Usage Use;
-};
-
-struct ToolStartedData {
-  DurableId OperationId;
-  DurableId ToolExecutionId;
-  StrView ToolCallId;
-  StrView ToolName;
-  StrView EffectiveArgumentsJson;
-  DurableId ProvisionedResultEntryId;
-  ToolReplayPolicy ReplayPolicy;
-};
-
-struct ToolFinishedData {
-  DurableId OperationId;
-  DurableId ToolExecutionId;
-  ToolOutcomeKind Outcome;
-  DurableId ResultEntryId;
-  bool Terminate;
-  StrView Error;
-};
-
-struct QueueItemAcceptedData {
-  DurableId OperationId;
-  DurableId ItemId;
-  QueueKind Queue;
-  Message Value;
-};
-
-struct QueueCheckpointData {
-  DurableId OperationId;
-  QueueCheckpointKind Checkpoint;
-  Array<DurableId> ItemIds;
-};
-
-struct DeferredWriteData {
-  DurableId OperationId;
-  DurableId DeferredId;
-  DurableId QueueItemId;
-  DurableId ProvisionedEntryId;
-  Message Value;
-};
-
-struct DeferredWriteCommittedData {
-  DurableId OperationId;
-  DurableId DeferredId;
-  DurableId MessageEntryId;
-};
-
-struct OperationCancelRequestedData {
-  DurableId OperationId;
-};
-
-struct OperationFinishedData {
-  DurableId OperationId;
-  OperationOutcome Outcome;
-  DurableId ResultHeadId;
-  StrView Error;
-};
-
-struct OperationAbortedData {
-  DurableId OperationId;
-  StrView Reason;
-};
-
-struct RecoveryResolvedData {
-  DurableId OperationId;
-  DurableId ToolExecutionId;
-  RecoveryResolution Resolution;
-  bool HasSuppliedResult;
-  Message SuppliedResult;
+// Explicit marker for the active leaf entry. Appended whenever the harness
+// moves the head to an entry other than the one the default parent-chaining
+// rule would select (checkout/navigate to an existing entry). Ordinary
+// appends (message/model/thinking/tools/branch-label/compaction) become the
+// new head implicitly because their parentId equals the current head.
+struct LeafEntryData {
+  DurableId LeafId;
 };
 
 struct SessionRecord {
@@ -194,7 +89,6 @@ struct SessionRecord {
   DurableId SessionId;
   u64 Seq;
   DurableId EntryId;
-  SessionEntryClass EntryClass;
   SessionRecordKind Kind;
   u64 CreatedAt;
 
@@ -207,24 +101,19 @@ struct SessionRecord {
     CompactionEntryData CompactionEntry;
     BranchLabelEntryData BranchLabelEntry;
     SessionNameEntryData SessionNameEntry;
-    OperationStartedData OperationStarted;
-    GenerationStartedData GenerationStarted;
-    GenerationFinishedData GenerationFinished;
-    ToolStartedData ToolStarted;
-    ToolFinishedData ToolFinished;
-    QueueItemAcceptedData QueueItemAccepted;
-    QueueCheckpointData QueueCheckpoint;
-    DeferredWriteData DeferredWrite;
-    DeferredWriteCommittedData DeferredWriteCommitted;
-    OperationCancelRequestedData OperationCancelRequested;
-    OperationFinishedData OperationFinished;
-    OperationAbortedData OperationAborted;
-    RecoveryResolvedData RecoveryResolved;
+    LeafEntryData LeafEntry;
   };
 };
 
-SessionEntryClass SessionRecord_ClassForKind(SessionRecordKind kind);
+// True for record kinds that occupy a position in the entry tree and can
+// therefore be validly referenced by EntryId (as a parent, a compaction
+// base/through/source-head, or a leaf target): everything except the
+// session-name label and the leaf marker itself, which are never targets of
+// such a reference.
+bool SessionRecord_IsTreeNode(SessionRecordKind kind);
 StrView SessionRecordKind_Name(SessionRecordKind kind);
+// Returns the zero DurableId for kinds without a parent (SessionStarted,
+// SessionName, Leaf).
 DurableId SessionRecord_ParentId(const SessionRecord* record);
 SessionResult SessionRecord_PrepareForkCopy(
     const SessionRecord* source, DurableId targetSessionId, u64 targetSeq,
@@ -238,12 +127,12 @@ SessionResult SessionRecord_Encode(StrBuf* out, const SessionRecord* record);
 // JSON parser. All decoded strings and arrays are owned by arena.
 SessionResult SessionRecord_Decode(Arena* arena, StrView text, SessionRecord* out);
 
-// Deep-copies all arena-backed strings and arrays into arena by round-tripping
-// through the canonical codec.
+// Explicit deep structural clone: every string, content array, and nested
+// array is copied field-by-field into `arena`. Never round-trips through the
+// JSON codec (that would cost an encode+parse per historical record).
 SessionResult SessionRecord_Clone(Arena* arena, const SessionRecord* source,
                                   SessionRecord* out);
 
-// Validates envelope fields, kind-specific required values, total sequence
-// order, tree references, operation transitions, and provisioned result links.
+// Validates envelope fields and kind-specific required values for a single
+// record in isolation (no history/index required).
 SessionResult SessionRecord_Validate(const SessionRecord* record);
-SessionResult SessionRecords_Validate(const SessionRecord* records, u32 count);

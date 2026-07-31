@@ -16,7 +16,7 @@
 // threads (input + render); the caller's thread drives the agent loop and feeds
 // events through Tui_AgentEvent / drains user input via Tui_WaitForSubmit.
 
-enum class TuiState : u8 { Idle, Thinking, Streaming, Tool };
+enum class TuiState : u8 { Idle, Thinking, Streaming, Tool, Retry };
 
 enum class TuiModalKind : u8 { None, Select, Text };
 enum class TuiModalResult : u8 { None, Pending, Confirmed, Back, Cancelled };
@@ -124,6 +124,7 @@ struct Tui {
   // Status.
   TuiState State;
   StrView StateTool;
+  StrView RetryStatus;
   u64 TurnStartMs;
   Usage Use;
   u32 Spinner;
@@ -194,7 +195,7 @@ struct Tui {
   StrBuf ClipboardRaw;
   StrBuf ClipboardOsc;
 
-  // Received assistant text paced across render frames.
+  // Received assistant text coalesced at render-frame boundaries.
   StreamReveal Reveal;
   Array<TuiDisplayEvent> DisplayEvents;
   u32 DisplayHead;
@@ -265,7 +266,7 @@ void Tui_OpenCommandPalette(Tui* t);
 // AgentSink callback (User = Tui*).
 void Tui_AgentEvent(void* user, const AgentEvent& ev);
 
-// Advance the paced display pipeline at `nowMs`. Compose uses this under the
+// Advance the frame-coalesced display pipeline at `nowMs`. Compose uses this under the
 // TUI lock; headless tests call it directly when no TUI threads are running.
 bool Tui_AdvanceStream(Tui* t, u64 nowMs);
 bool Tui_HasPendingDisplay(const Tui* t);

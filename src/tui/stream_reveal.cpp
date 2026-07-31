@@ -5,13 +5,6 @@
 namespace {
 
 const u32 COMPACT_AFTER_BYTES = 64 * 1024;
-const u32 BASE_SCALARS_PER_SECOND = 120;
-const u32 MEDIUM_SCALARS_PER_SECOND = 180;
-const u32 HIGH_SCALARS_PER_SECOND = 240;
-const u32 MEDIUM_BACKLOG_BYTES = 256;
-const u32 HIGH_BACKLOG_BYTES = 1024;
-const u32 MAX_SCALARS_PER_FRAME = 4;
-const u32 ONE_SCALAR_CREDIT = 1000;
 
 // Return one complete UTF-8 scalar's byte length. A zero result means the
 // buffer ends with a potentially valid but incomplete scalar. Invalid input
@@ -72,62 +65,32 @@ bool StreamReveal_HasPending(const StreamReveal* r) {
 
 void StreamReveal_Push(StreamReveal* r, StrView text) {
   if (text.Length == 0) return;
-  bool wasEmpty = !StreamReveal_HasPending(r);
   ReclaimConsumed(r);
   StrBuf_Append(&r->Pending, text);
-  if (wasEmpty) {
-    r->LastTickMs = 0;
-    r->CreditMilliScalars = ONE_SCALAR_CREDIT;
-  }
 }
 
 void StreamReveal_Adopt(StreamReveal* r, StrBuf text) {
   FFI(StreamReveal_HasPending(r));
   r->Pending = text;
   r->Offset = 0;
-  r->LastTickMs = 0;
-  r->CreditMilliScalars = ONE_SCALAR_CREDIT;
 }
 
 StrView StreamReveal_NextFrame(StreamReveal* r, u64 nowMs, bool final) {
-  u32 backlog = r->Pending.Length - r->Offset;
-  if (backlog == 0) return StrView{};
-
-  u32 rate = BASE_SCALARS_PER_SECOND;
-  if (backlog >= HIGH_BACKLOG_BYTES)
-    rate = HIGH_SCALARS_PER_SECOND;
-  else if (backlog >= MEDIUM_BACKLOG_BYTES)
-    rate = MEDIUM_SCALARS_PER_SECOND;
-
-  if (r->LastTickMs == 0) {
-    r->LastTickMs = nowMs;
-  } else if (nowMs > r->LastTickMs) {
-    u64 elapsed = nowMs - r->LastTickMs;
-    if (elapsed > 100) elapsed = 100;
-    u64 credit = (u64)r->CreditMilliScalars + elapsed * rate;
-    u32 cap = MAX_SCALARS_PER_FRAME * ONE_SCALAR_CREDIT;
-    r->CreditMilliScalars = (u32)(credit > cap ? cap : credit);
-    r->LastTickMs = nowMs;
-  }
-
-  u32 budget = r->CreditMilliScalars / ONE_SCALAR_CREDIT;
-  if (budget == 0) return StrView{};
+  (void)nowMs;
+  if (!StreamReveal_HasPending(r)) return StrView{};
 
   u32 start = r->Offset;
   u32 end = start;
-  u32 consumed = 0;
-  while (end < r->Pending.Length && consumed < budget) {
+  while (end < r->Pending.Length) {
     u32 scalar = Utf8ScalarBytes(r->Pending.Data + end, r->Pending.Length - end);
     if (scalar == 0) {
       if (!final) break;
       scalar = 1;
     }
     end += scalar;
-    consumed++;
   }
 
   if (end == start) return StrView{};
-  r->CreditMilliScalars -= consumed * ONE_SCALAR_CREDIT;
   r->Offset = end;
   return StrView{r->Pending.Data + start, end - start};
 }

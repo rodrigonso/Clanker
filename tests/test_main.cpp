@@ -9,6 +9,7 @@
 //   clank_tests json session       run the named suites
 //   clank_tests --filter tui       run suites whose name contains "tui"
 //   clank_tests --all              include network-tagged suites
+//   clank_tests --benchmark ...    run the opt-in agent-loop benchmark
 //   clank_tests --help             usage
 #include <stdio.h>
 #include <stdlib.h>
@@ -69,7 +70,8 @@ const Suite kSuites[] = {
     {"ui_widgets", TestUiWidgets, TagDefault, "reusable terminal widgets"},
     {"ui_demo", TestUiDemo, TagDefault, "standalone component screen"},
     {"tui", TestTui, TagDefault, "headless TUI controller"},
-    {"http", TestHttp, TagNetwork, "live TLS/HTTP request (network)"},
+    {"http", TestHttp, TagDefault, "HTTP transport and retry policy"},
+    {"http_live", TestHttpLive, TagNetwork, "live TLS/HTTP request (network)"},
 };
 const u32 kSuiteCount = sizeof(kSuites) / sizeof(kSuites[0]);
 
@@ -85,6 +87,7 @@ void PrintUsage(const char* exe) {
   printf("  --list            list available suites and exit\n");
   printf("  --filter <text>   run suites whose name contains <text>\n");
   printf("  --all             include network-tagged suites\n");
+  printf("  --benchmark ...   run the agent-loop latency benchmark\n");
   printf("  -h, --help        show this help\n\n");
   printf("examples:\n");
   printf("  %s                       # full offline sweep\n", exe);
@@ -202,6 +205,8 @@ int main(int argc, char** argv) {
   if (argc == 3 && strcmp(argv[1], "--expect-lock-busy") == 0) {
     return RunLockProbe(argv[2]);
   }
+  if (argc >= 2 && strcmp(argv[1], "--benchmark") == 0)
+    return RunAgentBenchmark(argc - 1, argv + 1);
 
   g_test_executable = argv[0];
 

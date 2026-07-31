@@ -6,6 +6,10 @@ struct MemoryLogHandle;
 
 struct MemorySession {
   Array<SessionRecord> Records;
+  // Persistent fold state: built once (CreateSessionLocked) and updated in
+  // O(1) per appended record (SessionReducer_Fold). Never rebuilt via
+  // SessionReducer_Reduce on a hot append/open path.
+  SessionReduction Reduction;
   MemoryLogHandle* Writer;
 };
 
@@ -67,6 +71,7 @@ SessionResult BuildInfo(Arena* arena, const MemorySession* session,
                         SessionInfo* out) {
   SessionMetadataBuildOptions options = {};
   options.Busy = session->Writer != nullptr;
+  options.NowMs = NowMillis();
   return SessionMetadata_Build(arena, session->Records.Data,
                                session->Records.Count, &options, out);
 }
@@ -98,6 +103,9 @@ SessionResult CloneRecords(Arena* arena, const Array<SessionRecord>* source,
   return SessionResult_Ok(source->Count ? source->Data[source->Count - 1].Seq : 0);
 }
 
+// Callers should prefer folded SessionReduction state over ReadAll for any
+// per-turn/hot-path need; this exists for callers that genuinely need a full
+// snapshot (e.g. export, or the one-time load at harness Init).
 SessionResult ReadAll(void* context, Arena* arena, Array<SessionRecord>* out) {
   MemoryLogHandle* handle = (MemoryLogHandle*)context;
   if (!handle || !arena || !out) return Invalid("read arguments are invalid");
@@ -105,6 +113,7 @@ SessionResult ReadAll(void* context, Arena* arena, Array<SessionRecord>* out) {
   ScopedLock lock(&repository->Lock);
   if (handle->Closed)
     return SessionResult_Error(SessionStatus::InvalidState, SVL("session log is closed"));
+  repository->ReadAllCalls++;
   return CloneRecords(arena, &handle->Session->Records, out);
 }
 
@@ -115,7 +124,7 @@ SessionResult PrepareRecord(const MemorySession* session, u64 seq,
   record.SchemaVersion = SESSION_SCHEMA_VERSION;
   record.SessionId = SessionId(session);
   record.Seq = seq;
-  record.EntryClass = SessionRecord_ClassForKind(record.Kind);
+  if (!DurableId_IsSet(record.EntryId)) record.EntryId = DurableId_Generate();
   if (record.CreatedAt == 0) record.CreatedAt = NowMillis();
   *out = record;
   return SessionResult_Ok(seq);
@@ -143,30 +152,31 @@ SessionResult AppendBatch(void* context, SessionRecord* input, u32 count) {
                                SVL("injected memory repository append failure"));
   }
 
+  MemorySession* session = handle->Session;
   Arena scratch = ArenaCreate();
-  Array<SessionRecord> candidate =
-      Array_Make<SessionRecord>(&scratch, handle->Session->Records.Count + count);
-  for (u32 i = 0; i < handle->Session->Records.Count; i++)
-    Array_Push(&candidate, handle->Session->Records.Data[i]);
-
   Array<SessionRecord> prepared = Array_Make<SessionRecord>(&scratch, count);
-  u64 firstSeq = (u64)handle->Session->Records.Count + 1;
+  u64 firstSeq = (u64)session->Records.Count + 1;
+
+  // Two-phase: validate every new record against the already-folded
+  // reduction (O(1) per record) plus the small in-flight batch prepared so
+  // far (bounded by `count`, never the historical log). Only after the
+  // whole batch validates do we mutate the persistent records/reduction, so
+  // a failure partway through the batch leaves prior history untouched.
   for (u32 i = 0; i < count; i++) {
     SessionRecord record = {};
-    SessionResult prep = PrepareRecord(handle->Session, firstSeq + i, &input[i], &record);
+    SessionResult prep = PrepareRecord(session, firstSeq + i, &input[i], &record);
     if (!SessionResult_IsOk(prep)) {
       ArenaRelease(&scratch);
       return prep;
     }
+    SessionResult valid = SessionReducer_ValidateAppend(
+        &session->Reduction, &record, prepared.Data, prepared.Count);
+    if (!SessionResult_IsOk(valid)) {
+      ArenaRelease(&scratch);
+      valid.Status = SessionStatus::InvalidArgument;
+      return valid;
+    }
     Array_Push(&prepared, record);
-    Array_Push(&candidate, record);
-  }
-
-  SessionResult valid = SessionRecords_Validate(candidate.Data, candidate.Count);
-  if (!SessionResult_IsOk(valid)) {
-    ArenaRelease(&scratch);
-    valid.Status = SessionStatus::InvalidArgument;
-    return valid;
   }
 
   for (u32 i = 0; i < prepared.Count; i++) {
@@ -179,11 +189,12 @@ SessionResult AppendBatch(void* context, SessionRecord* input, u32 count) {
       return SessionResult_Error(SessionStatus::Faulted,
                                  SVL("memory repository clone failed"));
     }
-    Array_Push(&handle->Session->Records, persistent);
-    input[i] = prepared.Data[i];
+    Array_Push(&session->Records, persistent);
+    SessionReducer_Fold(&session->Reduction, session->Records.Data, session->Records.Count);
+    input[i] = persistent;
   }
   ArenaRelease(&scratch);
-  return SessionResult_Ok(LastSeq(handle->Session));
+  return SessionResult_Ok(LastSeq(session));
 }
 
 SessionResult Append(void* context, SessionRecord* record) {
@@ -215,6 +226,7 @@ MemorySession* CreateSessionLocked(MemoryRepository* repository,
   MemorySession* session = ArenaPushStruct(&repository->Mem, MemorySession);
   *session = MemorySession{};
   session->Records = Array_Make<SessionRecord>(&repository->Mem, 32);
+  DurableIdIndex_Init(&session->Reduction.Index, &repository->Mem, 32);
 
   DurableId sessionId = DurableId_IsSet(options->RequestedId)
                             ? options->RequestedId
@@ -224,7 +236,6 @@ MemorySession* CreateSessionLocked(MemoryRepository* repository,
   started.SessionId = sessionId;
   started.Seq = 1;
   started.EntryId = DurableId_Generate();
-  started.EntryClass = SessionEntryClass::Session;
   started.Kind = SessionRecordKind::SessionStarted;
   started.CreatedAt = NowMillis();
   started.SessionStarted.WorkingDirectory = options->WorkingDirectory;
@@ -237,6 +248,7 @@ MemorySession* CreateSessionLocked(MemoryRepository* repository,
   SessionResult copied = SessionRecord_Clone(&repository->Mem, &started, &persistent);
   if (!SessionResult_IsOk(copied)) return nullptr;
   Array_Push(&session->Records, persistent);
+  SessionReducer_Fold(&session->Reduction, session->Records.Data, session->Records.Count);
 
   Array_Push(&repository->Sessions, session);
   return session;
@@ -290,9 +302,9 @@ SessionResult Open(void* context, Arena* arena, const SessionOpenOptions* option
     return SessionResult_Error(SessionStatus::NotFound, SVL("session was not found"));
   if (options->Writable && session->Writer)
     return SessionResult_Error(SessionStatus::Busy, SVL("session already has a writer"));
-  SessionResult valid =
-      SessionRecords_Validate(session->Records.Data, session->Records.Count);
-  if (!SessionResult_IsOk(valid)) return valid;
+  // The in-memory session object is already validated and folded (built at
+  // Create time, kept current on every append); no linear re-validation on
+  // this Open path.
   MemoryLogHandle* handle = NewHandleLocked(repository, session, options->Writable);
   *outLog = LogInterface(handle);
   SessionResult built = BuildInfo(arena, session, outInfo);
@@ -378,16 +390,9 @@ SessionResult Fork(void* context, Arena* arena, const SessionForkOptions* option
                                SVL("target session ID already exists"));
 
   Arena scratch = ArenaCreate();
-  SessionReduction reduction = {};
-  SessionResult reduced = SessionReducer_Reduce(
-      &scratch, source->Records.Data, source->Records.Count, &reduction);
-  if (!SessionResult_IsOk(reduced)) {
-    ArenaRelease(&scratch);
-    return reduced;
-  }
   Array<const SessionRecord*> branch = {};
   SessionResult ancestry = SessionReducer_Ancestry(
-      &scratch, &reduction, options->SourceHeadId, &branch);
+      &source->Reduction, &scratch, options->SourceHeadId, &branch);
   if (!SessionResult_IsOk(ancestry)) {
     ArenaRelease(&scratch);
     return ancestry;
@@ -433,17 +438,11 @@ SessionResult Fork(void* context, Arena* arena, const SessionForkOptions* option
       return cloned;
     }
     Array_Push(&target->Records, persistent);
+    SessionReducer_Fold(&target->Reduction, target->Records.Data, target->Records.Count);
     Array_Push(&oldIds, sourceRecord->EntryId);
     Array_Push(&newIds, persistent.EntryId);
   }
 
-  SessionResult valid =
-      SessionRecords_Validate(target->Records.Data, target->Records.Count);
-  if (!SessionResult_IsOk(valid)) {
-    DiscardLastSession(repository, target);
-    ArenaRelease(&scratch);
-    return valid;
-  }
   MemoryLogHandle* handle = NewHandleLocked(repository, target, true);
   *outLog = LogInterface(handle);
   SessionResult built = BuildInfo(arena, target, outInfo);

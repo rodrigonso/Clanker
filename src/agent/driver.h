@@ -2,35 +2,53 @@
 
 #include "agent/harness.h"
 
-SessionResult AgentDriver_StartRun(AgentHarness* harness,
-                                   const Message* prompt,
-                                   DurableId operationId,
-                                   DurableId startingHeadId);
-SessionResult AgentDriver_ResumeRun(AgentHarness* harness,
-                                    const SessionReduction* restored);
-SessionResult AgentDriver_Compact(AgentHarness* harness, DurableId operationId,
-                                  DurableId startingHeadId,
-                                  DurableId compactionEntryId);
-SessionResult AgentDriver_ResumeCompaction(AgentHarness* harness,
-                                           const SessionReduction* restored);
-SessionResult AgentDriver_ResumeNavigation(AgentHarness* harness,
-                                           const SessionReduction* restored);
+// Runs a full turn-loop for an accepted user prompt: flushes the next-turn
+// queue onto the current head, appends the accepted prompt, flushes the
+// steering queue, then loops provider -> tools -> steering-checkpoint ->
+// (continue) | follow-up-checkpoint -> (continue) | stop. Returns once the
+// run truly stops (success, provider failure/abort, cancellation, or fault).
+SessionResult AgentDriver_Run(AgentHarness* harness, StrView prompt);
 
-// Internal durable append/load seams shared by the harness and driver.
+// Runs one compaction turn: a single provider call summarizing the active
+// branch, then appends one Compaction entry replacing prior context.
+SessionResult AgentDriver_Compact(AgentHarness* harness);
+
+// Internal seams shared by harness.cpp and driver.cpp.
+
+// Appends records to the session log, then folds each into the harness's own
+// maintained Records/Reduction (O(1) per record: never re-validates, clones,
+// or reloads history). Notifies watchers of each new durable record.
 SessionResult AgentHarness_Append(AgentHarness* harness, SessionRecord* records,
-                                  u32 count);
-SessionResult AgentHarness_Load(Arena* arena, AgentHarness* harness,
-                                Array<SessionRecord>* records,
-                                SessionReduction* reduction);
-void AgentHarness_PublishTransient(AgentHarness* harness,
-                                   DurableId operationId,
-                                   DurableId attemptId,
-                                   const StreamEvent* event);
-void AgentHarness_PublishToolUpdate(AgentHarness* harness,
-                                    DurableId operationId,
-                                    StrView toolCallId, StrView toolName,
-                                    const ToolResult* partial);
-void AgentHarness_PublishToolEnd(AgentHarness* harness,
-                                 DurableId operationId,
-                                 StrView toolCallId, StrView toolName,
-                                 const ToolResult* result, bool isError);
+                                  u32 count,
+                                  bool rejectIfCancelled = false);
+
+// O(1) copy of the harness's maintained reduction (arena-backed; the copy's
+// backing arrays remain valid for as long as the harness lives, since the
+// arena never frees an abandoned block -- see base/arena.h).
+SessionReduction AgentHarness_ReduceSnapshot(AgentHarness* harness);
+
+// Drains every message currently queued in `*queue` (under StateLock) and
+// appends it as a Message record chained from `*ioHead`, in FIFO order.
+// Queues are memory-only, so a drained-but-unflushed item is simply gone if
+// the process exits first; nothing here is a durable queue record.
+SessionResult AgentHarness_FlushQueue(AgentHarness* harness, Array<Message>* queue,
+                                      DurableId* ioHead, u32* outFlushedCount);
+
+void AgentHarness_PublishAgentStart(AgentHarness* harness, AgentTurnKind turn);
+void AgentHarness_PublishAgentEnd(AgentHarness* harness, AgentTurnKind turn,
+                                  AgentTurnOutcome outcome, StrView error);
+void AgentHarness_PublishTurnStart(AgentHarness* harness, AgentTurnKind turn);
+void AgentHarness_PublishTurnEnd(AgentHarness* harness, AgentTurnKind turn,
+                                 AgentTurnOutcome outcome, StrView error);
+void AgentHarness_PublishStream(AgentHarness* harness, const StreamEvent* event);
+void AgentHarness_PublishToolStart(AgentHarness* harness, StrView toolCallId,
+                                   StrView toolName, StrView argumentsJson);
+void AgentHarness_PublishToolUpdate(AgentHarness* harness, StrView toolCallId,
+                                    StrView toolName, const ToolResult* partial);
+void AgentHarness_PublishToolEnd(AgentHarness* harness, StrView toolCallId,
+                                 StrView toolName, const ToolResult* result,
+                                 bool isError);
+void AgentHarness_PublishRetry(AgentHarness* harness, AgentHarnessEventKind kind,
+                               RetryLayer layer, u32 attempt, u32 maxAttempts,
+                               u32 delayMs, StrView error);
+void AgentHarness_PublishQueueUpdate(AgentHarness* harness);

@@ -65,26 +65,6 @@ u64 AddSaturated(u64 a, u64 b) {
 
 u64 Elapsed(u64 start, u64 end) { return end > start ? end - start : 0; }
 
-const SessionRecord* FindEntry(const SessionRecord* records, u32 before,
-                               DurableId entryId) {
-  if (!DurableId_IsSet(entryId)) return nullptr;
-  for (u32 i = before; i > 0; i--)
-    if (DurableId_Eq(records[i - 1].EntryId, entryId))
-      return &records[i - 1];
-  return nullptr;
-}
-
-bool HasGenerationForMessage(const SessionRecord* records, u32 start,
-                             u32 count, DurableId messageEntryId) {
-  for (u32 i = start; i < count; i++) {
-    if (records[i].Kind == SessionRecordKind::GenerationFinished &&
-        DurableId_Eq(records[i].GenerationFinished.MessageEntryId,
-                     messageEntryId))
-      return true;
-  }
-  return false;
-}
-
 u64 NormalizedTokens(const Usage* usage) {
   if (!usage) return 0;
   if (usage->TotalTokens) return usage->TotalTokens;
@@ -107,23 +87,17 @@ void AddUsage(SessionInfo* info, const Usage* usage) {
       AddSaturated(info->TotalTokens, NormalizedTokens(usage));
 }
 
-StrView FirstUserText(Arena* arena, const SessionRecord* records, u32 count) {
-  for (u32 i = 0; i < count; i++) {
-    if (records[i].Kind != SessionRecordKind::Message ||
-        records[i].MessageEntry.Value.Kind != Role::User)
-      continue;
-    const Message* message = &records[i].MessageEntry.Value;
-    StrBuf text = StrBuf_Make(arena, 128);
-    for (u32 c = 0; c < message->Content.Count; c++) {
-      const Content* content = &message->Content.Data[c];
-      if (content->Kind != ContentKind::Text || !content->Text.Length) continue;
-      if (text.Length) StrBuf_AppendChar(&text, ' ');
-      StrBuf_Append(&text, content->Text);
-    }
-    if (!text.Length) continue;
-    return SessionMetadata_FlattenDisplayText(arena, StrBuf_View(&text), 0);
+StrView FirstUserText(Arena* arena, const SessionRecord* record) {
+  const Message* message = &record->MessageEntry.Value;
+  StrBuf text = StrBuf_Make(arena, 128);
+  for (u32 c = 0; c < message->Content.Count; c++) {
+    const Content* content = &message->Content.Data[c];
+    if (content->Kind != ContentKind::Text || !content->Text.Length) continue;
+    if (text.Length) StrBuf_AppendChar(&text, ' ');
+    StrBuf_Append(&text, content->Text);
   }
-  return {};
+  if (!text.Length) return {};
+  return SessionMetadata_FlattenDisplayText(arena, StrBuf_View(&text), 0);
 }
 
 }  // namespace
@@ -184,12 +158,10 @@ SessionResult SessionMetadata_Build(
   SessionInfo info = {};
   const SessionRecord* started = &records[0];
   info.SessionId = started->SessionId;
-  info.ProjectKey =
-      StrView_Dup(arena, started->SessionStarted.ProjectKey);
+  info.ProjectKey = StrView_Dup(arena, started->SessionStarted.ProjectKey);
   info.WorkingDirectory =
       StrView_Dup(arena, started->SessionStarted.WorkingDirectory);
-  info.ForkedFromSessionId =
-      started->SessionStarted.ForkedFromSessionId;
+  info.ForkedFromSessionId = started->SessionStarted.ForkedFromSessionId;
   info.ForkedFromEntryId = started->SessionStarted.ForkedFromEntryId;
   info.CreatedAt = started->CreatedAt;
   info.StorageUpdatedAt = records[count - 1].CreatedAt;
@@ -201,15 +173,9 @@ SessionResult SessionMetadata_Build(
   StrView label = started->SessionStarted.Label;
   StrView latestProvider = {};
   StrView latestModel = {};
-  const SessionRecord* pendingOperation = nullptr;
-  u64 pendingOperationActivityAt = 0;
-  u64 completedActiveMs = 0;
+
   for (u32 i = 0; i < count; i++) {
     const SessionRecord* record = &records[i];
-    if (pendingOperation &&
-        record->Kind != SessionRecordKind::SessionName &&
-        record->Kind != SessionRecordKind::BranchLabel)
-      pendingOperationActivityAt = record->CreatedAt;
     switch (record->Kind) {
       case SessionRecordKind::SessionName:
         explicitName = record->SessionNameEntry.Name;
@@ -219,78 +185,44 @@ SessionResult SessionMetadata_Build(
         const Message* message = &record->MessageEntry.Value;
         if (message->Kind == Role::User) {
           info.UserMessageCount++;
-          if (!firstUserText.Length)
-            firstUserText = FirstUserText(arena, record, 1);
+          if (!firstUserText.Length) firstUserText = FirstUserText(arena, record);
         } else if (message->Kind == Role::Assistant) {
           info.AssistantMessageCount++;
           for (u32 c = 0; c < message->Content.Count; c++)
             if (message->Content.Data[c].Kind == ContentKind::ToolCall)
               info.ToolCallCount++;
-          if (!HasGenerationForMessage(records, i + 1, count,
-                                       record->EntryId))
-            AddUsage(&info, &message->Use);
-          if (message->Provider.Length)
-            latestProvider = message->Provider;
-          if (message->Model.Length)
-            latestModel = message->Model;
+          AddUsage(&info, &message->Use);
+          if (message->Provider.Length) latestProvider = message->Provider;
+          if (message->Model.Length) latestModel = message->Model;
         } else {
           info.ToolResultMessageCount++;
         }
         info.LastActivityAt = record->CreatedAt;
         break;
       }
-      case SessionRecordKind::Model:
-        break;
-      case SessionRecordKind::BranchLabel:
-        break;
       case SessionRecordKind::Compaction:
         info.CompactionCount++;
         info.LastActivityAt = record->CreatedAt;
-        break;
-      case SessionRecordKind::GenerationStarted:
-        info.GenerationCount++;
-        latestProvider = record->GenerationStarted.Provider;
-        latestModel = record->GenerationStarted.Model;
-        break;
-      case SessionRecordKind::GenerationFinished:
-        if (record->GenerationFinished.HasUsage) {
-          AddUsage(&info, &record->GenerationFinished.Use);
-        } else {
-          const SessionRecord* message =
-              FindEntry(records, i,
-                        record->GenerationFinished.MessageEntryId);
-          if (message && message->Kind == SessionRecordKind::Message &&
-              message->MessageEntry.Value.Kind == Role::Assistant)
-            AddUsage(&info, &message->MessageEntry.Value.Use);
-          else
-            info.UnknownUsageCount++;
-        }
-        break;
-      case SessionRecordKind::OperationStarted:
-        info.OperationCount++;
-        pendingOperation = record;
-        pendingOperationActivityAt = record->CreatedAt;
-        break;
-      case SessionRecordKind::OperationFinished:
-      case SessionRecordKind::OperationAborted:
-        if (pendingOperation) {
-          completedActiveMs = AddSaturated(
-              completedActiveMs,
-              Elapsed(pendingOperation->CreatedAt, record->CreatedAt));
-          pendingOperation = nullptr;
-          pendingOperationActivityAt = 0;
-        }
+        if (record->CompactionEntry.HasUsage)
+          AddUsage(&info, &record->CompactionEntry.Use);
         break;
       default:
         break;
     }
   }
 
-  for (u32 i = 0; i < reduction.Branch.Count; i++) {
-    const SessionRecord* record = reduction.Branch.Data[i];
-    if (record->Kind == SessionRecordKind::BranchLabel)
-      label = record->BranchLabelEntry.Label;
+  if (reduction.HeadIsSet) {
+    Array<const SessionRecord*> branch = {};
+    SessionResult ancestry =
+        SessionReducer_Ancestry(&reduction, &scratch, reduction.HeadId, &branch);
+    if (SessionResult_IsOk(ancestry)) {
+      for (u32 i = 0; i < branch.Count; i++) {
+        if (branch.Data[i]->Kind == SessionRecordKind::BranchLabel)
+          label = branch.Data[i]->BranchLabelEntry.Label;
+      }
+    }
   }
+
   info.ExplicitName = StrView_Dup(arena, explicitName);
   info.Label = StrView_Dup(arena, label);
   info.CurrentProvider = StrView_Dup(arena, reduction.Provider);
@@ -305,25 +237,9 @@ SessionResult SessionMetadata_Build(
   info.DisplayTitle = SessionMetadata_FlattenDisplayText(
       arena, titleSource, SESSION_DISPLAY_TITLE_MAX_BYTES);
 
-  info.WallSpanMs = Elapsed(info.CreatedAt, info.LastActivityAt);
-  u64 pendingActiveMs = 0;
-  if (pendingOperation) {
-    u64 end = pendingOperationActivityAt
-                  ? pendingOperationActivityAt
-                  : pendingOperation->CreatedAt;
-    if (options && options->Running && options->NowMs > end)
-      end = options->NowMs;
-    pendingActiveMs = Elapsed(pendingOperation->CreatedAt, end);
-    info.Running = options && options->Running;
-    info.Suspended =
-        options && options->Suspended;
-    if (!info.Running && !info.Busy)
-      info.Suspended = true;
-    info.ActiveTimePartial = !info.Running;
-  }
-  info.ActiveTimeMs =
-      AddSaturated(completedActiveMs, pendingActiveMs);
-  info.UsageIncomplete = info.UnknownUsageCount > 0;
+  u64 wallEnd = info.LastActivityAt;
+  if (info.Busy && options && options->NowMs > wallEnd) wallEnd = options->NowMs;
+  info.WallSpanMs = Elapsed(info.CreatedAt, wallEnd);
 
   *out = info;
   ArenaRelease(&scratch);

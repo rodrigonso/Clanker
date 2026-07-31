@@ -197,7 +197,6 @@ Tool ReadTool() {
       "the file to read (relative or absolute)\"},\"offset\":{\"type\":\"number\",\"description\":"
       "\"Line number to start reading from (1-indexed)\"},\"limit\":{\"type\":\"number\","
       "\"description\":\"Maximum number of lines to read\"}},\"required\":[\"path\"]}");
-  t.ReplayPolicy = ToolReplayPolicy::ReplaySafe;
   t.Execute = ReadExec;
   return t;
 }

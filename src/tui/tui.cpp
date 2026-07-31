@@ -398,6 +398,10 @@ void FormatStatus(Tui* t, char* left, u32 leftCap, u32* ll, char* right,
       Put(left, leftCap, ll, "running ");
       for (u32 i = 0; i < t->StateTool.Length && *ll < leftCap - 1; i++)
         left[(*ll)++] = t->StateTool.Data[i];
+    } else if (t->State == TuiState::Retry) {
+      Put(left, leftCap, ll, "retrying ");
+      for (u32 i = 0; i < t->RetryStatus.Length && *ll < leftCap - 1; i++)
+        left[(*ll)++] = t->RetryStatus.Data[i];
     } else if (t->State == TuiState::Streaming) {
       Put(left, leftCap, ll, "responding");
     } else {
@@ -2112,6 +2116,7 @@ bool Tui_ClearSession(Tui* t) {
   t->EscapeArmed = false;
   t->State = TuiState::Idle;
   t->StateTool = {};
+  t->RetryStatus = {};
   t->TurnStartMs = 0;
   t->Use = {};
   t->Spinner = 0;
@@ -2504,6 +2509,7 @@ void Tui_AgentEvent(void* user, const AgentEvent& ev) {
   switch (ev.Kind) {
     case AgentEventKind::AgentStart:
       t->AgentRunning = true;
+      t->RetryStatus = {};
       t->LastEscapeMs = 0;
       t->EscapeArmed = false;
       if (!Tui_HasPendingDisplay(t)) t->State = TuiState::Thinking;
@@ -2568,9 +2574,32 @@ void Tui_AgentEvent(void* user, const AgentEvent& ev) {
     }
     case AgentEventKind::AgentEnd:
       t->AgentRunning = false;
+      t->RetryStatus = {};
       t->LastEscapeMs = 0;
       t->EscapeArmed = false;
       QueueDisplayEvent(t, TuiDisplayEventKind::AgentEnd);
+      break;
+    case AgentEventKind::RetryStart: {
+      StrBuf status = StrBuf_Make(
+          &t->SessionMem, ev.RetryError.Length + 96);
+      StrBuf_AppendCStr(
+          &status, ev.Layer == RetryLayer::ProviderRequest
+                       ? "provider request"
+                       : "assistant turn");
+      StrBuf_AppendCStr(&status, " in ");
+      StrBuf_AppendU64(&status, ev.RetryDelayMs);
+      StrBuf_AppendCStr(&status, " ms (");
+      StrBuf_AppendU64(&status, ev.RetryAttempt);
+      StrBuf_AppendChar(&status, '/');
+      StrBuf_AppendU64(&status, ev.RetryMaxAttempts);
+      StrBuf_AppendChar(&status, ')');
+      t->RetryStatus = StrBuf_View(&status);
+      t->State = TuiState::Retry;
+      break;
+    }
+    case AgentEventKind::RetryEnd:
+      t->RetryStatus = {};
+      if (t->State == TuiState::Retry) t->State = TuiState::Thinking;
       break;
     case AgentEventKind::QueueUpdate:
       t->QueuedCount = ev.SteerCount + ev.FollowUpCount + ev.NextTurnCount;

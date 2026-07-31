@@ -14,12 +14,6 @@ const ToolRuntime* FindTool(const ToolRuntime* tools, u32 toolCount,
   return nullptr;
 }
 
-bool ShouldReplayMessage(const Message& message) {
-  return message.Kind != Role::Assistant ||
-         (message.Stop != StopReason::Error &&
-          message.Stop != StopReason::Aborted);
-}
-
 Content RelocateContent(Arena* arena, const Content& source) {
   Content result = source;
   result.Text = StrView_Dup(arena, source.Text);
@@ -51,9 +45,13 @@ void SetPreparedError(Arena* arena, AgentPreparedTool* prepared,
 void PrepareOne(Arena* arena, const ToolRuntime* tools, u32 toolCount,
                 const AgentToolHooks* hooks, AgentPreparedTool* prepared) {
   const Content* call = prepared->Call;
+  if (prepared->Abort && *prepared->Abort) {
+    prepared->EffectiveArgumentsJson = SVL("{}");
+    SetPreparedError(arena, prepared, SVL("Tool execution cancelled"));
+    return;
+  }
   const ToolRuntime* runtime = FindTool(tools, toolCount, call->ToolName);
   prepared->EffectiveArgumentsJson = SVL("{}");
-  prepared->ReplayPolicy = ToolReplayPolicy::NoEffect;
   JsonValue* arguments = Json_Parse(arena, call->ToolArgsJson);
   StrBuf canonical = StrBuf_Make(arena, call->ToolArgsJson.Length + 32);
   if (Json_IsObject(arguments)) {
@@ -123,7 +121,6 @@ void PrepareOne(Arena* arena, const ToolRuntime* tools, u32 toolCount,
     SetPreparedError(arena, prepared, StrBuf_View(&error));
     return;
   }
-  prepared->ReplayPolicy = prepared->Resolved->ReplayPolicy;
   prepared->Runnable = true;
 }
 
@@ -141,7 +138,16 @@ void PublishToolUpdate(void* user, const ToolResult* partial) {
 }
 
 void RunOne(AgentPreparedTool* prepared, Arena* arena,
+            const AgentToolDispatchGate* dispatch,
             const AgentToolEventSink* events) {
+  bool mayStart =
+      dispatch && dispatch->TryStart
+          ? dispatch->TryStart(dispatch->User)
+          : !(prepared->Abort && *prepared->Abort);
+  if (!mayStart) {
+    SetPreparedError(arena, prepared, SVL("Tool execution cancelled"));
+    return;
+  }
   const Content* call = prepared->Call;
   StrBuf error = StrBuf_Make(arena, 64);
   ToolResult result = {};
@@ -175,8 +181,10 @@ struct ToolPool {
   u32 Count;
   u32 Next;
   u32 CompletedCount;
+  u32 WorkersExited;
   Mutex Lock;
   CondVar Changed;
+  const AgentToolDispatchGate* Dispatch;
   const AgentToolEventSink* Events;
 };
 
@@ -188,12 +196,17 @@ void ToolWorker(void* argument) {
     if (index < pool->Count) pool->Next = index + 1;
     Mutex_Unlock(&pool->Lock);
     if (index >= pool->Count) break;
-    RunOne(pool->Jobs[index], &pool->Jobs[index]->Worker, pool->Events);
+    RunOne(pool->Jobs[index], &pool->Jobs[index]->Worker, pool->Dispatch,
+           pool->Events);
     Mutex_Lock(&pool->Lock);
     pool->Completed[pool->CompletedCount++] = index;
     Cond_Signal(&pool->Changed);
     Mutex_Unlock(&pool->Lock);
   }
+  Mutex_Lock(&pool->Lock);
+  pool->WorkersExited++;
+  Cond_Signal(&pool->Changed);
+  Mutex_Unlock(&pool->Lock);
 }
 
 void FinalizeOne(Arena* arena, AgentPreparedTool* prepared,
@@ -215,7 +228,6 @@ void FinalizeOne(Arena* arena, AgentPreparedTool* prepared,
   call.ToolCallId = prepared->Call->ToolId;
   call.ToolName = prepared->Call->ToolName;
   call.EffectiveArgumentsJson = prepared->EffectiveArgumentsJson;
-  call.ReplayPolicy = prepared->ReplayPolicy;
   call.Content = outcome.Content;
   call.IsError = outcome.IsError;
   call.Terminate = outcome.Terminate;
@@ -241,11 +253,11 @@ void AgentProvider_BuildRequest(Arena* arena, StrView systemPrompt,
                                 const Tool* tools, u32 toolCount,
                                 AgentProviderRequest* out) {
   AgentProviderRequest request = {};
+  // Request-time-only Pi-style replay normalization: excludes errored/
+  // aborted assistant turns and synthesizes "No result provided" tool
+  // results for orphaned calls. Never mutates or persists the session log.
   Array<Message> replay =
-      Array_Make<Message>(arena, messageCount ? messageCount : 1);
-  for (u32 i = 0; i < messageCount; i++) {
-    if (ShouldReplayMessage(messages[i])) Array_Push(&replay, messages[i]);
-  }
+      SessionReplay_TransformMessages(arena, messages, messageCount);
   if (toolCount) {
     request.ToolDefs = ArenaPushArray(arena, ToolDef, toolCount);
     for (u32 i = 0; i < toolCount; i++)
@@ -341,6 +353,7 @@ void AgentToolBatch_Prepare(Arena* arena, const ToolRuntime* tools, u32 toolCoun
 
 void AgentToolBatch_Run(Arena* arena, AgentToolBatchPlan* plan,
                         u32 maxParallelTools, const AgentToolHooks* hooks,
+                        const AgentToolDispatchGate* dispatch,
                         const AgentToolEventSink* events,
                         AgentToolBatchResult* out) {
   if (!arena || !plan || !out) return;
@@ -354,6 +367,16 @@ void AgentToolBatch_Run(Arena* arena, AgentToolBatchPlan* plan,
     result.Calls.Data[i] = AgentToolCallResult{};
   result.AnyTool = plan->Calls.Count > 0;
   result.AllTerminate = result.AnyTool;
+
+  if (plan->RunnableCount && plan->Calls.Data[0].Abort &&
+      *plan->Calls.Data[0].Abort) {
+    for (u32 i = 0; i < plan->Calls.Count; i++) {
+      if (!plan->Calls.Data[i].Runnable) continue;
+      SetPreparedError(arena, &plan->Calls.Data[i],
+                       SVL("Tool execution cancelled"));
+      plan->RunnableCount--;
+    }
+  }
 
   for (u32 i = 0; i < plan->Calls.Count; i++) {
     if (!plan->Calls.Data[i].Runnable) {
@@ -384,17 +407,19 @@ void AgentToolBatch_Run(Arena* arena, AgentToolBatchPlan* plan,
     pool.Completed =
         ArenaPushArray(plan->Calls.Backing, u32, plan->RunnableCount);
     pool.Count = plan->RunnableCount;
+    pool.Dispatch = dispatch;
     pool.Events = events;
     Mutex_Init(&pool.Lock);
     Cond_Init(&pool.Changed);
-    Thread* threads = ArenaPushArray(plan->Calls.Backing, Thread, totalWorkers);
+    ThreadPoolTask* tasks =
+        ArenaPushArray(plan->Calls.Backing, ThreadPoolTask, totalWorkers);
     u32 started = 0;
     for (u32 i = 0; i < totalWorkers; i++) {
-      if (Thread_Start(&threads[started], ToolWorker, &pool)) started++;
+      if (ThreadPool_Submit(&tasks[started], ToolWorker, &pool)) started++;
     }
     if (started == 0) {
       for (u32 i = 0; i < plan->RunnableCount; i++) {
-        RunOne(runnable[i], &runnable[i]->Worker, events);
+        RunOne(runnable[i], &runnable[i]->Worker, dispatch, events);
         FinalizeOne(arena, runnable[i], hooks, events,
                     &result.Calls.Data[runnable[i] - plan->Calls.Data]);
         if (!result.Calls.Data[runnable[i] - plan->Calls.Data].Terminate)
@@ -415,14 +440,17 @@ void AgentToolBatch_Run(Arena* arena, AgentToolBatchPlan* plan,
         if (!result.Calls.Data[sourceIndex].Terminate)
           result.AllTerminate = false;
       }
+      Mutex_Lock(&pool.Lock);
+      while (pool.WorkersExited < started)
+        Cond_Wait(&pool.Changed, &pool.Lock);
+      Mutex_Unlock(&pool.Lock);
     }
-    for (u32 i = 0; i < started; i++) Thread_Join(&threads[i]);
     Cond_Destroy(&pool.Changed);
     Mutex_Destroy(&pool.Lock);
   } else {
     for (u32 i = 0; i < plan->Calls.Count; i++) {
       if (!plan->Calls.Data[i].Runnable) continue;
-      RunOne(&plan->Calls.Data[i], plan->Calls.Backing, events);
+      RunOne(&plan->Calls.Data[i], plan->Calls.Backing, dispatch, events);
       FinalizeOne(arena, &plan->Calls.Data[i], hooks, events,
                   &result.Calls.Data[i]);
       if (!result.Calls.Data[i].Terminate) result.AllTerminate = false;

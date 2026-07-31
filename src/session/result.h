@@ -17,8 +17,6 @@ enum class SessionStatus : u8 {
   Cancelled,
   ProviderError,
   HookError,
-  RecoveryRequired,
-  Suspended,
   WatcherLagged,
 };
 

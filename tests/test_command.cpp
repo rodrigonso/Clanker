@@ -102,15 +102,15 @@ AppCommandHandlerResult Reload(void* user, const AppCommandUx* ux,
 }
 
 void TestParse() {
-  CHECK_ALL(AppCommandSpec_Count() == 15,
+  CHECK_ALL(AppCommandSpec_Count() == 14,
             AppCommandSpec_At(AppCommandSpec_Count()) == nullptr,
             AppCommandSpec_At(0)->Kind == AppCommandKind::Login,
             StrView_EqCStr(AppCommandSpec_At(0)->Name, "login"),
             AppCommandSpec_At(0)->Arguments ==
                 AppCommandArgumentPolicy::None,
-            AppCommandSpec_At(14)->Kind == AppCommandKind::Exit,
-            StrView_EqCStr(AppCommandSpec_At(14)->Alias, "quit"),
-            AppCommandSpec_At(14)->Description.Length != 0,
+            AppCommandSpec_At(13)->Kind == AppCommandKind::Exit,
+            StrView_EqCStr(AppCommandSpec_At(13)->Alias, "quit"),
+            AppCommandSpec_At(13)->Description.Length != 0,
             StrView_EqCStr(AppCommand_Usage(AppCommandKind::Resume),
                            "Usage: /resume [session-id]"),
             AppCommand_Usage(AppCommandKind::Unknown).Length == 0);
@@ -139,7 +139,6 @@ void TestParse() {
       {SVL("/checkout abc"), AppCommandKind::Checkout},
       {SVL("/fork"), AppCommandKind::Fork},
       {SVL("/compact"), AppCommandKind::Compact},
-      {SVL("/recover resume"), AppCommandKind::Recover},
       {SVL("/trust"), AppCommandKind::Trust},
       {SVL("/reload"), AppCommandKind::Reload},
       {SVL("/exit"), AppCommandKind::Exit},     {SVL("/quit"), AppCommandKind::Exit},

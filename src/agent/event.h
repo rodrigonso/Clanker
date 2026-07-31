@@ -2,6 +2,13 @@
 #include "agent/tool.h"
 #include "llm/types.h"
 
+// Distinguishes Pi's two retry layers so a retry_start/retry_end event can
+// say which one paused: ProviderRequest is the transport-level HTTP retry
+// (Config.Stream.Retry / HttpRetryPolicy, handled inside the provider's
+// Stream implementation); AssistantTurn is the harness's own whole-turn
+// retry (Config.Retry / AgentRetryPolicy), driven by the agent loop.
+enum class RetryLayer : u8 { ProviderRequest, AssistantTurn };
+
 // Lifecycle events emitted by the agent loop for the UI/REPL. Mirrors pi's
 // AgentEvent sequence: agent_start -> turn_start -> message_* -> tool_* ->
 // turn_end -> agent_end.
@@ -31,6 +38,7 @@ struct AgentEvent {
   const ToolResult* Result;  // tool_update/tool_end
   bool IsError;              // tool_end
   // retry_start / retry_end (transient provider error backoff)
+  RetryLayer Layer;        // which retry layer paused (see RetryLayer above)
   u32 RetryAttempt;        // 1-based attempt number
   u32 RetryMaxAttempts;    // configured max retries
   u32 RetryDelayMs;        // backoff before this attempt

@@ -12,12 +12,23 @@ static DWORD WINAPI Trampoline(LPVOID p) {
   return 0;
 }
 
+static void CALLBACK PoolTrampoline(PTP_CALLBACK_INSTANCE, void* context) {
+  ThreadPoolTask* task = (ThreadPoolTask*)context;
+  task->Fn(task->Arg);
+}
+
 bool Thread_Start(Thread* t, ThreadFn fn, void* arg) {
   t->Fn = fn;
   t->Arg = arg;
   HANDLE* h = (HANDLE*)t->Storage;
   *h = CreateThread(nullptr, 0, Trampoline, t, 0, nullptr);
   return *h != nullptr;
+}
+
+bool ThreadPool_Submit(ThreadPoolTask* task, ThreadFn fn, void* arg) {
+  task->Fn = fn;
+  task->Arg = arg;
+  return TrySubmitThreadpoolCallback(PoolTrampoline, task, nullptr) != FALSE;
 }
 
 void Thread_Join(Thread* t) {

@@ -61,16 +61,21 @@ struct AuthWarmup;
 struct HarnessEventPump;
 
 struct AppAuth {
+  Arena* Mem;
   StrView Path;
+  AuthTokenCache Cache;
   AuthWarmup* Warmup;
 };
 
 struct AuthWarmup {
   Thread Worker;
+  Arena ResultMem;
+  ResolvedAuthToken Result;
   StrView Path;
   StrView Provider;
   const char* EnvVar;
   volatile i32* Abort;
+  bool Resolved;
   bool Started;
   bool Joined;
 };
@@ -113,12 +118,39 @@ struct PromptContextLifetime {
 static void EmitPromptDiagnostics(const PromptContext* context,
                                   const AppCommandUx* ux);
 
+static void AppAuth_Invalidate(AppAuth* auth) {
+  if (auth) AuthTokenCache_Invalidate(&auth->Cache);
+}
+
+static bool AppAuth_CacheToken(AppAuth* auth, StrView provider,
+                               const ResolvedAuthToken& token) {
+  return auth && AuthTokenCache_Store(auth->Mem, &auth->Cache, provider,
+                                      &token);
+}
+
+static bool AppAuth_CacheCredential(AppAuth* auth, StrView provider,
+                                    const Credential& credential) {
+  ResolvedAuthToken token = {};
+  if (credential.Kind == CredKind::ApiKey) {
+    token.Value = credential.ApiKey;
+  } else if (credential.Kind == CredKind::OAuth) {
+    token.Value = credential.Access;
+    token.ExpiresMs = credential.ExpiresMs;
+  }
+  return AppAuth_CacheToken(auth, provider, token);
+}
+
+static bool AppAuth_HasUsableCache(const AppAuth* auth, StrView provider) {
+  StrView ignored = {};
+  return auth &&
+         AuthTokenCache_Get(&auth->Cache, provider, NowMillis(), &ignored);
+}
+
 static void RunAuthWarmup(void* user) {
   AuthWarmup* warmup = (AuthWarmup*)user;
-  Arena scratch = ArenaCreate((usize)16 << 20);
-  Auth_ResolveToken(&scratch, warmup->Path, warmup->Provider,
-                    warmup->EnvVar, warmup->Abort);
-  ArenaRelease(&scratch);
+  warmup->Resolved = Auth_ResolveTokenInfo(
+      &warmup->ResultMem, warmup->Path, warmup->Provider, warmup->EnvVar,
+      &warmup->Result, warmup->Abort);
 }
 
 static bool StartAuthWarmup(AuthWarmup* warmup, AppAuth* auth,
@@ -129,8 +161,10 @@ static bool StartAuthWarmup(AuthWarmup* warmup, AppAuth* auth,
   warmup->Provider = spec->Id;
   warmup->EnvVar = spec->ApiKeyEnvVar;
   warmup->Abort = abort;
+  warmup->ResultMem = ArenaCreate((usize)16 << 20);
   auth->Warmup = warmup;
   if (!Thread_Start(&warmup->Worker, RunAuthWarmup, warmup)) {
+    ArenaRelease(&warmup->ResultMem);
     auth->Warmup = nullptr;
     return false;
   }
@@ -138,23 +172,28 @@ static bool StartAuthWarmup(AuthWarmup* warmup, AppAuth* auth,
   return true;
 }
 
-static void JoinAuthWarmup(AuthWarmup* warmup) {
+static void JoinAuthWarmup(AuthWarmup* warmup, AppAuth* auth) {
   if (!warmup || !warmup->Started || warmup->Joined) return;
   Thread_Join(&warmup->Worker);
   warmup->Joined = true;
+  if (auth && warmup->Resolved)
+    AppAuth_CacheToken(auth, warmup->Provider, warmup->Result);
+  ArenaRelease(&warmup->ResultMem);
+  if (auth && auth->Warmup == warmup) auth->Warmup = nullptr;
 }
 
 static void CancelAuthWarmup(AuthWarmup* warmup, AppAuth* auth) {
   if (!warmup) return;
   if (warmup->Abort) *warmup->Abort = 1;
-  JoinAuthWarmup(warmup);
+  JoinAuthWarmup(warmup, nullptr);
   if (auth && auth->Warmup == warmup) {
     auth->Warmup = nullptr;
   }
 }
 
 static void FinishRuntimeAuthWarmup(InteractiveRuntime* rt) {
-  if (rt && rt->AuthWarmupState) JoinAuthWarmup(rt->AuthWarmupState);
+  if (rt && rt->AuthWarmupState)
+    JoinAuthWarmup(rt->AuthWarmupState, rt->Auth);
 }
 
 static void CancelRuntimeAuthWarmup(InteractiveRuntime* rt) {
@@ -167,12 +206,21 @@ static bool AppResolveAuth(void* user, Arena* arena, StrView provider, volatile 
                            StrView* out) {
   AppAuth* aa = (AppAuth*)user;
   AuthWarmup* warmup = aa->Warmup;
-  if (warmup && StrView_Eq(warmup->Provider, provider)) JoinAuthWarmup(warmup);
+  if (warmup && StrView_Eq(warmup->Provider, provider))
+    JoinAuthWarmup(warmup, aa);
+  if (AppAuth_HasUsableCache(aa, provider)) {
+    AuthTokenCache_Get(&aa->Cache, provider, NowMillis(), out);
+    return true;
+  }
+  AppAuth_Invalidate(aa);
   const ProviderSpec* spec = ProviderRegistry_Find(provider);
-  StrView t =
-      Auth_ResolveToken(arena, aa->Path, provider, spec ? spec->ApiKeyEnvVar : nullptr, abort);
-  if (t.Length) {
-    *out = t;
+  ResolvedAuthToken resolved = {};
+  if (Auth_ResolveTokenInfo(arena, aa->Path, provider,
+                            spec ? spec->ApiKeyEnvVar : nullptr, &resolved,
+                            abort)) {
+    AppAuth_CacheToken(aa, provider, resolved);
+    *out = AppAuth_HasUsableCache(aa, provider) ? aa->Cache.Value
+                                                : resolved.Value;
     return true;
   }
   return false;
@@ -321,6 +369,14 @@ static void ReplSink(void* user, const AgentEvent& ev) {
     case AgentEventKind::MessageEnd:
       if (ev.Msg && ev.Msg->Kind == Role::Assistant) putchar('\n');
       break;
+    case AgentEventKind::RetryStart:
+      fprintf(stderr, "\nretrying %s in %u ms (retry %u of %u): %.*s\n",
+              ev.Layer == RetryLayer::ProviderRequest
+                  ? "provider request"
+                  : "assistant turn",
+              ev.RetryDelayMs, ev.RetryAttempt, ev.RetryMaxAttempts,
+              (int)ev.RetryError.Length, ev.RetryError.Data);
+      break;
     default:
       break;
   }
@@ -372,46 +428,73 @@ static bool ConsumeLiveToolEnd(HarnessEventPump* pump, StrView toolCallId) {
 static void PumpHarnessEvent(HarnessEventPump* pump,
                              const AgentHarnessEvent* event) {
   AgentEvent translated = {};
-  if (event->Kind == AgentHarnessEventKind::TransientStream) {
-    translated.Kind = AgentEventKind::MessageUpdate;
-    translated.Stream = event->Stream;
-    AgentSink_Emit(pump->Sink, translated);
-    return;
-  }
-  if (event->Kind == AgentHarnessEventKind::TransientToolUpdate ||
-      event->Kind == AgentHarnessEventKind::TransientToolEnd) {
-    translated.Kind =
-        event->Kind == AgentHarnessEventKind::TransientToolUpdate
-            ? AgentEventKind::ToolUpdate
-            : AgentEventKind::ToolEnd;
-    translated.ToolCallId = event->ToolCallId;
-    translated.ToolName = event->ToolName;
-    translated.Result = &event->ToolResultValue;
-    translated.IsError = event->IsError;
-    AgentSink_Emit(pump->Sink, translated);
-    if (event->Kind == AgentHarnessEventKind::TransientToolEnd)
-      RememberLiveToolEnd(pump, event->ToolCallId);
-    return;
-  }
-
-  const SessionRecord* record = &event->Record;
-  switch (record->Kind) {
-    case SessionRecordKind::OperationStarted:
-      if (record->OperationStarted.Operation == OperationKind::Run) {
-        translated.Kind = AgentEventKind::AgentStart;
-        AgentSink_Emit(pump->Sink, translated);
-        translated.Kind = AgentEventKind::TurnStart;
-        AgentSink_Emit(pump->Sink, translated);
-      }
-      break;
-    case SessionRecordKind::ToolStarted:
-      translated.Kind = AgentEventKind::ToolStart;
-      translated.ToolCallId = record->ToolStarted.ToolCallId;
-      translated.ToolName = record->ToolStarted.ToolName;
-      translated.ToolArgsJson = record->ToolStarted.EffectiveArgumentsJson;
+  switch (event->Kind) {
+    case AgentHarnessEventKind::TransientAgentStart:
+      translated.Kind = AgentEventKind::AgentStart;
       AgentSink_Emit(pump->Sink, translated);
       break;
-    case SessionRecordKind::Message:
+    case AgentHarnessEventKind::TransientAgentEnd:
+      translated.Kind = AgentEventKind::AgentEnd;
+      AgentSink_Emit(pump->Sink, translated);
+      ClearLiveToolEnds(pump);
+      break;
+    case AgentHarnessEventKind::TransientTurnStart:
+      translated.Kind = AgentEventKind::TurnStart;
+      AgentSink_Emit(pump->Sink, translated);
+      break;
+    case AgentHarnessEventKind::TransientTurnEnd:
+      translated.Kind = AgentEventKind::TurnEnd;
+      AgentSink_Emit(pump->Sink, translated);
+      break;
+    case AgentHarnessEventKind::TransientStream:
+      translated.Kind = AgentEventKind::MessageUpdate;
+      translated.Stream = event->Stream;
+      AgentSink_Emit(pump->Sink, translated);
+      break;
+    case AgentHarnessEventKind::TransientToolStart:
+      translated.Kind = AgentEventKind::ToolStart;
+      translated.ToolCallId = event->ToolCallId;
+      translated.ToolName = event->ToolName;
+      translated.ToolArgsJson = event->ToolArgsJson;
+      AgentSink_Emit(pump->Sink, translated);
+      break;
+    case AgentHarnessEventKind::TransientToolUpdate:
+    case AgentHarnessEventKind::TransientToolEnd:
+      translated.Kind =
+          event->Kind == AgentHarnessEventKind::TransientToolUpdate
+              ? AgentEventKind::ToolUpdate
+              : AgentEventKind::ToolEnd;
+      translated.ToolCallId = event->ToolCallId;
+      translated.ToolName = event->ToolName;
+      translated.Result = &event->ToolResultValue;
+      translated.IsError = event->IsError;
+      AgentSink_Emit(pump->Sink, translated);
+      if (event->Kind == AgentHarnessEventKind::TransientToolEnd)
+        RememberLiveToolEnd(pump, event->ToolCallId);
+      break;
+    case AgentHarnessEventKind::TransientRetryStart:
+    case AgentHarnessEventKind::TransientRetryEnd:
+      translated.Kind =
+          event->Kind == AgentHarnessEventKind::TransientRetryStart
+              ? AgentEventKind::RetryStart
+              : AgentEventKind::RetryEnd;
+      translated.Layer = event->Layer;
+      translated.RetryAttempt = event->RetryAttempt;
+      translated.RetryMaxAttempts = event->RetryMaxAttempts;
+      translated.RetryDelayMs = event->RetryDelayMs;
+      translated.RetryError = event->RetryError;
+      AgentSink_Emit(pump->Sink, translated);
+      break;
+    case AgentHarnessEventKind::TransientQueueUpdate:
+      translated.Kind = AgentEventKind::QueueUpdate;
+      translated.SteerCount = event->SteerCount;
+      translated.FollowUpCount = event->FollowUpCount;
+      translated.NextTurnCount = event->NextTurnCount;
+      AgentSink_Emit(pump->Sink, translated);
+      break;
+    case AgentHarnessEventKind::DurableRecord: {
+      const SessionRecord* record = &event->Record;
+      if (record->Kind != SessionRecordKind::Message) break;
       if (record->MessageEntry.Value.Kind == Role::Assistant) {
         translated.Kind = AgentEventKind::MessageEnd;
         translated.Msg = &record->MessageEntry.Value;
@@ -429,12 +512,8 @@ static void PumpHarnessEvent(HarnessEventPump* pump,
         AgentSink_Emit(pump->Sink, translated);
       }
       break;
-    case SessionRecordKind::OperationFinished:
-    case SessionRecordKind::OperationAborted:
-      translated.Kind = AgentEventKind::AgentEnd;
-      AgentSink_Emit(pump->Sink, translated);
-      ClearLiveToolEnds(pump);
-      break;
+    }
+    case AgentHarnessEventKind::TransientCancelRequested:
     default:
       break;
   }
@@ -720,6 +799,7 @@ static void OnLoginReady(void* user, StrView url) {
 
 static AppCommandHandlerResult RunOAuthLogin(InteractiveRuntime* rt, const ProviderSpec* spec,
                                              const AppCommandUx* ux) {
+  CancelRuntimeAuthWarmup(rt);
   const OAuthConfig* cfg = spec ? OAuth_GetConfig(spec->Id) : nullptr;
   if (!cfg)
     return AppCommandHandlerResult{AppCommandHandlerStatus::Unsupported,
@@ -800,6 +880,7 @@ static AppCommandHandlerResult RunOAuthLogin(InteractiveRuntime* rt, const Provi
     ArenaRelease(&scratch);
     return result;
   }
+  AppAuth_CacheCredential(rt->Auth, cfg->Id, credential);
 
   StrBuf message = StrBuf_Make(&scratch, spec->Name.Length + rt->AuthPath.Length + 48);
   StrBuf_AppendCStr(&message, "Logged in to ");
@@ -839,8 +920,8 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
 
   RuntimeSetOperationStatus(rt, ux, SVL("Resolving provider credentials."));
   FinishRuntimeAuthWarmup(rt);
-  StrView token =
-      Auth_ResolveToken(&scratch, rt->AuthPath, spec->Id, spec->ApiKeyEnvVar, abort);
+  StrView token = {};
+  AppResolveAuth(rt->Auth, &scratch, spec->Id, abort, &token);
   ProviderModelList live = {};
   if (!(abort && *abort)) {
     RuntimeSetOperationStatus(rt, ux, SVL("Fetching the provider model catalog."));
@@ -1112,9 +1193,14 @@ static bool ActivateRuntimeSelection(InteractiveRuntime* rt, const ProviderSpec*
     EmitCommandError(ux, changed.Message);
     return false;
   }
+  bool providerChanged = !rt->Spec || !StrView_Eq(rt->Spec->Id, spec->Id);
   rt->Spec = spec;
   rt->CurrentModel = model;
   rt->PreferredProfile = preference;
+  if (providerChanged &&
+      (!rt->Auth ||
+       !StrView_Eq(rt->Auth->Cache.Provider, spec->Id)))
+    AppAuth_Invalidate(rt->Auth);
   if (rt->TuiView)
     Tui_SetModelProfile(rt->TuiView, model.Id, activeProfile);
   bool saved = PersistRuntimeSelection(rt, ux);
@@ -1202,7 +1288,6 @@ static AppCommandHandlerResult HandleLoginCommand(void* user, const AppCommandUx
                                      provider.Message};
 
     if (authenticated != provider.Spec) {
-      CancelRuntimeAuthWarmup(rt);
       AppCommandHandlerResult login = RunOAuthLogin(rt, provider.Spec, ux);
       if (login.Status != AppCommandHandlerStatus::Success) return login;
       authenticated = provider.Spec;
@@ -1379,8 +1464,6 @@ static bool RuntimeRestorePreviousSession(
       rt->Sessions->Open(rt->Sessions->Ctx, &scratch, &open, &log, &info);
   if (SessionResult_IsOk(restored)) {
     restored = AgentHarness_Init(rt->Harness, log, config);
-    if (restored.Status == SessionStatus::Suspended)
-      restored = SessionResult_Ok(restored.Seq);
   }
   bool ok = SessionResult_IsOk(restored) && RuntimeRestartWatch(rt, ux);
   ArenaRelease(&scratch);
@@ -1522,8 +1605,7 @@ static SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
   }
 
   SessionResult initialized = AgentHarness_Init(rt->Harness, target, &config);
-  if (!SessionResult_IsOk(initialized) &&
-      initialized.Status != SessionStatus::Suspended) {
+  if (!SessionResult_IsOk(initialized)) {
     bool restored = RuntimeRollbackSessionSwitch(
         rt, previousWorkingDirectory, previousSessionId, &previousConfig, ux);
     PromptContext_Release(&nextPrompt);
@@ -1589,9 +1671,7 @@ static SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
     Tui_LoadStartupContext(rt->TuiView);
   }
   ArenaRelease(&scratch);
-  return initialized.Status == SessionStatus::Suspended
-             ? SessionResult_Ok(initialized.Seq)
-             : initialized;
+  return initialized;
 }
 
 static StrView SessionTitle(const SessionInfo* info) {
@@ -1693,13 +1773,6 @@ static Array<StrView> SessionDetailLines(Arena* arena,
             FormatTimestamp(arena, info->StorageUpdatedAt));
   AddDetail(&lines, arena, "Wall span  ",
             FormatDuration(arena, info->WallSpanMs));
-  StrBuf active = StrBuf_Make(arena, 48);
-  StrBuf_Append(&active, FormatDuration(arena, info->ActiveTimeMs));
-  if (info->Running)
-    StrBuf_AppendCStr(&active, " (running)");
-  else if (info->ActiveTimePartial)
-    StrBuf_AppendCStr(&active, " (partial)");
-  AddDetail(&lines, arena, "Active     ", StrBuf_View(&active));
 
   StrBuf model =
       StrBuf_Make(arena, info->CurrentProvider.Length +
@@ -1724,18 +1797,13 @@ static Array<StrView> SessionDetailLines(Arena* arena,
 
   StrBuf counts = StrBuf_Make(arena, 96);
   StrBuf_AppendU64(&counts, info->ToolCallCount);
-  StrBuf_AppendCStr(&counts, " tools, ");
-  StrBuf_AppendU64(&counts, info->GenerationCount);
-  StrBuf_AppendCStr(&counts, " generations, ");
+  StrBuf_AppendCStr(&counts, " tool calls, ");
   StrBuf_AppendU64(&counts, info->CompactionCount);
-  StrBuf_AppendCStr(&counts, " compactions, ");
-  StrBuf_AppendU64(&counts, info->OperationCount);
-  StrBuf_AppendCStr(&counts, " operations");
+  StrBuf_AppendCStr(&counts, " compactions");
   AddDetail(&lines, arena, "Counts     ", StrBuf_View(&counts));
 
   StrBuf tokens = StrBuf_Make(arena, 128);
   StrBuf_AppendU64(&tokens, info->TotalTokens);
-  if (info->UsageIncomplete) StrBuf_AppendChar(&tokens, '+');
   StrBuf_AppendCStr(&tokens, " total (in ");
   StrBuf_AppendU64(&tokens, info->InputTokens);
   StrBuf_AppendCStr(&tokens, ", out ");
@@ -1747,13 +1815,6 @@ static Array<StrView> SessionDetailLines(Arena* arena,
   StrBuf_AppendCStr(&tokens, ", reasoning ");
   StrBuf_AppendU64(&tokens, info->ReasoningTokens);
   StrBuf_AppendChar(&tokens, ')');
-  if (info->UsageIncomplete) {
-    StrBuf_AppendCStr(&tokens, "; ");
-    StrBuf_AppendU64(&tokens, info->UnknownUsageCount);
-    StrBuf_AppendCStr(&tokens, info->UnknownUsageCount == 1
-                                  ? " attempt unavailable"
-                                  : " attempts unavailable");
-  }
   AddDetail(&lines, arena, "Tokens     ", StrBuf_View(&tokens));
 
   if (DurableId_IsSet(info->ForkedFromSessionId)) {
@@ -1769,8 +1830,6 @@ static Array<StrView> SessionDetailLines(Arena* arena,
 }
 
 static StrView SessionStatusText(const SessionInfo* info) {
-  if (info->Running) return SVL("running");
-  if (info->Suspended) return SVL("suspended");
   if (info->Busy) return SVL("busy");
   return SVL("available");
 }
@@ -1787,13 +1846,12 @@ static StrView FormatSessionOption(Arena* arena, const SessionInfo* info,
   StrBuf_AppendU64(&option, info->MessageCount);
   StrBuf_AppendCStr(&option, " msg  |  ");
   StrBuf_AppendU64(&option, info->TotalTokens);
-  if (info->UsageIncomplete) StrBuf_AppendChar(&option, '+');
   StrBuf_AppendCStr(&option, " tok  |  ");
   StrBuf_Append(&option,
                 FormatRelativeAge(arena, info->LastActivityAt, nowMs));
   StrBuf_AppendCStr(&option, "  |  ");
-  StrBuf_Append(&option, FormatDuration(arena, info->ActiveTimeMs));
-  StrBuf_AppendCStr(&option, " active");
+  StrBuf_Append(&option, FormatDuration(arena, info->WallSpanMs));
+  StrBuf_AppendCStr(&option, " span");
   if (allProjects) {
     StrView cwd =
         Sys_AbbreviatePath(arena, info->WorkingDirectory, home);
@@ -1808,8 +1866,6 @@ static StrView FormatSessionOption(Arena* arena, const SessionInfo* info,
     StrBuf_AppendCStr(&option, "  [current]");
   else if (info->Busy)
     StrBuf_AppendCStr(&option, "  [busy]");
-  else if (info->Suspended)
-    StrBuf_AppendCStr(&option, "  [suspended]");
   return StrBuf_View(&option);
 }
 
@@ -1866,9 +1922,7 @@ static AppCommandHandlerResult HandleSessionCommand(
     return CommandResult(snapshot, {});
   }
   SessionMetadataBuildOptions build = {};
-  build.Busy = true;
-  build.Running = rt->Harness->Running;
-  build.Suspended = rt->Harness->Suspended;
+  build.Busy = rt->Harness->Running;
   build.NowMs = NowMillis();
   SessionInfo info = {};
   SessionResult metadata =
@@ -1882,8 +1936,7 @@ static AppCommandHandlerResult HandleSessionCommand(
                        ? SVL("faulted")
                    : rt->Harness->Running
                        ? SVL("running")
-                   : rt->Harness->Suspended ? SVL("suspended")
-                                             : SVL("idle");
+                       : SVL("idle");
   Array<StrView> lines = SessionDetailLines(
       &scratch, &info, rt->NoSession ? SVL("memory") : SVL("jsonl"),
       status);
@@ -2194,14 +2247,15 @@ static AppCommandHandlerResult HandleTreeCommand(
     ArenaRelease(&scratch);
     return CommandResult(snapshot, {});
   }
-  StrBuf text = StrBuf_Make(rt->Mem, state.Nodes.Count * 72 + 32);
-  if (!state.Nodes.Count) StrBuf_AppendCStr(&text, "(empty tree)");
-  for (u32 i = 0; i < state.Nodes.Count; i++) {
-    const SessionNode* node = &state.Nodes.Data[i];
-    const SessionRecord* record = &state.Records[node->RecordIndex];
+  StrBuf text = StrBuf_Make(rt->Mem, state.RecordCount * 72 + 32);
+  u32 treeCount = 0;
+  for (u32 i = 0; i < state.RecordCount; i++) {
+    const SessionRecord* record = &state.Records[i];
+    if (!SessionRecord_IsTreeNode(record->Kind)) continue;
+    if (treeCount++) StrBuf_AppendChar(&text, '\n');
     StrBuf_AppendCStr(&text,
-                     DurableId_Eq(node->EntryId, state.HeadId) ? "* " : "  ");
-    StrBuf_Append(&text, DurableId_View(&node->EntryId));
+                     DurableId_Eq(record->EntryId, state.HeadId) ? "* " : "  ");
+    StrBuf_Append(&text, DurableId_View(&record->EntryId));
     if (record->Kind == SessionRecordKind::Message) {
       if (record->MessageEntry.Value.Kind == Role::User)
         StrBuf_AppendCStr(&text, " user");
@@ -2216,12 +2270,13 @@ static AppCommandHandlerResult HandleTreeCommand(
     } else if (record->Kind == SessionRecordKind::BranchLabel) {
       StrBuf_AppendCStr(&text, " label");
     }
-    if (DurableId_IsSet(node->ParentId)) {
+    DurableId parentId = SessionRecord_ParentId(record);
+    if (DurableId_IsSet(parentId)) {
       StrBuf_AppendCStr(&text, " <- ");
-      StrBuf_Append(&text, DurableId_View(&node->ParentId));
+      StrBuf_Append(&text, DurableId_View(&parentId));
     }
-    if (i + 1 < state.Nodes.Count) StrBuf_AppendChar(&text, '\n');
   }
+  if (!treeCount) StrBuf_AppendCStr(&text, "(empty tree)");
   ArenaRelease(&scratch);
   return AppCommandHandlerResult{AppCommandHandlerStatus::Success,
                                  StrBuf_View(&text)};
@@ -2282,88 +2337,6 @@ static AppCommandHandlerResult HandleCompactCommand(
   InteractiveRuntime* rt = (InteractiveRuntime*)user;
   return CommandResult(AgentHarness_Compact(rt->Harness),
                        SVL("session compacted"));
-}
-
-static AppCommandHandlerResult HandleRecoverCommand(
-    void* user, const AppCommandUx*, StrView arguments) {
-  InteractiveRuntime* rt = (InteractiveRuntime*)user;
-  StrView command = arguments;
-  StrView rest = {};
-  for (u32 i = 0; i < arguments.Length; i++) {
-    if (!IsAsciiSpace(arguments.Data[i])) continue;
-    command = StrView{arguments.Data, i};
-    rest = TrimAscii(
-        StrView{arguments.Data + i, arguments.Length - i});
-    break;
-  }
-  if (StrView_Eq(command, SVL("resume")))
-    return CommandResult(AgentHarness_ResumeOperation(rt->Harness),
-                         SVL("operation recovered"));
-  if (StrView_Eq(command, SVL("abort")))
-    return CommandResult(
-        AgentHarness_AbortOperation(rt->Harness,
-                                    SVL("aborted by user during recovery")),
-        SVL("operation aborted"));
-  if (!StrView_Eq(command, SVL("tool")))
-    return AppCommandHandlerResult{
-        AppCommandHandlerStatus::Failed,
-        AppCommand_Usage(AppCommandKind::Recover)};
-
-  StrView action = rest;
-  StrView suppliedText = {};
-  for (u32 i = 0; i < rest.Length; i++) {
-    if (!IsAsciiSpace(rest.Data[i])) continue;
-    action = StrView{rest.Data, i};
-    suppliedText =
-        TrimAscii(StrView{rest.Data + i, rest.Length - i});
-    break;
-  }
-  Arena scratch = ArenaCreate((usize)16 << 20);
-  SessionReduction state = {};
-  SessionResult snapshot =
-      AgentHarness_Snapshot(&scratch, rt->Harness, &state);
-  if (!SessionResult_IsOk(snapshot) || state.PendingTools.Count == 0) {
-    ArenaRelease(&scratch);
-    return CommandResult(
-        SessionResult_IsOk(snapshot)
-            ? SessionResult_Error(SessionStatus::InvalidState,
-                                  SVL("no interrupted tool requires recovery"))
-            : snapshot,
-        {});
-  }
-  const SessionRecord* pending = state.PendingTools.Data[0];
-  RecoveryResolution resolution = RecoveryResolution::RecordFailure;
-  Message supplied = {};
-  Message* suppliedPtr = nullptr;
-  if (StrView_Eq(action, SVL("record-failure"))) {
-    resolution = RecoveryResolution::RecordFailure;
-  } else if (StrView_Eq(action, SVL("rerun-anyway"))) {
-    resolution = RecoveryResolution::RerunAnyway;
-  } else if (StrView_Eq(action, SVL("supply-result")) &&
-             suppliedText.Length) {
-    resolution = RecoveryResolution::SupplyResult;
-    supplied.Kind = Role::ToolResult;
-    supplied.ToolCallId = pending->ToolStarted.ToolCallId;
-    supplied.ToolName = pending->ToolStarted.ToolName;
-    supplied.Content = Array_Make<Content>(&scratch, 1);
-    Content content = {};
-    content.Kind = ContentKind::Text;
-    content.Text = suppliedText;
-    Array_Push(&supplied.Content, content);
-    suppliedPtr = &supplied;
-  } else {
-    ArenaRelease(&scratch);
-    return AppCommandHandlerResult{
-        AppCommandHandlerStatus::Failed,
-        SVL("Usage: /recover tool <record-failure|rerun-anyway|supply-result TEXT>")};
-  }
-  SessionResult reconciled = AgentHarness_ReconcileTool(
-      rt->Harness, pending->ToolStarted.ToolExecutionId, resolution,
-      suppliedPtr);
-  if (SessionResult_IsOk(reconciled))
-    reconciled = AgentHarness_ResumeOperation(rt->Harness);
-  ArenaRelease(&scratch);
-  return CommandResult(reconciled, SVL("tool recovery completed"));
 }
 
 static StrView PromptContextReport(Arena* arena, const PromptContext* context,
@@ -2522,8 +2495,7 @@ static AppCommandHandlerResult HandleTrustCommand(
 static AppCommandHandlerResult HandleReloadCommand(
     void* user, const AppCommandUx* ux, StrView) {
   InteractiveRuntime* rt = (InteractiveRuntime*)user;
-  if (!rt->Harness || !rt->Prompt || rt->Harness->Running ||
-      rt->Harness->Suspended) {
+  if (!rt->Harness || !rt->Prompt || rt->Harness->Running) {
     return AppCommandHandlerResult{
         AppCommandHandlerStatus::Failed,
         SVL("Prompt context can only be reloaded while the agent is idle.")};
@@ -2575,6 +2547,7 @@ static AppCommandHandlerResult HandleReloadCommand(
   rt->DefaultTrust = defaultTrust;
   rt->ProjectTrusted = trust.Trusted;
   rt->HasProjectResources = hasProjectResources;
+  AppAuth_Invalidate(rt->Auth);
   PromptContext_Release(&previous);
 
   EmitPromptDiagnostics(rt->Prompt, ux);
@@ -2633,7 +2606,6 @@ static AppCommandHandlers RuntimeCommandHandlers(InteractiveRuntime* rt) {
   handlers.Checkout = HandleCheckoutCommand;
   handlers.Fork = HandleForkCommand;
   handlers.Compact = HandleCompactCommand;
-  handlers.Recover = HandleRecoverCommand;
   handlers.Reload = HandleReloadCommand;
   bool selectorsAvailable = rt->TuiView || Term_IsInteractive();
   if (selectorsAvailable) handlers.Trust = HandleTrustCommand;
@@ -2721,7 +2693,7 @@ static void PrintHelp() {
       "Auth: run `--login anthropic` for a Claude Pro/Max subscription (a local\n"
       "callback server captures the redirect automatically), or set ANTHROPIC_API_KEY.\n"
       "Interactive commands: /session, /name, /sessions, /resume, /tree,\n"
-      "/checkout, /fork, /compact, /recover, /trust, /reload, /login, /model,\n"
+      "/checkout, /fork, /compact, /trust, /reload, /login, /model,\n"
       "/clear, /exit.\n");
 }
 
@@ -3131,6 +3103,7 @@ int main(int argc, char** argv) {
   }
 
   AppAuth appAuth = {};
+  appAuth.Mem = &arena;
   appAuth.Path = authPath;
   RuntimeSelection selected =
       LoadRuntimeSelection(&arena, settingsPath, faux ? nullptr : modelOverride);
@@ -3157,7 +3130,13 @@ int main(int argc, char** argv) {
     MemoryRepository_Init(&memoryRepository);
     sessions = MemoryRepository_AsRepository(&memoryRepository);
   } else {
-    JsonlRepository_Init(&jsonlRepository, SessionDataRoot(&arena));
+    StrView dataRoot = SessionDataRoot(&arena);
+    JsonlRepository_Init(&jsonlRepository, dataRoot);
+    if (jsonlRepository.HasUnmigratedV1) {
+      fprintf(stderr,
+              "notice: existing v1 sessions were not migrated; Clank will "
+              "start a new v2 session store\n");
+    }
     sessions = JsonlRepository_AsRepository(&jsonlRepository);
   }
 
@@ -3289,10 +3268,6 @@ int main(int argc, char** argv) {
       faux ? Faux_Provider(&fauxState) : selected.Spec->CreateProvider(&arena);
   harnessConfig.Stream.Profile = profile;
   harnessConfig.ToolExec = ToolExecution::Parallel;
-  harnessConfig.Retry.Enabled = true;
-  harnessConfig.Retry.MaxRetries = 3;
-  harnessConfig.Retry.BaseDelayMs = 2000;
-  harnessConfig.Retry.MaxDelayMs = 60000;
   if (!faux) {
     harnessConfig.AuthUser = &appAuth;
     harnessConfig.ResolveAuth = AppResolveAuth;
@@ -3352,8 +3327,7 @@ int main(int argc, char** argv) {
   AgentHarness harness = {};
   SessionResult initialized =
       AgentHarness_Init(&harness, sessionLog, &harnessConfig);
-  if (!SessionResult_IsOk(initialized) &&
-      initialized.Status != SessionStatus::Suspended) {
+  if (!SessionResult_IsOk(initialized)) {
     fprintf(stderr, "error: session restore failed: %.*s\n",
             (int)initialized.Message.Length, initialized.Message.Data);
     sessions.Close(sessions.Ctx);
@@ -3400,7 +3374,7 @@ int main(int argc, char** argv) {
         harness.Config.ModelInfo = model;
         harness.Config.ProviderImpl = restored->CreateProvider(&arena);
         harness.Config.Stream.Profile = profile;
-        if (modelOverride && !harness.Suspended) {
+        if (modelOverride) {
           SessionResult overridden = AgentHarness_SetModel(
               &harness, model, harness.Config.ProviderImpl, profile);
           if (!SessionResult_IsOk(overridden)) {
@@ -3414,7 +3388,7 @@ int main(int argc, char** argv) {
           }
         }
       }
-    } else if (SessionResult_IsOk(snapshot) && !harness.Suspended) {
+    } else if (SessionResult_IsOk(snapshot)) {
       SessionResult selectedModel = AgentHarness_SetModel(
           &harness, model, harness.Config.ProviderImpl, profile);
       if (!SessionResult_IsOk(selectedModel)) {

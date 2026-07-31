@@ -10,6 +10,12 @@ struct MemoryRepository {
   Mutex Lock;
   Array<MemorySession*> Sessions;
   u64 AppendCalls;
+  // Counts calls to SessionLog_ReadAll across every log this repository has
+  // handed out. Tests use this to prove the harness reads full history only
+  // once, at AgentHarness_Init -- never again on a per-turn/snapshot/mutation
+  // path (see AgentHarness_Append / AgentHarness_ReduceSnapshot, which fold
+  // incrementally instead of reloading).
+  u64 ReadAllCalls;
   u64 FailOnAppendCall;
   bool Initialized;
 };

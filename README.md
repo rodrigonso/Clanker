@@ -29,8 +29,8 @@ src/
            callback server + browser opener (no deps beyond OS sockets)
   auth/    credentials + generic OAuth (PKCE flow, callback capture, store,
            refresh, resolve)
-  session/ append-only session records, reducer, memory + JSONL repositories
-  agent/   durable AgentHarness, recovery driver, hooks, events, compaction
+  session/ append-only v2 message tree, reducer, memory + JSONL repositories
+  agent/   incremental AgentHarness, in-memory queues, hooks, events, compaction
   tools/   read/write/edit/ls/find/grep/shell, direct/shell process exec,
            ripgrep discovery, fs/glob/diff/truncate/filelock infra
   term/    full-screen TUI: raw-mode terminal, key decoder, differential
@@ -44,24 +44,24 @@ tests/     single CLI test harness (suite selection via args; offline by default
 - **No C++ standard library**, no exceptions, no RTTI. Types and conventions
   (`Arena`, `Array<T>`, PascalCase fields, `FFI(cond)` fastfail) follow the
   caboose/Briq house style. Only the C runtime and platform/libcurl APIs are used.
-- **Append-only durable sessions.** Session entries form a branchable message
-  tree; harness entries persist provider/tool intent, queues, cancellation, and
-  recovery state without entering model context. Session-global names are
-  separate from branch labels, and a shared metadata projection derives titles,
-  activity/duration statistics, counts, ancestry, and lifetime attempt usage.
-  JSONL is the default backend, while `--no-session` uses the same contracts
-  entirely in memory.
+- **Append-only durable sessions.** Session v2 entries form a branchable,
+  message-oriented tree containing only model-visible state, compactions,
+  names, labels, and the selected leaf. Active turns and message queues remain
+  in memory, matching pi. A crash can leave an assistant tool call without a
+  result; provider replay supplies a transient `No result provided` error
+  without persisting it or rerunning the side effect. JSONL is the default
+  backend, while `--no-session` uses the same contracts entirely in memory.
 - **Single-threaded loop, parallel tool batches.** A pluggable `Provider`
-  streams one assistant turn (auto-retrying transient errors with capped
-  exponential backoff); a turn's tool calls run **concurrently by default** (each
+  streams one assistant turn; a turn's tool calls run **concurrently by default** (each
   on a small worker pool, isolated in its own arena), matching pi. Transient
   completion events are published in actual finish order, while final results
-  remain durably appended in original call order. Tools receive centrally
+  are appended in original call order. Provider-request and whole-assistant-turn
+  retry layers are separately configurable and default to off. Tools receive centrally
   parsed, schema-validated, coercion-normalized arguments; unsupported
   validation keywords fail harness initialization. The `shell` tool also emits
   bounded, replace-in-place partial output snapshots. These live updates never
   enter model context or the session log, so the source-ordered durable result
-  remains authoritative for replay and recovery. Set the agent to sequential —
+  remains authoritative for replay. Set the agent to sequential —
   or mark a tool sequential — to serialize. A `beforeTool` gate and an
   `afterToolCall` hook bracket each call. Events are pushed to an `AgentSink`.
   Mirrors pi's event sequence (`agent_start → turn_start → message_* → tool_* →
@@ -175,10 +175,9 @@ painted synchronously before
 HTTP initialization, cwd/git context discovery, and credential warmup; key input
 starts before the remaining post-frame work. It runs three threads — the agent
 loop, a key-input thread, and a render thread (~20fps) so the spinner stays live
-while a turn waits on the network. Bursty assistant deltas are revealed
-continuously across ~60fps frames at a capped UTF-8 scalar rate instead of
-painting a large received chunk all at once. Visual message/tool transitions
-wait behind queued text without blocking the agent or tool execution.
+while a turn waits on the network. Assistant deltas are displayed at complete
+UTF-8 boundaries on the next render frame, without a separate typing-speed
+throttle, so reveal speed is bounded only by provider delivery and rendering.
 
 The interface is assembled with the internal, arena-backed `clank_ui`
 component library. Layout, focus, hit-testing, pointer capture, reusable
@@ -212,8 +211,7 @@ Interactive commands:
   ID, then choose the effort and context tier when that model exposes those
   controls. Fixed context windows are displayed without an unnecessary prompt.
 - `/session` — inspect the current title, IDs, project, status, times, model,
-  counts, token categories, and fork ancestry. Token totals use a trailing `+`
-  when interrupted attempts have unavailable usage.
+  counts, token categories, and fork ancestry.
 - `/name [title]` — set the current session name; an empty TUI value or
   `/name --clear` restores the first-user-message title.
 - `/sessions [all]` — browse rich current-project metadata, or all projects.
@@ -222,7 +220,6 @@ Interactive commands:
 - `/tree` and `/checkout <entry-id>` — inspect or navigate conversation branches.
 - `/fork [entry-id]` — fork and switch to a new session.
 - `/compact` — durably summarize the active branch.
-- `/recover ...` — resume, abort, or reconcile an interrupted operation.
 - `/trust` — save project trust for a future Clank process.
 - `/reload` — transactionally reload settings and prompt context while idle.
 - `/clear` — create a fresh session while preserving the provider, model,
@@ -248,9 +245,10 @@ adds a new durable model selection. Direct IDs are exact opaque durable IDs.
 Cross-project resume enters the session's stored working directory, resolves
 project trust again, rebuilds prompt context, and rollback-safely switches the
 session, process cwd, and TUI cwd/branch. `--continue` remains scoped to the current project. Sessions
-live under `~/.clank/sessions/v1/<project-key>/`; their canonical JSONL files
-also store names and per-attempt usage without a sidecar. Unreadable session
-files are reported and skipped during browsing/continuation. Interactive
+live under `~/.clank/sessions/v2/<project-key>/`; v1 sessions are intentionally
+not migrated, listed, or opened. Canonical JSONL files also store names without
+a sidecar. Unreadable session files are reported and skipped during
+browsing/continuation. Interactive
 mode may start without credentials and blocks prompts with `/login` guidance;
 `-p` remains fail-fast.
 
@@ -259,7 +257,9 @@ Set `CLANK_PRINT_MEM=1` to print peak RSS at exit.
 ## Authentication
 
 Two credential types, stored in `~/.clank/auth.json` (atomic writes,
-restricted perms), resolved per turn so OAuth tokens refresh mid-session.
+restricted perms). The resolved token and OAuth expiry are cached in the
+running app; expiry, login, provider changes, and `/reload` invalidate or
+replace the cache so OAuth refresh still works mid-session.
 Existing `~/.mini-agent/auth.json` credentials are migrated automatically:
 
 - **API key** — set `ANTHROPIC_API_KEY`, or store one in `auth.json`.
@@ -293,7 +293,7 @@ lets you (or an agent) pick exactly what to exercise.
 ./build/clank_tests --help          # usage
 ```
 
-Suites tagged `network` (currently `http`, a live TLS/HTTP request that replaces
+Suites tagged `network` (currently `http_live`, a live TLS/HTTP request that replaces
 the old `clank_http_smoke` binary) are skipped by default, so a bare run stays
 offline and deterministic. Request one by name or with `--all`; point it at a
 local server with `CLANK_TEST_HTTP_URL`. Exit code is 0 on success, 1 on test

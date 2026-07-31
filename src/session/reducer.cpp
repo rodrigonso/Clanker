@@ -2,89 +2,183 @@
 
 namespace {
 
-const SessionRecord* FindEntry(const SessionReduction* reduction, DurableId id) {
-  for (u32 i = 0; i < reduction->Nodes.Count; i++) {
-    if (DurableId_Eq(reduction->Nodes.Data[i].EntryId, id))
-      return &reduction->Records[reduction->Nodes.Data[i].RecordIndex];
-  }
-  return nullptr;
-}
-
-bool IdArrayContains(const Array<DurableId>* ids, DurableId id) {
-  for (u32 i = 0; i < ids->Count; i++)
-    if (DurableId_Eq(ids->Data[i], id)) return true;
-  return false;
-}
-
-bool QueueItemConsumed(const SessionRecord* records, u32 count, u32 acceptedIndex,
-                       DurableId itemId) {
-  for (u32 i = acceptedIndex + 1; i < count; i++) {
-    if (records[i].Kind == SessionRecordKind::QueueCheckpoint &&
-        IdArrayContains(&records[i].QueueCheckpoint.ItemIds, itemId))
-      return true;
-  }
-  return false;
-}
-
-bool DeferredWriteCommitted(const SessionRecord* records, u32 count, u32 deferredIndex,
-                            DurableId deferredId) {
-  for (u32 i = deferredIndex + 1; i < count; i++) {
-    if (records[i].Kind == SessionRecordKind::DeferredWriteCommitted &&
-        DurableId_Eq(records[i].DeferredWriteCommitted.DeferredId, deferredId))
-      return true;
-  }
-  return false;
-}
-
-bool GenerationFinished(const SessionRecord* records, u32 count, u32 startedIndex,
-                        DurableId attemptId) {
-  for (u32 i = startedIndex + 1; i < count; i++) {
-    if (records[i].Kind == SessionRecordKind::GenerationFinished &&
-        DurableId_Eq(records[i].GenerationFinished.AttemptId, attemptId))
-      return true;
-  }
-  return false;
-}
-
-bool ToolFinished(const SessionRecord* records, u32 count, u32 startedIndex,
-                  DurableId executionId) {
-  for (u32 i = startedIndex + 1; i < count; i++) {
-    if (records[i].Kind == SessionRecordKind::ToolFinished &&
-        DurableId_Eq(records[i].ToolFinished.ToolExecutionId, executionId))
-      return true;
-  }
-  return false;
-}
-
-const SessionRecord* LatestRecovery(const SessionRecord* records, u32 count,
-                                    u32 startedIndex, DurableId executionId) {
-  const SessionRecord* result = nullptr;
-  for (u32 i = startedIndex + 1; i < count; i++) {
-    if (records[i].Kind == SessionRecordKind::RecoveryResolved &&
-        DurableId_Eq(records[i].RecoveryResolved.ToolExecutionId, executionId))
-      result = &records[i];
-  }
-  return result;
+SessionResult Invalid(const char* message) {
+  return SessionResult_Error(SessionStatus::InvalidArgument, SV(message));
 }
 
 SessionResult Corrupt(const char* message) {
   return SessionResult_Error(SessionStatus::Corrupt, SV(message));
 }
 
+const SessionRecord* FindEntry(const SessionReduction* reduction, DurableId id) {
+  u32 index;
+  if (!DurableIdIndex_Find(&reduction->Index, id, &index)) return nullptr;
+  const SessionRecord* record = &reduction->Records[index];
+  return SessionRecord_IsTreeNode(record->Kind) ? record : nullptr;
+}
+
+// Walks backward from `reduction->HeadId` to the session root, recomputing
+// the branch-scoped Provider/Model/ThinkingLevel/ToolNames from whichever
+// Model/Thinking/Tools record is nearest to the head. O(branch); only called
+// when a Leaf record explicitly relocates the head (checkout), never on the
+// ordinary append-onto-head path.
+void RecomputeBranchSettings(SessionReduction* reduction) {
+  reduction->Provider = StrView{};
+  reduction->Model = StrView{};
+  reduction->ThinkingLevel = StrView{};
+  reduction->ToolNames = Array<StrView>{};
+  bool haveModel = false;
+  bool haveThinking = false;
+  bool haveTools = false;
+
+  DurableId current = reduction->HeadId;
+  while (DurableId_IsSet(current)) {
+    const SessionRecord* record = FindEntry(reduction, current);
+    if (!record) break;
+    if (!haveModel && record->Kind == SessionRecordKind::Model) {
+      reduction->Provider = record->ModelEntry.Provider;
+      reduction->Model = record->ModelEntry.Model;
+      haveModel = true;
+    } else if (!haveThinking && record->Kind == SessionRecordKind::Thinking) {
+      reduction->ThinkingLevel = record->ThinkingEntry.Level;
+      haveThinking = true;
+    } else if (!haveTools && record->Kind == SessionRecordKind::Tools) {
+      reduction->ToolNames = record->ToolsEntry.ToolNames;
+      haveTools = true;
+    }
+    if (record->Kind == SessionRecordKind::SessionStarted) break;
+    current = SessionRecord_ParentId(record);
+  }
+}
+
 }  // namespace
 
-SessionResult SessionReducer_Ancestry(Arena* arena, const SessionReduction* reduction,
+void SessionReducer_Fold(SessionReduction* reduction, const SessionRecord* records, u32 count) {
+  reduction->Records = records;
+  reduction->RecordCount = count;
+  if (count == 0) return;
+  u32 i = count - 1;
+  const SessionRecord* record = &records[i];
+
+  DurableIdIndex_Put(&reduction->Index, record->EntryId, i);
+
+  if (record->Kind == SessionRecordKind::SessionName) return;
+
+  if (record->Kind == SessionRecordKind::Leaf) {
+    reduction->HeadId = record->LeafEntry.LeafId;
+    reduction->HeadIsSet = true;
+    RecomputeBranchSettings(reduction);
+    return;
+  }
+
+  if (record->Kind == SessionRecordKind::SessionStarted) {
+    reduction->HeadId = record->EntryId;
+    reduction->HeadIsSet = true;
+    return;
+  }
+
+  DurableId parent = SessionRecord_ParentId(record);
+  bool chainsOntoHead = reduction->HeadIsSet && DurableId_Eq(parent, reduction->HeadId);
+  if (!chainsOntoHead) return;  // appended onto an inactive branch; indexed, not the new head
+
+  reduction->HeadId = record->EntryId;
+  reduction->HeadIsSet = true;
+  switch (record->Kind) {
+    case SessionRecordKind::Model:
+      reduction->Provider = record->ModelEntry.Provider;
+      reduction->Model = record->ModelEntry.Model;
+      break;
+    case SessionRecordKind::Thinking:
+      reduction->ThinkingLevel = record->ThinkingEntry.Level;
+      break;
+    case SessionRecordKind::Tools:
+      reduction->ToolNames = record->ToolsEntry.ToolNames;
+      break;
+    default: break;
+  }
+}
+
+namespace {
+
+bool PendingContains(const SessionRecord* pending, u32 pendingCount,
+                     DurableId id, bool treeOnly) {
+  for (u32 i = 0; i < pendingCount; i++)
+    if ((!treeOnly || SessionRecord_IsTreeNode(pending[i].Kind)) &&
+        DurableId_Eq(pending[i].EntryId, id))
+      return true;
+  return false;
+}
+
+}  // namespace
+
+SessionResult SessionReducer_ValidateAppend(const SessionReduction* reduction,
+                                            const SessionRecord* candidate,
+                                            const SessionRecord* pending,
+                                            u32 pendingCount) {
+  if (!reduction || !candidate) return Invalid("validate-append arguments are invalid");
+  SessionResult self = SessionRecord_Validate(candidate);
+  if (!SessionResult_IsOk(self)) return self;
+
+  auto treeExists = [&](DurableId id) {
+    u32 index = 0;
+    bool historical =
+        DurableIdIndex_Find(&reduction->Index, id, &index) &&
+        SessionRecord_IsTreeNode(reduction->Records[index].Kind);
+    return historical || PendingContains(pending, pendingCount, id, true);
+  };
+
+  u64 priorCount = (u64)reduction->RecordCount + pendingCount;
+  if (candidate->Seq != priorCount + 1)
+    return Invalid("seq must be contiguous with the existing log");
+
+  if (reduction->RecordCount > 0 &&
+      !DurableId_Eq(candidate->SessionId, reduction->Records[0].SessionId))
+    return Invalid("sessionId must match the log it is appended to");
+  if (reduction->RecordCount == 0 && pendingCount > 0 &&
+      !DurableId_Eq(candidate->SessionId, pending[0].SessionId))
+    return Invalid("sessionId must match the log it is appended to");
+
+  if (DurableIdIndex_Contains(&reduction->Index, candidate->EntryId) ||
+      PendingContains(pending, pendingCount, candidate->EntryId, false))
+    return Invalid("entryId already exists in this session");
+
+  if (candidate->Kind == SessionRecordKind::SessionStarted) {
+    if (priorCount != 0) return Invalid("sessionStarted must be the first record");
+    return SessionResult_Ok(candidate->Seq);
+  }
+  if (priorCount == 0) return Invalid("the first record must be sessionStarted");
+
+  if (candidate->Kind == SessionRecordKind::SessionName) return SessionResult_Ok(candidate->Seq);
+
+  if (candidate->Kind == SessionRecordKind::Leaf) {
+    if (!treeExists(candidate->LeafEntry.LeafId))
+      return Invalid("leaf target entryId was not found");
+    return SessionResult_Ok(candidate->Seq);
+  }
+
+  DurableId parent = SessionRecord_ParentId(candidate);
+  if (!treeExists(parent)) return Invalid("parentId was not found in this session");
+
+  if (candidate->Kind == SessionRecordKind::Compaction) {
+    if (!treeExists(candidate->CompactionEntry.BaseEntryId) ||
+        !treeExists(candidate->CompactionEntry.ThroughEntryId) ||
+        !treeExists(candidate->CompactionEntry.SourceHeadId))
+      return Invalid("compaction references an entryId that was not found");
+  }
+
+  return SessionResult_Ok(candidate->Seq);
+}
+
+SessionResult SessionReducer_Ancestry(const SessionReduction* reduction, Arena* arena,
                                       DurableId headId,
                                       Array<const SessionRecord*>* outBranch) {
   if (!arena || !reduction || !outBranch || !DurableId_IsSet(headId))
-    return SessionResult_Error(SessionStatus::InvalidArgument,
-                               SVL("ancestry arguments are invalid"));
+    return Invalid("ancestry arguments are invalid");
   const SessionRecord* current = FindEntry(reduction, headId);
-  if (!current || current->EntryClass != SessionEntryClass::Session)
-    return SessionResult_Error(SessionStatus::NotFound, SVL("session head was not found"));
+  if (!current) return SessionResult_Error(SessionStatus::NotFound, SVL("session head was not found"));
 
   Array<const SessionRecord*> reverse =
-      Array_Make<const SessionRecord*>(arena, reduction->Nodes.Count);
+      Array_Make<const SessionRecord*>(arena, reduction->RecordCount ? reduction->RecordCount : 1);
   while (current) {
     Array_Push(&reverse, current);
     if (current->Kind == SessionRecordKind::SessionStarted) break;
@@ -105,11 +199,9 @@ SessionResult SessionReducer_Ancestry(Arena* arena, const SessionReduction* redu
 
 SessionResult SessionReducer_Context(Arena* arena, const SessionReduction* reduction,
                                      DurableId headId, Array<Message>* outMessages) {
-  if (!arena || !reduction || !outMessages)
-    return SessionResult_Error(SessionStatus::InvalidArgument,
-                               SVL("context arguments are invalid"));
+  if (!arena || !reduction || !outMessages) return Invalid("context arguments are invalid");
   Array<const SessionRecord*> branch = {};
-  SessionResult ancestry = SessionReducer_Ancestry(arena, reduction, headId, &branch);
+  SessionResult ancestry = SessionReducer_Ancestry(reduction, arena, headId, &branch);
   if (!SessionResult_IsOk(ancestry)) return ancestry;
 
   i32 compactionIndex = -1;
@@ -132,131 +224,98 @@ SessionResult SessionReducer_Context(Arena* arena, const SessionReduction* reduc
 
 SessionResult SessionReducer_Reduce(Arena* arena, const SessionRecord* records, u32 count,
                                     SessionReduction* out) {
-  if (!arena || !records || count == 0 || !out)
-    return SessionResult_Error(SessionStatus::InvalidArgument,
-                               SVL("reducer arguments are invalid"));
+  if (!arena || !records || count == 0 || !out) return Invalid("reducer arguments are invalid");
   SessionResult valid = SessionRecords_Validate(records, count);
   if (!SessionResult_IsOk(valid)) return valid;
 
   SessionReduction result = {};
-  result.Records = records;
-  result.RecordCount = count;
-  result.Nodes = Array_Make<SessionNode>(arena, count);
-  result.PendingTools = Array_Make<const SessionRecord*>(arena, 4);
-  result.PendingQueueItems = Array_Make<const SessionRecord*>(arena, 8);
-  result.PendingDeferredWrites = Array_Make<const SessionRecord*>(arena, 4);
-  result.HeadId = records[0].EntryId;
-
-  for (u32 i = 0; i < count; i++) {
-    const SessionRecord* record = &records[i];
-    if (record->EntryClass == SessionEntryClass::Session &&
-        record->Kind != SessionRecordKind::SessionName) {
-      SessionNode node = {};
-      node.EntryId = record->EntryId;
-      node.ParentId = SessionRecord_ParentId(record);
-      node.RecordIndex = i;
-      Array_Push(&result.Nodes, node);
-      if (record->Kind != SessionRecordKind::SessionStarted &&
-          DurableId_Eq(node.ParentId, result.HeadId))
-        result.HeadId = record->EntryId;
-    }
-
-    switch (record->Kind) {
-      case SessionRecordKind::OperationStarted:
-        result.HasActiveOperation = true;
-        result.ActiveOperationStart = record;
-        result.ActiveOperationId = record->OperationStarted.OperationId;
-        result.ActiveOperationKind = record->OperationStarted.Operation;
-        result.CancelRequested = false;
-        break;
-      case SessionRecordKind::OperationCancelRequested:
-        result.CancelRequested = true;
-        break;
-      case SessionRecordKind::OperationFinished:
-        if (record->OperationFinished.Outcome == OperationOutcome::Succeeded &&
-            DurableId_IsSet(record->OperationFinished.ResultHeadId))
-          result.HeadId = record->OperationFinished.ResultHeadId;
-        result.HasActiveOperation = false;
-        result.ActiveOperationStart = nullptr;
-        result.ActiveOperationId = DurableId{};
-        result.CancelRequested = false;
-        break;
-      case SessionRecordKind::OperationAborted:
-        result.HasActiveOperation = false;
-        result.ActiveOperationStart = nullptr;
-        result.ActiveOperationId = DurableId{};
-        result.CancelRequested = false;
-        break;
-      default: break;
-    }
-  }
-
-  SessionResult ancestry =
-      SessionReducer_Ancestry(arena, &result, result.HeadId, &result.Branch);
-  if (!SessionResult_IsOk(ancestry)) return ancestry;
-  for (u32 i = 0; i < result.Branch.Count; i++) {
-    const SessionRecord* record = result.Branch.Data[i];
-    if (record->Kind == SessionRecordKind::Model) {
-      result.Provider = record->ModelEntry.Provider;
-      result.Model = record->ModelEntry.Model;
-    } else if (record->Kind == SessionRecordKind::Thinking) {
-      result.ThinkingLevel = record->ThinkingEntry.Level;
-    } else if (record->Kind == SessionRecordKind::Tools) {
-      result.ToolNames = record->ToolsEntry.ToolNames;
-    }
-  }
-
-  if (result.HasActiveOperation) {
-    bool pendingGeneration = false;
-    bool pendingReplaySafe = false;
-    bool pendingManual = false;
-    for (u32 i = 0; i < count; i++) {
-      const SessionRecord* record = &records[i];
-      if (record->Kind == SessionRecordKind::GenerationStarted &&
-          DurableId_Eq(record->GenerationStarted.OperationId,
-                       result.ActiveOperationId) &&
-          !GenerationFinished(records, count, i, record->GenerationStarted.AttemptId)) {
-        pendingGeneration = true;
-        result.PendingAttemptId = record->GenerationStarted.AttemptId;
-        result.PendingGeneration = record;
-      } else if (record->Kind == SessionRecordKind::ToolStarted &&
-                 DurableId_Eq(record->ToolStarted.OperationId,
-                              result.ActiveOperationId) &&
-                 !ToolFinished(records, count, i, record->ToolStarted.ToolExecutionId)) {
-        Array_Push(&result.PendingTools, record);
-        const SessionRecord* recovery =
-            LatestRecovery(records, count, i, record->ToolStarted.ToolExecutionId);
-        const SessionRecord* durableResult =
-            FindEntry(&result, record->ToolStarted.ProvisionedResultEntryId);
-        if (durableResult ||
-            record->ToolStarted.ReplayPolicy !=
-                ToolReplayPolicy::ManualReconcile ||
-            recovery)
-          pendingReplaySafe = true;
-        else
-          pendingManual = true;
-      }
-    }
-    if (pendingManual)
-      result.Suspension = SessionSuspensionKind::ManualTool;
-    else if (pendingReplaySafe)
-      result.Suspension = SessionSuspensionKind::ReplaySafeTool;
-    else if (pendingGeneration)
-      result.Suspension = SessionSuspensionKind::Generation;
-    else
-      result.Suspension = SessionSuspensionKind::Operation;
-  }
-
-  for (u32 i = 0; i < count; i++) {
-    const SessionRecord* record = &records[i];
-    if (record->Kind == SessionRecordKind::QueueItemAccepted &&
-        !QueueItemConsumed(records, count, i, record->QueueItemAccepted.ItemId))
-      Array_Push(&result.PendingQueueItems, record);
-    if (record->Kind == SessionRecordKind::DeferredWrite &&
-        !DeferredWriteCommitted(records, count, i, record->DeferredWrite.DeferredId))
-      Array_Push(&result.PendingDeferredWrites, record);
-  }
+  DurableIdIndex_Init(&result.Index, arena, count);
+  for (u32 i = 0; i < count; i++) SessionReducer_Fold(&result, records, i + 1);
 
   *out = result;
   return SessionResult_Ok(records[count - 1].Seq);
+}
+
+SessionResult SessionRecords_Validate(const SessionRecord* records, u32 count) {
+  if (!records || count == 0) return Invalid("records are required");
+  if (records[0].Kind != SessionRecordKind::SessionStarted)
+    return Corrupt("the first record must be sessionStarted");
+
+  if (count > (1u << 30))
+    return Corrupt("session contains too many records");
+  usize indexBytes = DurableIdIndex_AllocationSize(count);
+  Arena scratch = ArenaCreate(indexBytes + ((usize)64 << 10));
+  DurableIdIndex index;
+  DurableIdIndex_Init(&index, &scratch, count);
+  DurableId sessionId = records[0].SessionId;
+  DurableId headId = {};
+  bool headIsSet = false;
+
+  SessionResult result = SessionResult_Ok();
+  for (u32 i = 0; i < count; i++) {
+    const SessionRecord* record = &records[i];
+    SessionResult self = SessionRecord_Validate(record);
+    if (!SessionResult_IsOk(self)) {
+      result = self;
+      break;
+    }
+    if (!DurableId_Eq(record->SessionId, sessionId)) {
+      result = Corrupt("all records must share the same sessionId");
+      break;
+    }
+    if (record->Seq != (u64)i + 1) {
+      result = Corrupt("seq must be contiguous starting at 1");
+      break;
+    }
+    if (DurableIdIndex_Contains(&index, record->EntryId)) {
+      result = Corrupt("duplicate entryId in session log");
+      break;
+    }
+
+    auto treeExists = [&](DurableId id) {
+      u32 recordIndex = 0;
+      return DurableIdIndex_Find(&index, id, &recordIndex) &&
+             SessionRecord_IsTreeNode(records[recordIndex].Kind);
+    };
+
+    if (record->Kind == SessionRecordKind::SessionStarted) {
+      if (i != 0) {
+        result = Corrupt("sessionStarted must be the first record");
+        break;
+      }
+      headId = record->EntryId;
+      headIsSet = true;
+    } else if (record->Kind == SessionRecordKind::SessionName) {
+      // no parent, does not affect head
+    } else if (record->Kind == SessionRecordKind::Leaf) {
+      if (!treeExists(record->LeafEntry.LeafId)) {
+        result = Corrupt("leaf target entryId was not found");
+        break;
+      }
+      headId = record->LeafEntry.LeafId;
+      headIsSet = true;
+    } else {
+      DurableId parent = SessionRecord_ParentId(record);
+      if (!treeExists(parent)) {
+        result = Corrupt("parentId was not found before its reference");
+        break;
+      }
+      if (record->Kind == SessionRecordKind::Compaction) {
+        if (!treeExists(record->CompactionEntry.BaseEntryId) ||
+            !treeExists(record->CompactionEntry.ThroughEntryId) ||
+            !treeExists(record->CompactionEntry.SourceHeadId)) {
+          result = Corrupt("compaction references an entryId that was not found");
+          break;
+        }
+      }
+      if (headIsSet && DurableId_Eq(parent, headId)) {
+        headId = record->EntryId;
+        headIsSet = true;
+      }
+    }
+
+    DurableIdIndex_Put(&index, record->EntryId, i);
+  }
+  ArenaRelease(&scratch);
+  return result;
 }
