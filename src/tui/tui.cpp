@@ -12,6 +12,7 @@ const char* kSpinner[10] = {"\xe2\xa0\x8b", "\xe2\xa0\x99", "\xe2\xa0\xb9", "\xe
                             "\xe2\xa0\xbc", "\xe2\xa0\xb4", "\xe2\xa0\xa6", "\xe2\xa0\xa7",
                             "\xe2\xa0\x87", "\xe2\xa0\x8f"};
 constexpr u64 kDoubleEscapeMs = 500;
+constexpr u64 kSpinnerFrameMs = 60;
 
 Style TuiSt(const Tui* t, u8 fg, u8 attr) {
   return Style{t->Color ? fg : COL_DEFAULT, COL_DEFAULT, attr};
@@ -586,6 +587,7 @@ void ApplyDisplayEvent(Tui* t, const TuiDisplayEvent& ev) {
 bool PumpDisplay(Tui* t, u64 nowMs) {
   ViewportAnchor anchor = CaptureViewportAnchor(t);
   bool changed = false;
+  bool toolStartedThisFrame = false;
 
   for (;;) {
     if (StreamReveal_HasPending(&t->Reveal)) {
@@ -606,13 +608,17 @@ bool PumpDisplay(Tui* t, u64 nowMs) {
     }
 
     if (!HasQueuedDisplayEvents(t)) break;
-    TuiDisplayEvent* ev = &t->DisplayEvents.Data[t->DisplayHead++];
+    TuiDisplayEvent* ev = &t->DisplayEvents.Data[t->DisplayHead];
+    if (toolStartedThisFrame && ev->Kind != TuiDisplayEventKind::ToolStart) break;
+    t->DisplayHead++;
     if (ev->Kind == TuiDisplayEventKind::Text) {
       StreamReveal_Adopt(&t->Reveal, ev->Payload);
       t->State = TuiState::Streaming;
       continue;
     }
     ApplyDisplayEvent(t, *ev);
+    if (ev->Kind == TuiDisplayEventKind::ToolStart)
+      toolStartedThisFrame = true;
     changed = true;
   }
 
@@ -1026,7 +1032,14 @@ void ComposeAtSize(Tui* t, u16 cols, u16 rows, u64 nowMs) {
 
   PumpDisplay(t, nowMs);
   AdvanceSelectionTick(t, nowMs);
-  if (t->State != TuiState::Idle || t->OperationActive) t->Spinner++;
+  if (t->State != TuiState::Idle || t->OperationActive) {
+    if (t->SpinnerStartMs == 0 || nowMs < t->SpinnerStartMs)
+      t->SpinnerStartMs = nowMs;
+    t->Spinner = (u32)((nowMs - t->SpinnerStartMs) / kSpinnerFrameMs);
+  } else {
+    t->Spinner = 0;
+    t->SpinnerStartMs = 0;
+  }
 
   // Input box layout: left/right border column + one padding column each side.
   u16 textW = (u16)(cols > 4 ? cols - 4 : 1);
@@ -1685,19 +1698,29 @@ bool DispatchPointerKey(Tui* t, const Key& key) {
 void HandleKey(Tui* t, const Key& k) {
   ValidateTranscriptSelection(t);
   if (k.Kind == KeyKind::Escape) {
-    if (t->AgentRunning && !t->AbortFlag) {
+    bool canArm =
+        t->ModalResult != TuiModalResult::Pending &&
+        ((t->AgentRunning && !t->AbortFlag) ||
+         (!t->AgentRunning && !t->OperationActive));
+    if (canArm) {
       u64 now = MonotonicMillis();
       bool doubleEscape =
           t->EscapeArmed && now - t->LastEscapeMs <= kDoubleEscapeMs;
       t->LastEscapeMs = now;
       t->EscapeArmed = !doubleEscape;
       if (doubleEscape) {
-        if (t->Harness) {
-          SessionResult cancelled =
-              AgentHarness_RequestCancel(t->Harness);
-          if (!SessionResult_IsOk(cancelled)) t->AbortFlag = 1;
+        if (t->AgentRunning) {
+          if (t->Harness) {
+            SessionResult cancelled =
+                AgentHarness_RequestCancel(t->Harness);
+            if (!SessionResult_IsOk(cancelled)) t->AbortFlag = 1;
+          } else {
+            t->AbortFlag = 1;
+          }
         } else {
-          t->AbortFlag = 1;
+          FocusComposer(t);
+          LineEdit_Clear(&t->Edit);
+          ResetCommandPalette(t);
         }
       }
     } else {
@@ -2120,6 +2143,7 @@ bool Tui_ClearSession(Tui* t) {
   t->TurnStartMs = 0;
   t->Use = {};
   t->Spinner = 0;
+  t->SpinnerStartMs = 0;
   t->QueuedCount = 0;
   t->CommandPaletteSelected = 0;
   t->CommandPaletteFirst = 0;
@@ -2278,6 +2302,7 @@ void Tui_BeginOperation(Tui* t, StrView label) {
   t->OperationStatus = {};
   t->OperationAbortFlag = 0;
   t->Spinner = 0;
+  t->SpinnerStartMs = 0;
   Wake(t);
   Mutex_Unlock(&t->Lock);
 }
@@ -2515,6 +2540,7 @@ void Tui_AgentEvent(void* user, const AgentEvent& ev) {
       if (!Tui_HasPendingDisplay(t)) t->State = TuiState::Thinking;
       t->TurnStartMs = NowMillis();
       t->Spinner = 0;
+      t->SpinnerStartMs = 0;
       break;
     case AgentEventKind::MessageStart:
       // The agent emits message_start for the assistant turn before any content

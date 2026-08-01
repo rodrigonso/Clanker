@@ -242,6 +242,30 @@ void TestTui() {
     ArenaRelease(&af);
   }
 
+  // Spinner animation follows elapsed time rather than the number of renders,
+  // so streaming and input-driven frames cannot accelerate it.
+  {
+    Arena spinnerArena = ArenaCreate();
+    Tui spinnerTui;
+    InitHeadlessTui(&spinnerTui, &spinnerArena, false);
+    spinnerTui.State = TuiState::Thinking;
+    Tui_ComposeFrame(&spinnerTui, 20, 12, 1000);
+    CHECK(spinnerTui.Spinner == 0);
+    Tui_ComposeFrame(&spinnerTui, 20, 12, 1016);
+    Tui_ComposeFrame(&spinnerTui, 20, 12, 1059);
+    CHECK(spinnerTui.Spinner == 0);
+    Tui_ComposeFrame(&spinnerTui, 20, 12, 1060);
+    CHECK(spinnerTui.Spinner == 1);
+    for (u32 i = 0; i < 20; i++)
+      Tui_ComposeFrame(&spinnerTui, 20, 12, 1120);
+    CHECK(spinnerTui.Spinner == 2);
+    spinnerTui.State = TuiState::Idle;
+    Tui_ComposeFrame(&spinnerTui, 20, 12, 1180);
+    CHECK_ALL(spinnerTui.Spinner == 0, spinnerTui.SpinnerStartMs == 0);
+    Tui_Stop(&spinnerTui);
+    ArenaRelease(&spinnerArena);
+  }
+
   Message m = {};
   m.Kind = Role::Assistant;
 
@@ -319,7 +343,12 @@ void TestTui() {
   ev.Kind = AgentEventKind::AgentEnd;
   Tui_AgentEvent(&t, ev);
   CHECK_ALL(!t.AgentRunning, t.State == TuiState::Streaming);
-  DrainDisplay(&t, 1032);
+  CHECK(Tui_AdvanceStream(&t, 1032));
+  CHECK_ALL(t.Model.Entries.Count == 2,
+            t.Model.Entries.Data[1].Kind == EntryKind::Tool,
+            !t.Model.Entries.Data[1].Tool.Done,
+            t.State == TuiState::Tool, Tui_HasPendingDisplay(&t));
+  DrainDisplay(&t, 1048);
 
   // The transcript captured the unlabeled assistant text and compact tool row.
   CHECK_ALL(!AnyRow(&a, &t, "assistant"), AnyRow(&a, &t, "Hello world"),
@@ -628,8 +657,9 @@ void TestTui() {
     ArenaRelease(&a2);
   }
 
-  // Double Escape cancels only an active agent turn. The presses may arrive
-  // separately or in one terminal read; expired/interrupted sequences re-arm.
+  // Double Escape clears an idle composer or cancels an active agent turn. The
+  // presses may arrive separately or in one terminal read; expired/interrupted
+  // sequences re-arm.
   {
     Arena ae = ArenaCreate();
     TuiOpts oe;
@@ -638,9 +668,13 @@ void TestTui() {
     Tui te;
     Tui_InitModel(&te, &ae, oe);
 
-    Feed(&te, "\x1b\x1b");
-    CHECK(*Tui_Abort(&te) == 0);
-    CHECK(!te.EscapeArmed);
+    Feed(&te, "draft prompt");
+    Feed(&te, "\x1b");
+    CHECK_ALL(StrView_Eq(LineEdit_Text(&te.Edit), SVL("draft prompt")),
+              te.EscapeArmed);
+    Feed(&te, "\x1b");
+    CHECK_ALL(*Tui_Abort(&te) == 0, LineEdit_Empty(&te.Edit),
+              !te.EscapeArmed);
 
     te.AgentRunning = true;
     Feed(&te, "\x1b");
@@ -657,7 +691,8 @@ void TestTui() {
     CHECK(*Tui_Abort(&te) == 0);
     Feed(&te, "\x1b");
     CHECK(*Tui_Abort(&te) == 1);
-    CHECK(!te.EscapeArmed);
+    CHECK_ALL(!te.EscapeArmed,
+              StrView_Eq(LineEdit_Text(&te.Edit), SVL("x")));
 
     *Tui_Abort(&te) = 0;
     Feed(&te, "\x1b\x1b");

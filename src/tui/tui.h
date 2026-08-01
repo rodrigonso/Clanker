@@ -128,6 +128,7 @@ struct Tui {
   u64 TurnStartMs;
   Usage Use;
   u32 Spinner;
+  u64 SpinnerStartMs;
   StrView ModelName;
   ModelRequestProfile Profile;
   u32 QueuedCount;  // messages queued (steer/followUp/nextTurn) per last queue_update

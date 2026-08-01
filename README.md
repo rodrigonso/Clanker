@@ -193,9 +193,10 @@ the transcript) · an overflow-only scrollbar can be clicked or dragged (track
 clicks center its thumb) · type during a turn to **steer** · **Ctrl+C** copies
 selections via OSC 52; otherwise it interrupts a turn, cancels a command
 operation, clears the composer, or quits · double-press **Escape** within 500 ms
-to interrupt an active turn · hover or **left click** a turn's first row to
-highlight or collapse/expand it · **Ctrl+O** expands all tools when any is
-collapsed, otherwise collapses all · **Ctrl+D** quits · **Ctrl+L** repaints.
+to clear an idle composer or interrupt an active turn · hover or **left click**
+a turn's first row to highlight or collapse/expand it · **Ctrl+O** expands all
+tools when any is collapsed, otherwise collapses all · **Ctrl+D** quits ·
+**Ctrl+L** repaints.
 Honors `NO_COLOR`. Bracketed paste inserts literal multi-line text and replaces
 a composer selection.
 
