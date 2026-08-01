@@ -11,7 +11,7 @@ static bool OnHttpData(void* user, StrView chunk) {
   return true;
 }
 
-static u32 Anthropic_BuildHeaders(Arena* arena, StrView token,
+static u32 Anthropic_BuildHeaders(Arena* arena, ProviderAuth auth,
                                   const Model* model,
                                   const StreamOptions* options,
                                   HttpHeader* headers) {
@@ -19,16 +19,16 @@ static u32 Anthropic_BuildHeaders(Arena* arena, StrView token,
   headers[count++] = HttpHeader{SVL("anthropic-version"), SVL("2023-06-01")};
   headers[count++] = HttpHeader{SVL("content-type"), SVL("application/json")};
   StrView contextBeta = Anthropic_ContextBeta(model, options);
-  bool oauth = Anthropic_IsOAuthToken(token);
+  bool oauth = Anthropic_UsesOAuth(auth);
   if (oauth) {
-    StrBuf bearer = StrBuf_Make(arena, token.Length + 8);
+    StrBuf bearer = StrBuf_Make(arena, auth.Token.Length + 8);
     StrBuf_AppendCStr(&bearer, "Bearer ");
-    StrBuf_Append(&bearer, token);
+    StrBuf_Append(&bearer, auth.Token);
     headers[count++] = HttpHeader{SVL("authorization"), StrBuf_View(&bearer)};
     headers[count++] = HttpHeader{SVL("user-agent"), SVL("claude-cli/2.1.75")};
     headers[count++] = HttpHeader{SVL("x-app"), SVL("cli")};
   } else {
-    headers[count++] = HttpHeader{SVL("x-api-key"), token};
+    headers[count++] = HttpHeader{SVL("x-api-key"), auth.Token};
   }
   if (oauth || contextBeta.Length) {
     StrView oauthBetas = SVL("claude-code-20250219,oauth-2025-04-20");
@@ -70,10 +70,9 @@ static bool Anthropic_Stream(void* ctx, Arena* arena, const Model* model, const 
   StrBuf_Append(&url, model->BaseUrl);
   StrBuf_AppendCStr(&url, "/v1/messages");
 
-  StrView token = resolved.ApiKey;
-
   HttpHeader headers[ANTHROPIC_HEADER_CAPACITY];
-  u32 hc = Anthropic_BuildHeaders(arena, token, model, &resolved, headers);
+  u32 hc =
+      Anthropic_BuildHeaders(arena, resolved.Auth, model, &resolved, headers);
 
   Message m = Message_AssistantEmpty(arena);
   m.Model = model->Id;
@@ -175,9 +174,11 @@ static HttpResponse AnthropicHttpFetch(void* user, Arena* arena, const HttpReque
   return Http_Fetch(arena, request, abort);
 }
 
-ProviderModelList Anthropic_ListModelsWithFetch(Arena* arena, StrView token, volatile i32* abort,
+ProviderModelList Anthropic_ListModelsWithFetch(Arena* arena,
+                                                ProviderAuth auth,
+                                                volatile i32* abort,
                                                 AnthropicModelsFetchFn fetch, void* fetchUser) {
-  if (token.Length == 0) {
+  if (auth.Token.Length == 0) {
     return AnthropicModelListError(arena, ProviderModelListStatus::Unavailable,
                                    SVL("Anthropic credentials are unavailable"));
   }
@@ -204,7 +205,7 @@ ProviderModelList Anthropic_ListModelsWithFetch(Arena* arena, StrView token, vol
 
     HttpHeader headers[ANTHROPIC_HEADER_CAPACITY];
     u32 headerCount =
-        Anthropic_BuildHeaders(arena, token, nullptr, nullptr, headers);
+        Anthropic_BuildHeaders(arena, auth, nullptr, nullptr, headers);
     HttpRequest request = {};
     request.Method = SVL("GET");
     request.Url = StrBuf_View(&url);
@@ -248,8 +249,10 @@ ProviderModelList Anthropic_ListModelsWithFetch(Arena* arena, StrView token, vol
                                  SVL("Anthropic model pagination exceeded 100 pages"));
 }
 
-ProviderModelList Anthropic_ListModels(Arena* arena, StrView token, volatile i32* abort) {
-  return Anthropic_ListModelsWithFetch(arena, token, abort, AnthropicHttpFetch, nullptr);
+ProviderModelList Anthropic_ListModels(Arena* arena, ProviderAuth auth,
+                                       volatile i32* abort) {
+  return Anthropic_ListModelsWithFetch(arena, auth, abort,
+                                       AnthropicHttpFetch, nullptr);
 }
 
 Provider Anthropic_Provider() {

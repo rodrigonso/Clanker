@@ -276,10 +276,10 @@ AgentProviderAttemptResult AgentProvider_RunAttempt(
   AgentProviderAttemptResult result = {};
   StreamOptions options = input->Options;
   if (input->ResolveAuth) {
-    StrView token = {};
+    ProviderAuth auth = {};
     if (input->ResolveAuth(input->AuthUser, input->Arena,
-                           input->ModelInfo->Provider, options.Abort, &token))
-      options.ApiKey = token;
+                           input->ModelInfo->Provider, options.Abort, &auth))
+      options.Auth = auth;
   }
   if (options.Abort && *options.Abort) {
     result.Assistant.Kind = Role::Assistant;

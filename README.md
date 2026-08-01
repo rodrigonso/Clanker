@@ -14,9 +14,9 @@ peaks at **~6 MB RSS** (`CLANK_PRINT_MEM=1`).
 
 ## What it is
 
-A runnable Clank agent: the agent loop + the Anthropic Messages provider
-(HTTP/SSE) + `read`, `write`, `edit`, `ls`, `find`, `grep`, and `shell` tools +
-a streaming REPL.
+A runnable Clank agent: the agent loop + native Anthropic Messages and OpenAI
+Responses providers (HTTP/SSE) + `read`, `write`, `edit`, `ls`, `find`, `grep`,
+and `shell` tools + a streaming REPL.
 
 ```
 src/
@@ -67,9 +67,9 @@ tests/     single CLI test harness (suite selection via args; offline by default
   Mirrors pi's event sequence (`agent_start → turn_start → message_* → tool_* →
   turn_end → agent_end`) plus its agent-owned steer / follow-up / next-turn
   message queues (`queue_update` events).
-- **Providers are reimplemented wire protocols**, not vendor SDKs. The Anthropic
-  request builder and SSE parser are ~400 lines and unit-tested against a
-  recorded fixture (offline).
+- **Providers are reimplemented wire protocols**, not vendor SDKs. Anthropic
+  Messages and OpenAI Responses request builders and SSE parsers are tested
+  against recorded fixtures offline.
 
 ## Build
 
@@ -120,6 +120,7 @@ ctest --preset vs2026-debug
 
 # Live:
 ./build/clank --login anthropic     # OAuth (Claude Pro/Max), or set ANTHROPIC_API_KEY
+./build/clank --login openai        # OAuth (ChatGPT subscription), or set OPENAI_API_KEY
 ./build/clank                        # full-screen TUI; login can also happen inside it
 ./build/clank -m claude-sonnet-4-6 -p "summarize README.md"
 ./build/clank --continue             # most recent session for this project
@@ -160,8 +161,7 @@ explicit CLI trust override covers the run.
 
 `~/.clank/settings.json` also stores the active provider/model and explicit
 effort or selectable context-window preferences. Unsupported saved values fall
-back to the selected model's defaults. Current Anthropic context windows are
-fixed metadata, so they are displayed without an extra chooser.
+back to the selected model's defaults. Current fixed provider context windows are displayed without an extra chooser.
 
 ## TUI
 
@@ -262,20 +262,28 @@ running app; expiry, login, provider changes, and `/reload` invalidate or
 replace the cache so OAuth refresh still works mid-session.
 Existing `~/.mini-agent/auth.json` credentials are migrated automatically:
 
-- **API key** — set `ANTHROPIC_API_KEY`, or store one in `auth.json`.
+- **API key** — set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`, or store a key in
+  `auth.json`.
 - **OAuth (subscription)** — `clank --login anthropic` runs an
   authorization-code + PKCE flow: it opens your browser to approve access and a
   local callback server on `http://localhost:53692/callback` captures the
   redirect automatically (no copy/paste). The browser shows a success page; the
   access/refresh tokens are saved and auto-refreshed. Pass `--no-open` to print
-  the URL instead of launching a browser. Interactive `/login` uses the same
-  flow. `--logout <provider>` removes credentials.
+  the URL instead of launching a browser. `clank --login openai` uses the same
+  browser flow on OpenAI's callback port for a ChatGPT subscription.
+  Interactive `/login` supports both providers. `--logout <provider>` removes
+  credentials.
+
+OpenAI API-key requests use the public Responses API. ChatGPT subscription
+requests use the backend protocol implemented by OpenAI's official Codex
+client. That OAuth/backend surface is not a stable public API, so it is isolated
+from the public API path and covered by separate fixtures.
 
 The OAuth flow/storage is **provider-generic** (`src/auth/`): a config table
-(`OAuthConfig`) plus generic PKCE/exchange/refresh. Only how the token is applied
-to a request is per-provider — for Anthropic, an `sk-ant-oat` token switches to
-`Authorization: Bearer` with the Claude Code identity headers and system block.
-Adding Copilot/OpenAI is one config row plus a small header branch.
+(`OAuthConfig`) plus generic PKCE/exchange/refresh. Only how the token is applied to a request is per-provider. Anthropic OAuth uses
+the Claude subscription endpoint conventions; OpenAI OAuth uses the ChatGPT
+Responses backend conventions, including the account ID carried by the access
+token.
 
 Resolution priority: stored api_key → stored OAuth (refresh) → env var.
 
@@ -315,8 +323,7 @@ event→transcript mapping. Live full-screen rendering is verified manually.
 This is the small clean core. Deliberately out of scope for now (the structure
 leaves seams for them):
 
-- Additional providers (OpenAI-compatible shape). OAuth is generic; each new
-  provider is a config row + a small token-application branch.
+- Additional OpenAI-compatible or vendor-specific providers.
 - Device-code OAuth (e.g. GitHub Copilot) — the loopback callback flow is done.
 - TUI niceties: visual-row (vs logical-line) Up/Down, syntax highlighting,
   images, undo. The full-screen differential TUI itself is done.

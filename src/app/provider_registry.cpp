@@ -1,6 +1,7 @@
 #include "app/provider_registry.h"
 
 #include "llm/anthropic.h"
+#include "llm/openai.h"
 
 static Provider AnthropicProviderFactory(Arena* arena) {
   (void)arena;
@@ -9,6 +10,15 @@ static Provider AnthropicProviderFactory(Arena* arena) {
 
 static Model AnthropicModelFactory(Arena* arena, StrView modelId) {
   return Anthropic_Model(StrView_Dup(arena, modelId));
+}
+
+static Provider OpenAIProviderFactory(Arena* arena) {
+  (void)arena;
+  return OpenAI_Provider();
+}
+
+static Model OpenAIModelFactory(Arena* arena, StrView modelId) {
+  return OpenAI_Model(StrView_Dup(arena, modelId));
 }
 
 static const ProviderSpec PROVIDERS[] = {
@@ -22,6 +32,17 @@ static const ProviderSpec PROVIDERS[] = {
         Anthropic_ListModels,
         Anthropic_FallbackModels(),
         Anthropic_FallbackModelCount(),
+    },
+    {
+        SVL("openai"),
+        SVL("OpenAI"),
+        SVL("gpt-5.6-sol"),
+        "OPENAI_API_KEY",
+        OpenAIProviderFactory,
+        OpenAIModelFactory,
+        OpenAI_ListModels,
+        OpenAI_FallbackModels(),
+        OpenAI_FallbackModelCount(),
     },
 };
 

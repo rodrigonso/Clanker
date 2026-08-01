@@ -160,11 +160,16 @@ add_library(clank_tui STATIC
 target_link_libraries(clank_tui PUBLIC clank_ui clank_term clank_agent clank_json)
 
 # ---- llm providers -------------------------------------------------------
-add_library(clank_proto STATIC src/llm/anthropic_proto.cpp)
+add_library(clank_proto STATIC
+  src/llm/anthropic_proto.cpp
+  src/llm/openai_proto.cpp)
 target_link_libraries(clank_proto PUBLIC clank_json)
 
 add_library(clank_anthropic STATIC src/llm/anthropic.cpp)
 target_link_libraries(clank_anthropic PUBLIC clank_proto clank_http)
+
+add_library(clank_openai STATIC src/llm/openai.cpp)
+target_link_libraries(clank_openai PUBLIC clank_proto clank_http clank_auth)
 
 # ---- auth (api keys + OAuth) ---------------------------------------------
 add_library(clank_auth STATIC
@@ -199,11 +204,11 @@ add_library(clank_app STATIC
   src/app/prompt_context.cpp
   src/app/provider_registry.cpp
   src/app/settings.cpp)
-target_link_libraries(clank_app PUBLIC clank_anthropic clank_auth clank_tui clank_tools)
+target_link_libraries(clank_app PUBLIC clank_anthropic clank_openai clank_auth clank_tui clank_tools)
 
 # ---- executables ---------------------------------------------------------
 add_executable(clank src/app/main.cpp)
-target_link_libraries(clank PRIVATE clank_app clank_anthropic clank_tools clank_agent clank_auth clank_tui)
+target_link_libraries(clank PRIVATE clank_app clank_anthropic clank_openai clank_tools clank_agent clank_auth clank_tui)
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT clank)
 set_target_properties(clank PROPERTIES
   VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -221,6 +226,7 @@ add_executable(clank_tests EXCLUDE_FROM_ALL
   tests/test_session.cpp
   tests/test_harness.cpp
   tests/test_anthropic.cpp
+  tests/test_openai.cpp
   tests/test_tools.cpp
   tests/test_infra.cpp
   tests/test_crypto.cpp

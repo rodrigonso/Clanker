@@ -41,6 +41,46 @@ void TestCrypto() {
             StrView_EqCStr(Base64UrlEncode(&a, bff, 3), "____"),
             StrView_EqCStr(Base64UrlEncode(&a, b1, 1), "Zg"));
 
+  // Decode round-trips encode, for each padding-remainder case (0/1/2 extra
+  // bytes past a full group of 3).
+  StrView d3 = {};
+  CHECK(Base64UrlDecode(&a, SVL("AAEC"), &d3));
+  CHECK_ALL(d3.Length == 3, (byte)d3.Data[0] == 0, (byte)d3.Data[1] == 1, (byte)d3.Data[2] == 2);
+  StrView dff = {};
+  CHECK(Base64UrlDecode(&a, SVL("____"), &dff));
+  CHECK_ALL(dff.Length == 3, (byte)dff.Data[0] == 0xff, (byte)dff.Data[1] == 0xff,
+            (byte)dff.Data[2] == 0xff);
+  StrView d1 = {};
+  CHECK(Base64UrlDecode(&a, SVL("Zg"), &d1));
+  CHECK_ALL(d1.Length == 1, (byte)d1.Data[0] == 0x66);
+
+  // Tolerates '=' padding even though base64url/JWT segments are unpadded.
+  StrView dPadded = {};
+  CHECK(Base64UrlDecode(&a, SVL("Zg=="), &dPadded));
+  CHECK(StrView_EqCStr(dPadded, "f"));
+
+  // Empty input decodes to empty output (not malformed).
+  StrView dEmpty = {};
+  CHECK(Base64UrlDecode(&a, SVL(""), &dEmpty));
+  CHECK(dEmpty.Length == 0);
+
+  // Malformed: invalid length (mod 4 == 1 has no valid encoding).
+  StrView bad = {};
+  CHECK(!Base64UrlDecode(&a, SVL("A"), &bad));
+  CHECK(bad.Length == 0);
+
+  // Malformed: invalid characters (standard base64 '+'/'/' aren't base64url).
+  CHECK(!Base64UrlDecode(&a, SVL("AA+C"), &bad));
+  CHECK(!Base64UrlDecode(&a, SVL("AA/C"), &bad));
+  CHECK(!Base64UrlDecode(&a, SVL("AA C"), &bad));
+
+  // Encode -> decode round-trip over arbitrary bytes.
+  byte mixed[5] = {0x00, 0x7f, 0x80, 0xab, 0xcd};
+  StrView mixedEnc = Base64UrlEncode(&a, mixed, 5);
+  StrView mixedDec = {};
+  CHECK(Base64UrlDecode(&a, mixedEnc, &mixedDec));
+  CHECK_ALL(mixedDec.Length == 5, memcmp(mixedDec.Data, mixed, 5) == 0);
+
   Pkce p = Pkce_Generate(&a);
   CHECK_ALL(p.Verifier.Length == 43, p.Challenge.Length == 43);
   byte vh[32];

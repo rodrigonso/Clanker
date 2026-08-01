@@ -91,6 +91,9 @@ void TestTypes() {
   ModelEffort parsed = ModelEffort::None;
   CHECK(ModelEffort_Parse(SVL("xhigh"), &parsed));
   CHECK(parsed == ModelEffort::XHigh);
+  CHECK(ModelEffort_Parse(SVL("ultra"), &parsed));
+  CHECK(parsed == ModelEffort::Ultra);
+  CHECK(ModelEffort_Bit(ModelEffort::Ultra) != 0);
   CHECK(!ModelEffort_Parse(SVL("extreme"), &parsed));
 
   ArenaRelease(&a);

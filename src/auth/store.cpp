@@ -27,6 +27,9 @@ bool ParseCred(JsonValue* v, Credential* out) {
     out->Access = Json_GetStr(v, "access");
     out->Refresh = Json_GetStr(v, "refresh");
     out->ExpiresMs = (u64)Json_GetInt(v, "expires", 0);
+    out->IdToken = Json_GetStr(v, "idToken");
+    out->AccountId = Json_GetStr(v, "accountId");
+    out->IsFedRamp = Json_GetBool(v, "isFedRamp", false);
     return true;
   }
   return false;
@@ -44,6 +47,16 @@ void WriteCred(StrBuf* b, const Credential* c) {
     Json_WriteString(b, c->Refresh);
     StrBuf_AppendCStr(b, ",\"expires\":");
     StrBuf_AppendU64(b, c->ExpiresMs);
+    if (c->IdToken.Length) {
+      StrBuf_AppendCStr(b, ",\"idToken\":");
+      Json_WriteString(b, c->IdToken);
+    }
+    if (c->AccountId.Length) {
+      StrBuf_AppendCStr(b, ",\"accountId\":");
+      Json_WriteString(b, c->AccountId);
+    }
+    if (c->IsFedRamp)
+      StrBuf_AppendCStr(b, ",\"isFedRamp\":true");
     StrBuf_AppendChar(b, '}');
   }
 }

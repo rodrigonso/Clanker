@@ -10,7 +10,8 @@
 // are also owned by `arena`.
 typedef Provider (*ProviderFactoryFn)(Arena* arena);
 typedef Model (*ProviderModelFactoryFn)(Arena* arena, StrView modelId);
-typedef ProviderModelList (*ProviderListModelsFn)(Arena* arena, StrView token,
+typedef ProviderModelList (*ProviderListModelsFn)(Arena* arena,
+                                                  ProviderAuth auth,
                                                   volatile i32* abort);
 
 struct ProviderSpec {

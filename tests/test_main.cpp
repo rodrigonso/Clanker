@@ -48,6 +48,7 @@ const Suite kSuites[] = {
     {"session", TestSession, TagDefault, "durable sessions and replay"},
     {"harness", TestHarness, TagDefault, "agent harness loop"},
     {"anthropic", TestAnthropic, TagDefault, "anthropic proto and SSE"},
+    {"openai", TestOpenAI, TagDefault, "openai Responses protocol and SSE"},
     {"tools", TestTools, TagDefault, "tool implementations"},
     {"infra", TestInfra, TagDefault, "glob, diff, fs, locks"},
     {"crypto", TestCrypto, TagDefault, "sha256 and random"},

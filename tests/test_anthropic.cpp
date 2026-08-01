@@ -202,7 +202,8 @@ static void TestBuildRequestOAuth() {
   ctx.Messages = msgs;
   ctx.MessageCount = 1;
   StreamOptions opt = {};
-  opt.ApiKey = SV("sk-ant-oat01-xxx");  // OAuth token shape
+  opt.Auth = ProviderAuth{ProviderAuthKind::OAuth,
+                          SV("sk-ant-oat01-xxx")};
 
   StrBuf body = Anthropic_BuildRequest(&a, &model, &ctx, &opt);
   JsonValue* j = Json_Parse(&a, StrBuf_View(&body));

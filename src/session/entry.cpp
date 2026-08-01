@@ -197,6 +197,18 @@ bool ReadRequiredId(const JsonValue* object, const char* key, DurableId* out) {
   return Json_IsString(value) && DurableId_Parse(value->Str, out);
 }
 
+bool ReadOptionalString(const JsonValue* object, const char* key,
+                        StrView* out) {
+  JsonValue* value = Json_Get(object, key);
+  if (!value || value->Kind == JsonKind::Null) {
+    *out = {};
+    return true;
+  }
+  if (!Json_IsString(value)) return false;
+  *out = value->Str;
+  return true;
+}
+
 bool ReadOptionalId(const JsonValue* object, const char* key, DurableId* out) {
   JsonValue* value = Json_Get(object, key);
   if (!value || value->Kind == JsonKind::Null) {
@@ -224,6 +236,8 @@ void WriteContent(StrBuf* out, const Content* content) {
       WriteString(&w, "toolId", content->ToolId);
       WriteString(&w, "toolName", content->ToolName);
       WriteString(&w, "argumentsJson", content->ToolArgsJson);
+      if (content->Signature.Length)
+        WriteString(&w, "signature", content->Signature);
       break;
     case ContentKind::Image:
       WriteString(&w, "data", content->ImageData);
@@ -293,7 +307,9 @@ bool DecodeContent(Arena* arena, const JsonValue* object, Content* out) {
     case ContentKind::ToolCall: {
       if (!ReadRequiredString(object, "toolId", false, &result.ToolId) ||
           !ReadRequiredString(object, "toolName", false, &result.ToolName) ||
-          !ReadRequiredString(object, "argumentsJson", false, &result.ToolArgsJson)) {
+          !ReadRequiredString(object, "argumentsJson", false,
+                              &result.ToolArgsJson) ||
+          !ReadOptionalString(object, "signature", &result.Signature)) {
         return false;
       }
       break;

@@ -79,6 +79,7 @@ enum class ModelEffort : u8 {
   High,
   XHigh,
   Max,
+  Ultra,
 };
 
 constexpr u8 ModelEffort_Bit(ModelEffort effort) {
@@ -87,15 +88,18 @@ constexpr u8 ModelEffort_Bit(ModelEffort effort) {
              : (u8)(1u << ((u8)effort - 1));
 }
 
-constexpr u32 MODEL_EFFORT_OPTION_CAPACITY = (u32)ModelEffort::Max;
+constexpr u32 MODEL_EFFORT_OPTION_CAPACITY = (u32)ModelEffort::Ultra;
 constexpr u8 MODEL_EFFORT_STANDARD_MASK =
     ModelEffort_Bit(ModelEffort::Low) |
     ModelEffort_Bit(ModelEffort::Medium) |
     ModelEffort_Bit(ModelEffort::High);
-constexpr u8 MODEL_EFFORT_ALL_MASK =
+constexpr u8 MODEL_EFFORT_THROUGH_MAX_MASK =
     MODEL_EFFORT_STANDARD_MASK |
     ModelEffort_Bit(ModelEffort::XHigh) |
     ModelEffort_Bit(ModelEffort::Max);
+constexpr u8 MODEL_EFFORT_ALL_MASK =
+    MODEL_EFFORT_THROUGH_MAX_MASK |
+    ModelEffort_Bit(ModelEffort::Ultra);
 constexpr u32 MODEL_CONTEXT_WINDOW_OPTION_CAPACITY = 4;
 constexpr u32 MODEL_CONTEXT_WINDOW_LABEL_CAPACITY = 24;
 
@@ -106,13 +110,14 @@ inline StrView ModelEffort_Name(ModelEffort effort) {
     case ModelEffort::High: return SVL("high");
     case ModelEffort::XHigh: return SVL("xhigh");
     case ModelEffort::Max: return SVL("max");
+    case ModelEffort::Ultra: return SVL("ultra");
     default: return {};
   }
 }
 
 inline bool ModelEffort_Parse(StrView value, ModelEffort* out) {
   if (!out) return false;
-  for (u8 i = (u8)ModelEffort::Low; i <= (u8)ModelEffort::Max; i++) {
+  for (u8 i = (u8)ModelEffort::Low; i <= (u8)ModelEffort::Ultra; i++) {
     ModelEffort effort = (ModelEffort)i;
     if (StrView_Eq(value, ModelEffort_Name(effort))) {
       *out = effort;
@@ -225,7 +230,7 @@ inline ModelEffort Model_DefaultEffort(const Model* model) {
 inline u32 Model_EffortOptionCount(const Model* model) {
   if (!model) return 0;
   u32 count = 0;
-  for (u8 i = (u8)ModelEffort::Low; i <= (u8)ModelEffort::Max; i++) {
+  for (u8 i = (u8)ModelEffort::Low; i <= (u8)ModelEffort::Ultra; i++) {
     if (Model_SupportsEffort(model, (ModelEffort)i)) count++;
   }
   return count;
@@ -391,8 +396,21 @@ inline void StreamSink_Emit(const StreamSink& sink, const StreamEvent& ev) {
 
 struct HttpRetryPolicy;  // net/http.h; forward-declared so types.h stays net-independent
 
+enum class ProviderAuthKind : u8 {
+  None,
+  ApiKey,
+  OAuth,
+};
+
+struct ProviderAuth {
+  ProviderAuthKind Kind;
+  StrView Token;
+  StrView AccountId;
+  bool IsFedRamp;
+};
+
 struct StreamOptions {
-  StrView ApiKey;
+  ProviderAuth Auth;
   i32 MaxTokens;            // 0 => use model default
   ModelRequestProfile Profile;
   volatile i32* Abort;     // non-zero => abort in progress

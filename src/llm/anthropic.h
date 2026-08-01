@@ -12,6 +12,11 @@ inline bool Anthropic_IsOAuthToken(StrView token) {
   return StrView_Contains(token, "sk-ant-oat");
 }
 
+inline bool Anthropic_UsesOAuth(ProviderAuth auth) {
+  return auth.Kind == ProviderAuthKind::OAuth ||
+         Anthropic_IsOAuthToken(auth.Token);
+}
+
 // ---- protocol (anthropic_proto.cpp) --------------------------------------
 
 // Build the Anthropic /v1/messages streaming request body from a context.
@@ -66,6 +71,8 @@ typedef HttpResponse (*AnthropicModelsFetchFn)(void* user, Arena* arena, const H
                                                volatile i32* abort);
 
 // Live GET /v1/models discovery. The injected form is used by offline tests.
-ProviderModelList Anthropic_ListModels(Arena* arena, StrView token, volatile i32* abort);
-ProviderModelList Anthropic_ListModelsWithFetch(Arena* arena, StrView token, volatile i32* abort,
+ProviderModelList Anthropic_ListModels(Arena* arena, ProviderAuth auth,
+                                       volatile i32* abort);
+ProviderModelList Anthropic_ListModelsWithFetch(Arena* arena, ProviderAuth auth,
+                                                volatile i32* abort,
                                                 AnthropicModelsFetchFn fetch, void* fetchUser);

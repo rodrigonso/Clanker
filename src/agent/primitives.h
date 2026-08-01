@@ -24,7 +24,7 @@ void AgentProvider_BuildRequest(Arena* arena, StrView systemPrompt,
                                 AgentProviderRequest* out);
 
 typedef bool (*AgentResolveAuthFn)(void* user, Arena* arena, StrView provider,
-                                   volatile i32* abort, StrView* outToken);
+                                   volatile i32* abort, ProviderAuth* out);
 
 struct AgentProviderAttemptInput {
   Arena* Arena;

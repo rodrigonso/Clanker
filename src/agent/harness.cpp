@@ -804,7 +804,7 @@ SessionResult AgentHarness_SetModel(AgentHarness* harness, Model model, Provider
     if (SessionResult_IsOk(result)) {
       harness->Config.ModelInfo = model;
       harness->Config.ProviderImpl = provider;
-      harness->Config.Stream.ApiKey = {};
+      harness->Config.Stream.Auth = {};
       harness->Config.Stream.Profile = profile;
     }
     harness->Running = false;

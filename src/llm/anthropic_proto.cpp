@@ -62,12 +62,12 @@ struct AnthropicCapabilitySpec {
 };
 
 static const AnthropicCapabilitySpec ANTHROPIC_CAPABILITIES[] = {
-    {SVL("claude-opus-5"), 1000000, MODEL_EFFORT_ALL_MASK},
-    {SVL("claude-opus-4-8"), 1000000, MODEL_EFFORT_ALL_MASK},
-    {SVL("claude-opus-4-7"), 1000000, MODEL_EFFORT_ALL_MASK},
-    {SVL("claude-sonnet-5"), 1000000, MODEL_EFFORT_ALL_MASK},
-    {SVL("claude-fable-5"), 1000000, MODEL_EFFORT_ALL_MASK},
-    {SVL("claude-mythos"), 1000000, MODEL_EFFORT_ALL_MASK},
+    {SVL("claude-opus-5"), 1000000, MODEL_EFFORT_THROUGH_MAX_MASK},
+    {SVL("claude-opus-4-8"), 1000000, MODEL_EFFORT_THROUGH_MAX_MASK},
+    {SVL("claude-opus-4-7"), 1000000, MODEL_EFFORT_THROUGH_MAX_MASK},
+    {SVL("claude-sonnet-5"), 1000000, MODEL_EFFORT_THROUGH_MAX_MASK},
+    {SVL("claude-fable-5"), 1000000, MODEL_EFFORT_THROUGH_MAX_MASK},
+    {SVL("claude-mythos"), 1000000, MODEL_EFFORT_THROUGH_MAX_MASK},
     {SVL("claude-opus-4-5"), 200000, MODEL_EFFORT_STANDARD_MASK},
     {SVL("claude-sonnet-4-5"), 200000, 0},
 };
@@ -383,7 +383,7 @@ StrBuf Anthropic_BuildRequest(Arena* arena, const Model* model, const LlmContext
 
   // OAuth (subscription) tokens require the Claude Code identity as the first
   // system block, with the caller's system prompt appended after it.
-  bool isOAuth = opt && Anthropic_IsOAuthToken(opt->ApiKey);
+  bool isOAuth = opt && Anthropic_UsesOAuth(opt->Auth);
   bool haveSystem = isOAuth || ctx->SystemPrompt.Length != 0;
   if (isOAuth) {
     StrBuf_AppendCStr(&b, ",\"system\":[{\"type\":\"text\",\"text\":");

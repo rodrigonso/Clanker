@@ -131,6 +131,9 @@ static bool AppAuth_CacheToken(AppAuth* auth, StrView provider,
 static bool AppAuth_CacheCredential(AppAuth* auth, StrView provider,
                                     const Credential& credential) {
   ResolvedAuthToken token = {};
+  token.Kind = credential.Kind;
+  token.AccountId = credential.AccountId;
+  token.IsFedRamp = credential.IsFedRamp;
   if (credential.Kind == CredKind::ApiKey) {
     token.Value = credential.ApiKey;
   } else if (credential.Kind == CredKind::OAuth) {
@@ -141,9 +144,21 @@ static bool AppAuth_CacheCredential(AppAuth* auth, StrView provider,
 }
 
 static bool AppAuth_HasUsableCache(const AppAuth* auth, StrView provider) {
-  StrView ignored = {};
+  ResolvedAuthToken ignored = {};
   return auth &&
          AuthTokenCache_Get(&auth->Cache, provider, NowMillis(), &ignored);
+}
+
+static ProviderAuth ToProviderAuth(const ResolvedAuthToken& token) {
+  ProviderAuth result = {};
+  result.Token = token.Value;
+  result.AccountId = token.AccountId;
+  result.IsFedRamp = token.IsFedRamp;
+  if (token.Kind == CredKind::ApiKey)
+    result.Kind = ProviderAuthKind::ApiKey;
+  else if (token.Kind == CredKind::OAuth)
+    result.Kind = ProviderAuthKind::OAuth;
+  return result;
 }
 
 static void RunAuthWarmup(void* user) {
@@ -203,13 +218,17 @@ static void CancelRuntimeAuthWarmup(InteractiveRuntime* rt) {
 }
 
 static bool AppResolveAuth(void* user, Arena* arena, StrView provider, volatile i32* abort,
-                           StrView* out) {
+                           ProviderAuth* out) {
+  if (out) *out = {};
+  if (!out) return false;
   AppAuth* aa = (AppAuth*)user;
   AuthWarmup* warmup = aa->Warmup;
   if (warmup && StrView_Eq(warmup->Provider, provider))
     JoinAuthWarmup(warmup, aa);
   if (AppAuth_HasUsableCache(aa, provider)) {
-    AuthTokenCache_Get(&aa->Cache, provider, NowMillis(), out);
+    ResolvedAuthToken cached = {};
+    AuthTokenCache_Get(&aa->Cache, provider, NowMillis(), &cached);
+    *out = ToProviderAuth(cached);
     return true;
   }
   AppAuth_Invalidate(aa);
@@ -219,8 +238,13 @@ static bool AppResolveAuth(void* user, Arena* arena, StrView provider, volatile 
                             spec ? spec->ApiKeyEnvVar : nullptr, &resolved,
                             abort)) {
     AppAuth_CacheToken(aa, provider, resolved);
-    *out = AppAuth_HasUsableCache(aa, provider) ? aa->Cache.Value
-                                                : resolved.Value;
+    if (AppAuth_HasUsableCache(aa, provider)) {
+      ResolvedAuthToken cached = {};
+      AuthTokenCache_Get(&aa->Cache, provider, NowMillis(), &cached);
+      *out = ToProviderAuth(cached);
+    } else {
+      *out = ToProviderAuth(resolved);
+    }
     return true;
   }
   return false;
@@ -229,15 +253,15 @@ static bool AppResolveAuth(void* user, Arena* arena, StrView provider, volatile 
 static bool ResolvePromptAuth(AgentHarness* harness, volatile i32* abort) {
   if (!harness || (abort && *abort)) return false;
   if (!harness->Config.ResolveAuth)
-    return harness->Config.Stream.ApiKey.Length > 0;
-  harness->Config.Stream.ApiKey = {};
-  StrView token = {};
+    return harness->Config.Stream.Auth.Token.Length > 0;
+  harness->Config.Stream.Auth = {};
+  ProviderAuth auth = {};
   if (!harness->Config.ResolveAuth(harness->Config.AuthUser, &harness->Work,
                                    harness->Config.ModelInfo.Provider, abort,
-                                   &token))
+                                   &auth))
     return false;
   if (abort && *abort) return false;
-  harness->Config.Stream.ApiKey = token;
+  harness->Config.Stream.Auth = auth;
   return true;
 }
 
@@ -816,7 +840,8 @@ static AppCommandHandlerResult RunOAuthLogin(InteractiveRuntime* rt, const Provi
   OAuthCode code = {};
   StrBuf error = StrBuf_Make(&scratch, 128);
   LoginReadyContext ready = {rt, ux, &scratch};
-  if (!OAuth_WaitForCallback(&scratch, cfg, begin.AuthUrl, begin.Verifier, &code, abort, &error,
+  if (!OAuth_WaitForCallback(&scratch, cfg, begin.AuthUrl, begin.State, &code,
+                             abort, &error,
                              OnLoginReady, &ready)) {
     bool cancelled = (abort && *abort) || StrView_Contains(StrBuf_View(&error), "cancelled");
     AppCommandHandlerResult result = {};
@@ -844,7 +869,7 @@ static AppCommandHandlerResult RunOAuthLogin(InteractiveRuntime* rt, const Provi
   }
 
   RuntimeSetOperationStatus(rt, ux, SVL("Exchanging the authorization code."));
-  StrView state = code.State.Length ? code.State : begin.Verifier;
+  StrView state = code.State.Length ? code.State : begin.State;
   Credential credential = {};
   StrBuf_Clear(&error);
   if (!OAuth_ExchangeCode(&scratch, cfg, code.Code, state, begin.Verifier, &credential, &error,
@@ -920,13 +945,13 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
 
   RuntimeSetOperationStatus(rt, ux, SVL("Resolving provider credentials."));
   FinishRuntimeAuthWarmup(rt);
-  StrView token = {};
-  AppResolveAuth(rt->Auth, &scratch, spec->Id, abort, &token);
+  ProviderAuth auth = {};
+  AppResolveAuth(rt->Auth, &scratch, spec->Id, abort, &auth);
   ProviderModelList live = {};
   if (!(abort && *abort)) {
     RuntimeSetOperationStatus(rt, ux, SVL("Fetching the provider model catalog."));
     if (spec->ListModels) {
-      live = spec->ListModels(&scratch, token, abort);
+      live = spec->ListModels(&scratch, auth, abort);
     } else {
       live.Status = ProviderModelListStatus::Unavailable;
       live.Error = SVL("this provider does not support live model discovery");
@@ -1070,7 +1095,7 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
       ModelEffort effortValues[MODEL_EFFORT_OPTION_CAPACITY] = {};
       u32 effortCount = 0;
       u32 effortInitial = 0;
-      for (u8 i = (u8)ModelEffort::Low; i <= (u8)ModelEffort::Max; i++) {
+      for (u8 i = (u8)ModelEffort::Low; i <= (u8)ModelEffort::Ultra; i++) {
         ModelEffort effort = (ModelEffort)i;
         if (!Model_SupportsEffort(&chosen, effort)) continue;
         effortOptions[effortCount] = ModelEffort_Name(effort);
@@ -1574,7 +1599,7 @@ static SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
           &targetModel, rt->PreferredProfile);
       config.ModelInfo = targetModel;
       config.ProviderImpl = targetSpec->CreateProvider(rt->Mem);
-      config.Stream.ApiKey = {};
+      config.Stream.Auth = {};
       config.Stream.Profile = targetProfile;
     }
   }
@@ -2685,13 +2710,13 @@ static void PrintHelp() {
       "                    Do not load AGENTS.md or CLAUDE.md files\n"
       "  -a, --approve     Trust project prompt resources for this run\n"
       "  -na, --no-approve Do not trust project prompt resources for this run\n"
-      "  --login [prov]    OAuth login in your browser (default provider: anthropic)\n"
+      "  --login [prov]    OAuth login in your browser (anthropic or openai)\n"
       "  --logout [prov]   Remove stored credentials (default: anthropic)\n"
       "  --no-open         Do not auto-open a browser for --login or interactive /login\n"
       "  --faux            Scripted provider (no key/network; for demos)\n"
       "  --help            Show this help\n\n"
-      "Auth: run `--login anthropic` for a Claude Pro/Max subscription (a local\n"
-      "callback server captures the redirect automatically), or set ANTHROPIC_API_KEY.\n"
+      "Auth: run `--login anthropic` for Claude Pro/Max or `--login openai` for\n"
+      "a ChatGPT subscription; alternatively set ANTHROPIC_API_KEY or OPENAI_API_KEY.\n"
       "Interactive commands: /session, /name, /sessions, /resume, /tree,\n"
       "/checkout, /fork, /compact, /trust, /reload, /login, /model,\n"
       "/clear, /exit.\n");

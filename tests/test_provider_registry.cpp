@@ -5,6 +5,7 @@
 #include "base/arena.h"
 #include "check.h"
 #include "llm/anthropic.h"
+#include "llm/openai.h"
 
 struct ModelsFetchFixture {
   HttpResponse Responses[4];
@@ -68,7 +69,10 @@ static void TestAnthropicModelDiscovery() {
   volatile i32 abort = 0;
 
   ProviderModelList live =
-      Anthropic_ListModelsWithFetch(&arena, SVL("sk-ant-api"), &abort, FetchModelsFixture, &fixture);
+      Anthropic_ListModelsWithFetch(
+          &arena,
+          ProviderAuth{ProviderAuthKind::ApiKey, SVL("sk-ant-api")},
+          &abort, FetchModelsFixture, &fixture);
   CHECK_ALL(live.Status == ProviderModelListStatus::Success, live.Count == 2,
             fixture.RequestsValid, fixture.Calls == 2, fixture.AbortSeen == &abort);
   CHECK_ALL(
@@ -101,7 +105,9 @@ static void TestAnthropicModelDiscoveryOAuthAndEmpty() {
   fixture.Responses[0].Status = 200;
   fixture.Responses[0].Body = SVL("{\"data\":[],\"has_more\":false,\"last_id\":null}");
   ProviderModelList live = Anthropic_ListModelsWithFetch(
-      &arena, SVL("sk-ant-oat01-test"), nullptr, FetchModelsFixture, &fixture);
+      &arena,
+      ProviderAuth{ProviderAuthKind::ApiKey, SVL("sk-ant-oat01-test")},
+      nullptr, FetchModelsFixture, &fixture);
   CHECK_ALL(live.Status == ProviderModelListStatus::Success, live.Count == 0,
             fixture.RequestsValid, fixture.Calls == 1, fixture.ApiKeys[0].Length == 0);
   CHECK(StrView_EqCStr(fixture.Authorizations[0], "Bearer sk-ant-oat01-test"));
@@ -126,7 +132,8 @@ static void TestAnthropicModelDiscoveryFailures() {
   volatile i32 abort = 1;
   ModelsFetchFixture unused = {};
   ProviderModelList aborted = Anthropic_ListModelsWithFetch(
-      &arena, SVL("token"), &abort, FetchModelsFixture, &unused);
+      &arena, ProviderAuth{ProviderAuthKind::ApiKey, SVL("token")}, &abort,
+      FetchModelsFixture, &unused);
   CHECK_ALL(aborted.Status == ProviderModelListStatus::Unavailable, unused.Calls == 0);
 
   ModelsFetchFixture transport = {};
@@ -134,7 +141,8 @@ static void TestAnthropicModelDiscoveryFailures() {
   transport.Responses[0].Status = -1;
   transport.Responses[0].Error = SVL("offline");
   ProviderModelList unavailable = Anthropic_ListModelsWithFetch(
-      &arena, SVL("token"), nullptr, FetchModelsFixture, &transport);
+      &arena, ProviderAuth{ProviderAuthKind::ApiKey, SVL("token")}, nullptr,
+      FetchModelsFixture, &transport);
   CHECK_ALL(unavailable.Status == ProviderModelListStatus::Unavailable,
             StrView_EqCStr(unavailable.Error, "offline"), transport.RequestsValid);
 
@@ -142,7 +150,9 @@ static void TestAnthropicModelDiscoveryFailures() {
   http.ResponseCount = 1;
   http.Responses[0].Status = 401;
   ProviderModelList failed =
-      Anthropic_ListModelsWithFetch(&arena, SVL("token"), nullptr, FetchModelsFixture, &http);
+      Anthropic_ListModelsWithFetch(
+          &arena, ProviderAuth{ProviderAuthKind::ApiKey, SVL("token")},
+          nullptr, FetchModelsFixture, &http);
   CHECK_ALL(failed.Status == ProviderModelListStatus::Failed, failed.Error.Length != 0,
             http.RequestsValid);
 
@@ -151,7 +161,8 @@ static void TestAnthropicModelDiscoveryFailures() {
   malformed.Responses[0].Status = 200;
   malformed.Responses[0].Body = SVL("{\"data\":[],\"has_more\":true}");
   ProviderModelList badPage = Anthropic_ListModelsWithFetch(
-      &arena, SVL("token"), nullptr, FetchModelsFixture, &malformed);
+      &arena, ProviderAuth{ProviderAuthKind::ApiKey, SVL("token")}, nullptr,
+      FetchModelsFixture, &malformed);
   CHECK_ALL(badPage.Status == ProviderModelListStatus::Failed, malformed.RequestsValid);
 
   ModelsFetchFixture repeated = {};
@@ -161,14 +172,15 @@ static void TestAnthropicModelDiscoveryFailures() {
       SVL("{\"data\":[],\"has_more\":true,\"last_id\":\"same\"}");
   repeated.Responses[1] = repeated.Responses[0];
   ProviderModelList loop = Anthropic_ListModelsWithFetch(
-      &arena, SVL("token"), nullptr, FetchModelsFixture, &repeated);
+      &arena, ProviderAuth{ProviderAuthKind::ApiKey, SVL("token")}, nullptr,
+      FetchModelsFixture, &repeated);
   CHECK_ALL(loop.Status == ProviderModelListStatus::Failed, repeated.RequestsValid,
             repeated.Calls == 2);
   ArenaRelease(&arena);
 }
 
 void TestProviderRegistry() {
-  CHECK_ALL(ProviderRegistry_Count() == 1,
+  CHECK_ALL(ProviderRegistry_Count() == 2,
             ProviderRegistry_At(ProviderRegistry_Count()) == nullptr,
             ProviderRegistry_Find(SVL("faux")) == nullptr,
             ProviderRegistry_Find(SVL("missing")) == nullptr);
@@ -205,6 +217,27 @@ void TestProviderRegistry() {
   const OAuthConfig* oauth = OAuth_GetConfig(spec->Id);
   CHECK(oauth != nullptr);
   CHECK(StrView_Eq(oauth->Id, spec->Id));
+
+  const ProviderSpec* openai = ProviderRegistry_Find(SVL("openai"));
+  CHECK(openai != nullptr);
+  CHECK_ALL(
+      StrView_EqCStr(openai->Name, "OpenAI"),
+      StrView_EqCStr(openai->DefaultModel, "gpt-5.6-sol"),
+      strcmp(openai->ApiKeyEnvVar, "OPENAI_API_KEY") == 0,
+      openai->CreateProvider != nullptr, openai->CreateModel != nullptr,
+      openai->ListModels != nullptr, openai->FallbackModels != nullptr,
+      openai->FallbackModelCount == 5);
+  Model openaiDefault =
+      openai->CreateModel(&arena, openai->DefaultModel);
+  CHECK_ALL(
+      StrView_EqCStr(openaiDefault.Provider, "openai"),
+      openaiDefault.ContextWindow == 272000,
+      Model_SupportsEffort(&openaiDefault, ModelEffort::Ultra));
+  Provider openaiProvider = openai->CreateProvider(&arena);
+  CHECK(openaiProvider.Stream != nullptr);
+  const OAuthConfig* openaiOAuth = OAuth_GetConfig(openai->Id);
+  CHECK(openaiOAuth != nullptr);
+  CHECK(StrView_Eq(openaiOAuth->Id, openai->Id));
 
   ArenaRelease(&arena);
   TestAnthropicModelDiscovery();

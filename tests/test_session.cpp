@@ -60,6 +60,7 @@ static Message AssistantToolMessage(Arena* arena) {
   Array_Push(&message.Content, Content_Text(SVL("checking")));
   Array_Push(&message.Content,
              Content_ToolCall(SVL("call-1"), SVL("read"), SVL("{\"path\":\"a.txt\"}")));
+  message.Content.Data[1].Signature = SVL("fc-item-1");
   return message;
 }
 
@@ -106,7 +107,21 @@ static void TestRecordCodec(Arena* arena) {
             decoded.MessageEntry.Value.Use.Input == 10,
             decoded.MessageEntry.Value.Content.Count == 2,
             StrView_EqCStr(decoded.MessageEntry.Value.Content.Data[1].ToolName, "read"),
+            StrView_EqCStr(decoded.MessageEntry.Value.Content.Data[1].Signature,
+                           "fc-item-1"),
             StrView_EqCStr(decoded.MessageEntry.Value.Model, "claude-test"));
+
+  message.MessageEntry.Value.Content.Data[1].Signature = {};
+  StrBuf legacyToolCall = StrBuf_Make(arena, 512);
+  CHECK(SessionResult_IsOk(
+      SessionRecord_Encode(&legacyToolCall, &message)));
+  CHECK(!StrView_Contains(StrBuf_View(&legacyToolCall), "\"signature\":\"fc-item-1\""));
+  CHECK(SessionResult_IsOk(SessionRecord_Decode(
+      arena, StrBuf_View(&legacyToolCall), &decoded)));
+  CHECK_ALL(
+      decoded.MessageEntry.Value.Content.Count == 2,
+      decoded.MessageEntry.Value.Content.Data[1].Signature.Length == 0);
+  message.MessageEntry.Value.Content.Data[1].Signature = SVL("fc-item-1");
 
   message.MessageEntry.Value.Content.Data[1].ToolArgsJson = SVL("not-json");
   StrBuf invalidArguments = StrBuf_Make(arena, 512);
