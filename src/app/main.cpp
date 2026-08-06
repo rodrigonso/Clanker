@@ -7,6 +7,7 @@
 #include "agent/event_json.h"
 #include "agent/harness.h"
 #include "app/command.h"
+#include "app/hook_runner.h"
 #include "app/plain_select.h"
 #include "app/project_trust.h"
 #include "app/prompt_context.h"
@@ -44,9 +45,22 @@ static void EnableTerminal() {}
 
 static volatile i32 g_abort = 0;
 static AgentHarness* g_activeHarness = nullptr;
+// Process-wide because exactly one session runs per process, and every
+// reporting site -- startup, the prompt choke point, and the event pump thread
+// -- would otherwise have to thread the same pointer through unrelated structs.
+static HookRunner* g_hooks = nullptr;
+
 static void OnSigint(int) {
   g_abort = 1;
   if (g_activeHarness) g_activeHarness->AbortFlag = 1;
+}
+
+// Idempotent, so every exit path can call it without tracking who got there
+// first.
+static void EndHookSession() {
+  if (!g_hooks) return;
+  HookRunner_Shutdown(g_hooks, HookEvent::SessionEnd);
+  g_hooks = nullptr;
 }
 
 static SessionResult RunHarnessPrompt(AgentHarness* harness, StrView prompt) {
@@ -90,6 +104,9 @@ struct InteractiveRuntime {
   ModelRequestProfile PreferredProfile;
   AgentHarness* Harness;
   SessionRepository* Sessions;
+  // Concrete backend, when there is one, purely so a session switch can report
+  // the new durable log path to hooks. Null under `--no-session`.
+  JsonlRepository* JsonlSessions;
   StrView ProjectKey;
   StrView WorkingDirectory;
   StrView AgentDirectory;
@@ -588,6 +605,38 @@ static void RunHarnessEventPump(void* user) {
       continue;
     }
     if (!SessionResult_IsOk(next)) break;
+    // Every run-scoped hook event is dispatched from here rather than from
+    // around AgentHarness_Run, because this watch stream is the only place the
+    // agent's events are already in order. Reporting Stop from the calling
+    // thread raced the pump and could land it ahead of the run's own last
+    // PostToolUse. Reported for every output mode: hooks describe the agent's
+    // lifecycle, not whatever this process happens to be rendering.
+    switch (event.Kind) {
+      case AgentHarnessEventKind::TransientToolStart:
+        HookRunner_Dispatch(g_hooks, HookEvent::PreToolUse, event.ToolName);
+        break;
+      case AgentHarnessEventKind::TransientToolEnd:
+        HookRunner_Dispatch(g_hooks, HookEvent::PostToolUse, event.ToolName);
+        break;
+      case AgentHarnessEventKind::TransientAgentStart:
+        // Compaction is machinery, not a prompt the user submitted.
+        if (event.Turn == AgentTurnKind::Run)
+          HookRunner_Dispatch(g_hooks, HookEvent::UserPromptSubmit, StrView{});
+        break;
+      case AgentHarnessEventKind::TransientAgentEnd:
+        // A cancel is how a user stops a run they no longer want, so it ends
+        // the turn normally; only an actual error is reported as a failure.
+        if (event.Turn == AgentTurnKind::Run)
+          HookRunner_Dispatch(g_hooks,
+                              event.Outcome == AgentTurnOutcome::Failed
+                                  ? HookEvent::StopFailure
+                                  : HookEvent::Stop,
+                              StrView{});
+        break;
+      default:
+        break;
+    }
+
     if (pump->JsonOutput)
       EmitHarnessEventJson(&scratch, &event);
     else
@@ -1738,6 +1787,24 @@ static SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
     Tui_SetModelProfile(rt->TuiView, targetModel.Id, targetProfile);
     Tui_LoadStartupContext(rt->TuiView);
   }
+
+  // The switch replaced the durable session, so later payloads would otherwise
+  // keep naming a transcript that is no longer written.
+  if (g_hooks) {
+    Arena hookScratch = ArenaCreate((usize)1 << 20);
+    HookSessionInfo hookSession = {};
+    hookSession.SessionId = DurableId_View(&targetInfo->SessionId);
+    hookSession.WorkingDirectory = rt->WorkingDirectory;
+    hookSession.TranscriptPath =
+        JsonlRepository_SessionPath(&hookScratch, rt->JsonlSessions,
+                                    targetInfo->ProjectKey, targetInfo->SessionId);
+    HookRunner_SetSession(g_hooks, &hookSession);
+    ArenaRelease(&hookScratch);
+    // Announced as a fresh start so a consumer tracks the new session rather
+    // than silently reattributing it to the old one.
+    HookRunner_Dispatch(g_hooks, HookEvent::SessionStart, StrView{});
+  }
+
   ArenaRelease(&scratch);
   return initialized;
 }
@@ -3413,6 +3480,7 @@ int main(int argc, char** argv) {
   runtime.PreferredProfile = preference;
   runtime.Harness = &harness;
   runtime.Sessions = &sessions;
+  runtime.JsonlSessions = noSession ? nullptr : &jsonlRepository;
   runtime.ProjectKey = projectKey;
   runtime.WorkingDirectory = workingDirectory;
   runtime.AgentDirectory = agentDirectory;
@@ -3430,6 +3498,33 @@ int main(int argc, char** argv) {
   runtime.AutoOpen = !noOpen;
   runtime.Auth = &appAuth;
 
+  // External lifecycle hooks. Started only once the session is durable, so the
+  // very first payload can already name the transcript a consumer should read.
+  // `--no-session` has no durable path to report, so it reports nothing at all.
+  HookConfig hookConfig = {};
+  if (!noSession) {
+    StrView hooksPath = HookConfig_DefaultPath(&arena);
+    HookConfigLoadResult hooksLoad = HookConfig_Load(&arena, hooksPath, &hookConfig);
+    // Surfaced the way a malformed settings.json is: a typo must not disable
+    // every hook in silence. Missing is the normal case and stays quiet.
+    if (hooksLoad == HookConfigLoadResult::Malformed ||
+        hooksLoad == HookConfigLoadResult::ReadFailure) {
+      fprintf(stderr, "warning: %s %.*s; hooks are disabled\n",
+              hooksLoad == HookConfigLoadResult::Malformed
+                  ? "hooks file is malformed:"
+                  : "could not read hooks file:",
+              (int)hooksPath.Length, hooksPath.Data);
+    }
+
+    HookSessionInfo hookSession = {};
+    hookSession.SessionId = DurableId_View(&sessionInfo.SessionId);
+    hookSession.WorkingDirectory = workingDirectory;
+    hookSession.TranscriptPath = JsonlRepository_SessionPath(
+        &arena, &jsonlRepository, sessionInfo.ProjectKey, sessionInfo.SessionId);
+    g_hooks = HookRunner_Create(&arena, &hookConfig, &hookSession);
+    HookRunner_Dispatch(g_hooks, HookEvent::SessionStart, StrView{});
+  }
+
   if (onePrompt) {
     EnableTerminal();
     Http_GlobalInit();
@@ -3441,6 +3536,7 @@ int main(int argc, char** argv) {
                               &snapshot, jsonMode);
     if (!SessionResult_IsOk(watching)) {
       ReportHarnessResult(watching);
+      EndHookSession();
       AgentHarness_Close(&harness);
       sessions.Close(sessions.Ctx);
       Http_GlobalShutdown();
@@ -3451,6 +3547,7 @@ int main(int argc, char** argv) {
     if (!ResolvePromptAuth(&harness, &g_abort)) {
       if (g_abort) {
         StopHarnessEventPump(&pump);
+        EndHookSession();
         AgentHarness_Close(&harness);
         sessions.Close(sessions.Ctx);
         Http_GlobalShutdown();
@@ -3460,6 +3557,7 @@ int main(int argc, char** argv) {
       StrView authGuidance = AuthGuidance(&arena, runtime.Spec, false);
       fprintf(stderr, "error: %.*s\n", (int)authGuidance.Length, authGuidance.Data);
       StopHarnessEventPump(&pump);
+      EndHookSession();
       AgentHarness_Close(&harness);
       sessions.Close(sessions.Ctx);
       Http_GlobalShutdown();
@@ -3485,6 +3583,7 @@ int main(int argc, char** argv) {
     }
     ReportHarnessResult(run);
     MaybeReportMem();
+    EndHookSession();
     AgentHarness_Close(&harness);
     sessions.Close(sessions.Ctx);
     Http_GlobalShutdown();
@@ -3500,6 +3599,7 @@ int main(int argc, char** argv) {
   }
 
   MaybeReportMem();
+  EndHookSession();
   AgentHarness_Close(&harness);
   sessions.Close(sessions.Ctx);
   Http_GlobalShutdown();

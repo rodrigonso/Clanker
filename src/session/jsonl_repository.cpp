@@ -918,6 +918,15 @@ void JsonlRepository_Init(JsonlRepository* repository, StrView dataRoot) {
   repository->Initialized = true;
 }
 
+StrView JsonlRepository_SessionPath(Arena* arena, JsonlRepository* repository,
+                                    StrView projectKey, DurableId sessionId) {
+  if (!arena || !repository || !repository->Initialized ||
+      !ValidProjectKey(projectKey) || !DurableId_IsSet(sessionId)) {
+    return StrView{"", 0};
+  }
+  return SessionPath(arena, repository, projectKey, sessionId);
+}
+
 void JsonlRepository_Destroy(JsonlRepository* repository) {
   if (!repository || !repository->Initialized) return;
   Mutex_Destroy(&repository->Lock);

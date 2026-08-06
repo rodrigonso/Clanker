@@ -23,6 +23,7 @@ void TestInfra();
 void TestCrypto();
 void TestAuth();
 void TestCommand();
+void TestHooks();
 void TestPromptContext();
 void TestProjectTrust();
 void TestLoopback();

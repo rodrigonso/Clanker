@@ -35,3 +35,11 @@ struct ExecArgvResult {
 // stdout and stderr stay separate, and either sink may stop the process tree.
 ExecArgvResult Exec_RunArgv(Arena* arena, StrView program, const StrView* args, u32 argCount,
                             u32 timeoutMs, volatile i32* abort, ExecArgvSink sink);
+
+// Run `command` through the platform shell with `input` written to the child's
+// stdin, which is then closed. Unlike the calls above the child never inherits
+// the caller's stdin -- the TUI holds the console in raw mode -- and its output
+// goes to the null device, so no drain loop is needed. `input` must be under
+// 16 KiB, which is enforced on both platforms.
+ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
+                              u32 timeoutMs, volatile i32* abort);

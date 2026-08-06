@@ -1,5 +1,13 @@
 #include "tools/exec.h"
 
+// Bound on a stdin payload handed to a child process. The write happens before
+// the wait loop, so anything larger than the pipe buffer would block past both
+// the timeout and `abort` against a child that never reads its stdin. Windows
+// sizes its pipe to exactly this; POSIX pipe buffers cannot be sized portably,
+// so the value stays under the smallest common default (16 KiB on macOS).
+// Hook payloads are a couple of hundred bytes, so this is never close.
+static constexpr u32 EXEC_INPUT_PIPE_BYTES = 1u << 14;
+
 #if defined(_WIN32)
 #include <windows.h>
 
@@ -48,6 +56,21 @@ static void Exec_AppendWindowsArg(StrBuf* commandLine, StrView arg) {
   StrBuf_AppendChar(commandLine, '"');
 }
 
+// Kill-on-close so a timeout or abort takes down the whole process tree, not
+// just the shell that was spawned.
+static HANDLE Exec_CreateKillOnCloseJob() {
+  HANDLE job = CreateJobObjectA(nullptr, nullptr);
+  if (!job) return nullptr;
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {};
+  limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+  if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits,
+                               sizeof(limits))) {
+    CloseHandle(job);
+    return nullptr;
+  }
+  return job;
+}
+
 static bool Exec_ReadWindowsPipe(HANDLE pipe, ExecChunkFn sink, void* user, bool* hadData) {
   char buf[4096];
   for (;;) {
@@ -89,18 +112,8 @@ ExecArgvResult Exec_RunArgv(Arena* arena, StrView program, const StrView* args, 
     Exec_AppendWindowsArg(&commandLine, args[i]);
   }
 
-  HANDLE job = CreateJobObjectA(nullptr, nullptr);
+  HANDLE job = Exec_CreateKillOnCloseJob();
   if (!job) {
-    CloseHandle(outRead);
-    CloseHandle(outWrite);
-    CloseHandle(errRead);
-    CloseHandle(errWrite);
-    return res;
-  }
-  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {};
-  limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-  if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
-    CloseHandle(job);
     CloseHandle(outRead);
     CloseHandle(outWrite);
     CloseHandle(errRead);
@@ -197,17 +210,8 @@ ExecResult Exec_RunStreaming(Arena* arena, StrView command, u32 timeoutMs,
   StrBuf_AppendCStr(&cmd, "cmd.exe /c ");
   StrBuf_Append(&cmd, command);
 
-  HANDLE job = CreateJobObjectA(nullptr, nullptr);
+  HANDLE job = Exec_CreateKillOnCloseJob();
   if (!job) {
-    CloseHandle(rd);
-    CloseHandle(wr);
-    res.Output = SV("failed to create job object");
-    return res;
-  }
-  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {};
-  limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-  if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
-    CloseHandle(job);
     CloseHandle(rd);
     CloseHandle(wr);
     res.Output = SV("failed to configure job object");
@@ -295,6 +299,119 @@ ExecResult Exec_RunStreaming(Arena* arena, StrView command, u32 timeoutMs,
   CloseHandle(pinfo.hThread);
   CloseHandle(job);
   res.Output = StrBuf_View(output);
+  return res;
+}
+
+ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
+                              u32 timeoutMs, volatile i32* abort) {
+  ExecResult res = {};
+  res.ExitCode = -1;
+  res.Output = StrView{"", 0};
+  if (input.Length >= EXEC_INPUT_PIPE_BYTES) {
+    res.Output = SV("hook payload is too large for the stdin pipe");
+    return res;
+  }
+
+  SECURITY_ATTRIBUTES sa = {};
+  sa.nLength = sizeof(sa);
+  sa.bInheritHandle = TRUE;
+
+  HANDLE inRead = nullptr, inWrite = nullptr;
+  if (!CreatePipe(&inRead, &inWrite, &sa, EXEC_INPUT_PIPE_BYTES)) {
+    res.Output = SV("failed to create stdin pipe");
+    return res;
+  }
+  SetHandleInformation(inWrite, HANDLE_FLAG_INHERIT, 0);
+
+  HANDLE nul = CreateFileA("NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           &sa, OPEN_EXISTING, 0, nullptr);
+  if (nul == INVALID_HANDLE_VALUE) {
+    CloseHandle(inRead);
+    CloseHandle(inWrite);
+    res.Output = SV("failed to open the null device");
+    return res;
+  }
+
+  // Wrapped in an extra pair of quotes: `cmd /c` strips the first and last
+  // quote character of what follows, which silently corrupts any command
+  // beginning with a quoted path (`"C:\Program Files\hook.exe" --flag` loses
+  // the quote before the program and the one after the last argument). The
+  // added pair is what cmd consumes, leaving the command itself intact.
+  StrBuf cmd = StrBuf_Make(arena, command.Length + 16);
+  StrBuf_AppendCStr(&cmd, "cmd.exe /c \"");
+  StrBuf_Append(&cmd, command);
+  StrBuf_AppendChar(&cmd, '"');
+
+  HANDLE job = Exec_CreateKillOnCloseJob();
+  if (!job) {
+    CloseHandle(nul);
+    CloseHandle(inRead);
+    CloseHandle(inWrite);
+    res.Output = SV("failed to configure job object");
+    return res;
+  }
+
+  STARTUPINFOA si = {};
+  si.cb = sizeof(si);
+  si.dwFlags = STARTF_USESTDHANDLES;
+  si.hStdInput = inRead;
+  si.hStdOutput = nul;
+  si.hStdError = nul;
+
+  PROCESS_INFORMATION pinfo = {};
+  BOOL ok = CreateProcessA(nullptr, (LPSTR)StrBuf_CStr(&cmd), nullptr, nullptr, TRUE,
+                           CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pinfo);
+  CloseHandle(inRead);
+  CloseHandle(nul);
+  if (!ok) {
+    CloseHandle(job);
+    CloseHandle(inWrite);
+    res.Output = SV("failed to start process");
+    return res;
+  }
+  if (!AssignProcessToJobObject(job, pinfo.hProcess) ||
+      ResumeThread(pinfo.hThread) == (DWORD)-1) {
+    TerminateProcess(pinfo.hProcess, 1);
+    CloseHandle(pinfo.hProcess);
+    CloseHandle(pinfo.hThread);
+    CloseHandle(job);
+    CloseHandle(inWrite);
+    res.Output = SV("failed to start process in job object");
+    return res;
+  }
+  res.Spawned = true;
+
+  for (u32 written = 0; written < input.Length;) {
+    DWORD chunk = 0;
+    if (!WriteFile(inWrite, input.Data + written, input.Length - written, &chunk, nullptr) ||
+        chunk == 0) {
+      break;  // The child closed stdin early; its exit code still decides.
+    }
+    written += (u32)chunk;
+  }
+  CloseHandle(inWrite);
+
+  DWORD start = GetTickCount();
+  for (;;) {
+    if (WaitForSingleObject(pinfo.hProcess, 10) == WAIT_OBJECT_0) break;
+    if (abort && *abort) {
+      TerminateJobObject(job, 1);
+      break;
+    }
+    if (timeoutMs && (GetTickCount() - start) > timeoutMs) {
+      res.TimedOut = true;
+      TerminateJobObject(job, 1);
+      break;
+    }
+  }
+
+  WaitForSingleObject(pinfo.hProcess, INFINITE);
+  DWORD code = 0;
+  GetExitCodeProcess(pinfo.hProcess, &code);
+  res.ExitCode = (i32)code;
+  CloseHandle(pinfo.hProcess);
+  CloseHandle(pinfo.hThread);
+  CloseHandle(job);
   return res;
 }
 
@@ -543,6 +660,89 @@ ExecResult Exec_RunStreaming(Arena* arena, StrView command, u32 timeoutMs,
   waitpid(pid, &status, 0);
   res.ExitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
   res.Output = StrBuf_View(output);
+  return res;
+}
+
+ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
+                              u32 timeoutMs, volatile i32* abort) {
+  ExecResult res = {};
+  res.ExitCode = -1;
+  res.Output = StrView{"", 0};
+  if (input.Length >= EXEC_INPUT_PIPE_BYTES) {
+    res.Output = SV("hook payload is too large for the stdin pipe");
+    return res;
+  }
+
+  int fds[2];
+  if (pipe(fds) != 0) {
+    res.Output = SV("pipe failed");
+    return res;
+  }
+
+  StrBuf cmd = StrBuf_Make(arena, command.Length + 1);
+  StrBuf_Append(&cmd, command);
+
+  pid_t pid = fork();
+  if (pid < 0) {
+    close(fds[0]);
+    close(fds[1]);
+    res.Output = SV("fork failed");
+    return res;
+  }
+  if (pid == 0) {
+    setpgid(0, 0);
+    dup2(fds[0], STDIN_FILENO);
+    close(fds[0]);
+    close(fds[1]);
+    int nul = open("/dev/null", O_WRONLY);
+    if (nul >= 0) {
+      dup2(nul, STDOUT_FILENO);
+      dup2(nul, STDERR_FILENO);
+      close(nul);
+    }
+    execl("/bin/sh", "sh", "-c", StrBuf_CStr(&cmd), (char*)nullptr);
+    _exit(127);
+  }
+  close(fds[0]);
+  setpgid(pid, pid);
+  res.Spawned = true;
+
+  // A hook that never reads stdin would otherwise raise SIGPIPE and take the
+  // agent down with it; a short write failure is not worth reporting.
+  void (*previousPipeHandler)(int) = signal(SIGPIPE, SIG_IGN);
+  for (u32 written = 0; written < input.Length;) {
+    ssize_t n = write(fds[1], input.Data + written, input.Length - written);
+    if (n > 0) {
+      written += (u32)n;
+      continue;
+    }
+    if (n < 0 && errno == EINTR) continue;
+    break;
+  }
+  close(fds[1]);
+  signal(SIGPIPE, previousPipeHandler);
+
+  struct timespec t0;
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  int status = 0;
+  for (;;) {
+    pid_t done = waitpid(pid, &status, WNOHANG);
+    if (done == pid) break;
+    if (done < 0 && errno != EINTR) break;
+
+    struct timespec t1;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    u64 elapsed = (u64)(t1.tv_sec - t0.tv_sec) * 1000 + (u64)(t1.tv_nsec - t0.tv_nsec) / 1000000;
+    if ((abort && *abort) || (timeoutMs && elapsed > timeoutMs)) {
+      res.TimedOut = !(abort && *abort);
+      kill(-pid, SIGKILL);
+      waitpid(pid, &status, 0);
+      break;
+    }
+    struct timespec nap = {0, 5 * 1000 * 1000};
+    nanosleep(&nap, nullptr);
+  }
+  res.ExitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
   return res;
 }
 

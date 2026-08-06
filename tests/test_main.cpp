@@ -17,6 +17,7 @@
 
 #include "base/arena.h"
 #include "base/process_file_lock.h"
+#include "base/thread.h"
 #include "json/json.h"
 #include "tests.h"
 
@@ -56,6 +57,7 @@ const Suite kSuites[] = {
     {"crypto", TestCrypto, TagDefault, "sha256 and random"},
     {"auth", TestAuth, TagDefault, "credential store and OAuth"},
     {"command", TestCommand, TagDefault, "slash command parsing"},
+    {"hooks", TestHooks, TagDefault, "external lifecycle hooks"},
     {"prompt_context", TestPromptContext, TagDefault, "system prompt and project context"},
     {"project_trust", TestProjectTrust, TagDefault, "hierarchical project trust"},
     {"loopback", TestLoopback, TagDefault, "OAuth loopback server"},
@@ -203,6 +205,22 @@ int main(int argc, char** argv) {
   if (getenv("CLANK_TEST_FAKE_RG")) return RunFakeRipgrep(argc, argv);
   if (argc == 3 && strcmp(argv[1], "--echo-arg") == 0) {
     fwrite(argv[2], 1, strlen(argv[2]), stdout);
+    return 0;
+  }
+  // Hook-runner helpers: a child that drains stdin into a file, and one that
+  // ignores stdin and outlives its timeout.
+  if (argc == 3 && strcmp(argv[1], "--sink-stdin") == 0) {
+    FILE* out = fopen(argv[2], "ab");
+    if (!out) return 1;
+    char buf[1024];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), stdin)) > 0) fwrite(buf, 1, n, out);
+    fputc('\n', out);
+    fclose(out);
+    return 0;
+  }
+  if (argc == 3 && strcmp(argv[1], "--hang") == 0) {
+    Sleep_Ms((u32)atoi(argv[2]));
     return 0;
   }
   if (argc == 3 && strcmp(argv[1], "--expect-lock-busy") == 0) {

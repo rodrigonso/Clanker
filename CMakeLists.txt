@@ -201,6 +201,8 @@ target_link_libraries(clank_tools PUBLIC clank_json clank_agent clank_http)
 # ---- app support (settings, provider registry, interactive commands) ------
 add_library(clank_app STATIC
   src/app/command.cpp
+  src/app/hook_config.cpp
+  src/app/hook_runner.cpp
   src/app/plain_select.cpp
   src/app/project_trust.cpp
   src/app/prompt_context.cpp
@@ -234,6 +236,7 @@ add_executable(clank_tests EXCLUDE_FROM_ALL
   tests/test_crypto.cpp
   tests/test_auth.cpp
   tests/test_command.cpp
+  tests/test_hooks.cpp
   tests/test_prompt_context.cpp
   tests/test_project_trust.cpp
   tests/test_loopback.cpp

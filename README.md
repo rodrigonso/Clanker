@@ -40,7 +40,8 @@ src/
            ripgrep discovery, fs/glob/diff/truncate/filelock infra
   term/    full-screen TUI: raw-mode terminal, key decoder, differential
            renderer, markdown, transcript model, multi-line editor, controller
-  app/     CLI entry + durable session startup + TUI/plain REPL + login flow
+  app/     CLI entry + durable session startup + TUI/plain REPL + login flow +
+           external lifecycle hooks (hooks.json config + dispatch runner)
 tests/     single CLI test harness (suite selection via args; offline by default)
 ```
 
@@ -86,6 +87,8 @@ tests/     single CLI test harness (suite selection via args; offline by default
 - **Providers are reimplemented wire protocols**, not vendor SDKs. Anthropic
   Messages and OpenAI Responses request builders and SSE parsers are tested
   against recorded fixtures offline.
+- **External lifecycle hooks** let an editor or supervisor follow a run without
+  linking against Clank. See [Lifecycle hooks](#lifecycle-hooks).
 
 ## Build
 
@@ -181,6 +184,82 @@ explicit CLI trust override covers the run.
 `~/.clank/settings.json` also stores the active provider/model and explicit
 effort or selectable context-window preferences. Unsupported saved values fall
 back to the selected model's defaults. Current fixed provider context windows are displayed without an extra chooser.
+
+## Lifecycle hooks
+
+Clank reports lifecycle transitions to external commands so an editor or
+supervisor can follow a run it did not start. Hooks are configured in
+`~/.clank/hooks.json` — deliberately **not** `settings.json`, which is rewritten
+from its own known keys whenever a setting changes and would drop anything it
+does not model.
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "notify.exe", "timeout": 10 }] }
+    ],
+    "PreToolUse": [
+      { "matcher": "read|write", "hooks": [{ "type": "command", "command": "audit.exe" }] }
+    ]
+  }
+}
+```
+
+`matcher` is an optional `|`-separated alternation of exact tool names; `*`,
+empty, or absent accepts everything. It is matched against the tool name, so it
+only narrows `PreToolUse` and `PostToolUse` — a matcher on any other event is
+ignored rather than silencing it. `timeout` is in seconds and defaults to 10.
+Entries of an unrecognized `type`, and entries with no `command`, are skipped
+rather than invalidating the file — one bad entry never disables the rest. A
+missing `hooks.json` simply disables hooks; one that cannot be read or parsed
+disables them too, but says so on stderr rather than failing silently.
+
+| Event | Fires |
+| --- | --- |
+| `SessionStart` | once the session is durable, before the first prompt |
+| `UserPromptSubmit` | each prompt submitted to the agent |
+| `PreToolUse` | before a tool call runs |
+| `PostToolUse` | after a tool call completes |
+| `Stop` | when an agent run finishes normally |
+| `StopFailure` | when a run ends in an error; a user cancel reports `Stop` instead |
+| `SessionEnd` | at exit |
+
+Each command runs through the platform shell and receives a JSON payload on
+**stdin**:
+
+```json
+{
+  "hook_event_name": "PreToolUse",
+  "session_id": "DuPy5yQe3amJZd0ZKOaUlw",
+  "cwd": "C:\\work\\repo",
+  "transcript_path": "C:\\Users\\me\\.clank\\sessions\\v2\\repo-c838...\\DuPy....jsonl",
+  "tool_name": "read"
+}
+```
+
+`transcript_path` is reported directly so a consumer never has to re-derive the
+project key, and `tool_name` is present only for the two tool events. The child
+never inherits Clank's stdin — the TUI holds the console in raw mode — and its
+stdout, stderr, and exit code are ignored: a hook is a one-way status report,
+and a broken one must not become an agent failure.
+
+Dispatch is queued onto a worker thread, so a slow hook cannot stall the agent
+loop or a TUI redraw, and events are dropped rather than blocking if a burst
+outruns the queue. Every run-scoped event is dispatched from the harness's own
+event stream, so hooks observe them in the order the agent produced them —
+`UserPromptSubmit` before the tool events it caused, and `Stop` after the last
+of them. All commands registered for an event run in configuration order, with
+no cap on how many. On exit the backlog gets a bounded grace period to finish
+before anything still outstanding is cancelled, and `SessionEnd` is then
+reported synchronously so it is delivered even when everything else was dropped.
+With no hooks configured no thread is started and nothing is spawned, so the
+default footprint is unchanged. `--no-session` keeps everything in memory and
+has no transcript to point at, so it reports nothing at all.
+
+Switching sessions with `/clear` or `/resume` re-announces `SessionStart` with
+the new session ID, transcript path, and working directory, so a consumer never
+keeps tailing a log that stopped being written.
 
 ## Compaction
 
