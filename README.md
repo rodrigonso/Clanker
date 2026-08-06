@@ -72,6 +72,17 @@ tests/     single CLI test harness (suite selection via args; offline by default
   Mirrors pi's event sequence (`agent_start → turn_start → message_* → tool_* →
   turn_end → agent_end`) plus its agent-owned steer / follow-up / next-turn
   message queues (`queue_update` events).
+- **Full hook parity with pi's `AgentLoopConfig`.** Thirteen typed C callbacks
+  bracket the loop: `BeforeRun`, `BeforeContext`, `ConvertToLlm`,
+  `BeforeProvider`, `AfterProvider`, `BeforeTool`, `PrepareNextTurn`,
+  `ShouldStopAfterTurn`, `GetSteeringMessages`, `GetFollowUpMessages`,
+  `BeforeCompaction`, `BeforeNavigation`, `AfterTurn`. `PrepareNextTurn` swaps
+  the model, effort, or context for the rest of a run and `ShouldStopAfterTurn`
+  ends it gracefully; both fire after `turn_end` and before either steering
+  source is polled. `GetSteeringMessages` / `GetFollowUpMessages` are polled at
+  the same checkpoints as the in-memory queues. Overrides are run-scoped and
+  never touch the config or the session tree; a failing hook surfaces as a
+  typed `HookError`.
 - **Providers are reimplemented wire protocols**, not vendor SDKs. Anthropic
   Messages and OpenAI Responses request builders and SSE parsers are tested
   against recorded fixtures offline.

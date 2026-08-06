@@ -78,7 +78,7 @@ re-run against pi HEAD as written — see that section.
 |---|---|---|
 | Event sequence `agent_start → turn_start → message_* → tool_* → turn_end → agent_end` | ✅ | Clank's 13 `AgentEventKind` values map 1:1 onto pi's 10 `AgentEvent` discriminants and add three: `RetryStart`, `RetryEnd`, `QueueUpdate` |
 | Data model (text / thinking / tool_call / image) | ✅ | `llm/types.h` mirrors `packages/ai/src/types.ts` |
-| Steering · follow-up · next-turn queues | ✅ | agent-owned thread-safe queues drained at pi's points; `queue_update` carries depths |
+| Steering · follow-up · next-turn queues | ✅ | agent-owned thread-safe queues drained at pi's points; `queue_update` carries depths. `GetSteeringMessages` / `GetFollowUpMessages` add pi's pluggable message sources, polled at the same checkpoints (queue first, hook second) |
 | Queue delivery modes (`all` / `one-at-a-time`) | ❌ | pi exposes `steeringMode` and `followUpMode`; Clank always drains the whole queue |
 | Queue cancellation (`cancelQueued`) | ❌ | |
 | Abort / cancellation | ✅ | shared abort flag, also short-circuits retry backoff |
@@ -86,20 +86,29 @@ re-run against pi HEAD as written — see that section.
 | Per-tool sequential override | ✅ | matches pi's `AgentTool.executionMode` |
 | `beforeTool` gate · `afterToolCall` override | ✅ | field-by-field override of result content / `isError` / terminate |
 | Tool live progress (`tool_execution_update`) | ✅ | `ToolUpdate` events; the `shell` tool emits an initial update then throttles to 100 ms, matching pi's `BASH_UPDATE_THROTTLE_MS` |
-| Context transformation | 🟡 | Clank's `BeforeContext` hook can rewrite the message array per turn, covering pi's `transformContext`; pi additionally has `convertToLlm` and declaration-merged `CustomAgentMessages`, which Clank has no equivalent for |
-| Per-turn state / stop hooks | ❌ | no equivalent for pi's `prepareNextTurn` or `shouldStopAfterTurn`; Clank's `AfterTurn` fires once per run and cannot stop the loop, and model/prompt/tools stay fixed for a harness run |
+| Context transformation | ✅ | `BeforeContext` covers pi's `transformContext` and `ConvertToLlm` covers `convertToLlm`, in that order, as the last rewrite before the request is built. pi's `convertToLlm` is required because `AgentMessage` may carry declaration-merged `CustomAgentMessages`; Clank's tree stores only model-visible state, so the hook is optional and starts from an already-LLM-shaped array |
+| Per-turn state / stop hooks | ✅ | `PrepareNextTurn` (pi's `prepareNextTurn`) writes a replacement model / effort / context for the rest of the run, and `ShouldStopAfterTurn` (pi's `shouldStopAfterTurn`) ends it gracefully. Both fire after `turn_end` and before either steering source is polled. A replacement context stays live — later assistant messages, tool results, and drained steering/follow-up accumulate onto it, as pi grows `currentContext` — and automatic compaction sizes itself against it rather than the branch it replaced. Overrides are run-scoped: they never touch `AgentHarnessConfig` or the session tree |
 | Dynamic tool addition from a tool result | ❌ | pi's `AgentToolResult.addedToolNames` has no equivalent |
 | Deferred / suspended runs | ❌ | pi's `RunOutcome.kind === "suspended"` + `DeferredHandle` + `write_deferred` records |
 | Multi-lane sessions | ❌ | pi sessions carry named lanes with independent leaves; Clank has one branch head per session |
 | Provider retries (`maxRetries` / backoff) | ✅ | separate provider-request and assistant-turn layers, both abortable and observable, default off |
 
-Clank harness hooks: `BeforeRun`, `BeforeContext`, `BeforeProvider`,
-`AfterProvider`, `BeforeTool`, `BeforeCompaction`, `BeforeNavigation`,
-`AfterTurn` (8). pi's `AgentLoopConfig` exposes `convertToLlm` (required),
-`transformContext`, `getApiKey`, `shouldStopAfterTurn`, `prepareNextTurn`,
-`getSteeringMessages`, `getFollowUpMessages`, `toolExecution`,
-`beforeToolCall`, `afterToolCall`, and its extension layer adds 33 further
-event names.
+Clank harness hooks: `BeforeRun`, `BeforeContext`, `ConvertToLlm`,
+`BeforeProvider`, `AfterProvider`, `BeforeTool`, `PrepareNextTurn`,
+`ShouldStopAfterTurn`, `GetSteeringMessages`, `GetFollowUpMessages`,
+`BeforeCompaction`, `BeforeNavigation`, `AfterTurn` (13), plus the `BeforeTool`
+gate and `AfterTool` override on `AgentToolHooks`. Every entry in pi's
+`AgentLoopConfig` now has a counterpart: `convertToLlm` → `ConvertToLlm`,
+`transformContext` → `BeforeContext`, `getApiKey` → `ResolveAuth`,
+`shouldStopAfterTurn` → `ShouldStopAfterTurn`, `prepareNextTurn` →
+`PrepareNextTurn`, `getSteeringMessages` / `getFollowUpMessages` →
+`GetSteeringMessages` / `GetFollowUpMessages`, `toolExecution` →
+`AgentHarnessConfig.ToolExec`, `beforeToolCall` / `afterToolCall` →
+`AgentToolHooks.BeforeTool` / `AgentToolHooks.AfterTool`. Clank adds
+`BeforeRun`, `BeforeProvider`, `AfterProvider`, `BeforeCompaction`,
+`BeforeNavigation`, and `AfterTurn`, which pi's loop config has no equivalent
+for. pi's extension layer still adds 33 further event names on top, which
+Clank has no seam for.
 
 ## Latency benchmark
 
@@ -282,13 +291,14 @@ and model-visible state and keeps active turns and queues in memory.
 ## Bottom line
 
 Clank holds close on the **memory-first execution core**: the data model,
-high-level loop semantics, parallel tool ordering, live tool progress, queue
-plumbing, Anthropic and OpenAI SSE plus OAuth, durable branchable sessions,
-automatic and manual compaction with a retained tail, prompt/context/trust
-assembly, a full-screen differential TUI, and equivalents for all seven pi
-tools. It does so in 28k lines with no C++ standard library, runs the
-documented live workload at ~12.4 MB peak RSS, and was measurably faster than
-the pinned pi harness across every sequential depth tested.
+high-level loop semantics, the full `AgentLoopConfig` hook surface, parallel
+tool ordering, live tool progress, queue plumbing, Anthropic and OpenAI SSE
+plus OAuth, durable branchable sessions, automatic and manual compaction with a
+retained tail, prompt/context/trust assembly, a full-screen differential TUI,
+and equivalents for all seven pi tools. It does so in 28k lines with no C++
+standard library, runs the documented live workload at ~12.4 MB peak RSS, and
+was measurably faster than the pinned pi harness across every sequential depth
+tested.
 
 The gaps fall into three buckets:
 

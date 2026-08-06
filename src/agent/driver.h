@@ -40,8 +40,11 @@ SessionReduction AgentHarness_ReduceSnapshot(AgentHarness* harness);
 // appends it as a Message record chained from `*ioHead`, in FIFO order.
 // Queues are memory-only, so a drained-but-unflushed item is simply gone if
 // the process exits first; nothing here is a durable queue record.
+// `outMessages`, when given, receives the persisted clone of each appended
+// message (harness-lifetime storage) so a run can report what it produced.
 SessionResult AgentHarness_FlushQueue(AgentHarness* harness, Array<Message>* queue,
-                                      DurableId* ioHead, u32* outFlushedCount);
+                                      DurableId* ioHead, u32* outFlushedCount,
+                                      Array<Message>* outMessages = nullptr);
 
 void AgentHarness_PublishAgentStart(AgentHarness* harness, AgentTurnKind turn);
 void AgentHarness_PublishAgentEnd(AgentHarness* harness, AgentTurnKind turn,

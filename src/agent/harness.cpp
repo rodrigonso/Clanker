@@ -276,7 +276,8 @@ SessionReduction AgentHarness_ReduceSnapshot(AgentHarness* harness) {
 }
 
 SessionResult AgentHarness_FlushQueue(AgentHarness* harness, Array<Message>* queue,
-                                     DurableId* ioHead, u32* outFlushedCount) {
+                                     DurableId* ioHead, u32* outFlushedCount,
+                                     Array<Message>* outMessages) {
   Arena scratch = ArenaCreate();
   Array<Message> pending = {};
   {
@@ -309,6 +310,12 @@ SessionResult AgentHarness_FlushQueue(AgentHarness* harness, Array<Message>* que
   {
     ScopedLock lock(&harness->StateLock);
     ResetQueuesIfEmptyLocked(harness);
+  }
+  // Append rewrote each record in place with its harness-lifetime clone, so
+  // these values outlive the scratch arena released below.
+  if (outMessages) {
+    for (u32 i = 0; i < records.Count; i++)
+      Array_Push(outMessages, records.Data[i].MessageEntry.Value);
   }
   ArenaRelease(&scratch);
   *ioHead = head;

@@ -213,6 +213,141 @@ SessionResult BlockingAfterTurn(void* context, Arena* arena,
   return SessionResult_Ok();
 }
 
+// Per-turn hook coverage: pi's prepareNextTurn / shouldStopAfterTurn /
+// getSteeringMessages / getFollowUpMessages / convertToLlm.
+struct TurnHookState {
+  u32 PrepareCount;
+  u32 ShouldStopCount;
+  u32 SteeringCount;
+  u32 FollowUpCount;
+  u32 ConvertCount;
+  u32 BeforeContextCount;
+  u32 StopAfterTurn;   // 1-based turn that requests the stop; 0 never stops
+  u32 SteeringBudget;  // how many polls actually yield a message
+  u32 FollowUpBudget;
+  bool OverrideNextTurn;
+  bool OverrideContext;
+  bool KeepAssistantInOverride;
+  u32 StopSeenContext[8];
+  u32 StopSeenCount;
+  // Observations from the last invocation of each hook.
+  u32 LastToolResults;
+  u32 LastContextCount;
+  u32 LastNewMessages;
+  bool LastAssistantSeen;
+  u32 BeforeContextLastCount;
+  u32 ConvertLastCount;
+  bool ProviderSawOverride[8];
+  ModelEffort ProviderEffort[8];
+  u32 ProviderMessageCount[8];
+  u32 ProviderTurnCount;
+};
+
+SessionResult HookCountBeforeContext(void* context, Arena* arena, AgentTurnKind turn,
+                                     DurableId headId, Array<Message>* messages) {
+  (void)turn;
+  (void)headId;
+  TurnHookState* state = (TurnHookState*)context;
+  state->BeforeContextCount++;
+  Array_Push(messages, Message_User(arena, SVL("before-context marker")));
+  state->BeforeContextLastCount = messages->Count;
+  return SessionResult_Ok();
+}
+
+SessionResult HookConvertToLlm(void* context, Arena* arena, AgentTurnKind turn, DurableId headId,
+                               Array<Message>* messages) {
+  (void)turn;
+  (void)headId;
+  TurnHookState* state = (TurnHookState*)context;
+  state->ConvertCount++;
+  state->ConvertLastCount = messages->Count;
+  Array_Push(messages, Message_User(arena, SVL("convert-to-llm marker")));
+  return SessionResult_Ok();
+}
+
+SessionResult HookObserveProvider(void* context, Arena* arena, AgentTurnKind turn,
+                                  u32 attemptIndex, AgentHarnessProviderInput* input) {
+  (void)arena;
+  (void)turn;
+  TurnHookState* state = (TurnHookState*)context;
+  if (attemptIndex != 0 || state->ProviderTurnCount >= 8) return SessionResult_Ok();
+  u32 index = state->ProviderTurnCount++;
+  state->ProviderSawOverride[index] = StrView_EqCStr(input->ModelInfo.Id, "override-model");
+  state->ProviderEffort[index] = input->Options.Profile.Effort;
+  state->ProviderMessageCount[index] = input->Context.MessageCount;
+  return SessionResult_Ok();
+}
+
+SessionResult HookPrepareNextTurn(void* context, Arena* arena, const AgentTurnContext* turn,
+                                  AgentNextTurnUpdate* out) {
+  TurnHookState* state = (TurnHookState*)context;
+  state->PrepareCount++;
+  state->LastToolResults = turn->ToolResults.Count;
+  state->LastContextCount = turn->Context.Count;
+  state->LastNewMessages = turn->NewMessages.Count;
+  state->LastAssistantSeen = turn->Assistant && turn->Assistant->Kind == Role::Assistant;
+  if (state->OverrideNextTurn) {
+    out->HasModel = true;
+    out->ModelInfo.Id = StrView_Dup(arena, SVL("override-model"));
+    out->ModelInfo.Provider = StrView_Dup(arena, SVL("script"));
+    out->ModelInfo.EffortMask = ModelEffort_Bit(ModelEffort::Medium);
+    out->ModelInfo.DefaultEffort = ModelEffort::Medium;
+    out->HasProfile = true;
+    out->Profile.Effort = ModelEffort::Medium;
+  }
+  if (state->OverrideContext && state->PrepareCount == 1) {
+    // A realistic trim: drop old history but keep the turn that just finished,
+    // billed usage and all.
+    out->HasContext = true;
+    out->Context = Array_Make<Message>(arena, 2);
+    Array_Push(&out->Context, Message_User(arena, SVL("override context")));
+    if (state->KeepAssistantInOverride && turn->Assistant)
+      Array_Push(&out->Context, *turn->Assistant);
+  }
+  return SessionResult_Ok();
+}
+
+SessionResult HookShouldStopAfterTurn(void* context, Arena* arena, const AgentTurnContext* turn,
+                                      bool* outStop) {
+  (void)arena;
+  TurnHookState* state = (TurnHookState*)context;
+  state->ShouldStopCount++;
+  if (state->StopSeenCount < 8) state->StopSeenContext[state->StopSeenCount++] = turn->Context.Count;
+  *outStop = state->StopAfterTurn != 0 && state->ShouldStopCount == state->StopAfterTurn;
+  return SessionResult_Ok();
+}
+
+SessionResult HookSteeringMessages(void* context, Arena* arena, Array<Message>* out) {
+  TurnHookState* state = (TurnHookState*)context;
+  state->SteeringCount++;
+  if (state->SteeringBudget == 0) return SessionResult_Ok();
+  state->SteeringBudget--;
+  Array_Push(out, Message_User(arena, SVL("hook steering")));
+  return SessionResult_Ok();
+}
+
+SessionResult HookFollowUpMessages(void* context, Arena* arena, Array<Message>* out) {
+  TurnHookState* state = (TurnHookState*)context;
+  state->FollowUpCount++;
+  if (state->FollowUpBudget == 0) return SessionResult_Ok();
+  state->FollowUpBudget--;
+  Array_Push(out, Message_User(arena, SVL("hook follow-up")));
+  return SessionResult_Ok();
+}
+
+SessionResult FailPrepareNextTurn(void* context, Arena*, const AgentTurnContext*,
+                                  AgentNextTurnUpdate*) {
+  (*(u32*)context)++;
+  return SessionResult_Error(SessionStatus::InvalidArgument,
+                             SVL("prepare-next-turn hook failed"));
+}
+
+SessionResult FailSteeringMessages(void* context, Arena*, Array<Message>*) {
+  (*(u32*)context)++;
+  return SessionResult_Error(SessionStatus::InvalidArgument,
+                             SVL("steering source failed"));
+}
+
 AgentHarnessConfig ScriptConfig(ScriptProvider* script, Tool* tools, u32 toolCount) {
   AgentHarnessConfig config = {};
   config.SystemPrompt = SVL("durable system");
@@ -1627,6 +1762,378 @@ static void TestHarnessToolsAndHooks() {
 
 }
 
+static void TestHarnessPerTurnHooks() {
+  // ShouldStopAfterTurn ends the run gracefully after the requested turn: the
+  // assistant message and its tool results are still durable, but no further
+  // provider request starts and neither steering source is polled.
+  {
+    Arena arena = ArenaCreate();
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+    Tool echo = {};
+    echo.Name = SVL("echo");
+    echo.Description = SVL("echo arguments");
+    echo.ParamsJsonSchema = SVL("{\"type\":\"object\"}");
+    echo.Execute = EchoExec;
+    ScriptStep steps[2] = {};
+    ScriptToolCall call[1] = {ScriptToolCall{SVL("echo"), SVL("stop-call"), SVL("{}")}};
+    steps[0].Tools = call;
+    steps[0].ToolCount = 1;
+    steps[1].Text = SVL("must never run");
+    steps[1].Stop = StopReason::Stop;
+    ScriptProvider script = {steps, 2, 0};
+
+    TurnHookState hooks = {};
+    hooks.StopAfterTurn = 1;
+    hooks.SteeringBudget = 4;
+    AgentHarness harness = {};
+    AgentHarnessConfig config = ScriptConfig(&script, &echo, 1);
+    config.Hooks.User = &hooks;
+    config.Hooks.PrepareNextTurn = HookPrepareNextTurn;
+    config.Hooks.ShouldStopAfterTurn = HookShouldStopAfterTurn;
+    config.Hooks.GetSteeringMessages = HookSteeringMessages;
+    config.Hooks.GetFollowUpMessages = HookFollowUpMessages;
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+    CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("stop after one turn"))));
+
+    SessionReduction snapshot = {};
+    CHECK(SessionResult_IsOk(AgentHarness_Snapshot(&arena, &harness, &snapshot)));
+    Array<Message> context = {};
+    CHECK(SessionResult_IsOk(SessionReducer_Context(&arena, &snapshot, snapshot.HeadId, &context)));
+    // prompt + run-start steering + assistant + tool result. The only steering
+    // poll is the one before the first turn; the post-turn checkpoint is
+    // skipped entirely by the graceful stop.
+    CHECK_ALL(script.Index == 1, hooks.PrepareCount == 1, hooks.ShouldStopCount == 1,
+              hooks.SteeringCount == 1, hooks.FollowUpCount == 0, context.Count == 4,
+              ContextTextEq(&context, 1, Role::User, "hook steering"),
+              context.Data[2].Kind == Role::Assistant,
+              context.Data[3].Kind == Role::ToolResult);
+    // The turn context reports the finished turn, not a partial one.
+    CHECK_ALL(hooks.LastAssistantSeen, hooks.LastToolResults == 1,
+              hooks.LastContextCount == 4, hooks.LastNewMessages == 4);
+
+    Array<SessionRecord> records = {};
+    CHECK(SessionResult_IsOk(SessionLog_ReadAll(&harness.Log, &arena, &records)));
+    CHECK(AllNonRootAreMessages(&records));
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    repository.Close(repository.Ctx);
+    ArenaRelease(&arena);
+  }
+
+  // PrepareNextTurn's model and effort override applies to every later turn of
+  // the same run, and never leaks into AgentHarnessConfig.
+  {
+    Arena arena = ArenaCreate();
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+    Tool echo = {};
+    echo.Name = SVL("echo");
+    echo.Description = SVL("echo arguments");
+    echo.ParamsJsonSchema = SVL("{\"type\":\"object\"}");
+    echo.Execute = EchoExec;
+    ScriptStep steps[3] = {};
+    ScriptToolCall first[1] = {ScriptToolCall{SVL("echo"), SVL("a"), SVL("{}")}};
+    ScriptToolCall second[1] = {ScriptToolCall{SVL("echo"), SVL("b"), SVL("{}")}};
+    steps[0].Tools = first;
+    steps[0].ToolCount = 1;
+    steps[1].Tools = second;
+    steps[1].ToolCount = 1;
+    steps[2].Text = SVL("done");
+    steps[2].Stop = StopReason::Stop;
+    ScriptProvider script = {steps, 3, 0};
+
+    TurnHookState hooks = {};
+    hooks.OverrideNextTurn = true;
+    AgentHarness harness = {};
+    AgentHarnessConfig config = ScriptConfig(&script, &echo, 1);
+    config.Hooks.User = &hooks;
+    config.Hooks.PrepareNextTurn = HookPrepareNextTurn;
+    config.Hooks.BeforeProvider = HookObserveProvider;
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+    CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("override the model"))));
+
+    CHECK_ALL(script.Index == 3, hooks.PrepareCount == 3, hooks.ProviderTurnCount == 3,
+              !hooks.ProviderSawOverride[0], hooks.ProviderSawOverride[1],
+              hooks.ProviderSawOverride[2],
+              hooks.ProviderEffort[0] == ModelEffort::None,
+              hooks.ProviderEffort[1] == ModelEffort::Medium,
+              hooks.ProviderEffort[2] == ModelEffort::Medium);
+    // The harness config itself is untouched: overrides are run-scoped only.
+    CHECK_ALL(StrView_EqCStr(harness.Config.ModelInfo.Id, "script-model"),
+              harness.Config.Stream.Profile.Effort == ModelEffort::None);
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    repository.Close(repository.Ctx);
+    ArenaRelease(&arena);
+  }
+
+  // A PrepareNextTurn context override replaces the branch context but stays
+  // live: later turns accumulate their own assistant message and tool results
+  // onto it. A frozen snapshot would re-send an identical request every turn,
+  // which a non-terminating tool batch turns into an unbounded loop.
+  // ShouldStopAfterTurn observes the override, not the pre-override context.
+  {
+    Arena arena = ArenaCreate();
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+    Tool echo = {};
+    echo.Name = SVL("echo");
+    echo.Description = SVL("echo arguments");
+    echo.ParamsJsonSchema = SVL("{\"type\":\"object\"}");
+    echo.Execute = EchoExec;
+    ScriptStep steps[3] = {};
+    ScriptToolCall first[1] = {ScriptToolCall{SVL("echo"), SVL("a"), SVL("{}")}};
+    ScriptToolCall second[1] = {ScriptToolCall{SVL("echo"), SVL("b"), SVL("{}")}};
+    steps[0].Tools = first;
+    steps[0].ToolCount = 1;
+    steps[1].Tools = second;
+    steps[1].ToolCount = 1;
+    steps[2].Text = SVL("done");
+    steps[2].Stop = StopReason::Stop;
+    ScriptProvider script = {steps, 3, 0};
+
+    TurnHookState hooks = {};
+    hooks.OverrideContext = true;
+    AgentHarness harness = {};
+    AgentHarnessConfig config = ScriptConfig(&script, &echo, 1);
+    config.Hooks.User = &hooks;
+    config.Hooks.PrepareNextTurn = HookPrepareNextTurn;
+    config.Hooks.ShouldStopAfterTurn = HookShouldStopAfterTurn;
+    config.Hooks.BeforeProvider = HookObserveProvider;
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+    CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("override the context"))));
+
+    // Turn 1 sees the real branch (just the prompt). Turn 2 sees the 1-message
+    // override installed after turn 1. Turn 3 sees that override plus turn 2's
+    // own assistant message and tool result.
+    CHECK_ALL(script.Index == 3, hooks.ProviderTurnCount == 3,
+              hooks.ProviderMessageCount[0] == 1, hooks.ProviderMessageCount[1] == 1,
+              hooks.ProviderMessageCount[2] == 3);
+    // The stop hook sees the post-override context on the turn that installed
+    // it (1), then the accumulated one: +assistant +tool result (3), then the
+    // final text-only turn's assistant (4). Never the growing real branch.
+    CHECK_ALL(hooks.StopSeenCount == 3, hooks.StopSeenContext[0] == 1,
+              hooks.StopSeenContext[1] == 3, hooks.StopSeenContext[2] == 4);
+
+    // The durable branch is untouched by the override: prompt + 2x(assistant,
+    // tool result) + final assistant.
+    SessionReduction snapshot = {};
+    CHECK(SessionResult_IsOk(AgentHarness_Snapshot(&arena, &harness, &snapshot)));
+    Array<Message> context = {};
+    CHECK(SessionResult_IsOk(SessionReducer_Context(&arena, &snapshot, snapshot.HeadId, &context)));
+    CHECK_ALL(context.Count == 6, ContextTextEq(&context, 0, Role::User, "override the context"),
+              ContextTextEq(&context, 5, Role::Assistant, "done"));
+    Array<SessionRecord> records = {};
+    CHECK(SessionResult_IsOk(SessionLog_ReadAll(&harness.Log, &arena, &records)));
+    CHECK(AllNonRootAreMessages(&records));
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    repository.Close(repository.Ctx);
+    ArenaRelease(&arena);
+  }
+
+  // A message from the in-memory queue must reach a live context override too,
+  // not just a hook-sourced one -- otherwise a user's steering/follow-up is
+  // durably recorded but invisible to the model.
+  {
+    Arena arena = ArenaCreate();
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+    ScriptStep steps[2] = {};
+    steps[0].Text = SVL("first");
+    steps[0].Stop = StopReason::Stop;
+    steps[1].Text = SVL("second");
+    steps[1].Stop = StopReason::Stop;
+    ScriptProvider script = {steps, 2, 0};
+
+    TurnHookState hooks = {};
+    hooks.OverrideContext = true;
+    AgentHarness harness = {};
+    AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
+    config.Hooks.User = &hooks;
+    config.Hooks.PrepareNextTurn = HookPrepareNextTurn;
+    config.Hooks.BeforeProvider = HookObserveProvider;
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+    CHECK(SessionResult_IsOk(AgentHarness_QueueFollowUp(&harness, SVL("queued follow-up"))));
+    CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("start"))));
+
+    // Turn 1 sends the real branch (the prompt). The override installed after
+    // turn 1 holds 1 message; the queued follow-up drains onto it, so turn 2
+    // sends 2. A queue drain that bypassed the accumulator would send 1.
+    CHECK_ALL(script.Index == 2, hooks.ProviderTurnCount == 2,
+              hooks.ProviderMessageCount[0] == 1, hooks.ProviderMessageCount[1] == 2);
+
+    SessionReduction snapshot = {};
+    CHECK(SessionResult_IsOk(AgentHarness_Snapshot(&arena, &harness, &snapshot)));
+    Array<Message> context = {};
+    CHECK(SessionResult_IsOk(SessionReducer_Context(&arena, &snapshot, snapshot.HeadId, &context)));
+    CHECK_ALL(context.Count == 4, ContextTextEq(&context, 2, Role::User, "queued follow-up"),
+              ContextTextEq(&context, 3, Role::Assistant, "second"));
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    repository.Close(repository.Ctx);
+    ArenaRelease(&arena);
+  }
+
+  // The hook message sources drive the same two checkpoints the in-memory
+  // queues do: steering continues the turn loop, follow-up restarts a run that
+  // would otherwise have stopped.
+  {
+    Arena arena = ArenaCreate();
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+    ScriptStep steps[3] = {};
+    steps[0].Text = SVL("first");
+    steps[0].Stop = StopReason::Stop;
+    steps[1].Text = SVL("second");
+    steps[1].Stop = StopReason::Stop;
+    steps[2].Text = SVL("third");
+    steps[2].Stop = StopReason::Stop;
+    ScriptProvider script = {steps, 3, 0};
+
+    TurnHookState hooks = {};
+    hooks.SteeringBudget = 1;   // consumed by the pre-first-turn poll
+    hooks.FollowUpBudget = 1;   // one extra run turn after the agent would stop
+    AgentHarness harness = {};
+    AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
+    config.Hooks.User = &hooks;
+    config.Hooks.GetSteeringMessages = HookSteeringMessages;
+    config.Hooks.GetFollowUpMessages = HookFollowUpMessages;
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+    CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("start"))));
+
+    SessionReduction snapshot = {};
+    CHECK(SessionResult_IsOk(AgentHarness_Snapshot(&arena, &harness, &snapshot)));
+    Array<Message> context = {};
+    CHECK(SessionResult_IsOk(SessionReducer_Context(&arena, &snapshot, snapshot.HeadId, &context)));
+    CHECK_ALL(script.Index == 2, context.Count == 5,
+              ContextTextEq(&context, 0, Role::User, "start"),
+              ContextTextEq(&context, 1, Role::User, "hook steering"),
+              ContextTextEq(&context, 2, Role::Assistant, "first"),
+              ContextTextEq(&context, 3, Role::User, "hook follow-up"),
+              ContextTextEq(&context, 4, Role::Assistant, "second"));
+    // Steering is polled before turn 1 and after each of the 2 turns;
+    // follow-up only at the two points the run would have stopped.
+    CHECK_ALL(hooks.SteeringCount == 3, hooks.FollowUpCount == 2,
+              hooks.SteeringBudget == 0, hooks.FollowUpBudget == 0);
+
+    Array<SessionRecord> records = {};
+    CHECK(SessionResult_IsOk(SessionLog_ReadAll(&harness.Log, &arena, &records)));
+    CHECK(AllNonRootAreMessages(&records));
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    repository.Close(repository.Ctx);
+    ArenaRelease(&arena);
+  }
+
+  // ConvertToLlm is the last rewrite before the request is built: it runs
+  // after BeforeContext, and only its output reaches the provider.
+  {
+    Arena arena = ArenaCreate();
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+    ScriptStep steps[1] = {};
+    steps[0].Text = SVL("converted");
+    steps[0].Stop = StopReason::Stop;
+    ScriptProvider script = {steps, 1, 0};
+
+    TurnHookState hooks = {};
+    AgentHarness harness = {};
+    AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
+    config.Hooks.User = &hooks;
+    config.Hooks.BeforeContext = HookCountBeforeContext;
+    config.Hooks.ConvertToLlm = HookConvertToLlm;
+    config.Hooks.BeforeProvider = HookObserveProvider;
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+    CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("only prompt"))));
+
+    // 1 durable prompt -> BeforeContext appends 1 -> ConvertToLlm sees 2 and
+    // appends 1 -> the provider request carries 3. Neither marker is durable.
+    CHECK_ALL(hooks.BeforeContextCount == 1, hooks.ConvertCount == 1,
+              hooks.BeforeContextLastCount == 2, hooks.ConvertLastCount == 2,
+              hooks.ProviderTurnCount == 1, hooks.ProviderMessageCount[0] == 3);
+
+    SessionReduction snapshot = {};
+    CHECK(SessionResult_IsOk(AgentHarness_Snapshot(&arena, &harness, &snapshot)));
+    Array<Message> context = {};
+    CHECK(SessionResult_IsOk(SessionReducer_Context(&arena, &snapshot, snapshot.HeadId, &context)));
+    CHECK_ALL(context.Count == 2, ContextTextEq(&context, 0, Role::User, "only prompt"),
+              ContextTextEq(&context, 1, Role::Assistant, "converted"));
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    repository.Close(repository.Ctx);
+    ArenaRelease(&arena);
+  }
+
+  // Both new hook families surface a typed HookError, and a failing hook stops
+  // the run at its own checkpoint.
+  {
+    Arena arena = ArenaCreate();
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+    ScriptStep steps[2] = {};
+    steps[0].Text = SVL("first");
+    steps[0].Stop = StopReason::Stop;
+    steps[1].Text = SVL("never");
+    steps[1].Stop = StopReason::Stop;
+    ScriptProvider script = {steps, 2, 0};
+
+    u32 prepareCalls = 0;
+    AgentHarness harness = {};
+    AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
+    config.Hooks.User = &prepareCalls;
+    config.Hooks.PrepareNextTurn = FailPrepareNextTurn;
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+    CHECK(AgentHarness_Run(&harness, SVL("fail after turn")).Status == SessionStatus::HookError);
+    CHECK_ALL(prepareCalls == 1, script.Index == 1);
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    repository.Close(repository.Ctx);
+    ArenaRelease(&arena);
+  }
+
+  {
+    Arena arena = ArenaCreate();
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+    ScriptStep steps[1] = {};
+    steps[0].Text = SVL("never reached");
+    steps[0].Stop = StopReason::Stop;
+    ScriptProvider script = {steps, 1, 0};
+
+    u32 steeringCalls = 0;
+    AgentHarness harness = {};
+    AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
+    config.Hooks.User = &steeringCalls;
+    config.Hooks.GetSteeringMessages = FailSteeringMessages;
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+    // The run-start poll fails before the first provider request.
+    CHECK(AgentHarness_Run(&harness, SVL("fail steering")).Status == SessionStatus::HookError);
+    CHECK_ALL(steeringCalls == 1, script.Index == 0);
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    repository.Close(repository.Ctx);
+    ArenaRelease(&arena);
+  }
+}
+
 static void TestHarnessCancellationAndBranches() {
   // Append failure faults the harness before any provider effect starts.
   {
@@ -2238,6 +2745,53 @@ static void TestHarnessAutoCompaction() {
     ArenaRelease(&arena);
   }
 
+  // Automatic compaction sizes against what the request will actually carry.
+  // A small context override must not be destroyed by a compaction triggered
+  // by the large durable branch it replaced.
+  {
+    Arena arena = ArenaCreate((usize)32 << 20);
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+
+    // Turn 1 reports 700 prompt tokens, past the 600-token threshold, so the
+    // branch alone would compact before turn 2.
+    ScriptStep steps[3] = {};
+    steps[0].Tools = calls;
+    steps[0].ToolCount = 1;
+    steps[0].Use = PromptUsage(700);
+    steps[1].Text = SVL("done");
+    steps[1].Stop = StopReason::Stop;
+    steps[2].Text = SVL("must never run");
+    steps[2].Stop = StopReason::Stop;
+    ScriptProvider script = {steps, 3, 0};
+
+    TurnHookState hooks = {};
+    hooks.OverrideContext = true;
+    // The trimmed context keeps turn 1's assistant message, which carries the
+    // 700-token usage report. Sizing that anchor as if it still paid for the
+    // discarded history would compact and destroy the override.
+    hooks.KeepAssistantInOverride = true;
+    AgentHarness harness = {};
+    AgentHarnessConfig config = AutoCompactConfig(&script, echo, 1, true);
+    config.Hooks.User = &hooks;
+    config.Hooks.PrepareNextTurn = HookPrepareNextTurn;
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+    CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("override then compact"))));
+
+    // The trimmed override is genuinely small, so no compaction turn is spent
+    // and the override survives: exactly 2 provider calls, no Compaction entry.
+    Array<SessionRecord> records = {};
+    CHECK(SessionResult_IsOk(SessionLog_ReadAll(&harness.Log, &arena, &records)));
+    CHECK_ALL(script.Index == 2, CountKind(&records, SessionRecordKind::Compaction) == 0,
+              AllNonRootAreMessages(&records));
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    repository.Close(repository.Ctx);
+    ArenaRelease(&arena);
+  }
+
   // Under the threshold: nothing compacts.
   {
     Arena arena = ArenaCreate((usize)32 << 20);
@@ -2454,6 +3008,7 @@ void TestHarness() {
   TestHarnessWatchers();
   TestHarnessWatchDrainsAfterClose();
   TestHarnessToolsAndHooks();
+  TestHarnessPerTurnHooks();
   TestHarnessCancellationAndBranches();
   TestHarnessAutoCompaction();
 }

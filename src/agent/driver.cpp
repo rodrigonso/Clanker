@@ -73,20 +73,161 @@ struct TurnRunResult {
   bool ProviderOk;
 };
 
+// Per-run, memory-only state: the messages this run has appended so far, plus
+// the replacement model/effort/context PrepareNextTurn asked for. None of this
+// is persisted and none of it touches AgentHarnessConfig, so overrides expire
+// when the run returns. Backed by harness->Work, which lives for the run.
+struct AgentRunState {
+  Array<Message> NewMessages;
+  bool HasContext;
+  Array<Message> Context;
+  bool HasModel;
+  Model ModelInfo;
+  bool HasProfile;
+  ModelRequestProfile Profile;
+};
+
+void AgentRunState_RecordMessages(AgentRunState* run, const Message* messages, u32 count) {
+  if (!run) return;
+  for (u32 i = 0; i < count; i++) {
+    Array_Push(&run->NewMessages, messages[i]);
+    // A live context override accumulates exactly like the branch it replaced,
+    // matching pi's currentContext.messages.push(...): without this, every
+    // later turn would re-send the frozen snapshot and a non-terminating tool
+    // batch would repeat the identical request forever.
+    if (run->HasContext) Array_Push(&run->Context, messages[i]);
+  }
+}
+
+void AgentRunState_Record(AgentRunState* run, const SessionRecord* records, u32 count) {
+  if (!run) return;
+  for (u32 i = 0; i < count; i++) {
+    if (records[i].Kind != SessionRecordKind::Message) continue;
+    AgentRunState_RecordMessages(run, &records[i].MessageEntry.Value, 1);
+  }
+}
+
+SessionResult AgentRunState_Apply(Arena* arena, AgentRunState* run,
+                                  const AgentNextTurnUpdate* update) {
+  if (!run || !update) return SessionResult_Ok();
+  if (update->HasModel) {
+    if (update->ModelInfo.Provider.Length == 0 || update->ModelInfo.Id.Length == 0)
+      return SessionResult_Error(SessionStatus::HookError,
+                                 SVL("prepare-next-turn hook produced an invalid model"));
+    run->HasModel = true;
+    run->ModelInfo = update->ModelInfo;
+  }
+  if (update->HasProfile) {
+    run->HasProfile = true;
+    run->Profile = update->Profile;
+  }
+  if (update->HasContext) {
+    // Copied into an array the harness owns, so later turns can append to it
+    // without depending on how the hook allocated its own.
+    run->HasContext = true;
+    run->Context = Array_Make<Message>(arena, update->Context.Count + 8);
+    for (u32 i = 0; i < update->Context.Count; i++)
+      Array_Push(&run->Context, update->Context.Data[i]);
+  }
+  return SessionResult_Ok();
+}
+
+typedef SessionResult (*AgentMessageSourceFn)(void* user, Arena* arena, Array<Message>* out);
+
+// Polls a hook message source (pi's getSteeringMessages / getFollowUpMessages)
+// and appends whatever it returns onto the branch exactly like a drained
+// queue, so both sources reach the model at the same checkpoint.
+SessionResult DrainMessageSource(AgentHarness* harness, AgentMessageSourceFn source,
+                                 const char* failure, DurableId* ioHead,
+                                 AgentRunState* run, u32* outCount) {
+  *outCount = 0;
+  if (!source) return SessionResult_Ok();
+  Array<Message> messages = Array_Make<Message>(&harness->Work, 4);
+  SessionResult hooked = AgentHook_Failure(
+      source(harness->Config.Hooks.User, &harness->Work, &messages), failure);
+  if (!SessionResult_IsOk(hooked)) return hooked;
+  if (messages.Count == 0) return SessionResult_Ok();
+
+  Array<SessionRecord> records = Array_Make<SessionRecord>(&harness->Work, messages.Count);
+  DurableId head = *ioHead;
+  for (u32 i = 0; i < messages.Count; i++) {
+    SessionRecord record = NewMessageRecord(head, messages.Data[i]);
+    Array_Push(&records, record);
+    head = record.EntryId;
+  }
+  SessionResult appended = AgentHarness_Append(harness, records.Data, records.Count);
+  if (!SessionResult_IsOk(appended)) return appended;
+  *ioHead = head;
+  *outCount = messages.Count;
+  AgentRunState_Record(run, records.Data, records.Count);
+  return SessionResult_Ok();
+}
+
+// A checkpoint drains the in-memory queue first and the hook source second, so
+// a caller wiring up both sees queue-before-hook order on the branch. The
+// returned count drives the same continue decision either source alone would.
+// Both paths feed AgentRunState, so a queued message reaches a live context
+// override just like a hook-sourced one does.
+SessionResult FlushQueueIntoRun(AgentHarness* harness, Array<Message>* queue, DurableId* ioHead,
+                                AgentRunState* run, u32* outCount) {
+  Array<Message> drained = Array_Make<Message>(&harness->Work, 4);
+  SessionResult result = AgentHarness_FlushQueue(harness, queue, ioHead, outCount, &drained);
+  if (!SessionResult_IsOk(result)) return result;
+  AgentRunState_RecordMessages(run, drained.Data, drained.Count);
+  return SessionResult_Ok();
+}
+
+SessionResult FlushSteering(AgentHarness* harness, DurableId* ioHead, AgentRunState* run,
+                            u32* outCount) {
+  u32 queued = 0;
+  SessionResult result =
+      FlushQueueIntoRun(harness, &harness->Queues.Steering, ioHead, run, &queued);
+  if (!SessionResult_IsOk(result)) return result;
+  u32 hooked = 0;
+  result = DrainMessageSource(harness, harness->Config.Hooks.GetSteeringMessages,
+                              "steering-messages hook failed", ioHead, run, &hooked);
+  if (!SessionResult_IsOk(result)) return result;
+  *outCount = queued + hooked;
+  return SessionResult_Ok();
+}
+
+SessionResult FlushFollowUp(AgentHarness* harness, DurableId* ioHead, AgentRunState* run,
+                            u32* outCount) {
+  u32 queued = 0;
+  SessionResult result =
+      FlushQueueIntoRun(harness, &harness->Queues.FollowUp, ioHead, run, &queued);
+  if (!SessionResult_IsOk(result)) return result;
+  u32 hooked = 0;
+  result = DrainMessageSource(harness, harness->Config.Hooks.GetFollowUpMessages,
+                              "follow-up-messages hook failed", ioHead, run, &hooked);
+  if (!SessionResult_IsOk(result)) return result;
+  *outCount = queued + hooked;
+  return SessionResult_Ok();
+}
+
 // Builds the active-branch context (linear in branch length, never full
-// history), runs the BeforeContext/BeforeProvider/AfterProvider hooks, and
-// drives the assistant-turn retry layer (Config.Retry / AgentRetryPolicy),
-// emitting transient retry_start/retry_end events around each backoff. Never
-// appends anything -- the caller decides what a successful/failed attempt
-// means for the tree (a plain assistant message for a run turn, or a
-// Compaction entry for compaction).
+// history), runs the BeforeContext/ConvertToLlm/BeforeProvider/AfterProvider
+// hooks, and drives the assistant-turn retry layer (Config.Retry /
+// AgentRetryPolicy), emitting transient retry_start/retry_end events around
+// each backoff. `run`, when given, supplies this run's PrepareNextTurn
+// overrides. Never appends anything -- the caller decides what a
+// successful/failed attempt means for the tree (a plain assistant message for
+// a run turn, or a Compaction entry for compaction).
 SessionResult RunAssistantTurn(AgentHarness* harness, AgentTurnKind turnKind, DurableId headId,
-                               const Message* extraTrailingMessage, TurnRunResult* out) {
-  SessionReduction reduction = AgentHarness_ReduceSnapshot(harness);
+                               const Message* extraTrailingMessage,
+                               const AgentRunState* run, TurnRunResult* out) {
   Array<Message> contextMessages = {};
-  SessionResult contextResult =
-      SessionReducer_Context(&harness->Work, &reduction, headId, &contextMessages);
-  if (!SessionResult_IsOk(contextResult)) return contextResult;
+  if (run && run->HasContext) {
+    contextMessages =
+        Array_Make<Message>(&harness->Work, run->Context.Count ? run->Context.Count : 1);
+    for (u32 i = 0; i < run->Context.Count; i++)
+      Array_Push(&contextMessages, run->Context.Data[i]);
+  } else {
+    SessionReduction reduction = AgentHarness_ReduceSnapshot(harness);
+    SessionResult contextResult =
+        SessionReducer_Context(&harness->Work, &reduction, headId, &contextMessages);
+    if (!SessionResult_IsOk(contextResult)) return contextResult;
+  }
   if (extraTrailingMessage) Array_Push(&contextMessages, *extraTrailingMessage);
 
   if (harness->Config.Hooks.BeforeContext) {
@@ -97,6 +238,14 @@ SessionResult RunAssistantTurn(AgentHarness* harness, AgentTurnKind turnKind, Du
     if (!SessionResult_IsOk(hooked)) return hooked;
   }
 
+  if (harness->Config.Hooks.ConvertToLlm) {
+    SessionResult hooked = AgentHook_Failure(
+        harness->Config.Hooks.ConvertToLlm(harness->Config.Hooks.User, &harness->Work,
+                                           turnKind, headId, &contextMessages),
+        "convert-to-llm hook failed");
+    if (!SessionResult_IsOk(hooked)) return hooked;
+  }
+
   AgentProviderRequest request = {};
   AgentProvider_BuildRequest(&harness->Work, harness->Config.SystemPrompt, contextMessages.Data,
                              contextMessages.Count, harness->Config.Tools,
@@ -104,9 +253,10 @@ SessionResult RunAssistantTurn(AgentHarness* harness, AgentTurnKind turnKind, Du
 
   for (u32 attemptIndex = 0;; attemptIndex++) {
     AgentHarnessProviderInput effective = {};
-    effective.ModelInfo = harness->Config.ModelInfo;
+    effective.ModelInfo = run && run->HasModel ? run->ModelInfo : harness->Config.ModelInfo;
     effective.Context = request.Context;
     effective.Options = harness->Config.Stream;
+    if (run && run->HasProfile) effective.Options.Profile = run->Profile;
     if (harness->Config.Hooks.BeforeProvider) {
       SessionResult hooked = AgentHook_Failure(
           harness->Config.Hooks.BeforeProvider(harness->Config.Hooks.User, &harness->Work,
@@ -115,8 +265,9 @@ SessionResult RunAssistantTurn(AgentHarness* harness, AgentTurnKind turnKind, Du
       if (!SessionResult_IsOk(hooked)) return hooked;
     }
     if (!ResolveProviderInput(&effective))
-      return SessionResult_Error(SessionStatus::HookError,
-                                 SVL("before-provider hook produced invalid settings"));
+      return SessionResult_Error(
+          SessionStatus::HookError,
+          SVL("effective provider settings are invalid (model, token limit, or profile)"));
 
     StreamOptions options = effective.Options;
     options.Abort = &harness->AbortFlag;
@@ -180,7 +331,8 @@ SessionResult RunAssistantTurn(AgentHarness* harness, AgentTurnKind turnKind, Du
 // before this function returns -- so the harness never leaves a live tool
 // call without a result before the next provider request.
 SessionResult RunToolBatch(AgentHarness* harness, DurableId* ioHead, const Message* assistant,
-                          bool* outAnyTool, bool* outAllTerminate) {
+                          AgentRunState* run, bool* outAnyTool, bool* outAllTerminate,
+                          Array<Message>* outToolResults) {
   Arena* arena = &harness->Work;
   Message effectiveAssistant = *assistant;
   effectiveAssistant.Content =
@@ -256,6 +408,11 @@ SessionResult RunToolBatch(AgentHarness* harness, DurableId* ioHead, const Messa
     *ioHead = head;
     *outAnyTool = results.AnyTool;
     *outAllTerminate = results.AllTerminate;
+    AgentRunState_Record(run, messages.Data, messages.Count);
+    if (outToolResults) {
+      for (u32 i = 0; i < messages.Count; i++)
+        Array_Push(outToolResults, messages.Data[i].MessageEntry.Value);
+    }
   }
   if (!SessionResult_IsOk(committed)) return committed;
   if (!SessionResult_IsOk(beforeToolFailure)) return beforeToolFailure;
@@ -299,7 +456,7 @@ SessionResult PerformCompaction(AgentHarness* harness, DurableId head,
           "decisions, constraints, unresolved work, and important tool results."));
   TurnRunResult turn = {};
   SessionResult result =
-      RunAssistantTurn(harness, AgentTurnKind::Compaction, head, &summarizePrompt, &turn);
+      RunAssistantTurn(harness, AgentTurnKind::Compaction, head, &summarizePrompt, nullptr, &turn);
 
   AgentTurnOutcome outcome = AgentTurnOutcome::Succeeded;
   StrView error = {};
@@ -350,28 +507,44 @@ SessionResult PerformCompaction(AgentHarness* harness, DurableId head,
 
 // The window the next provider request will actually be sized against: the
 // explicitly selected tier when the model exposes one, else its fixed window.
-u32 ActiveContextWindow(const AgentHarness* harness) {
-  u32 window = harness->Config.Stream.Profile.ContextWindow;
-  return window ? window : harness->Config.ModelInfo.ContextWindow;
+// A run's PrepareNextTurn overrides are what the request will carry, so they
+// take precedence over the config here too.
+u32 ActiveContextWindow(const AgentHarness* harness, const AgentRunState* run) {
+  u32 window = run && run->HasProfile ? run->Profile.ContextWindow
+                                      : harness->Config.Stream.Profile.ContextWindow;
+  if (window) return window;
+  return run && run->HasModel ? run->ModelInfo.ContextWindow
+                              : harness->Config.ModelInfo.ContextWindow;
 }
 
 // Decides whether the next provider request for `head` would eat into the
 // window's reserved headroom, and if so which branch span to fold away.
 // Measurement materializes the branch context once, the same O(branch) cost the
-// turn itself pays.
-bool ShouldAutoCompact(AgentHarness* harness, DurableId head, AgentCompactionCut* outCut) {
+// turn itself pays -- or reads a live context override directly, since that is
+// what the request will actually carry. The cut point is always selected from
+// the durable branch, which is what compaction folds.
+bool ShouldAutoCompact(AgentHarness* harness, DurableId head, const AgentRunState* run,
+                       AgentCompactionCut* outCut) {
   const AgentCompactionPolicy* policy = &harness->Config.Compaction;
-  u32 window = ActiveContextWindow(harness);
+  u32 window = ActiveContextWindow(harness, run);
   if (!AgentCompactionPolicy_IsValid(policy) || !window) return false;
 
   SessionReduction reduction = AgentHarness_ReduceSnapshot(harness);
-  Array<Message> messages = {};
-  if (!SessionResult_IsOk(
-          SessionReducer_Context(&harness->Work, &reduction, head, &messages)))
-    return false;
-  if (!AgentCompaction_ShouldCompact(
-          policy, window, AgentCompaction_ContextTokens(messages.Data, messages.Count)))
-    return false;
+  u32 tokens = 0;
+  if (run && run->HasContext) {
+    // A hook-supplied context may keep an assistant message while dropping the
+    // history it was billed against, so the reported-usage anchor's invariant
+    // ("this usage paid for everything before it") no longer holds. Only the
+    // byte estimate is meaningful for an array the harness did not assemble.
+    tokens = AgentCompaction_EstimateContextTokens(run->Context.Data, run->Context.Count);
+  } else {
+    Array<Message> messages = {};
+    if (!SessionResult_IsOk(
+            SessionReducer_Context(&harness->Work, &reduction, head, &messages)))
+      return false;
+    tokens = AgentCompaction_ContextTokens(messages.Data, messages.Count);
+  }
+  if (!AgentCompaction_ShouldCompact(policy, window, tokens)) return false;
 
   Array<const SessionRecord*> branch = {};
   if (!SessionResult_IsOk(
@@ -381,7 +554,26 @@ bool ShouldAutoCompact(AgentHarness* harness, DurableId head, AgentCompactionCut
                                         policy->KeepRecentTokens, outCut);
 }
 
-SessionResult ContinueRun(AgentHarness* harness, DurableId* ioHead) {
+// Materializes the state pi hands to prepareNextTurn / shouldStopAfterTurn.
+// Only built when one of them is installed, since the context array costs
+// O(branch) to materialize.
+SessionResult BuildTurnContext(AgentHarness* harness, DurableId head, const Message* assistant,
+                               Array<Message> toolResults, const AgentRunState* run,
+                               AgentTurnContext* out) {
+  SessionReduction reduction = AgentHarness_ReduceSnapshot(harness);
+  Array<Message> context = {};
+  SessionResult result = SessionReducer_Context(&harness->Work, &reduction, head, &context);
+  if (!SessionResult_IsOk(result)) return result;
+  out->Turn = AgentTurnKind::Run;
+  out->HeadId = head;
+  out->Assistant = assistant;
+  out->ToolResults = toolResults;
+  out->Context = context;
+  if (run) out->NewMessages = run->NewMessages;
+  return SessionResult_Ok();
+}
+
+SessionResult ContinueRun(AgentHarness* harness, DurableId* ioHead, AgentRunState* run) {
   for (;;) {
     if (harness->AbortFlag)
       return SessionResult_Error(SessionStatus::Cancelled, SVL("run cancelled"));
@@ -390,7 +582,7 @@ SessionResult ContinueRun(AgentHarness* harness, DurableId* ioHead) {
     // per iteration. If it succeeds but the context still exceeds the budget we
     // continue anyway and let the provider decide, rather than loop.
     AgentCompactionCut cut = {};
-    if (ShouldAutoCompact(harness, *ioHead, &cut)) {
+    if (ShouldAutoCompact(harness, *ioHead, run, &cut)) {
       if (harness->Config.Hooks.BeforeCompaction) {
         SessionResult hooked = AgentHook_Failure(
             harness->Config.Hooks.BeforeCompaction(harness->Config.Hooks.User,
@@ -412,11 +604,18 @@ SessionResult ContinueRun(AgentHarness* harness, DurableId* ioHead) {
         return SessionResult_Error(compacted.Status, StrBuf_View(&message));
       }
       *ioHead = compaction.NewHead;
+      // Compaction rewrote the branch the override was derived from, so the
+      // override is stale and there is no sound way to rebase it: fall back to
+      // the compacted branch. Because ShouldAutoCompact sizes against the
+      // override itself, this only happens when the override genuinely
+      // outgrew the window, never because the branch behind it did.
+      if (run) run->HasContext = false;
     }
 
     AgentHarness_PublishTurnStart(harness, AgentTurnKind::Run);
     TurnRunResult turn = {};
-    SessionResult generated = RunAssistantTurn(harness, AgentTurnKind::Run, *ioHead, nullptr, &turn);
+    SessionResult generated =
+        RunAssistantTurn(harness, AgentTurnKind::Run, *ioHead, nullptr, run, &turn);
     if (!SessionResult_IsOk(generated)) {
       bool cancelled = generated.Status == SessionStatus::Cancelled;
       AgentHarness_PublishTurnEnd(harness, AgentTurnKind::Run,
@@ -436,6 +635,7 @@ SessionResult ContinueRun(AgentHarness* harness, DurableId* ioHead) {
       return committed;
     }
     *ioHead = assistantRecord.EntryId;
+    AgentRunState_Record(run, &assistantRecord, 1);
 
     if (!turn.ProviderOk || turn.Assistant.Stop == StopReason::Error ||
         turn.Assistant.Stop == StopReason::Aborted) {
@@ -449,7 +649,9 @@ SessionResult ContinueRun(AgentHarness* harness, DurableId* ioHead) {
 
     bool anyTool = false;
     bool allTerminate = true;
-    SessionResult tools = RunToolBatch(harness, ioHead, &turn.Assistant, &anyTool, &allTerminate);
+    Array<Message> toolResults = Array_Make<Message>(&harness->Work, 4);
+    SessionResult tools = RunToolBatch(harness, ioHead, &turn.Assistant, run, &anyTool,
+                                       &allTerminate, &toolResults);
     if (!SessionResult_IsOk(tools)) {
       AgentHarness_PublishTurnEnd(harness, AgentTurnKind::Run,
                                  tools.Status == SessionStatus::Cancelled
@@ -460,18 +662,51 @@ SessionResult ContinueRun(AgentHarness* harness, DurableId* ioHead) {
     }
     AgentHarness_PublishTurnEnd(harness, AgentTurnKind::Run, AgentTurnOutcome::Succeeded, StrView{});
 
+    // pi's prepareNextTurn then shouldStopAfterTurn: both observe the finished
+    // turn after turn_end and before either steering source is polled.
+    if (harness->Config.Hooks.PrepareNextTurn || harness->Config.Hooks.ShouldStopAfterTurn) {
+      AgentTurnContext turnContext = {};
+      SessionResult built =
+          BuildTurnContext(harness, *ioHead, &turn.Assistant, toolResults, run, &turnContext);
+      if (!SessionResult_IsOk(built)) return built;
+
+      if (harness->Config.Hooks.PrepareNextTurn) {
+        AgentNextTurnUpdate update = {};
+        SessionResult hooked = AgentHook_Failure(
+            harness->Config.Hooks.PrepareNextTurn(harness->Config.Hooks.User, &harness->Work,
+                                                  &turnContext, &update),
+            "prepare-next-turn hook failed");
+        if (!SessionResult_IsOk(hooked)) return hooked;
+        SessionResult applied = AgentRunState_Apply(&harness->Work, run, &update);
+        if (!SessionResult_IsOk(applied)) return applied;
+        // pi hands shouldStopAfterTurn the already-updated context, so a stop
+        // decision sees what the next request would actually carry.
+        if (run && run->HasContext) turnContext.Context = run->Context;
+      }
+
+      if (harness->Config.Hooks.ShouldStopAfterTurn) {
+        bool stop = false;
+        SessionResult hooked = AgentHook_Failure(
+            harness->Config.Hooks.ShouldStopAfterTurn(harness->Config.Hooks.User, &harness->Work,
+                                                      &turnContext, &stop),
+            "should-stop-after-turn hook failed");
+        if (!SessionResult_IsOk(hooked)) return hooked;
+        // A graceful stop: the run ends here without polling either queue and
+        // without starting another provider request.
+        if (stop) return SessionResult_Ok();
+      }
+    }
+
     // Steering folds onto the tree right after this tool-result batch, before
     // any further provider request (whether that request continues this
     // turn or starts the next one).
     u32 steerCount = 0;
-    SessionResult steered =
-        AgentHarness_FlushQueue(harness, &harness->Queues.Steering, ioHead, &steerCount);
+    SessionResult steered = FlushSteering(harness, ioHead, run, &steerCount);
     if (!SessionResult_IsOk(steered)) return steered;
     if (AgentCheckpoint_ContinueTurn(anyTool, allTerminate, steerCount)) continue;
 
     u32 followUpCount = 0;
-    SessionResult followed =
-        AgentHarness_FlushQueue(harness, &harness->Queues.FollowUp, ioHead, &followUpCount);
+    SessionResult followed = FlushFollowUp(harness, ioHead, run, &followUpCount);
     if (!SessionResult_IsOk(followed)) return followed;
     if (AgentCheckpoint_ContinueRun(followUpCount)) continue;
 
@@ -488,9 +723,11 @@ SessionResult AgentDriver_Run(AgentHarness* harness, StrView prompt) {
   AgentHarness_PublishAgentStart(harness, AgentTurnKind::Run);
 
   DurableId head = AgentHarness_ReduceSnapshot(harness).HeadId;
+  AgentRunState run = {};
+  run.NewMessages = Array_Make<Message>(&harness->Work, 8);
   u32 nextTurnCount = 0;
   SessionResult result =
-      AgentHarness_FlushQueue(harness, &harness->Queues.NextTurn, &head, &nextTurnCount);
+      FlushQueueIntoRun(harness, &harness->Queues.NextTurn, &head, &run, &nextTurnCount);
 
   if (SessionResult_IsOk(result)) {
     Message accepted = Message_User(&harness->Work, StrView_Dup(&harness->Work, prompt));
@@ -502,16 +739,21 @@ SessionResult AgentDriver_Run(AgentHarness* harness, StrView prompt) {
     if (SessionResult_IsOk(result)) {
       SessionRecord userRecord = NewMessageRecord(head, accepted);
       result = AgentHarness_Append(harness, &userRecord, 1);
-      if (SessionResult_IsOk(result)) head = userRecord.EntryId;
+      if (SessionResult_IsOk(result)) {
+        head = userRecord.EntryId;
+        AgentRunState_Record(&run, &userRecord, 1);
+      }
     }
   }
 
+  // pi polls steering once before the first turn, picking up anything the user
+  // typed while the previous run was still finishing.
   if (SessionResult_IsOk(result)) {
     u32 steerCount = 0;
-    result = AgentHarness_FlushQueue(harness, &harness->Queues.Steering, &head, &steerCount);
+    result = FlushSteering(harness, &head, &run, &steerCount);
   }
 
-  if (SessionResult_IsOk(result)) result = ContinueRun(harness, &head);
+  if (SessionResult_IsOk(result)) result = ContinueRun(harness, &head, &run);
 
   AgentTurnOutcome outcome = AgentTurnOutcome::Succeeded;
   StrView error = {};
