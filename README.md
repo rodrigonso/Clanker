@@ -4,13 +4,17 @@ A tiny, memory-efficient coding-agent harness in C++ — a clean reimplementatio
 of the core of [`earendil-works/pi`](https://github.com/earendil-works/pi)
 without a JavaScript runtime.
 
-The goal is footprint. A Node/Bun-based agent carries a fixed ~100–300 MB+
-baseline (embedded JS engine + SDK object graphs) and duplicates the transcript
-several times in UTF-16. Clank runs the same agent loop with an
-arena-allocated, UTF-8, zero-copy transcript.
+The goal is footprint. A Node/Bun-based agent pays for an embedded JS engine and
+SDK object graphs before it does any work, and duplicates the transcript several
+times in UTF-16. Clank runs the same agent loop with an arena-allocated, UTF-8,
+zero-copy transcript.
 
-**Measured:** a full faux run (libcurl init + agent + a `shell` tool execution)
-peaks at **~6 MB RSS** (`CLANK_PRINT_MEM=1`).
+**Measured** on Windows x64 with `CLANK_PRINT_MEM=1`: a full faux run (libcurl
+init + agent + a `shell` tool execution) peaks at **~8.9 MB RSS** from a Release
+build, and ~11 MB from a Debug build. For scale, an empty `node -e ''` process
+on the same machine (Node 24.13.0) sits at ~33 MB before loading an agent at
+all. The claim here is the order of magnitude, not a benchmarked ratio against
+a specific upstream measurement — pi publishes no memory numbers.
 
 ## What it is
 
@@ -24,7 +28,8 @@ src/
            FFI fastfail, peak-RSS reporter   (caboose conventions, no C++ std)
   json/    arena DOM parser + escaping writer (hand-rolled, no deps)
   crypto/  SHA-256, base64url, secure random, PKCE (no deps)
-  llm/     data model, faux provider, Anthropic protocol (build + SSE parse)
+  llm/     data model, faux provider, Anthropic Messages and OpenAI Responses
+           protocols (request build + SSE parse), retry policy, model registry
   net/     streaming HTTP + non-streaming fetch over libcurl; loopback OAuth
            callback server + browser opener (no deps beyond OS sockets)
   auth/    credentials + generic OAuth (PKCE flow, callback capture, store,
@@ -321,10 +326,15 @@ event→transcript mapping. Live full-screen rendering is verified manually.
 
 ## Scope / deferred
 
-This is the small clean core. Deliberately out of scope for now (the structure
-leaves seams for them):
+This is the small clean core. A running feature-by-feature comparison against
+upstream pi — including what is at parity, what is partial, and what is missing
+— lives in [`docs/PARITY.md`](docs/PARITY.md).
+
+Deliberately out of scope for now (the structure leaves seams for them):
 
 - Additional OpenAI-compatible or vendor-specific providers.
+- Non-interactive machine surfaces: a JSON event stream and a bidirectional RPC
+  mode. `-p` is currently the only non-interactive path.
 - Device-code OAuth (e.g. GitHub Copilot) — the loopback callback flow is done.
 - TUI niceties: visual-row (vs logical-line) Up/Down, syntax highlighting,
   images, undo. The full-screen differential TUI itself is done.
