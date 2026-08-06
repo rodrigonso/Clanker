@@ -11,42 +11,25 @@ constexpr u32 kMaxSystemPromptBytes = (u32)16 << 20;
 const StrView kContextCandidates[] = {
     SVL("AGENTS.md"), SVL("AGENTS.MD"), SVL("CLAUDE.md"), SVL("CLAUDE.MD")};
 
-bool IsPathSeparator(char c) { return c == '/' || c == '\\'; }
-
-char PathFold(char c) {
-#if defined(_WIN32)
-  if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-#endif
-  return IsPathSeparator(c) ? '/' : c;
-}
-
-bool PathEquals(StrView a, StrView b) {
-  if (a.Length != b.Length) return false;
-  for (u32 i = 0; i < a.Length; i++) {
-    if (PathFold(a.Data[i]) != PathFold(b.Data[i])) return false;
-  }
-  return true;
-}
-
 StrView PathRoot(StrView path) {
   if (!path.Length) return {};
 #if defined(_WIN32)
   if (path.Length >= 3 && path.Data[1] == ':' &&
-      IsPathSeparator(path.Data[2]))
+      Fs_IsSep(path.Data[2]))
     return StrView{path.Data, 3};
-  if (path.Length >= 2 && IsPathSeparator(path.Data[0]) &&
-      IsPathSeparator(path.Data[1])) {
+  if (path.Length >= 2 && Fs_IsSep(path.Data[0]) &&
+      Fs_IsSep(path.Data[1])) {
     u32 separators = 0;
     for (u32 i = 2; i < path.Length; i++) {
-      if (!IsPathSeparator(path.Data[i])) continue;
+      if (!Fs_IsSep(path.Data[i])) continue;
       separators++;
-      while (i + 1 < path.Length && IsPathSeparator(path.Data[i + 1])) i++;
+      while (i + 1 < path.Length && Fs_IsSep(path.Data[i + 1])) i++;
       if (separators == 2) return StrView{path.Data, i + 1};
     }
     return path;
   }
 #endif
-  return IsPathSeparator(path.Data[0]) ? StrView{path.Data, 1} : StrView{};
+  return Fs_IsSep(path.Data[0]) ? StrView{path.Data, 1} : StrView{};
 }
 
 bool AppendLimited(StrBuf* out, StrView value) {
@@ -93,7 +76,7 @@ PromptFileReadResult ReadPromptFile(PromptContext* context, StrView path,
 
 bool ContextAlreadyLoaded(const PromptContext* context, StrView path) {
   for (u32 i = 0; i < context->ContextFiles.Count; i++) {
-    if (PathEquals(context->ContextFiles.Data[i].Path, path)) return true;
+    if (Fs_PathEquals(context->ContextFiles.Data[i].Path, path)) return true;
   }
   return false;
 }
@@ -150,7 +133,7 @@ void DiscoverContextFiles(PromptContext* context,
     StrView parent = Fs_Parent(current);
     if (!parent.Length) {
       StrView root = PathRoot(current);
-      if (root.Length && !PathEquals(root, current))
+      if (root.Length && !Fs_PathEquals(root, current))
         Array_Push(&ancestors, StrView_Dup(&context->Mem, root));
       break;
     }

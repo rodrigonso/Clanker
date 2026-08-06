@@ -1,4 +1,6 @@
 #include "agent/driver.h"
+
+#include "agent/compaction.h"
 #include "net/http.h"
 
 namespace {
@@ -270,10 +272,154 @@ SessionResult RunToolBatch(AgentHarness* harness, DurableId* ioHead, const Messa
              : committed;
 }
 
+StrView ExtractSummaryText(Arena* arena, const Message* assistant) {
+  StrBuf text = StrBuf_Make(arena, 256);
+  for (u32 i = 0; i < assistant->Content.Count; i++) {
+    const Content* content = &assistant->Content.Data[i];
+    if ((content->Kind == ContentKind::Text || content->Kind == ContentKind::Thinking) &&
+        content->Text.Length) {
+      if (text.Length) StrBuf_AppendChar(&text, '\n');
+      StrBuf_Append(&text, content->Text);
+    }
+  }
+  return StrBuf_View(&text);
+}
+
+struct CompactionTurnResult {
+  AgentTurnOutcome Outcome;
+  StrView Error;
+  DurableId NewHead;
+};
+
+// Runs one compaction turn over the inclusive branch span [base..through] and
+// appends the resulting Compaction entry chained from `head`. Publishes only
+// turn-level events, so an inline compaction never emits a nested agent
+// lifecycle inside the enclosing run.
+SessionResult PerformCompaction(AgentHarness* harness, DurableId head,
+                                DurableId baseEntryId, DurableId throughEntryId,
+                                CompactionTurnResult* out) {
+  AgentHarness_PublishTurnStart(harness, AgentTurnKind::Compaction);
+
+  Message summarizePrompt = Message_User(
+      &harness->Work,
+      SVL("Summarize the conversation for future continuation. Preserve goals, "
+          "decisions, constraints, unresolved work, and important tool results."));
+  TurnRunResult turn = {};
+  SessionResult result =
+      RunAssistantTurn(harness, AgentTurnKind::Compaction, head, &summarizePrompt, &turn);
+
+  AgentTurnOutcome outcome = AgentTurnOutcome::Succeeded;
+  StrView error = {};
+
+  if (SessionResult_IsOk(result)) {
+    bool success = turn.ProviderOk && turn.Assistant.Stop != StopReason::Error &&
+                   turn.Assistant.Stop != StopReason::Aborted;
+    StrView summaryText =
+        success ? ExtractSummaryText(&harness->Work, &turn.Assistant) : StrView{};
+    if (!success || summaryText.Length == 0) {
+      bool aborted = turn.Assistant.Stop == StopReason::Aborted;
+      error = summaryText.Length == 0 && success
+                  ? SVL("compaction provider returned an empty summary")
+                  : turn.Assistant.ErrorMessage;
+      result = SessionResult_Error(
+          aborted ? SessionStatus::Cancelled : SessionStatus::ProviderError, error);
+    } else {
+      StrBuf wrapped = StrBuf_Make(&harness->Work, summaryText.Length + 48);
+      StrBuf_AppendCStr(&wrapped, "Summary of previous conversation:\n");
+      StrBuf_Append(&wrapped, summaryText);
+      Message summary = Message_User(&harness->Work, StrBuf_View(&wrapped));
+
+      SessionRecord compactionRecord = {};
+      compactionRecord.EntryId = DurableId_Generate();
+      compactionRecord.Kind = SessionRecordKind::Compaction;
+      compactionRecord.CompactionEntry.ParentId = head;
+      compactionRecord.CompactionEntry.BaseEntryId = baseEntryId;
+      compactionRecord.CompactionEntry.ThroughEntryId = throughEntryId;
+      compactionRecord.CompactionEntry.SourceHeadId = head;
+      compactionRecord.CompactionEntry.Summary = summary;
+      compactionRecord.CompactionEntry.HasUsage = true;
+      compactionRecord.CompactionEntry.Use = turn.Assistant.Use;
+      result = AgentHarness_Append(harness, &compactionRecord, 1, true);
+      if (SessionResult_IsOk(result)) out->NewHead = compactionRecord.EntryId;
+    }
+  }
+
+  if (!SessionResult_IsOk(result)) {
+    outcome = result.Status == SessionStatus::Cancelled ? AgentTurnOutcome::Aborted
+                                                        : AgentTurnOutcome::Failed;
+    if (!error.Length) error = result.Message;
+  }
+  AgentHarness_PublishTurnEnd(harness, AgentTurnKind::Compaction, outcome, error);
+  out->Outcome = outcome;
+  out->Error = error;
+  return result;
+}
+
+// The window the next provider request will actually be sized against: the
+// explicitly selected tier when the model exposes one, else its fixed window.
+u32 ActiveContextWindow(const AgentHarness* harness) {
+  u32 window = harness->Config.Stream.Profile.ContextWindow;
+  return window ? window : harness->Config.ModelInfo.ContextWindow;
+}
+
+// Decides whether the next provider request for `head` would eat into the
+// window's reserved headroom, and if so which branch span to fold away.
+// Measurement materializes the branch context once, the same O(branch) cost the
+// turn itself pays.
+bool ShouldAutoCompact(AgentHarness* harness, DurableId head, AgentCompactionCut* outCut) {
+  const AgentCompactionPolicy* policy = &harness->Config.Compaction;
+  u32 window = ActiveContextWindow(harness);
+  if (!AgentCompactionPolicy_IsValid(policy) || !window) return false;
+
+  SessionReduction reduction = AgentHarness_ReduceSnapshot(harness);
+  Array<Message> messages = {};
+  if (!SessionResult_IsOk(
+          SessionReducer_Context(&harness->Work, &reduction, head, &messages)))
+    return false;
+  if (!AgentCompaction_ShouldCompact(
+          policy, window, AgentCompaction_ContextTokens(messages.Data, messages.Count)))
+    return false;
+
+  Array<const SessionRecord*> branch = {};
+  if (!SessionResult_IsOk(
+          SessionReducer_Ancestry(&reduction, &harness->Work, head, &branch)))
+    return false;
+  return AgentCompaction_SelectCutPoint(branch.Data, branch.Count,
+                                        policy->KeepRecentTokens, outCut);
+}
+
 SessionResult ContinueRun(AgentHarness* harness, DurableId* ioHead) {
   for (;;) {
     if (harness->AbortFlag)
       return SessionResult_Error(SessionStatus::Cancelled, SVL("run cancelled"));
+
+    // Automatic compaction runs before the next provider request, at most once
+    // per iteration. If it succeeds but the context still exceeds the budget we
+    // continue anyway and let the provider decide, rather than loop.
+    AgentCompactionCut cut = {};
+    if (ShouldAutoCompact(harness, *ioHead, &cut)) {
+      if (harness->Config.Hooks.BeforeCompaction) {
+        SessionResult hooked = HookFailure(
+            harness->Config.Hooks.BeforeCompaction(harness->Config.Hooks.User,
+                                                   &harness->Work, *ioHead),
+            "before-compaction hook failed");
+        if (!SessionResult_IsOk(hooked)) return hooked;
+      }
+      CompactionTurnResult compaction = {};
+      SessionResult compacted = PerformCompaction(harness, *ioHead, cut.BaseEntryId,
+                                                  cut.ThroughEntryId, &compaction);
+      if (!SessionResult_IsOk(compacted)) {
+        if (compacted.Status == SessionStatus::Cancelled) return compacted;
+        StrBuf message = StrBuf_Make(&harness->Work, compacted.Message.Length + 40);
+        StrBuf_AppendCStr(&message, "automatic compaction failed");
+        if (compacted.Message.Length) {
+          StrBuf_AppendCStr(&message, ": ");
+          StrBuf_Append(&message, compacted.Message);
+        }
+        return SessionResult_Error(compacted.Status, StrBuf_View(&message));
+      }
+      *ioHead = compaction.NewHead;
+    }
 
     AgentHarness_PublishTurnStart(harness, AgentTurnKind::Run);
     TurnRunResult turn = {};
@@ -338,19 +484,6 @@ SessionResult ContinueRun(AgentHarness* harness, DurableId* ioHead) {
 
     return SessionResult_Ok();
   }
-}
-
-StrView ExtractSummaryText(Arena* arena, const Message* assistant) {
-  StrBuf text = StrBuf_Make(arena, 256);
-  for (u32 i = 0; i < assistant->Content.Count; i++) {
-    const Content* content = &assistant->Content.Data[i];
-    if ((content->Kind == ContentKind::Text || content->Kind == ContentKind::Thinking) &&
-        content->Text.Length) {
-      if (text.Length) StrBuf_AppendChar(&text, '\n');
-      StrBuf_Append(&text, content->Text);
-    }
-  }
-  return StrBuf_View(&text);
 }
 
 }  // namespace
@@ -420,66 +553,19 @@ SessionResult AgentDriver_Compact(AgentHarness* harness) {
         "before-compaction hook failed");
   }
 
-  AgentTurnOutcome outcome = AgentTurnOutcome::Succeeded;
+  AgentTurnOutcome outcome = AgentTurnOutcome::Failed;
   StrView error = {};
 
   if (SessionResult_IsOk(result)) {
-    AgentHarness_PublishTurnStart(harness, AgentTurnKind::Compaction);
-    Message summarizePrompt = Message_User(
-        &harness->Work,
-        SVL("Summarize the conversation for future continuation. Preserve goals, "
-            "decisions, constraints, unresolved work, and important tool results."));
-    TurnRunResult turn = {};
-    result =
-        RunAssistantTurn(harness, AgentTurnKind::Compaction, head, &summarizePrompt, &turn);
-
-    if (SessionResult_IsOk(result)) {
-      bool success = turn.ProviderOk && turn.Assistant.Stop != StopReason::Error &&
-                     turn.Assistant.Stop != StopReason::Aborted;
-      StrView summaryText =
-          success ? ExtractSummaryText(&harness->Work, &turn.Assistant) : StrView{};
-      if (!success || summaryText.Length == 0) {
-        bool aborted = turn.Assistant.Stop == StopReason::Aborted;
-        outcome = aborted ? AgentTurnOutcome::Aborted : AgentTurnOutcome::Failed;
-        error = summaryText.Length == 0 && success
-                    ? SVL("compaction provider returned an empty summary")
-                    : turn.Assistant.ErrorMessage;
-        result = SessionResult_Error(
-            aborted ? SessionStatus::Cancelled : SessionStatus::ProviderError, error);
-      } else {
-        StrBuf wrapped = StrBuf_Make(&harness->Work, summaryText.Length + 48);
-        StrBuf_AppendCStr(&wrapped, "Summary of previous conversation:\n");
-        StrBuf_Append(&wrapped, summaryText);
-        Message summary = Message_User(&harness->Work, StrBuf_View(&wrapped));
-
-        SessionRecord compactionRecord = {};
-        compactionRecord.EntryId = DurableId_Generate();
-        compactionRecord.Kind = SessionRecordKind::Compaction;
-        compactionRecord.CompactionEntry.ParentId = head;
-        compactionRecord.CompactionEntry.BaseEntryId =
-            initial.RecordCount ? initial.Records[0].EntryId : DurableId{};
-        compactionRecord.CompactionEntry.ThroughEntryId = head;
-        compactionRecord.CompactionEntry.SourceHeadId = head;
-        compactionRecord.CompactionEntry.Summary = summary;
-        compactionRecord.CompactionEntry.HasUsage = true;
-        compactionRecord.CompactionEntry.Use = turn.Assistant.Use;
-        result = AgentHarness_Append(harness, &compactionRecord, 1, true);
-      }
-    } else {
-      outcome = result.Status == SessionStatus::Cancelled ? AgentTurnOutcome::Aborted
-                                                          : AgentTurnOutcome::Failed;
-      error = result.Message;
-    }
-    if (!SessionResult_IsOk(result) &&
-        outcome == AgentTurnOutcome::Succeeded) {
-      outcome = result.Status == SessionStatus::Cancelled
-                    ? AgentTurnOutcome::Aborted
-                    : AgentTurnOutcome::Failed;
-      error = result.Message;
-    }
-    AgentHarness_PublishTurnEnd(harness, AgentTurnKind::Compaction, outcome, error);
+    // Manual compaction always folds the whole branch: base is the session
+    // root, which is a tree node on every branch.
+    CompactionTurnResult compaction = {};
+    result = PerformCompaction(
+        harness, head, initial.RecordCount ? initial.Records[0].EntryId : DurableId{},
+        head, &compaction);
+    outcome = compaction.Outcome;
+    error = compaction.Error;
   } else {
-    outcome = AgentTurnOutcome::Failed;
     error = result.Message;
   }
 

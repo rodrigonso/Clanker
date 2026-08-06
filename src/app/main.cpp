@@ -309,6 +309,7 @@ struct RuntimeSelection {
   StrView ModelId;
   ModelRequestProfile RequestedProfile;
   DefaultProjectTrust DefaultTrust;
+  AgentCompactionPolicy Compaction;
 };
 
 static void WarnUsingDefaults(StrView path, const ProviderSpec* defaults, const char* reason) {
@@ -327,11 +328,13 @@ static RuntimeSelection LoadRuntimeSelection(Arena* arena, StrView settingsPath,
   selected.Spec = defaults;
   selected.ModelId = defaults->DefaultModel;
   selected.DefaultTrust = DefaultProjectTrust::Ask;
+  selected.Compaction = AgentCompactionPolicy_Default();
 
   AppSettings settings = {};
   AppSettingsLoadResult load = AppSettings_Load(arena, settingsPath, &settings);
   if (load == AppSettingsLoadResult::Success) {
     selected.DefaultTrust = settings.DefaultTrust;
+    selected.Compaction = settings.Compaction;
     const ProviderSpec* configured = ProviderRegistry_Find(settings.Provider);
     if (configured) {
       selected.Spec = configured;
@@ -1184,6 +1187,7 @@ static bool PersistRuntimeSelection(InteractiveRuntime* rt, const AppCommandUx* 
   settings.Model = rt->CurrentModel.Id;
   settings.DefaultTrust = rt->DefaultTrust;
   settings.Profile = rt->PreferredProfile;
+  settings.Compaction = rt->Harness->Config.Compaction;
   if (!AppSettings_Save(&scratch, rt->SettingsPath, &settings)) {
     StrBuf message = StrBuf_Make(&scratch, rt->SettingsPath.Length + 96);
     StrBuf_AppendCStr(
@@ -1383,6 +1387,67 @@ static bool RuntimeRestartWatch(InteractiveRuntime* rt,
   return true;
 }
 
+// One project-trust menu, shared by startup, `/trust`, and cross-project
+// resume. The session-only choices apply to the running process instead of
+// being written to the trust store.
+enum class TrustChoice : u8 {
+  TrustCurrent,
+  TrustParent,
+  TrustSession,
+  UntrustCurrent,
+  UntrustSession,
+};
+
+constexpr u32 TRUST_CHOICE_CAPACITY = 5;
+
+// Writes the menu into `outOptions`/`outChoices` (each at least
+// TRUST_CHOICE_CAPACITY long) and returns the number of entries. `/trust`
+// exists to persist a decision, so it omits the session-only choices.
+static u32 BuildTrustChoices(Arena* arena, StrView parent, bool includeSessionOnly,
+                             StrView* outOptions, TrustChoice* outChoices) {
+  u32 count = 0;
+  outOptions[count] = SVL("Trust this folder");
+  outChoices[count++] = TrustChoice::TrustCurrent;
+  if (parent.Length) {
+    StrBuf parentOption = StrBuf_Make(arena, parent.Length + 32);
+    StrBuf_AppendCStr(&parentOption, "Trust parent folder: ");
+    StrBuf_Append(&parentOption, parent);
+    outOptions[count] = StrBuf_View(&parentOption);
+    outChoices[count++] = TrustChoice::TrustParent;
+  }
+  if (includeSessionOnly) {
+    outOptions[count] = SVL("Trust for this session only");
+    outChoices[count++] = TrustChoice::TrustSession;
+  }
+  outOptions[count] = SVL("Do not trust this folder");
+  outChoices[count++] = TrustChoice::UntrustCurrent;
+  if (includeSessionOnly) {
+    outOptions[count] = SVL("Do not trust for this session only");
+    outChoices[count++] = TrustChoice::UntrustSession;
+  }
+  return count;
+}
+
+struct TrustDecision {
+  bool Trusted;
+  bool Persist;  // false for the session-only choices
+  StrView DecisionPath;
+  StrView RemovePath;  // a parent-scoped decision supersedes any child entry
+};
+
+static TrustDecision ResolveTrustChoice(TrustChoice choice, StrView cwd, StrView parent) {
+  TrustDecision decision = {};
+  decision.Trusted = choice == TrustChoice::TrustCurrent ||
+                     choice == TrustChoice::TrustParent ||
+                     choice == TrustChoice::TrustSession;
+  decision.Persist =
+      choice != TrustChoice::TrustSession && choice != TrustChoice::UntrustSession;
+  bool parentScoped = choice == TrustChoice::TrustParent;
+  decision.DecisionPath = parentScoped ? parent : cwd;
+  decision.RemovePath = parentScoped ? cwd : StrView{};
+  return decision;
+}
+
 static SessionResult ResolveRuntimeProjectTrust(
     InteractiveRuntime* rt, Arena* scratch, StrView workingDirectory,
     bool* trusted, bool* hasResources) {
@@ -1416,32 +1481,10 @@ static SessionResult ResolveRuntimeProjectTrust(
     return SessionResult_Ok();
   }
 
-  enum class TrustAction : u8 {
-    TrustCurrent,
-    TrustParent,
-    TrustSession,
-    UntrustCurrent,
-    UntrustSession,
-  };
   StrView parent = ProjectTrust_ParentPath(scratch, cwd);
-  StrView options[5] = {};
-  TrustAction actions[5] = {};
-  u32 count = 0;
-  options[count] = SVL("Trust this folder");
-  actions[count++] = TrustAction::TrustCurrent;
-  StrBuf parentOption = StrBuf_Make(scratch, parent.Length + 32);
-  if (parent.Length) {
-    StrBuf_AppendCStr(&parentOption, "Trust parent folder: ");
-    StrBuf_Append(&parentOption, parent);
-    options[count] = StrBuf_View(&parentOption);
-    actions[count++] = TrustAction::TrustParent;
-  }
-  options[count] = SVL("Trust for this session only");
-  actions[count++] = TrustAction::TrustSession;
-  options[count] = SVL("Do not trust this folder");
-  actions[count++] = TrustAction::UntrustCurrent;
-  options[count] = SVL("Do not trust for this session only");
-  actions[count++] = TrustAction::UntrustSession;
+  StrView options[TRUST_CHOICE_CAPACITY] = {};
+  TrustChoice actions[TRUST_CHOICE_CAPACITY] = {};
+  u32 count = BuildTrustChoices(scratch, parent, true, options, actions);
 
   StrBuf title = StrBuf_Make(scratch, cwd.Length + 96);
   StrBuf_AppendCStr(
@@ -1455,21 +1498,13 @@ static SessionResult ResolveRuntimeProjectTrust(
     return SessionResult_Error(SessionStatus::Cancelled,
                                SVL("project trust selection was cancelled"));
 
-  TrustAction action = actions[selected];
-  *trusted = action == TrustAction::TrustCurrent ||
-             action == TrustAction::TrustParent ||
-             action == TrustAction::TrustSession;
-  if (action == TrustAction::TrustSession ||
-      action == TrustAction::UntrustSession)
-    return SessionResult_Ok();
+  TrustDecision decision = ResolveTrustChoice(actions[selected], cwd, parent);
+  *trusted = decision.Trusted;
+  if (!decision.Persist) return SessionResult_Ok();
 
-  StrView decisionPath =
-      action == TrustAction::TrustParent ? parent : cwd;
-  StrView removePath =
-      action == TrustAction::TrustParent ? cwd : StrView{};
   StrBuf error = StrBuf_Make(scratch, 128);
-  if (!ProjectTrustStore_Update(scratch, rt->TrustPath, decisionPath,
-                                *trusted, removePath, &error))
+  if (!ProjectTrustStore_Update(scratch, rt->TrustPath, decision.DecisionPath,
+                                decision.Trusted, decision.RemovePath, &error))
     return SessionResult_Error(SessionStatus::IoError,
                                StrView_Dup(rt->Mem, StrBuf_View(&error)));
   return SessionResult_Ok();
@@ -2472,21 +2507,9 @@ static AppCommandHandlerResult HandleTrustCommand(
     StrBuf_AppendCStr(&title, "none");
   }
 
-  enum class TrustAction : u8 { TrustCurrent, TrustParent, UntrustCurrent };
-  StrView options[3] = {};
-  TrustAction actions[3] = {};
-  u32 count = 0;
-  options[count] = SVL("Trust this folder");
-  actions[count++] = TrustAction::TrustCurrent;
-  StrBuf parentOption = StrBuf_Make(&scratch, parent.Length + 32);
-  if (parent.Length) {
-    StrBuf_AppendCStr(&parentOption, "Trust parent folder: ");
-    StrBuf_Append(&parentOption, parent);
-    options[count] = StrBuf_View(&parentOption);
-    actions[count++] = TrustAction::TrustParent;
-  }
-  options[count] = SVL("Do not trust this folder");
-  actions[count++] = TrustAction::UntrustCurrent;
+  StrView options[TRUST_CHOICE_CAPACITY] = {};
+  TrustChoice actions[TRUST_CHOICE_CAPACITY] = {};
+  u32 count = BuildTrustChoices(&scratch, parent, false, options, actions);
 
   u32 selected = 0;
   RuntimeInputResult input =
@@ -2497,15 +2520,10 @@ static AppCommandHandlerResult HandleTrustCommand(
                                    SVL("Trust unchanged.")};
   }
 
-  TrustAction action = actions[selected];
-  StrView decisionPath =
-      action == TrustAction::TrustParent ? parent : cwd;
-  bool trusted = action != TrustAction::UntrustCurrent;
-  StrView removePath =
-      action == TrustAction::TrustParent ? cwd : StrView{};
+  TrustDecision decision = ResolveTrustChoice(actions[selected], cwd, parent);
   StrBuf error = StrBuf_Make(&scratch, 128);
-  if (!ProjectTrustStore_Update(&scratch, rt->TrustPath, decisionPath, trusted,
-                                removePath, &error)) {
+  if (!ProjectTrustStore_Update(&scratch, rt->TrustPath, decision.DecisionPath,
+                                decision.Trusted, decision.RemovePath, &error)) {
     AppCommandHandlerResult result =
         RuntimeOwnedFailure(rt, StrBuf_View(&error));
     ArenaRelease(&scratch);
@@ -2528,11 +2546,13 @@ static AppCommandHandlerResult HandleReloadCommand(
 
   Arena scratch = ArenaCreate((usize)16 << 20);
   DefaultProjectTrust defaultTrust = DefaultProjectTrust::Ask;
+  AgentCompactionPolicy compaction = AgentCompactionPolicy_Default();
   AppSettings settings = {};
   AppSettingsLoadResult settingsResult =
       AppSettings_Load(&scratch, rt->SettingsPath, &settings);
   if (settingsResult == AppSettingsLoadResult::Success) {
     defaultTrust = settings.DefaultTrust;
+    compaction = settings.Compaction;
   } else if (settingsResult == AppSettingsLoadResult::Malformed ||
              settingsResult == AppSettingsLoadResult::ReadFailure) {
     StrView message =
@@ -2569,6 +2589,7 @@ static AppCommandHandlerResult HandleReloadCommand(
   PromptContext previous = *rt->Prompt;
   *rt->Prompt = next;
   rt->Harness->Config.SystemPrompt = rt->Prompt->SystemPrompt;
+  rt->Harness->Config.Compaction = compaction;
   rt->DefaultTrust = defaultTrust;
   rt->ProjectTrusted = trust.Trusted;
   rt->HasProjectResources = hasProjectResources;
@@ -2759,32 +2780,10 @@ static bool ResolveStartupProjectTrust(
     return true;
   }
 
-  enum class StartupTrustAction : u8 {
-    TrustCurrent,
-    TrustParent,
-    TrustSession,
-    UntrustCurrent,
-    UntrustSession,
-  };
   StrView parent = ProjectTrust_ParentPath(arena, cwd);
-  StrView options[5] = {};
-  StartupTrustAction actions[5] = {};
-  u32 count = 0;
-  options[count] = SVL("Trust this folder");
-  actions[count++] = StartupTrustAction::TrustCurrent;
-  StrBuf parentOption = StrBuf_Make(arena, parent.Length + 32);
-  if (parent.Length) {
-    StrBuf_AppendCStr(&parentOption, "Trust parent folder: ");
-    StrBuf_Append(&parentOption, parent);
-    options[count] = StrBuf_View(&parentOption);
-    actions[count++] = StartupTrustAction::TrustParent;
-  }
-  options[count] = SVL("Trust for this session only");
-  actions[count++] = StartupTrustAction::TrustSession;
-  options[count] = SVL("Do not trust this folder");
-  actions[count++] = StartupTrustAction::UntrustCurrent;
-  options[count] = SVL("Do not trust for this session only");
-  actions[count++] = StartupTrustAction::UntrustSession;
+  StrView options[TRUST_CHOICE_CAPACITY] = {};
+  TrustChoice actions[TRUST_CHOICE_CAPACITY] = {};
+  u32 count = BuildTrustChoices(arena, parent, true, options, actions);
 
   StrBuf title = StrBuf_Make(arena, cwd.Length + 96);
   StrBuf_AppendCStr(
@@ -2797,21 +2796,13 @@ static bool ResolveStartupProjectTrust(
     return true;
   }
 
-  StartupTrustAction action = actions[selected];
-  *trusted = action == StartupTrustAction::TrustCurrent ||
-             action == StartupTrustAction::TrustParent ||
-             action == StartupTrustAction::TrustSession;
-  if (action == StartupTrustAction::TrustSession ||
-      action == StartupTrustAction::UntrustSession)
-    return true;
+  TrustDecision decision = ResolveTrustChoice(actions[selected], cwd, parent);
+  *trusted = decision.Trusted;
+  if (!decision.Persist) return true;
 
-  StrView decisionPath =
-      action == StartupTrustAction::TrustParent ? parent : cwd;
-  StrView removePath =
-      action == StartupTrustAction::TrustParent ? cwd : StrView{};
   StrBuf error = StrBuf_Make(arena, 128);
-  if (!ProjectTrustStore_Update(
-          arena, trustPath, decisionPath, *trusted, removePath, &error)) {
+  if (!ProjectTrustStore_Update(arena, trustPath, decision.DecisionPath,
+                                decision.Trusted, decision.RemovePath, &error)) {
     fprintf(stderr, "error: %.*s\n", (int)error.Length, error.Data);
     return false;
   }
@@ -3157,11 +3148,6 @@ int main(int argc, char** argv) {
   } else {
     StrView dataRoot = SessionDataRoot(&arena);
     JsonlRepository_Init(&jsonlRepository, dataRoot);
-    if (jsonlRepository.HasUnmigratedV1) {
-      fprintf(stderr,
-              "notice: existing v1 sessions were not migrated; Clank will "
-              "start a new v2 session store\n");
-    }
     sessions = JsonlRepository_AsRepository(&jsonlRepository);
   }
 
@@ -3272,12 +3258,13 @@ int main(int argc, char** argv) {
   }
 
   FauxStep steps[2] = {};
+  FauxToolCall fauxCall = {SVL("shell"), SVL("t1"),
+                           SVL("{\"command\":\"echo hello-from-shell\"}")};
   Faux fauxState = {};
   if (faux) {
     steps[0].Text = SVL("Let me run a quick command.\n");
-    steps[0].ToolName = SVL("shell");
-    steps[0].ToolId = SVL("t1");
-    steps[0].ToolArgsJson = SVL("{\"command\":\"echo hello-from-shell\"}");
+    steps[0].Tools = &fauxCall;
+    steps[0].ToolCount = 1;
     steps[1].Text = SVL("The command printed its greeting. All done.");
     steps[1].Stop = StopReason::Stop;
     fauxState.Steps = steps;
@@ -3293,6 +3280,7 @@ int main(int argc, char** argv) {
       faux ? Faux_Provider(&fauxState) : selected.Spec->CreateProvider(&arena);
   harnessConfig.Stream.Profile = profile;
   harnessConfig.ToolExec = ToolExecution::Parallel;
+  harnessConfig.Compaction = selected.Compaction;
   if (!faux) {
     harnessConfig.AuthUser = &appAuth;
     harnessConfig.ResolveAuth = AppResolveAuth;

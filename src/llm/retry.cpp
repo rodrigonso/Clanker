@@ -55,21 +55,3 @@ bool IsRetryableError(StrView errorMessage) {
   return ContainsAny(errorMessage, RETRYABLE, (u32)(sizeof(RETRYABLE) / sizeof(RETRYABLE[0])));
 }
 
-u32 AssistantRetry_DelayMs(u32 baseDelayMs, u32 maxDelayMs, u32 attemptIndex) {
-  if (maxDelayMs == 0) return 0;
-  u64 delay = baseDelayMs ? baseDelayMs : 1;
-  for (u32 i = 0; i < attemptIndex; i++) {
-    delay *= 2;
-    if (delay >= maxDelayMs) {
-      delay = maxDelayMs;
-      break;
-    }
-  }
-  if (delay > maxDelayMs) delay = maxDelayMs;
-  return (u32)delay;
-}
-
-bool AssistantRetry_ShouldRetry(StrView errorMessage, bool hasUsableContent) {
-  if (hasUsableContent) return false;
-  return IsRetryableError(errorMessage);
-}

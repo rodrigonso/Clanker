@@ -974,10 +974,15 @@ void BuildStatusComponents(Tui* t, u16 statusY, u16 cols) {
   char* right = (char*)Ui_FrameAlloc(&t->Ui, 256, alignof(char));
   u32 leftLength = 0;
   u32 rightLength = 0;
-  FormatStatus(t, left, 256, &leftLength, right, 256, &rightLength, cols);
+  // The row is inset on both sides, so the right-aligned group clears the
+  // transcript scrollbar column. Format against the usable width, not `cols`.
+  constexpr u16 kStatusInset = 1;
+  u16 contentCols = cols > 2 * kStatusInset ? (u16)(cols - 2 * kStatusInset) : 0;
+  FormatStatus(t, left, 256, &leftLength, right, 256, &rightLength, contentCols);
 
   UiLayoutStyle row = Positioned(0, statusY, cols, 1);
-  row.Padding.Left = 1;
+  row.Padding.Left = kStatusInset;
+  row.Padding.Right = kStatusInset;
   Ui_BeginRow(&t->Ui, Ui_Key(SVL("status")), row);
   Style style = TuiSt(t, 244, ATTR_NONE);
   UiTextProps leftProps = {};

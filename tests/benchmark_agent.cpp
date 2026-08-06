@@ -135,9 +135,12 @@ StrView BenchToolId(Arena* arena, const char* prefix, u32 index) {
 void BuildSequentialScript(Arena* arena, u32 cycles, BenchProvider* provider) {
   FauxStep* steps = ArenaPushArray(arena, FauxStep, cycles + 1);
   for (u32 i = 0; i < cycles; i++) {
-    steps[i].ToolName = SVL("bench_tool");
-    steps[i].ToolId = BenchToolId(arena, "cycle-", i);
-    steps[i].ToolArgsJson = SVL("{\"n\":1}");
+    FauxToolCall* call = ArenaPushStruct(arena, FauxToolCall);
+    call->Name = SVL("bench_tool");
+    call->Id = BenchToolId(arena, "cycle-", i);
+    call->ArgsJson = SVL("{\"n\":1}");
+    steps[i].Tools = call;
+    steps[i].ToolCount = 1;
   }
   steps[cycles].Text = SVL("done");
   steps[cycles].Stop = StopReason::Stop;

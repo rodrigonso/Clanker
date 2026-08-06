@@ -75,54 +75,6 @@ StrView SessionsRoot(Arena* arena, JsonlRepository* repository) {
   return Fs_Join(arena, sessions, SVL("v2"));
 }
 
-// v1's storage layout, kept only so JsonlRepository_Init can detect leftover
-// pre-v2 data for the one-time "old sessions were not migrated" notice (see
-// JsonlRepository::HasUnmigratedV1). v1 sessions are intentionally never
-// migrated: nothing else in this file ever reads, lists, opens, or writes
-// through this path -- SessionsRoot above always resolves to v2.
-StrView LegacyV1SessionsRoot(Arena* arena, StrView dataRoot) {
-  StrView sessions = Fs_Join(arena, dataRoot, SVL("sessions"));
-  return Fs_Join(arena, sessions, SVL("v1"));
-}
-
-// True if a project directory (already known to exist) contains at least one
-// "<durableId>.jsonl" session file, mirroring the recognition rule
-// AppendProjectItems uses when actually listing sessions.
-bool ProjectDirHasSessionFile(Arena* arena, StrView projectDir) {
-  bool listed = false;
-  Array<FsEntry> files = Fs_ListDir(arena, projectDir, &listed);
-  if (!listed) return false;
-  for (u32 i = 0; i < files.Count; i++) {
-    if (files.Data[i].IsDir || files.Data[i].Name.Length <= 6) continue;
-    StrView ext = {files.Data[i].Name.Data + files.Data[i].Name.Length - 6, 6};
-    if (!StrView_Eq(ext, SVL(".jsonl"))) continue;
-    StrView idText = {files.Data[i].Name.Data, files.Data[i].Name.Length - 6};
-    DurableId parsed = {};
-    if (DurableId_Parse(idText, &parsed)) return true;
-  }
-  return false;
-}
-
-// True if `sessionsRoot` (a "sessions/v1" or "sessions/v2" directory) exists
-// and has at least one project subdirectory with at least one session file
-// in it. Only used for the one-time migration notice below -- never on the
-// normal create/open/list/fork paths.
-bool HasAnySessionData(Arena* arena, StrView sessionsRoot) {
-  if (!Fs_Exists(sessionsRoot)) return false;
-  bool listed = false;
-  Array<FsEntry> projects = Fs_ListDir(arena, sessionsRoot, &listed);
-  if (!listed) return false;
-  for (u32 i = 0; i < projects.Count; i++) {
-    if (!projects.Data[i].IsDir || !ValidProjectKey(projects.Data[i].Name)) continue;
-    Arena probe = ArenaCreate();
-    StrView projectDir = Fs_Join(&probe, sessionsRoot, projects.Data[i].Name);
-    bool hasFile = ProjectDirHasSessionFile(&probe, projectDir);
-    ArenaRelease(&probe);
-    if (hasFile) return true;
-  }
-  return false;
-}
-
 StrView ProjectDir(Arena* arena, JsonlRepository* repository, StrView projectKey) {
   return Fs_Join(arena, SessionsRoot(arena, repository), projectKey);
 }
@@ -968,16 +920,6 @@ void JsonlRepository_Init(JsonlRepository* repository, StrView dataRoot) {
   repository->Claims = Array_Make<JsonlWriterClaim>(&repository->Mem, 8);
   Mutex_Init(&repository->Lock);
   repository->Initialized = true;
-
-  // One-time check: v1 sessions are never migrated, read, listed, or opened
-  // by this (v2) repository, so the only thing left to do with v1 data is
-  // let a caller (e.g. app startup) inform the user it is still there,
-  // untouched, under the old directory.
-  Arena scratch = ArenaCreate();
-  bool hasV1 = HasAnySessionData(&scratch, LegacyV1SessionsRoot(&scratch, repository->Root));
-  bool hasV2 = HasAnySessionData(&scratch, SessionsRoot(&scratch, repository));
-  repository->HasUnmigratedV1 = hasV1 && !hasV2;
-  ArenaRelease(&scratch);
 }
 
 void JsonlRepository_Destroy(JsonlRepository* repository) {

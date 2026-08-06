@@ -197,6 +197,13 @@ SessionResult SessionReducer_Ancestry(const SessionReduction* reduction, Arena* 
   return SessionResult_Ok();
 }
 
+// How one branch entry contributes to the materialized context.
+enum class ContextSlot : u8 {
+  Own,        // emit the entry's own message, when it has one
+  Suppressed, // folded into some compaction's summary
+  Summary,    // anchor position for a compaction's summary
+};
+
 SessionResult SessionReducer_Context(Arena* arena, const SessionReduction* reduction,
                                      DurableId headId, Array<Message>* outMessages) {
   if (!arena || !reduction || !outMessages) return Invalid("context arguments are invalid");
@@ -204,17 +211,60 @@ SessionResult SessionReducer_Context(Arena* arena, const SessionReduction* reduc
   SessionResult ancestry = SessionReducer_Ancestry(reduction, arena, headId, &branch);
   if (!SessionResult_IsOk(ancestry)) return ancestry;
 
-  i32 compactionIndex = -1;
+  u32 compactionCount = 0;
   for (u32 i = 0; i < branch.Count; i++)
-    if (branch.Data[i]->Kind == SessionRecordKind::Compaction) compactionIndex = (i32)i;
+    if (branch.Data[i]->Kind == SessionRecordKind::Compaction) compactionCount++;
 
   Array<Message> messages = Array_Make<Message>(arena, branch.Count ? branch.Count : 1);
-  u32 start = 0;
-  if (compactionIndex >= 0) {
-    Array_Push(&messages, branch.Data[compactionIndex]->CompactionEntry.Summary);
-    start = (u32)compactionIndex + 1;
+
+  if (compactionCount == 0) {
+    for (u32 i = 0; i < branch.Count; i++) {
+      if (branch.Data[i]->Kind == SessionRecordKind::Message)
+        Array_Push(&messages, branch.Data[i]->MessageEntry.Value);
+    }
+    *outMessages = messages;
+    return SessionResult_Ok();
   }
-  for (u32 i = start; i < branch.Count; i++) {
+
+  // Each compaction folds the inclusive branch span [Base..Through] into a
+  // single summary anchored at Base. Applying them in branch order means a
+  // later compaction that spans an earlier anchor correctly supersedes it.
+  DurableIdIndex position = {};
+  DurableIdIndex_Init(&position, arena, branch.Count);
+  for (u32 i = 0; i < branch.Count; i++)
+    DurableIdIndex_Put(&position, branch.Data[i]->EntryId, i);
+
+  ContextSlot* slot = ArenaPushArray(arena, ContextSlot, branch.Count);
+  const Message** anchor = ArenaPushArray(arena, const Message*, branch.Count);
+  for (u32 i = 0; i < branch.Count; i++) {
+    slot[i] = ContextSlot::Own;
+    anchor[i] = nullptr;
+  }
+
+  for (u32 i = 0; i < branch.Count; i++) {
+    const SessionRecord* record = branch.Data[i];
+    if (record->Kind != SessionRecordKind::Compaction) continue;
+    u32 base = 0;
+    u32 through = 0;
+    if (!DurableIdIndex_Find(&position, record->CompactionEntry.BaseEntryId, &base) ||
+        !DurableIdIndex_Find(&position, record->CompactionEntry.ThroughEntryId, &through))
+      return Corrupt("compaction span references an entry that is not on this branch");
+    if (base > through) return Corrupt("compaction span ends before it begins");
+    if (through >= i) return Corrupt("compaction span reaches its own entry or later");
+    for (u32 k = base; k <= through; k++) {
+      slot[k] = ContextSlot::Suppressed;
+      anchor[k] = nullptr;
+    }
+    slot[base] = ContextSlot::Summary;
+    anchor[base] = &record->CompactionEntry.Summary;
+  }
+
+  for (u32 i = 0; i < branch.Count; i++) {
+    if (slot[i] == ContextSlot::Summary) {
+      Array_Push(&messages, *anchor[i]);
+      continue;
+    }
+    if (slot[i] == ContextSlot::Suppressed) continue;
     if (branch.Data[i]->Kind == SessionRecordKind::Message)
       Array_Push(&messages, branch.Data[i]->MessageEntry.Value);
   }

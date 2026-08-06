@@ -858,12 +858,6 @@ static void RemovePath(Arena* arena, StrView path) {
   remove(StrBuf_CStr(&native));
 }
 
-static void RemoveDir(Arena* arena, StrView path) {
-  StrBuf native = StrBuf_Make(arena, path.Length + 1);
-  StrBuf_Append(&native, path);
-  SESSION_RMDIR(StrBuf_CStr(&native));
-}
-
 static void RemoveJsonlArtifacts(Arena* arena, StrView root, StrView project, DurableId sessionId) {
   RemovePath(arena, JsonlArtifactPath(arena, root, project, sessionId, ".jsonl"));
   RemovePath(arena, JsonlArtifactPath(arena, root, project, sessionId, ".lock"));
@@ -1072,85 +1066,164 @@ static void TestJsonlRepository(Arena* arena) {
   SESSION_RMDIR(StrBuf_CStr(&rootNative));
 }
 
-// v2 is an intentionally incompatible schema stored under sessions/v2; v1
-// data (sessions/v1) is never migrated, read, listed, or opened. Repository
-// discovery must resolve exclusively to v2, and JsonlRepository surfaces a
-// one-time HasUnmigratedV1 signal a caller can use to tell the user their old
-// sessions were left behind rather than silently vanishing.
-static void TestJsonlV1NotMigrated(Arena* arena) {
-  StrView root = SVL("clank_jsonl_v1_test");
-  StrView project = SVL("clank-jsonl-v1-project");
-  DurableId legacyId = TestId(200);
-  DurableId v2Id = TestId(210);
+static void TestCompactionReplay(Arena* arena) {
+  DurableId sessionId = TestId(1);
 
-  StrView sessionsDir = Fs_Join(arena, root, SVL("sessions"));
-  StrView v1Dir = Fs_Join(arena, sessionsDir, SVL("v1"));
-  StrView v2Dir = Fs_Join(arena, sessionsDir, SVL("v2"));
-  StrView v1ProjectDir = Fs_Join(arena, v1Dir, project);
+  // root -> user -> assistant -> toolResult -> user -> assistant, plus a
+  // sibling of the first user message so an off-branch reference can be tested.
+  SessionRecord root = BaseRecord(sessionId, 1, 10, SessionRecordKind::SessionStarted);
+  root.SessionStarted.WorkingDirectory = SVL("C:\\work\\clank");
+  root.SessionStarted.ProjectKey = SVL("clank-compaction");
+  root.SessionStarted.Label = SVL("compaction");
 
-  StrBuf legacyFileName = StrBuf_Make(arena, DURABLE_ID_CHAR_COUNT + 8);
-  StrBuf_Append(&legacyFileName, DurableId_View(&legacyId));
-  StrBuf_AppendCStr(&legacyFileName, ".jsonl");
-  StrView legacyFilePath = Fs_Join(arena, v1ProjectDir, StrBuf_View(&legacyFileName));
+  SessionRecord userOne = BaseRecord(sessionId, 2, 12, SessionRecordKind::Message);
+  userOne.MessageEntry.ParentId = root.EntryId;
+  userOne.MessageEntry.Value = UserMessage(arena, "one");
 
-  // Simulate a v1 install left behind by an older Clank build: a project
-  // directory containing one plausibly-named session file. Its content never
-  // has to be valid v2 JSON, since v2 must never read it at all.
-  CHECK(Fs_MkdirP(arena, v1ProjectDir));
+  SessionRecord assistantOne = BaseRecord(sessionId, 3, 14, SessionRecordKind::Message);
+  assistantOne.MessageEntry.ParentId = userOne.EntryId;
+  assistantOne.MessageEntry.Value = AssistantToolMessage(arena);
+
+  SessionRecord toolResult = BaseRecord(sessionId, 4, 16, SessionRecordKind::Message);
+  toolResult.MessageEntry.ParentId = assistantOne.EntryId;
+  toolResult.MessageEntry.Value =
+      Message_ToolResult(arena, SVL("call-1"), SVL("read"), SVL("contents"), false);
+
+  SessionRecord userTwo = BaseRecord(sessionId, 5, 18, SessionRecordKind::Message);
+  userTwo.MessageEntry.ParentId = toolResult.EntryId;
+  userTwo.MessageEntry.Value = UserMessage(arena, "two");
+
+  SessionRecord assistantTwo = BaseRecord(sessionId, 6, 20, SessionRecordKind::Message);
+  assistantTwo.MessageEntry.ParentId = userTwo.EntryId;
+  assistantTwo.MessageEntry.Value = UserMessage(arena, "reply");
+
+  SessionRecord sibling = BaseRecord(sessionId, 7, 22, SessionRecordKind::Message);
+  sibling.MessageEntry.ParentId = userOne.EntryId;
+  sibling.MessageEntry.Value = UserMessage(arena, "sibling branch");
+
+  auto build = [&](const SessionRecord* extra, u32 extraCount) {
+    Array<SessionRecord> records = Array_Make<SessionRecord>(arena, 8 + extraCount);
+    Array_Push(&records, root);
+    Array_Push(&records, userOne);
+    Array_Push(&records, assistantOne);
+    Array_Push(&records, toolResult);
+    Array_Push(&records, userTwo);
+    Array_Push(&records, assistantTwo);
+    Array_Push(&records, sibling);
+    for (u32 i = 0; i < extraCount; i++) Array_Push(&records, extra[i]);
+    return records;
+  };
+
+  // A compaction whose span stops before the trailing user turn keeps that
+  // turn and everything after it verbatim.
+  SessionRecord retained = BaseRecord(sessionId, 8, 24, SessionRecordKind::Compaction);
+  retained.CompactionEntry.ParentId = assistantTwo.EntryId;
+  retained.CompactionEntry.BaseEntryId = root.EntryId;
+  retained.CompactionEntry.ThroughEntryId = toolResult.EntryId;
+  retained.CompactionEntry.SourceHeadId = assistantTwo.EntryId;
+  retained.CompactionEntry.Summary = UserMessage(arena, "summary one");
   {
-    StrBuf native = StrBuf_Make(arena, legacyFilePath.Length + 1);
-    StrBuf_Append(&native, legacyFilePath);
-    FILE* file = fopen(StrBuf_CStr(&native), "wb");
-    CHECK(file != nullptr);
-    if (file) {
-      fwrite("not-a-v2-record\n", 1, 16, file);
-      fclose(file);
+    Array<SessionRecord> records = build(&retained, 1);
+    SessionReduction reduction = {};
+    CHECK(SessionResult_IsOk(
+        SessionReducer_Reduce(arena, records.Data, records.Count, &reduction)));
+    Array<Message> context = {};
+    CHECK(SessionResult_IsOk(
+        SessionReducer_Context(arena, &reduction, retained.EntryId, &context)));
+    CHECK(context.Count == 3);
+    if (context.Count == 3) {
+      CHECK_ALL(StrView_EqCStr(context.Data[0].Content.Data[0].Text, "summary one"),
+                StrView_EqCStr(context.Data[1].Content.Data[0].Text, "two"),
+                StrView_EqCStr(context.Data[2].Content.Data[0].Text, "reply"));
     }
   }
 
-  JsonlRepository jsonl = {};
-  JsonlRepository_Init(&jsonl, root);
-  CHECK(jsonl.HasUnmigratedV1);
-  SessionRepository repository = JsonlRepository_AsRepository(&jsonl);
+  // A legacy whole-branch span (root through the head) still collapses to the
+  // summary alone, so pre-retention sessions replay unchanged.
+  SessionRecord legacy = BaseRecord(sessionId, 8, 26, SessionRecordKind::Compaction);
+  legacy.CompactionEntry.ParentId = assistantTwo.EntryId;
+  legacy.CompactionEntry.BaseEntryId = root.EntryId;
+  legacy.CompactionEntry.ThroughEntryId = assistantTwo.EntryId;
+  legacy.CompactionEntry.SourceHeadId = assistantTwo.EntryId;
+  legacy.CompactionEntry.Summary = UserMessage(arena, "legacy summary");
+  {
+    Array<SessionRecord> records = build(&legacy, 1);
+    SessionReduction reduction = {};
+    CHECK(SessionResult_IsOk(
+        SessionReducer_Reduce(arena, records.Data, records.Count, &reduction)));
+    Array<Message> context = {};
+    CHECK(SessionResult_IsOk(
+        SessionReducer_Context(arena, &reduction, legacy.EntryId, &context)));
+    CHECK(context.Count == 1);
+    if (context.Count == 1)
+      CHECK(StrView_EqCStr(context.Data[0].Content.Data[0].Text, "legacy summary"));
+  }
 
-  // The v1 session is never listed or resolvable through the v2 repository.
-  SessionListOptions allProjects = {};
-  allProjects.Scope = SessionListScope::AllProjects;
-  Array<SessionInfo> items = {};
-  CHECK(SessionResult_IsOk(repository.List(repository.Ctx, arena, &allProjects, &items)));
-  CHECK(items.Count == 0);
-  SessionInfo resolved = {};
-  CHECK(repository.Resolve(repository.Ctx, arena, legacyId, &resolved).Status ==
-        SessionStatus::NotFound);
-  SessionOpenOptions openLegacy = {};
-  openLegacy.SessionId = legacyId;
-  openLegacy.ProjectKey = project;
-  SessionLog legacyLog = {};
-  SessionInfo legacyInfo = {};
-  CHECK(repository.Open(repository.Ctx, arena, &openLegacy, &legacyLog, &legacyInfo).Status ==
-        SessionStatus::NotFound);
+  // A later compaction whose span covers an earlier summary anchor supersedes
+  // it: only the newest summary and the messages after it survive.
+  SessionRecord userThree = BaseRecord(sessionId, 9, 28, SessionRecordKind::Message);
+  userThree.MessageEntry.ParentId = retained.EntryId;
+  userThree.MessageEntry.Value = UserMessage(arena, "three");
+  SessionRecord assistantThree = BaseRecord(sessionId, 10, 30, SessionRecordKind::Message);
+  assistantThree.MessageEntry.ParentId = userThree.EntryId;
+  assistantThree.MessageEntry.Value = UserMessage(arena, "third reply");
+  SessionRecord second = BaseRecord(sessionId, 11, 32, SessionRecordKind::Compaction);
+  second.CompactionEntry.ParentId = assistantThree.EntryId;
+  second.CompactionEntry.BaseEntryId = root.EntryId;
+  second.CompactionEntry.ThroughEntryId = userThree.EntryId;
+  second.CompactionEntry.SourceHeadId = assistantThree.EntryId;
+  second.CompactionEntry.Summary = UserMessage(arena, "summary two");
+  {
+    SessionRecord extra[4] = {retained, userThree, assistantThree, second};
+    Array<SessionRecord> records = build(extra, 4);
+    SessionReduction reduction = {};
+    CHECK(SessionResult_IsOk(
+        SessionReducer_Reduce(arena, records.Data, records.Count, &reduction)));
+    Array<Message> context = {};
+    CHECK(SessionResult_IsOk(
+        SessionReducer_Context(arena, &reduction, second.EntryId, &context)));
+    CHECK(context.Count == 2);
+    if (context.Count == 2) {
+      CHECK_ALL(StrView_EqCStr(context.Data[0].Content.Data[0].Text, "summary two"),
+                StrView_EqCStr(context.Data[1].Content.Data[0].Text, "third reply"));
+    }
+  }
 
-  // Once a v2 session exists under this data root, the "not migrated" signal
-  // clears -- v2 now has its own, independent data here.
-  SessionResult createdV2 = RepositoryCreate(&repository, arena, v2Id, project, &legacyLog, &legacyInfo);
-  CHECK(SessionResult_IsOk(createdV2));
-  SessionLog_Close(&legacyLog);
-  repository.Close(repository.Ctx);
+  // A span endpoint that exists in the session but is not an ancestor of the
+  // head cannot be positioned on this branch, so replay reports corruption
+  // rather than silently emitting the wrong context.
+  SessionRecord offBranch = BaseRecord(sessionId, 8, 34, SessionRecordKind::Compaction);
+  offBranch.CompactionEntry.ParentId = assistantTwo.EntryId;
+  offBranch.CompactionEntry.BaseEntryId = root.EntryId;
+  offBranch.CompactionEntry.ThroughEntryId = sibling.EntryId;
+  offBranch.CompactionEntry.SourceHeadId = assistantTwo.EntryId;
+  offBranch.CompactionEntry.Summary = UserMessage(arena, "off branch");
+  {
+    Array<SessionRecord> records = build(&offBranch, 1);
+    SessionReduction reduction = {};
+    CHECK(SessionResult_IsOk(
+        SessionReducer_Reduce(arena, records.Data, records.Count, &reduction)));
+    Array<Message> context = {};
+    CHECK(SessionReducer_Context(arena, &reduction, offBranch.EntryId, &context).Status ==
+          SessionStatus::Corrupt);
+  }
 
-  JsonlRepository reopened = {};
-  JsonlRepository_Init(&reopened, root);
-  CHECK(!reopened.HasUnmigratedV1);
-  SessionRepository secondRepository = JsonlRepository_AsRepository(&reopened);
-  secondRepository.Close(secondRepository.Ctx);
-
-  RemovePath(arena, legacyFilePath);
-  RemoveDir(arena, v1ProjectDir);
-  RemoveDir(arena, v1Dir);
-  RemoveJsonlArtifacts(arena, root, project, v2Id);
-  RemoveJsonlDirectories(arena, root, project);
-  RemoveDir(arena, v2Dir);
-  RemoveDir(arena, sessionsDir);
-  RemoveDir(arena, root);
+  // An inverted span is rejected too.
+  SessionRecord inverted = BaseRecord(sessionId, 8, 36, SessionRecordKind::Compaction);
+  inverted.CompactionEntry.ParentId = assistantTwo.EntryId;
+  inverted.CompactionEntry.BaseEntryId = toolResult.EntryId;
+  inverted.CompactionEntry.ThroughEntryId = root.EntryId;
+  inverted.CompactionEntry.SourceHeadId = assistantTwo.EntryId;
+  inverted.CompactionEntry.Summary = UserMessage(arena, "inverted");
+  {
+    Array<SessionRecord> records = build(&inverted, 1);
+    SessionReduction reduction = {};
+    CHECK(SessionResult_IsOk(
+        SessionReducer_Reduce(arena, records.Data, records.Count, &reduction)));
+    Array<Message> context = {};
+    CHECK(SessionReducer_Context(arena, &reduction, inverted.EntryId, &context).Status ==
+          SessionStatus::Corrupt);
+  }
 }
 
 void TestSession() {
@@ -1160,10 +1233,10 @@ void TestSession() {
   TestRecordClone();
   TestRecordValidation(&arena);
   TestReducer(&arena);
+  TestCompactionReplay(&arena);
   TestReplay(&arena);
   TestMetadata(&arena);
   TestMemoryRepository(&arena);
   TestJsonlRepository(&arena);
-  TestJsonlV1NotMigrated(&arena);
   ArenaRelease(&arena);
 }

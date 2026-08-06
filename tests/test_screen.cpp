@@ -21,7 +21,7 @@ void TestScreen() {
   Term_AppendOSC52(&osc52, StrView{nullptr, 0});
   CHECK(StrView_Eq(StrBuf_View(&osc52), SVL("\x1b]52;c;\x07")));
 
-  const char binary[] = {'\0', (char)0xff, '\x10', 'f'};
+  const char binary[] = {'\0', (char)(unsigned char)0xff, '\x10', 'f'};
   StrBuf_Clear(&osc52);
   StrBuf_AppendCStr(&osc52, "before:");
   Term_AppendOSC52(&osc52, StrView{binary, sizeof(binary)});

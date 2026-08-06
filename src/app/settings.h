@@ -1,4 +1,5 @@
 #pragma once
+#include "agent/compaction.h"
 #include "base/arena.h"
 #include "base/basics.h"
 #include "base/str.h"
@@ -10,6 +11,7 @@ struct AppSettings {
   StrView Model;
   DefaultProjectTrust DefaultTrust;
   ModelRequestProfile Profile;
+  AgentCompactionPolicy Compaction;
 };
 
 enum class AppSettingsLoadResult : u8 {

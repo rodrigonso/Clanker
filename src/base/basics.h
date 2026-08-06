@@ -35,5 +35,16 @@ inline T ClankMin(T a, T b) {
   return a < b ? a : b;
 }
 
+// Unsigned addition that clamps at the accumulator's maximum instead of
+// wrapping. Used for token and byte totals, where wrapping would silently
+// turn a huge total into a tiny one. The addend is converted to the
+// accumulator type first, so it must not be the wider of the two.
+template <typename T, typename U>
+inline T AddSaturated(T a, U b) {
+  T limit = (T)~(T)0;
+  T addend = (T)b;
+  return limit - a < addend ? limit : (T)(a + addend);
+}
+
 // Low-resolution wall clock in milliseconds. Used for message timestamps.
 inline u64 NowMillis() { return (u64)time(nullptr) * 1000ull; }

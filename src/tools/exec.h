@@ -15,7 +15,6 @@ typedef bool (*ExecChunkFn)(void* user, StrView chunk);
 // Run `command` through the platform shell (`cmd /c` on Windows, `/bin/sh -c`
 // on POSIX). Aborts the whole process tree if `abort` becomes non-zero or
 // `timeoutMs` elapses.
-ExecResult Exec_Run(Arena* arena, StrView command, u32 timeoutMs, volatile i32* abort);
 ExecResult Exec_RunStreaming(Arena* arena, StrView command, u32 timeoutMs,
                              volatile i32* abort, ExecChunkFn onData,
                              void* user, StrBuf* output = nullptr);

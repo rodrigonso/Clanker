@@ -548,8 +548,3 @@ ExecResult Exec_RunStreaming(Arena* arena, StrView command, u32 timeoutMs,
 
 #endif
 
-ExecResult Exec_Run(Arena* arena, StrView command, u32 timeoutMs,
-                    volatile i32* abort) {
-  return Exec_RunStreaming(arena, command, timeoutMs, abort, nullptr, nullptr,
-                           nullptr);
-}

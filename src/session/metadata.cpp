@@ -59,10 +59,6 @@ u32 Utf8ScalarLength(const char* data, u32 remaining) {
   return 0;
 }
 
-u64 AddSaturated(u64 a, u64 b) {
-  return ~0ull - a < b ? ~0ull : a + b;
-}
-
 u64 Elapsed(u64 start, u64 end) { return end > start ? end - start : 0; }
 
 u64 NormalizedTokens(const Usage* usage) {

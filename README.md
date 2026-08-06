@@ -168,6 +168,40 @@ explicit CLI trust override covers the run.
 effort or selectable context-window preferences. Unsupported saved values fall
 back to the selected model's defaults. Current fixed provider context windows are displayed without an extra chooser.
 
+## Compaction
+
+Clank compacts automatically. Before each provider request the agent loop
+compares the branch's context against the active model's window; once the
+context has eaten into the reserved headroom it folds the older part of the
+branch into a single summary and continues. The most recent messages are kept
+verbatim, and the retained tail always begins at a user turn, so an assistant
+tool call is never separated from its tool results.
+
+Token pressure is read from the provider's reported usage when there is any
+(prompt + cache + output of the newest assistant turn, plus an estimate for
+anything appended since), and falls back to a byte-based estimate otherwise.
+
+Compaction runs at most once per turn; if it succeeds and the context is still
+over budget, the request proceeds and the provider decides. If the compaction
+turn itself fails, the run stops with an `automatic compaction failed` error
+rather than letting an oversized request through.
+
+Tune or disable it in `~/.clank/settings.json`:
+
+```json
+{
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 16384,
+    "keepRecentTokens": 20000
+  }
+}
+```
+
+`/compact` remains available and always folds the whole branch. Automatic
+thresholds and a custom summarization prompt are separate: the prompt is fixed
+for now.
+
 ## TUI
 
 Running interactively on a real terminal launches a full-screen TUI: an
@@ -225,7 +259,8 @@ Interactive commands:
   or switch directly by exact full ID.
 - `/tree` and `/checkout <entry-id>` — inspect or navigate conversation branches.
 - `/fork [entry-id]` — fork and switch to a new session.
-- `/compact` — durably summarize the active branch.
+- `/compact` — durably summarize the active branch (compaction also runs
+  automatically; see Compaction above).
 - `/trust` — save project trust for a future Clank process.
 - `/reload` — transactionally reload settings and prompt context while idle.
 - `/clear` — create a fresh session while preserving the provider, model,
@@ -251,8 +286,7 @@ adds a new durable model selection. Direct IDs are exact opaque durable IDs.
 Cross-project resume enters the session's stored working directory, resolves
 project trust again, rebuilds prompt context, and rollback-safely switches the
 session, process cwd, and TUI cwd/branch. `--continue` remains scoped to the current project. Sessions
-live under `~/.clank/sessions/v2/<project-key>/`; v1 sessions are intentionally
-not migrated, listed, or opened. Canonical JSONL files also store names without
+live under `~/.clank/sessions/v2/<project-key>/`. Canonical JSONL files also store names without
 a sidecar. Unreadable session files are reported and skipped during
 browsing/continuation. Interactive
 mode may start without credentials and blocks prompts with `/login` guidance;
@@ -266,7 +300,6 @@ Two credential types, stored in `~/.clank/auth.json` (atomic writes,
 restricted perms). The resolved token and OAuth expiry are cached in the
 running app; expiry, login, provider changes, and `/reload` invalidate or
 replace the cache so OAuth refresh still works mid-session.
-Existing `~/.mini-agent/auth.json` credentials are migrated automatically:
 
 - **API key** — set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`, or store a key in
   `auth.json`.
@@ -338,8 +371,9 @@ Deliberately out of scope for now (the structure leaves seams for them):
 - Device-code OAuth (e.g. GitHub Copilot) — the loopback callback flow is done.
 - TUI niceties: visual-row (vs logical-line) Up/Down, syntax highlighting,
   images, undo. The full-screen differential TUI itself is done.
-- Automatic compaction thresholds, skills, general extensions, and additional
-  providers.
+- Skills, general extensions, and additional providers.
+- Custom `/compact` instructions, and pi's two-phase split-turn summary for a
+  single turn that exceeds the retained-tail budget.
 - Fuzzy/regex session search, generated names, pricing, deletion UX, and a
   derived session metadata sidecar.
 

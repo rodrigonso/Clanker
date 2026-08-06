@@ -13,15 +13,11 @@ struct FauxToolCall {
 
 struct FauxStep {
   StrView Text;
-  // Legacy single tool call (used only when Tools/ToolCount are unset).
-  StrView ToolName;  // non-empty => emit a tool call
-  StrView ToolId;
-  StrView ToolArgsJson;
-  // Multiple tool calls in one assistant message (takes precedence when set).
   const FauxToolCall* Tools;
   u32 ToolCount;
   StrView Error;    // non-empty => emit an error result (Stop=Error, ErrorMessage=Error)
   StopReason Stop;  // used when no tool call
+  Usage Use;        // reported verbatim, so token thresholds stay deterministic
 };
 
 struct Faux {
@@ -49,6 +45,7 @@ inline bool Faux_Stream(void* ctx, Arena* arena, const Model* model, const LlmCo
   Message m = Message_AssistantEmpty(arena);
   m.Model = SVL("faux");
   m.Provider = SVL("faux");
+  m.Use = step.Use;
 
   // Simulate a provider error (e.g. to exercise auto-retry). Mirrors a real
   // provider: emit an Error stream event, set Stop=Error + ErrorMessage, and
@@ -81,18 +78,8 @@ inline bool Faux_Stream(void* ctx, Arena* arena, const Model* model, const LlmCo
     Array_Push(&m.Content, Content_Text(StrView_Dup(arena, step.Text)));
   }
 
-  if (step.ToolName.Length || step.ToolCount) {
-    const FauxToolCall* tools = step.Tools;
-    u32 toolCount = step.ToolCount;
-    FauxToolCall legacy = {};
-    if (toolCount == 0) {
-      legacy.Name = step.ToolName;
-      legacy.Id = step.ToolId;
-      legacy.ArgsJson = step.ToolArgsJson;
-      tools = &legacy;
-      toolCount = 1;
-    }
-    for (u32 i = 0; i < toolCount; i++) {
+  if (step.ToolCount) {
+    for (u32 i = 0; i < step.ToolCount; i++) {
       u32 idx = m.Content.Count;
       StreamEvent cs = {};
       cs.Kind = StreamEventKind::ToolCallStart;
@@ -102,9 +89,9 @@ inline bool Faux_Stream(void* ctx, Arena* arena, const Model* model, const LlmCo
       ce.Kind = StreamEventKind::ToolCallEnd;
       ce.ContentIndex = idx;
       StreamSink_Emit(sink, ce);
-      Array_Push(&m.Content, Content_ToolCall(StrView_Dup(arena, tools[i].Id),
-                                              StrView_Dup(arena, tools[i].Name),
-                                              StrView_Dup(arena, tools[i].ArgsJson)));
+      Array_Push(&m.Content, Content_ToolCall(StrView_Dup(arena, step.Tools[i].Id),
+                                              StrView_Dup(arena, step.Tools[i].Name),
+                                              StrView_Dup(arena, step.Tools[i].ArgsJson)));
     }
     m.Stop = StopReason::ToolUse;
   } else {

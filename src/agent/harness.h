@@ -1,5 +1,6 @@
 #pragma once
 
+#include "agent/compaction.h"
 #include "agent/harness_event.h"
 #include "agent/hooks.h"
 #include "agent/primitives.h"
@@ -17,6 +18,9 @@ struct AgentHarnessConfig {
   ToolExecution ToolExec;
   u32 MaxParallelTools;
   AgentRetryPolicy Retry;
+  // Automatic compaction. Zero-initialized means disabled, so a harness only
+  // compacts on its own when a caller opts in; the CLI enables it by default.
+  AgentCompactionPolicy Compaction;
   AgentToolHooks ToolHooks;
   AgentHarnessHooks Hooks;
   void* AuthUser;

@@ -14,7 +14,22 @@
 #include <unistd.h>
 #endif
 
-static bool Fs_IsSep(char c) { return c == '/' || c == '\\'; }
+bool Fs_IsSep(char c) { return c == '/' || c == '\\'; }
+
+char Fs_PathFold(char c) {
+#if defined(_WIN32)
+  if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+#endif
+  return Fs_IsSep(c) ? '/' : c;
+}
+
+bool Fs_PathEquals(StrView a, StrView b) {
+  if (a.Length != b.Length) return false;
+  for (u32 i = 0; i < a.Length; i++) {
+    if (Fs_PathFold(a.Data[i]) != Fs_PathFold(b.Data[i])) return false;
+  }
+  return true;
+}
 
 static void Fs_CopyPathToStack(StrView path, char* buf, usize cap) {
   FFI(path.Length >= cap);

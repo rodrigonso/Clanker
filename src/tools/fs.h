@@ -17,6 +17,13 @@ StrView Fs_RealPath(Arena* arena, StrView path);
 
 // Path utilities are pure string operations. Fs_Ext returns a raw slice of the
 // original path and does not lowercase.
+//
+// Fs_PathFold normalizes one character for path comparison: separators become
+// '/', and on Windows upper case folds to lower. Fs_PathEquals compares two
+// paths under that folding.
+bool Fs_IsSep(char c);
+char Fs_PathFold(char c);
+bool Fs_PathEquals(StrView a, StrView b);
 StrView Fs_Parent(StrView path);
 StrView Fs_Base(StrView path);
 StrView Fs_Ext(StrView path);

@@ -9,70 +9,53 @@
 
 namespace {
 
-bool IsPathSeparator(char c) { return c == '/' || c == '\\'; }
-
-char PathFold(char c) {
-#if defined(_WIN32)
-  if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-#endif
-  return IsPathSeparator(c) ? '/' : c;
-}
-
 u32 RootLength(StrView path) {
   if (!path.Length) return 0;
 #if defined(_WIN32)
   if (path.Length >= 3 && path.Data[1] == ':' &&
-      IsPathSeparator(path.Data[2]))
+      Fs_IsSep(path.Data[2]))
     return 3;
-  if (path.Length >= 2 && IsPathSeparator(path.Data[0]) &&
-      IsPathSeparator(path.Data[1])) {
+  if (path.Length >= 2 && Fs_IsSep(path.Data[0]) &&
+      Fs_IsSep(path.Data[1])) {
     u32 separators = 0;
     for (u32 i = 2; i < path.Length; i++) {
-      if (!IsPathSeparator(path.Data[i])) continue;
+      if (!Fs_IsSep(path.Data[i])) continue;
       separators++;
-      while (i + 1 < path.Length && IsPathSeparator(path.Data[i + 1])) i++;
+      while (i + 1 < path.Length && Fs_IsSep(path.Data[i + 1])) i++;
       if (separators == 2) return i + 1;
     }
     return path.Length;
   }
 #endif
-  return IsPathSeparator(path.Data[0]) ? 1u : 0u;
+  return Fs_IsSep(path.Data[0]) ? 1u : 0u;
 }
 
 bool PathIsAbsolute(StrView path) {
 #if defined(_WIN32)
   return (path.Length >= 3 && path.Data[1] == ':' &&
-          IsPathSeparator(path.Data[2])) ||
-         (path.Length >= 2 && IsPathSeparator(path.Data[0]) &&
-          IsPathSeparator(path.Data[1]));
+          Fs_IsSep(path.Data[2])) ||
+         (path.Length >= 2 && Fs_IsSep(path.Data[0]) &&
+          Fs_IsSep(path.Data[1]));
 #else
-  return path.Length && IsPathSeparator(path.Data[0]);
+  return path.Length && Fs_IsSep(path.Data[0]);
 #endif
-}
-
-bool PathEquals(StrView a, StrView b) {
-  if (a.Length != b.Length) return false;
-  for (u32 i = 0; i < a.Length; i++) {
-    if (PathFold(a.Data[i]) != PathFold(b.Data[i])) return false;
-  }
-  return true;
 }
 
 bool PathIsAncestor(StrView ancestor, StrView path) {
   if (ancestor.Length > path.Length) return false;
   for (u32 i = 0; i < ancestor.Length; i++) {
-    if (PathFold(ancestor.Data[i]) != PathFold(path.Data[i])) return false;
+    if (Fs_PathFold(ancestor.Data[i]) != Fs_PathFold(path.Data[i])) return false;
   }
   if (ancestor.Length == path.Length) return true;
   if (ancestor.Length == RootLength(ancestor)) return true;
-  return IsPathSeparator(path.Data[ancestor.Length]);
+  return Fs_IsSep(path.Data[ancestor.Length]);
 }
 
 i32 ComparePath(StrView a, StrView b) {
   u32 common = a.Length < b.Length ? a.Length : b.Length;
   for (u32 i = 0; i < common; i++) {
-    char ac = PathFold(a.Data[i]);
-    char bc = PathFold(b.Data[i]);
+    char ac = Fs_PathFold(a.Data[i]);
+    char bc = Fs_PathFold(b.Data[i]);
     if (ac < bc) return -1;
     if (ac > bc) return 1;
   }
@@ -84,7 +67,7 @@ i32 ComparePath(StrView a, StrView b) {
 i32 FindExact(const ProjectTrustStore* store, StrView path) {
   if (!store) return -1;
   for (u32 i = 0; i < store->Entries.Count; i++) {
-    if (PathEquals(store->Entries.Data[i].Path, path)) return (i32)i;
+    if (Fs_PathEquals(store->Entries.Data[i].Path, path)) return (i32)i;
   }
   return -1;
 }
@@ -153,7 +136,7 @@ StrView ProjectTrust_CanonicalPath(Arena* arena, StrView path) {
   StrView real = Fs_RealPath(arena, path);
   StrBuf normalized = StrBuf_Make(arena, real.Length + 1);
   for (u32 i = 0; i < real.Length; i++)
-    StrBuf_AppendChar(&normalized, IsPathSeparator(real.Data[i]) ? '/' : real.Data[i]);
+    StrBuf_AppendChar(&normalized, Fs_IsSep(real.Data[i]) ? '/' : real.Data[i]);
   u32 root = RootLength(StrBuf_View(&normalized));
   while (normalized.Length > root &&
          normalized.Data[normalized.Length - 1] == '/')

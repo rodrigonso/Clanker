@@ -286,7 +286,9 @@ void WriteMessage(StrBuf* out, const Message* message) {
   ObjectEnd(&w);
 }
 
-bool DecodeContent(Arena* arena, const JsonValue* object, Content* out) {
+// Decoded strings are views into the JSON document, which the caller's arena
+// already owns, so nothing here allocates.
+bool DecodeContent(const JsonValue* object, Content* out) {
   if (!Json_IsObject(object)) return false;
   Content result = {};
   if (!ParseContentKind(Json_GetStr(object, "kind"), &result.Kind)) return false;
@@ -359,7 +361,7 @@ bool DecodeMessage(Arena* arena, const JsonValue* object, Message* out) {
   message.Content = Array_Make<Content>(arena, content->Count ? content->Count : 1);
   for (u32 i = 0; i < content->Count; i++) {
     Content item = {};
-    if (!DecodeContent(arena, content->Items[i], &item)) return false;
+    if (!DecodeContent(content->Items[i], &item)) return false;
     Array_Push(&message.Content, item);
   }
   if (!ReadRequiredU64(object, "timestamp", &message.Timestamp)) return false;

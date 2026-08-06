@@ -19,9 +19,9 @@ is the running gap list — it is not a roadmap commitment.
 
 | | Clank | pi |
 |---|---:|---:|
-| Implementation source | 28,011 lines (`src/`) | 10 workspace packages, 9 published to npm |
-| Test source | 10,701 lines (`tests/`) | per-package suites plus a private `evals` package |
-| Offline test run | 33 suites, 1,581 checks, 0 failures | not measured here |
+| Implementation source | 28,367 lines (`src/`) | 10 workspace packages, 9 published to npm |
+| Test source | 11,245 lines (`tests/`) | per-package suites plus a private `evals` package |
+| Offline test run | 34 suites, 1,705 checks, 0 failures | not measured here |
 | Runtime dependencies | libcurl, C runtime, OS APIs | Node ≥ 22.19.0 or Bun, plus an npm dependency tree |
 | Text providers | 2 | 39 |
 | Wire protocols | 2 | 10 |
@@ -225,6 +225,7 @@ and model-visible state and keeps active turns and queues in memory.
 | capability | status | notes |
 |---|---|---|
 | Append-only branchable message tree · leaf tracking | ✅ | |
+| Compaction retains a recent tail | ✅ | compaction records carry an inclusive `[Base..Through]` span; replay anchors the summary at `Base` and keeps everything outside it verbatim. Legacy whole-branch records replay unchanged |
 | Resume / continue · cross-project resume | ✅ | exact global-ID resume, rollback-safe cwd/trust/context switching; `--continue` scoped to the project |
 | Fork · tree checkout · branch labels · names | ✅ | |
 | Rich session metadata browsing | 🟡 | current-project and all-project listings with times, model, counts, token categories, fork ancestry; no fuzzy/regex search, generated titles, pricing, or deletion UX |
@@ -240,7 +241,7 @@ and model-visible state and keeps active turns and queues in memory.
 |---|---|---|
 | System prompt assembly (cwd, tool docs, overrides, `AGENTS.md`/`CLAUDE.md` discovery) | ✅ | global and project `SYSTEM.md` / `APPEND_SYSTEM.md`, root-to-cwd context discovery, CLI overrides, transactional reload; like pi, omits the date for prompt-cache stability |
 | `AGENTS.override.md` | ❌ | pi allows a per-directory override file |
-| Compaction | 🟡 | durable manual branch compaction with a fixed prompt. pi adds automatic thresholds (`reserveTokens` 16384, `keepRecentTokens` 20000), custom `/compact` instructions, split-turn two-phase summaries, cumulative file tracking, and branch summarization on tree navigation |
+| Compaction | 🟡 | automatic thresholds (`reserveTokens` / `keepRecentTokens`, pi's defaults) firing inside the turn loop, plus durable manual `/compact`. Retained tail cuts only at user boundaries so tool calls stay with their results. pi additionally has custom `/compact` instructions, split-turn two-phase summaries, cumulative file tracking, and branch summarization on tree navigation |
 | Skills (`SKILL.md` discovery, frontmatter, prompt injection, `/skill:<name>`) | ❌ | |
 | Prompt templates (`$1`, `$@`, `$ARGUMENTS`, `/templatename`) | ❌ | |
 | Subagent / task delegation | ❌ | neither ships built-in subagents, but pi can gain them through its extension API. Clank has no extension seam, so this is unreachable rather than merely absent |
@@ -282,11 +283,11 @@ and model-visible state and keeps active turns and queues in memory.
 Clank holds close on the **memory-first execution core**: the data model,
 high-level loop semantics, parallel tool ordering, live tool progress, queue
 plumbing, Anthropic and OpenAI SSE plus OAuth, durable branchable sessions,
-manual compaction, prompt/context/trust assembly, a full-screen differential
-TUI, and equivalents for all seven pi tools. It does so in 28k lines with no
-C++ standard library, runs the documented faux workload at ~8.9 MB peak RSS,
-and was measurably faster than the pinned pi harness across every sequential
-depth tested.
+automatic and manual compaction with a retained tail, prompt/context/trust
+assembly, a full-screen differential TUI, and equivalents for all seven pi
+tools. It does so in 28k lines with no C++ standard library, runs the
+documented faux workload at ~8.9 MB peak RSS, and was measurably faster than
+the pinned pi harness across every sequential depth tested.
 
 The gaps fall into three buckets:
 

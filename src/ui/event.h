@@ -12,8 +12,6 @@ enum class UiEventKind : u8 {
   MouseDown,
   MouseUp,
   Wheel,
-  Resize,
-  Tick,
 };
 
 struct UiEvent {
@@ -23,9 +21,6 @@ struct UiEvent {
   i32 X;
   i32 Y;
   i32 Delta;
-  u16 Width;
-  u16 Height;
-  u64 TimeMs;
 };
 
 UiEvent Ui_EventFromKey(const Key& key);

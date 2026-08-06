@@ -212,20 +212,20 @@ void TestTui() {
     LineModel_AddNotice(&tf.Model, EntryKind::Info, SVL("fixture transcript"));
     Feed(&tf, "hello");
     Tui_ComposeFrame(&tf, 20, 12);
-    CHECK(FrameHash(&tf) == 17203574560423216616ull);
+    CHECK(FrameHash(&tf) == 16918476410488148328ull);
 
     LineEdit_Clear(&tf.Edit);
     Feed(&tf, "/");
     Tui_ComposeFrame(&tf, 20, 12);
-    CHECK(FrameHash(&tf) == 6276729356697869733ull);
+    CHECK(FrameHash(&tf) == 8675490699267501349ull);
 
     StrView options[] = {SVL("first"), SVL("second"), SVL("third")};
     CHECK(Tui_BeginSelection(&tf, SVL("Choose"), options, 3, 1));
     Tui_ComposeFrame(&tf, 20, 12);
-    CHECK(FrameHash(&tf) == 2455385379269386559ull);
+    CHECK(FrameHash(&tf) == 10760913336260656319ull);
 
     Tui_ComposeFrame(&tf, 28, 15);
-    CHECK(FrameHash(&tf) == 16195661565015970235ull);
+    CHECK(FrameHash(&tf) == 3776490409679530299ull);
     Tui_Stop(&tf);
     ArenaRelease(&af);
   }
@@ -237,7 +237,7 @@ void TestTui() {
     LineModel_AddNotice(&tf.Model, EntryKind::Info, SVL("fixture transcript"));
     Feed(&tf, "hello");
     Tui_ComposeFrame(&tf, 20, 12);
-    CHECK(FrameHash(&tf) == 11317252277812289717ull);
+    CHECK(FrameHash(&tf) == 15960401383964303925ull);
     Tui_Stop(&tf);
     ArenaRelease(&af);
   }

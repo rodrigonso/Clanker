@@ -1456,9 +1456,9 @@ static void TestHarnessToolsAndHooks() {
     echo.ParamsJsonSchema = SVL("{\"type\":\"object\"}");
     echo.Execute = EchoExec;
     FauxStep steps[2] = {};
-    steps[0].ToolName = SVL("echo");
-    steps[0].ToolId = SVL("hook-call");
-    steps[0].ToolArgsJson = SVL("{}");
+    FauxToolCall hookCall[1] = {FauxToolCall{SVL("echo"), SVL("hook-call"), SVL("{}")}};
+    steps[0].Tools = hookCall;
+    steps[0].ToolCount = 1;
     steps[1].Text = SVL("hooked run complete");
     steps[1].Stop = StopReason::Stop;
     Faux faux = {steps, 2, 0};
@@ -1549,9 +1549,10 @@ static void TestHarnessToolsAndHooks() {
     tool.Ctx = &executions;
     tool.Execute = CountExec;
     FauxStep step = {};
-    step.ToolName = SVL("blocked");
-    step.ToolId = SVL("blocked-call");
-    step.ToolArgsJson = SVL("{}");
+    FauxToolCall blockedCall[1] = {
+        FauxToolCall{SVL("blocked"), SVL("blocked-call"), SVL("{}")}};
+    step.Tools = blockedCall;
+    step.ToolCount = 1;
     Faux faux = {&step, 1, 0};
     u32 hookCalls = 0;
     AgentHarness harness = {};
@@ -1592,9 +1593,9 @@ static void TestHarnessToolsAndHooks() {
     steer.ParamsJsonSchema = SVL("{\"type\":\"object\"}");
     steer.Execute = SteerExec;
     FauxStep steps[2] = {};
-    steps[0].ToolName = SVL("steer");
-    steps[0].ToolId = SVL("call-steer");
-    steps[0].ToolArgsJson = SVL("{}");
+    FauxToolCall steerCall[1] = {FauxToolCall{SVL("steer"), SVL("call-steer"), SVL("{}")}};
+    steps[0].Tools = steerCall;
+    steps[0].ToolCount = 1;
     steps[1].Text = SVL("after steering");
     steps[1].Stop = StopReason::Stop;
     Faux faux = {steps, 2, 0};
@@ -1668,9 +1669,10 @@ static void TestHarnessCancellationAndBranches() {
     echo.Execute = EchoExec;
 
     FauxStep step = {};
-    step.ToolName = SVL("echo");
-    step.ToolId = SVL("cancel-before-dispatch");
-    step.ToolArgsJson = SVL("{}");
+    FauxToolCall cancelCall[1] = {
+        FauxToolCall{SVL("echo"), SVL("cancel-before-dispatch"), SVL("{}")}};
+    step.Tools = cancelCall;
+    step.ToolCount = 1;
     Faux faux = {&step, 1, 0};
     BlockingBeforeToolState hook = {};
     AgentHarness harness = {};
@@ -2136,10 +2138,270 @@ static void TestHarnessCancellationAndBranches() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Automatic compaction: fires from inside the turn loop when the context eats
+// into the window's reserved headroom, and never as a nested agent lifecycle.
+// ---------------------------------------------------------------------------
+static AgentHarnessConfig AutoCompactConfig(Faux* faux, Tool* tools, u32 toolCount,
+                                            bool enabled, u32 keepRecentTokens = 10) {
+  AgentHarnessConfig config = FauxConfig(faux, tools, toolCount);
+  config.ModelInfo.ContextWindow = 1000;
+  config.Compaction.Enabled = enabled;
+  config.Compaction.ReserveTokens = 400;  // threshold at 600 prompt tokens
+  config.Compaction.KeepRecentTokens = keepRecentTokens;
+  return config;
+}
+
+static Usage PromptUsage(u32 input) {
+  Usage use = {};
+  use.Input = input;
+  return use;
+}
+
+static void TestHarnessAutoCompaction() {
+  u32 executions = 0;
+  Tool echo[1] = {};
+  echo[0].Name = SVL("echo");
+  echo[0].Description = SVL("echo tool");
+  echo[0].ParamsJsonSchema = SVL("{\"type\":\"object\"}");
+  echo[0].Ctx = &executions;
+  echo[0].Execute = EchoExec;
+
+  FauxToolCall calls[1] = {FauxToolCall{SVL("echo"), SVL("call-1"), SVL("{\"x\":1}")}};
+
+  // Over the threshold: the loop compacts once before the next provider call.
+  {
+    Arena arena = ArenaCreate((usize)32 << 20);
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+
+    FauxStep steps[3] = {};
+    steps[0].Tools = calls;
+    steps[0].ToolCount = 1;
+    steps[0].Use = PromptUsage(700);
+    steps[1].Text = SVL("compact summary");
+    steps[1].Stop = StopReason::Stop;
+    steps[2].Text = SVL("done");
+    steps[2].Stop = StopReason::Stop;
+    Faux faux = {steps, 3, 0};
+
+    AgentHarness harness = {};
+    AgentHarnessConfig config = AutoCompactConfig(&faux, echo, 1, true);
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+
+    AgentHarnessSnapshot watchSnapshot = {};
+    AgentHarnessWatch* watchPtr = ArenaPushStruct(&arena, AgentHarnessWatch);
+    *watchPtr = AgentHarnessWatch{};
+    AgentHarnessWatch& watch = *watchPtr;
+    CHECK(SessionResult_IsOk(
+        AgentHarness_Watch(&arena, &harness, 128, &watchSnapshot, &watch)));
+
+    CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("hello"))));
+    CHECK(faux.Index == 3);  // turn, compaction summary, final turn
+
+    Array<SessionRecord> records = {};
+    CHECK(SessionResult_IsOk(SessionLog_ReadAll(&harness.Log, &arena, &records)));
+    CHECK(CountKind(&records, SessionRecordKind::Compaction) == 1);
+
+    // The compaction turn is reported at turn level only: a run must never
+    // contain a nested Compaction-tagged agent lifecycle.
+    u32 compactionTurnStarts = 0, compactionTurnEnds = 0, compactionAgentEvents = 0;
+    u32 agentEnds = 0;
+    while (agentEnds == 0) {
+      AgentHarnessEvent event = {};
+      CHECK(SessionResult_IsOk(AgentHarness_WatchNext(&arena, &watch, &event)));
+      if (event.Kind == AgentHarnessEventKind::TransientTurnStart &&
+          event.Turn == AgentTurnKind::Compaction)
+        compactionTurnStarts++;
+      else if (event.Kind == AgentHarnessEventKind::TransientTurnEnd &&
+               event.Turn == AgentTurnKind::Compaction)
+        compactionTurnEnds++;
+      else if (event.Kind == AgentHarnessEventKind::TransientAgentStart &&
+               event.Turn == AgentTurnKind::Compaction)
+        compactionAgentEvents++;
+      else if (event.Kind == AgentHarnessEventKind::TransientAgentEnd) {
+        if (event.Turn == AgentTurnKind::Compaction)
+          compactionAgentEvents++;
+        else
+          agentEnds++;
+      }
+    }
+    CHECK_ALL(compactionTurnStarts == 1, compactionTurnEnds == 1,
+              compactionAgentEvents == 0);
+
+    CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    repository.Close(repository.Ctx);
+    ArenaRelease(&arena);
+  }
+
+  // Under the threshold: nothing compacts.
+  {
+    Arena arena = ArenaCreate((usize)32 << 20);
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+
+    FauxStep steps[2] = {};
+    steps[0].Tools = calls;
+    steps[0].ToolCount = 1;
+    steps[0].Use = PromptUsage(100);
+    steps[1].Text = SVL("done");
+    steps[1].Stop = StopReason::Stop;
+    Faux faux = {steps, 2, 0};
+
+    AgentHarness harness = {};
+    AgentHarnessConfig config = AutoCompactConfig(&faux, echo, 1, true);
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+    CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("hello"))));
+    CHECK(faux.Index == 2);
+
+    Array<SessionRecord> records = {};
+    CHECK(SessionResult_IsOk(SessionLog_ReadAll(&harness.Log, &arena, &records)));
+    CHECK(CountKind(&records, SessionRecordKind::Compaction) == 0);
+
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    repository.Close(repository.Ctx);
+    ArenaRelease(&arena);
+  }
+
+  // A disabled policy never fires, however much context accumulates.
+  {
+    Arena arena = ArenaCreate((usize)32 << 20);
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+
+    FauxStep steps[2] = {};
+    steps[0].Tools = calls;
+    steps[0].ToolCount = 1;
+    steps[0].Use = PromptUsage(700);
+    steps[1].Text = SVL("done");
+    steps[1].Stop = StopReason::Stop;
+    Faux faux = {steps, 2, 0};
+
+    AgentHarness harness = {};
+    AgentHarnessConfig config = AutoCompactConfig(&faux, echo, 1, false);
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+    CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("hello"))));
+    CHECK(faux.Index == 2);
+
+    Array<SessionRecord> records = {};
+    CHECK(SessionResult_IsOk(SessionLog_ReadAll(&harness.Log, &arena, &records)));
+    CHECK(CountKind(&records, SessionRecordKind::Compaction) == 0);
+
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    repository.Close(repository.Ctx);
+    ArenaRelease(&arena);
+  }
+
+  // With a budget that spans two user turns, the tail is retained: the summary
+  // replaces only the older prefix and the recent turns survive verbatim.
+  {
+    Arena arena = ArenaCreate((usize)32 << 20);
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+
+    FauxStep steps[4] = {};
+    steps[0].Text = SVL("ok");
+    steps[0].Stop = StopReason::Stop;
+    steps[0].Use = PromptUsage(100);  // first run stays under the threshold
+    steps[1].Tools = calls;
+    steps[1].ToolCount = 1;
+    steps[1].Use = PromptUsage(700);  // second run crosses it
+    steps[2].Text = SVL("compact summary");
+    steps[2].Stop = StopReason::Stop;
+    steps[3].Text = SVL("done");
+    steps[3].Stop = StopReason::Stop;
+    Faux faux = {steps, 4, 0};
+
+    AgentHarness harness = {};
+    AgentHarnessConfig config = AutoCompactConfig(&faux, echo, 1, true, 20);
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+
+    CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("hello"))));
+    CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("second"))));
+    CHECK(faux.Index == 4);
+
+    Array<SessionRecord> records = {};
+    CHECK(SessionResult_IsOk(SessionLog_ReadAll(&harness.Log, &arena, &records)));
+    CHECK(CountKind(&records, SessionRecordKind::Compaction) == 1);
+
+    SessionReduction snapshot = {};
+    CHECK(SessionResult_IsOk(AgentHarness_Snapshot(&arena, &harness, &snapshot)));
+    Array<Message> context = {};
+    CHECK(SessionResult_IsOk(
+        SessionReducer_Context(&arena, &snapshot, snapshot.HeadId, &context)));
+
+    // The summary leads, the first user turn is gone, and the second survives.
+    bool sawSummary = false, sawHello = false, sawSecond = false;
+    for (u32 i = 0; i < context.Count; i++) {
+      const Message* message = &context.Data[i];
+      for (u32 k = 0; k < message->Content.Count; k++) {
+        StrView text = message->Content.Data[k].Text;
+        if (StrView_Contains(text, "compact summary")) sawSummary = true;
+        if (StrView_EqCStr(text, "hello")) sawHello = true;
+        if (StrView_EqCStr(text, "second")) sawSecond = true;
+      }
+    }
+    CHECK_ALL(sawSummary, !sawHello, sawSecond, context.Count > 1);
+
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    repository.Close(repository.Ctx);
+    ArenaRelease(&arena);
+  }
+
+  // A failing compaction turn aborts the run with a message that names
+  // compaction, rather than letting the provider reject an oversized request.
+  {
+    Arena arena = ArenaCreate((usize)32 << 20);
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+
+    FauxStep steps[2] = {};
+    steps[0].Tools = calls;
+    steps[0].ToolCount = 1;
+    steps[0].Use = PromptUsage(700);
+    steps[1].Error = SVL("summary provider exploded");
+    Faux faux = {steps, 2, 0};
+
+    AgentHarness harness = {};
+    AgentHarnessConfig config = AutoCompactConfig(&faux, echo, 1, true);
+    config.Retry.Enabled = false;  // fail on the first compaction attempt
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+
+    SessionResult run = AgentHarness_Run(&harness, SVL("hello"));
+    CHECK(run.Status == SessionStatus::ProviderError);
+    CHECK(StrView_Contains(run.Message, "automatic compaction failed"));
+
+    Array<SessionRecord> records = {};
+    CHECK(SessionResult_IsOk(SessionLog_ReadAll(&harness.Log, &arena, &records)));
+    CHECK(CountKind(&records, SessionRecordKind::Compaction) == 0);
+
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    repository.Close(repository.Ctx);
+    ArenaRelease(&arena);
+  }
+}
+
 void TestHarness() {
   TestHarnessReplayAndIncremental();
   TestHarnessLifecycle();
   TestHarnessWatchers();
   TestHarnessToolsAndHooks();
   TestHarnessCancellationAndBranches();
+  TestHarnessAutoCompaction();
 }
