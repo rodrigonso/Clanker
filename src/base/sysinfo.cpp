@@ -252,3 +252,14 @@ StrView Sys_GitBranch(Arena* a, StrView dir) {
   }
   return StrView{nullptr, 0};
 }
+
+bool Sys_LocalTime(u64 timestampMs, struct tm* out) {
+  if (!out) return false;
+  time_t seconds = (time_t)(timestampMs / 1000ull);
+  *out = tm{};
+#if defined(_WIN32)
+  return localtime_s(out, &seconds) == 0;
+#else
+  return localtime_r(&seconds, out) != nullptr;
+#endif
+}

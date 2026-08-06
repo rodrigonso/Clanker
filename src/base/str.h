@@ -122,3 +122,11 @@ inline StrView StrView_Dup(Arena* arena, StrView s) {
   memcpy(dst, s.Data, s.Length);
   return StrView{dst, s.Length};
 }
+
+// Value of one hex digit, or -1 when `c` is not one.
+inline int StrView_HexDigit(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}

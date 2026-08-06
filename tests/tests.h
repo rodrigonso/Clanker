@@ -15,6 +15,7 @@ void TestJson();
 void TestSession();
 void TestHarness();
 void TestCompaction();
+void TestEventJson();
 void TestAnthropic();
 void TestOpenAI();
 void TestTools();

@@ -49,10 +49,6 @@ void FoldAllValidated(JsonlLogHandle* handle) {
 
 namespace {
 
-SessionResult Invalid(const char* message) {
-  return SessionResult_Error(SessionStatus::InvalidArgument, SV(message));
-}
-
 SessionResult IoError(const char* message) {
   return SessionResult_Error(SessionStatus::IoError, SV(message));
 }
@@ -341,7 +337,7 @@ void DestroyHandle(JsonlLogHandle* handle, bool removeData) {
 
 SessionResult ReadAll(void* context, Arena* arena, Array<SessionRecord>* out) {
   JsonlLogHandle* handle = (JsonlLogHandle*)context;
-  if (!handle || !arena || !out) return Invalid("read arguments are invalid");
+  if (!handle || !arena || !out) return SessionResult_Invalid("read arguments are invalid");
   ScopedLock lock(&handle->AppendLock);
   if (handle->Closed)
     return SessionResult_Error(SessionStatus::InvalidState, SVL("session log is closed"));
@@ -360,7 +356,7 @@ SessionResult ReadAll(void* context, Arena* arena, Array<SessionRecord>* out) {
 
 SessionResult AppendBatch(void* context, SessionRecord* input, u32 count) {
   JsonlLogHandle* handle = (JsonlLogHandle*)context;
-  if (!handle || !input || count == 0) return Invalid("append batch is empty");
+  if (!handle || !input || count == 0) return SessionResult_Invalid("append batch is empty");
   ScopedLock lock(&handle->AppendLock);
   if (handle->Closed)
     return SessionResult_Error(SessionStatus::InvalidState, SVL("session log is closed"));
@@ -499,7 +495,7 @@ SessionResult Create(void* context, Arena* arena, const SessionCreateOptions* op
       options->WorkingDirectory.Length == 0 ||
       (DurableId_IsSet(options->ForkedFromSessionId) !=
        DurableId_IsSet(options->ForkedFromEntryId)))
-    return Invalid("create arguments are invalid");
+    return SessionResult_Invalid("create arguments are invalid");
 
   Arena scratch = ArenaCreate();
   DurableId sessionId = options->RequestedId;
@@ -626,7 +622,7 @@ SessionResult Open(void* context, Arena* arena, const SessionOpenOptions* option
   if (!repository || !arena || !options || !outLog || !outInfo ||
       !ValidProjectKey(options->ProjectKey) ||
       !DurableId_IsSet(options->SessionId))
-    return Invalid("open arguments are invalid");
+    return SessionResult_Invalid("open arguments are invalid");
   Arena scratch = ArenaCreate();
   StrView path =
       SessionPath(&scratch, repository, options->ProjectKey, options->SessionId);
@@ -726,7 +722,7 @@ SessionResult Resolve(void* context, Arena* arena, DurableId sessionId,
                       SessionInfo* outInfo) {
   JsonlRepository* repository = (JsonlRepository*)context;
   if (!repository || !arena || !outInfo || !DurableId_IsSet(sessionId))
-    return Invalid("resolve arguments are invalid");
+    return SessionResult_Invalid("resolve arguments are invalid");
   Arena scratch = ArenaCreate();
   StrView foundProject = {};
   SessionResult found =
@@ -761,7 +757,7 @@ SessionResult List(void* context, Arena* arena,
        options->Scope != SessionListScope::AllProjects) ||
       (options->Scope == SessionListScope::CurrentProject &&
        !ValidProjectKey(options->ProjectKey)))
-    return Invalid("list arguments are invalid");
+    return SessionResult_Invalid("list arguments are invalid");
   if (options->SkippedCount) *options->SkippedCount = 0;
 
   Array<SessionInfo> items = Array_Make<SessionInfo>(arena, 16);
@@ -808,7 +804,7 @@ SessionResult Fork(void* context, Arena* arena, const SessionForkOptions* option
       !DurableId_IsSet(options->SourceSessionId) ||
       !DurableId_IsSet(options->SourceHeadId) ||
       options->WorkingDirectory.Length == 0)
-    return Invalid("fork arguments are invalid");
+    return SessionResult_Invalid("fork arguments are invalid");
 
   Arena scratch = ArenaCreate();
   StrView sourcePath = SessionPath(&scratch, repository, options->ProjectKey,

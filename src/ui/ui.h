@@ -202,7 +202,6 @@ struct UiScrollState {
 struct UiMetrics {
   u32 NodeCount;
   u32 HitRegionCount;
-  u32 FocusableCount;
   usize FrameBytes;
 };
 
@@ -241,7 +240,6 @@ struct UiContext {
   u32 ScopeDepth;
   UiCancelFn CaptureCancel;
   void* CaptureCancelUser;
-  bool DebugBounds;
 };
 
 void Ui_Init(UiContext* ui);
@@ -265,5 +263,4 @@ UiId Ui_CurrentSeed(const UiContext* ui);
 UiId Ui_DeriveId(UiId seed, UiKey key);
 
 void Ui_ActivateScope(UiContext* ui, u32 node);
-void Ui_SetDebugBounds(UiContext* ui, bool enabled);
 UiMetrics Ui_GetMetrics(const UiContext* ui);

@@ -1,4 +1,6 @@
 #pragma once
+#include <time.h>
+
 #include "base/arena.h"
 #include "base/basics.h"
 #include "base/str.h"
@@ -28,6 +30,10 @@ StrView Sys_AbbreviatePath(Arena* a, StrView path, StrView home);
 // empty if `dir` is not inside a git work tree or HEAD is detached. Walks up the
 // directory chain and follows the `.git` file (worktree/submodule) indirection.
 StrView Sys_GitBranch(Arena* a, StrView dir);
+
+// Local calendar time for a millisecond timestamp. Wraps the platform's
+// reentrant localtime; returns false when the timestamp cannot be converted.
+bool Sys_LocalTime(u64 timestampMs, struct tm* out);
 
 // Pure parsers (exposed for testing).
 StrView Git_GitdirFromFile(StrView contents);  // "gitdir: <path>"      -> <path>

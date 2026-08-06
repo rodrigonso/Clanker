@@ -9,9 +9,9 @@ SDK object graphs before it does any work, and duplicates the transcript several
 times in UTF-16. Clank runs the same agent loop with an arena-allocated, UTF-8,
 zero-copy transcript.
 
-**Measured** on Windows x64 with `CLANK_PRINT_MEM=1`: a full faux run (libcurl
-init + agent + a `shell` tool execution) peaks at **~8.9 MB RSS** from a Release
-build, and ~11 MB from a Debug build. For scale, an empty `node -e ''` process
+**Measured** on Windows x64 with `CLANK_PRINT_MEM=1`: a complete live run
+(libcurl + TLS + one prompt and response over HTTPS) peaks at **~12.4 MB RSS**
+from a Release build. For scale, an empty `node -e ''` process
 on the same machine (Node 24.13.0) sits at ~33 MB before loading an agent at
 all. The claim here is the order of magnitude, not a benchmarked ratio against
 a specific upstream measurement — pi publishes no memory numbers.
@@ -28,7 +28,7 @@ src/
            FFI fastfail, peak-RSS reporter   (caboose conventions, no C++ std)
   json/    arena DOM parser + escaping writer (hand-rolled, no deps)
   crypto/  SHA-256, base64url, secure random, PKCE (no deps)
-  llm/     data model, faux provider, Anthropic Messages and OpenAI Responses
+  llm/     data model, Anthropic Messages and OpenAI Responses
            protocols (request build + SSE parse), retry policy, model registry
   net/     streaming HTTP + non-streaming fetch over libcurl; loopback OAuth
            callback server + browser opener (no deps beyond OS sockets)
@@ -120,14 +120,11 @@ ctest --preset vs2026-debug
 ## Run
 
 ```sh
-# Offline demo (no API key, scripted provider) — exercises loop + tools + TUI:
-./build/clank --faux
-
-# Live:
 ./build/clank --login anthropic     # OAuth (Claude Pro/Max), or set ANTHROPIC_API_KEY
 ./build/clank --login openai        # OAuth (ChatGPT subscription), or set OPENAI_API_KEY
 ./build/clank                        # full-screen TUI; login can also happen inside it
 ./build/clank -m claude-sonnet-4-6 -p "summarize README.md"
+./build/clank --mode json -p "summarize README.md"   # NDJSON event stream
 ./build/clank --continue             # most recent session for this project
 ./build/clank --resume SESSION_ID     # exact ID, including sessions from other projects
 ./build/clank --no-session            # no session filesystem writes
@@ -274,8 +271,7 @@ command, Backspace on an empty page to go back, or Escape to dismiss the current
 choice.
 
 Commands entered during a TUI turn run afterward; ordinary text still steers the
-active turn. In `--faux` mode, session commands work while `/login` and `/model`
-are unavailable.
+active turn.
 
 The selected provider/model, explicit effort/context preferences, and
 `defaultProjectTrust` policy are written atomically to
@@ -350,12 +346,45 @@ the `network` test is registered but disabled by default.
 Adding a suite is a new `tests/test_*.cpp`, a declaration in `tests/tests.h`, and
 one row in the `kSuites` table in `tests/test_main.cpp`.
 
-The default run is network-free and key-free: the loop runs against a faux
-provider, the Anthropic SSE parser against a recorded fixture, the OAuth module
+The default run is network-free and key-free: the loop runs against the
+scripted provider in `tests/script_provider.h`, the Anthropic SSE parser against a recorded fixture, the OAuth module
 against fixtures, the callback server against an in-process loopback socket, and
 the TUI via pure units (key decoder, differential-renderer diff, markdown,
 line-wrapping, the multi-line editor) plus a headless controller test driving the
 event→transcript mapping. Live full-screen rendering is verified manually.
+
+## JSON mode
+
+`--mode json` turns print mode into a machine surface: one JSON object per line
+on stdout, flushed as it happens. All human-facing output stays on stderr, so
+stdout is safe to pipe.
+
+```sh
+clank --mode json -p "summarize README.md"
+```
+
+```json
+{"type":"agent_start","turn":"run"}
+{"type":"record","kind":"message","record":{...}}
+{"type":"turn_start","turn":"run"}
+{"type":"text_delta","index":0,"text":"pong"}
+{"type":"turn_end","turn":"run","outcome":"succeeded"}
+{"type":"agent_end","turn":"run","outcome":"succeeded"}
+{"type":"result","ok":true}
+```
+
+Event types: `agent_start`, `agent_end`, `turn_start`, `turn_end`,
+`text_delta`, `thinking_delta`, `tool_call_delta`, `tool_start`, `tool_update`,
+`tool_end`, `retry_start`, `retry_end`, `queue_update`, `cancel_requested`,
+`record`, and a final `result`.
+
+`record` carries a durable session entry verbatim, in the same schema the
+session log stores, so a consumer sees exactly the state that was persisted
+rather than a re-flattened copy. `agent_end` always arrives before `result`,
+and `result.ok` matches the process exit code.
+
+`--mode json` requires `-p`; there is no interactive form without a
+bidirectional protocol.
 
 ## Scope / deferred
 
@@ -366,8 +395,8 @@ upstream pi — including what is at parity, what is partial, and what is missin
 Deliberately out of scope for now (the structure leaves seams for them):
 
 - Additional OpenAI-compatible or vendor-specific providers.
-- Non-interactive machine surfaces: a JSON event stream and a bidirectional RPC
-  mode. `-p` is currently the only non-interactive path.
+- A bidirectional RPC mode. `-p` with `--mode text|json` is the non-interactive
+  surface; there is no stdin-driven protocol yet.
 - Device-code OAuth (e.g. GitHub Copilot) — the loopback callback flow is done.
 - TUI niceties: visual-row (vs logical-line) Up/Down, syntax highlighting,
   images, undo. The full-screen differential TUI itself is done.

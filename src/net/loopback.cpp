@@ -94,13 +94,6 @@ void SendResponse(Arena* a, SOCKET c, int status, const char* statusText, StrVie
   SendAll(c, b.Data, b.Length);
 }
 
-int HexVal(char c) {
-  if (c >= '0' && c <= '9') return c - '0';
-  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-  return -1;
-}
-
 }  // namespace
 
 bool Loopback_ParseRequestLine(StrView raw, StrView* path, StrView* query) {
@@ -148,8 +141,8 @@ StrView Loopback_UrlDecode(Arena* a, StrView s) {
     if (c == '+') {
       out[n++] = ' ';
     } else if (c == '%' && i + 2 < s.Length) {
-      int hi = HexVal(s.Data[i + 1]);
-      int lo = HexVal(s.Data[i + 2]);
+      int hi = StrView_HexDigit(s.Data[i + 1]);
+      int lo = StrView_HexDigit(s.Data[i + 2]);
       if (hi >= 0 && lo >= 0) {
         out[n++] = (char)((hi << 4) | lo);
         i += 2;

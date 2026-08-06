@@ -5,7 +5,7 @@
 #include "base/arena.h"
 #include "base/thread.h"
 #include "check.h"
-#include "llm/faux.h"
+#include "script_provider.h"
 #include "net/http.h"
 #include "session/memory_repository.h"
 #include "session/metadata.h"
@@ -213,14 +213,14 @@ SessionResult BlockingAfterTurn(void* context, Arena* arena,
   return SessionResult_Ok();
 }
 
-AgentHarnessConfig FauxConfig(Faux* faux, Tool* tools, u32 toolCount) {
+AgentHarnessConfig ScriptConfig(ScriptProvider* script, Tool* tools, u32 toolCount) {
   AgentHarnessConfig config = {};
   config.SystemPrompt = SVL("durable system");
-  config.ModelInfo.Id = SVL("faux-model");
-  config.ModelInfo.Provider = SVL("faux");
+  config.ModelInfo.Id = SVL("script-model");
+  config.ModelInfo.Provider = SVL("script");
   config.Tools = tools;
   config.ToolCount = toolCount;
-  config.ProviderImpl = Faux_Provider(faux);
+  config.ProviderImpl = ScriptProvider_Make(script);
   config.ToolExec = ToolExecution::Parallel;
   config.Retry.Enabled = true;
   config.Retry.MaxRetries = 3;
@@ -564,11 +564,11 @@ static void TestHarnessReplayAndIncremental() {
     SessionRepository repository = MemoryRepository_AsRepository(&memory);
     SessionLog log = {};
     CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
-    FauxStep step = {};
+    ScriptStep step = {};
     step.Text = SVL("snapshot survives close");
     step.Stop = StopReason::Stop;
-    Faux faux = {&step, 1, 0};
-    AgentHarnessConfig config = FauxConfig(&faux, nullptr, 0);
+    ScriptProvider script = {&step, 1, 0};
+    AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
     AgentHarness harness = {};
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
     CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("snapshot me"))));
@@ -607,18 +607,18 @@ static void TestHarnessReplayAndIncremental() {
     echo.ParamsJsonSchema = SVL("{\"type\":\"object\"}");
     echo.Ctx = &executions;
     echo.Execute = EchoExec;
-    FauxToolCall calls[1] = {FauxToolCall{SVL("echo"), SVL("call-1"), SVL("{\"x\":1}")}};
-    FauxStep steps[3] = {};
+    ScriptToolCall calls[1] = {ScriptToolCall{SVL("echo"), SVL("call-1"), SVL("{\"x\":1}")}};
+    ScriptStep steps[3] = {};
     steps[0].Tools = calls;
     steps[0].ToolCount = 1;
     steps[1].Text = SVL("done");
     steps[1].Stop = StopReason::Stop;
     steps[2].Text = SVL("compact summary");
     steps[2].Stop = StopReason::Stop;
-    Faux faux = {steps, 3, 0};
+    ScriptProvider script = {steps, 3, 0};
 
     AgentHarness harness = {};
-    AgentHarnessConfig config = FauxConfig(&faux, &echo, 1);
+    AgentHarnessConfig config = ScriptConfig(&script, &echo, 1);
     u64 baseline = memory.ReadAllCalls;
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
     CHECK(memory.ReadAllCalls == baseline + 1);
@@ -654,10 +654,10 @@ static void TestHarnessReplayAndIncremental() {
     CHECK(memory.ReadAllCalls == afterRunCalls);
 
     Model model = {};
-    model.Provider = SVL("faux-2");
+    model.Provider = SVL("script-2");
     model.Id = SVL("model-2");
-    Faux second = {};
-    Provider secondProvider = Faux_Provider(&second);
+    ScriptProvider second = {};
+    Provider secondProvider = ScriptProvider_Make(&second);
     CHECK(SessionResult_IsOk(
         AgentHarness_SetModel(&harness, model, secondProvider, ModelRequestProfile{})));
     CHECK(memory.ReadAllCalls == afterRunCalls);
@@ -834,16 +834,16 @@ static void TestHarnessLifecycle() {
     echo.ParamsJsonSchema = SVL("{\"type\":\"object\"}");
     echo.Ctx = &executions;
     echo.Execute = EchoExec;
-    FauxToolCall calls[1] = {FauxToolCall{SVL("echo"), SVL("call-lifecycle"), SVL("{\"y\":2}")}};
-    FauxStep steps[2] = {};
+    ScriptToolCall calls[1] = {ScriptToolCall{SVL("echo"), SVL("call-lifecycle"), SVL("{\"y\":2}")}};
+    ScriptStep steps[2] = {};
     steps[0].Tools = calls;
     steps[0].ToolCount = 1;
     steps[1].Text = SVL("lifecycle done");
     steps[1].Stop = StopReason::Stop;
-    Faux faux = {steps, 2, 0};
+    ScriptProvider script = {steps, 2, 0};
 
     AgentHarness harness = {};
-    AgentHarnessConfig config = FauxConfig(&faux, &echo, 1);
+    AgentHarnessConfig config = ScriptConfig(&script, &echo, 1);
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
     AgentHarnessSnapshot initial = {};
     AgentHarnessWatch* watchPtr = ArenaPushStruct(&arena, AgentHarnessWatch);
@@ -963,12 +963,12 @@ static void TestHarnessLifecycle() {
     SessionRepository repository = MemoryRepository_AsRepository(&memory);
     SessionLog log = {};
     CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
-    FauxStep step = {};
+    ScriptStep step = {};
     step.Text = SVL("compaction lifecycle summary");
     step.Stop = StopReason::Stop;
-    Faux faux = {&step, 1, 0};
+    ScriptProvider script = {&step, 1, 0};
     AgentHarness harness = {};
-    AgentHarnessConfig config = FauxConfig(&faux, nullptr, 0);
+    AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
     AgentHarnessSnapshot initial = {};
     AgentHarnessWatch* watchPtr = ArenaPushStruct(&arena, AgentHarnessWatch);
@@ -1026,11 +1026,11 @@ static void TestHarnessLifecycle() {
     SessionRepository repository = MemoryRepository_AsRepository(&memory);
     SessionLog log = {};
     CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
-    FauxStep step = {};
+    ScriptStep step = {};
     step.Text = SVL("summary that cannot be stored");
     step.Stop = StopReason::Stop;
-    Faux faux = {&step, 1, 0};
-    AgentHarnessConfig config = FauxConfig(&faux, nullptr, 0);
+    ScriptProvider script = {&step, 1, 0};
+    AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
     AgentHarness harness = {};
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
     AgentHarnessSnapshot initial = {};
@@ -1065,12 +1065,12 @@ static void TestHarnessWatchers() {
     SessionRepository repository = MemoryRepository_AsRepository(&memory);
     SessionLog log = {};
     CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
-    FauxStep step = {};
+    ScriptStep step = {};
     step.Text = SVL("watched response");
     step.Stop = StopReason::Stop;
-    Faux faux = {&step, 1, 0};
+    ScriptProvider script = {&step, 1, 0};
     AgentHarness harness = {};
-    AgentHarnessConfig config = FauxConfig(&faux, nullptr, 0);
+    AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
 
     AgentHarnessSnapshot initial = {};
@@ -1125,12 +1125,12 @@ static void TestHarnessWatchers() {
     SessionRepository repository = MemoryRepository_AsRepository(&memory);
     SessionLog log = {};
     CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
-    FauxStep step = {};
+    ScriptStep step = {};
     step.Text = SVL("overflow");
     step.Stop = StopReason::Stop;
-    Faux faux = {&step, 1, 0};
+    ScriptProvider script = {&step, 1, 0};
     AgentHarness harness = {};
-    AgentHarnessConfig config = FauxConfig(&faux, nullptr, 0);
+    AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
     AgentHarnessSnapshot snapshot = {};
     AgentHarnessWatch* watchPtr = ArenaPushStruct(&arena, AgentHarnessWatch);
@@ -1212,9 +1212,9 @@ static void TestHarnessWatchers() {
     SessionRepository repository = MemoryRepository_AsRepository(&memory);
     SessionLog log = {};
     CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
-    Faux faux = {};
+    ScriptProvider script = {};
     AgentHarness harness = {};
-    AgentHarnessConfig config = FauxConfig(&faux, nullptr, 0);
+    AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
     AgentHarnessSnapshot snapshot = {};
     AgentHarnessWatch* watchPtr = ArenaPushStruct(&arena, AgentHarnessWatch);
@@ -1257,19 +1257,19 @@ static void TestHarnessWatchers() {
     SessionRepository repository = MemoryRepository_AsRepository(&memory);
     SessionLog log = {};
     CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
-    Faux first = {};
-    Faux second = {};
+    ScriptProvider first = {};
+    ScriptProvider second = {};
     AgentHarness harness = {};
-    AgentHarnessConfig config = FauxConfig(&first, nullptr, 0);
+    AgentHarnessConfig config = ScriptConfig(&first, nullptr, 0);
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
     Model model = {};
-    model.Provider = SVL("faux-next");
+    model.Provider = SVL("script-next");
     model.Id = SVL("model-next");
     model.ContextWindow = 200000;
     model.EffortMask = ModelEffort_Bit(ModelEffort::Medium);
     model.DefaultEffort = ModelEffort::Medium;
     ModelRequestProfile profile = {ModelEffort::Medium, 200000};
-    Provider provider = Faux_Provider(&second);
+    Provider provider = ScriptProvider_Make(&second);
     CHECK(SessionResult_IsOk(AgentHarness_SetModel(&harness, model, provider, profile)));
     SessionReduction state = {};
     CHECK(SessionResult_IsOk(AgentHarness_Snapshot(&arena, &harness, &state)));
@@ -1315,18 +1315,18 @@ static void TestHarnessToolsAndHooks() {
     delay.Ctx = &executions;
     delay.Execute = DelayExec;
 
-    FauxToolCall calls[2] = {};
-    calls[0] = FauxToolCall{SVL("delay"), SVL("slow"), SVL("{\"label\":\"slow\",\"delay\":40}")};
-    calls[1] = FauxToolCall{SVL("delay"), SVL("fast"), SVL("{\"label\":\"fast\",\"delay\":1}")};
-    FauxStep steps[2] = {};
+    ScriptToolCall calls[2] = {};
+    calls[0] = ScriptToolCall{SVL("delay"), SVL("slow"), SVL("{\"label\":\"slow\",\"delay\":40}")};
+    calls[1] = ScriptToolCall{SVL("delay"), SVL("fast"), SVL("{\"label\":\"fast\",\"delay\":1}")};
+    ScriptStep steps[2] = {};
     steps[0].Tools = calls;
     steps[0].ToolCount = 2;
     steps[1].Text = SVL("complete");
     steps[1].Stop = StopReason::Stop;
-    Faux faux = {steps, 2, 0};
+    ScriptProvider script = {steps, 2, 0};
 
     AgentHarness harness = {};
-    AgentHarnessConfig config = FauxConfig(&faux, &delay, 1);
+    AgentHarnessConfig config = ScriptConfig(&script, &delay, 1);
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
     AgentHarnessSnapshot initial = {};
     AgentHarnessWatch* watchPtr = ArenaPushStruct(&arena, AgentHarnessWatch);
@@ -1389,18 +1389,18 @@ static void TestHarnessToolsAndHooks() {
         "\"delay\":{\"type\":\"integer\"}},\"required\":[\"label\",\"delay\"]}");
     delay.Ctx = &executions;
     delay.Execute = DelayExec;
-    FauxToolCall invalidCalls[2] = {};
-    invalidCalls[0] = FauxToolCall{
+    ScriptToolCall invalidCalls[2] = {};
+    invalidCalls[0] = ScriptToolCall{
         SVL("delay"), SVL("invalid-delay"),
         SVL("{\"label\":\"bad\",\"delay\":\"later\"}")};
     invalidCalls[1] =
-        FauxToolCall{SVL("delay"), SVL("malformed-delay"), SVL("not-json")};
-    FauxStep step = {};
+        ScriptToolCall{SVL("delay"), SVL("malformed-delay"), SVL("not-json")};
+    ScriptStep step = {};
     step.Tools = invalidCalls;
     step.ToolCount = 2;
-    Faux faux = {&step, 1, 0};
+    ScriptProvider script = {&step, 1, 0};
     AgentHarness harness = {};
-    AgentHarnessConfig config = FauxConfig(&faux, &delay, 1);
+    AgentHarnessConfig config = ScriptConfig(&script, &delay, 1);
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
     CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("validate tool"))));
     SessionReduction snapshot = {};
@@ -1423,7 +1423,7 @@ static void TestHarnessToolsAndHooks() {
     Tool emptySchema = delay;
     emptySchema.ParamsJsonSchema = {};
     AgentHarness emptySchemaHarness = {};
-    AgentHarnessConfig emptySchemaConfig = FauxConfig(&faux, &emptySchema, 1);
+    AgentHarnessConfig emptySchemaConfig = ScriptConfig(&script, &emptySchema, 1);
     CHECK(SessionResult_IsOk(
         AgentHarness_Init(&emptySchemaHarness, emptySchemaLog, &emptySchemaConfig)));
     CHECK(SessionResult_IsOk(AgentHarness_Close(&emptySchemaHarness)));
@@ -1433,7 +1433,7 @@ static void TestHarnessToolsAndHooks() {
     Tool unsupported = delay;
     unsupported.ParamsJsonSchema = SVL("{\"type\":\"string\",\"pattern\":\"x\"}");
     AgentHarness invalidHarness = {};
-    AgentHarnessConfig invalidConfig = FauxConfig(&faux, &unsupported, 1);
+    AgentHarnessConfig invalidConfig = ScriptConfig(&script, &unsupported, 1);
     CHECK(AgentHarness_Init(&invalidHarness, invalidLog, &invalidConfig).Status ==
           SessionStatus::InvalidArgument);
     repository.Close(repository.Ctx);
@@ -1455,16 +1455,16 @@ static void TestHarnessToolsAndHooks() {
     echo.Description = SVL("echo arguments");
     echo.ParamsJsonSchema = SVL("{\"type\":\"object\"}");
     echo.Execute = EchoExec;
-    FauxStep steps[2] = {};
-    FauxToolCall hookCall[1] = {FauxToolCall{SVL("echo"), SVL("hook-call"), SVL("{}")}};
+    ScriptStep steps[2] = {};
+    ScriptToolCall hookCall[1] = {ScriptToolCall{SVL("echo"), SVL("hook-call"), SVL("{}")}};
     steps[0].Tools = hookCall;
     steps[0].ToolCount = 1;
     steps[1].Text = SVL("hooked run complete");
     steps[1].Stop = StopReason::Stop;
-    Faux faux = {steps, 2, 0};
+    ScriptProvider script = {steps, 2, 0};
     HarnessHookState hookState = {};
     AgentHarness harness = {};
-    AgentHarnessConfig config = FauxConfig(&faux, &echo, 1);
+    AgentHarnessConfig config = ScriptConfig(&script, &echo, 1);
     config.Hooks.User = &hookState;
     config.Hooks.BeforeRun = HookBeforeRun;
     config.Hooks.BeforeContext = HookBeforeContext;
@@ -1505,11 +1505,11 @@ static void TestHarnessToolsAndHooks() {
     SessionRepository repository = MemoryRepository_AsRepository(&memory);
     SessionLog log = {};
     CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
-    FauxStep step = {};
+    ScriptStep step = {};
     step.Text = SVL("completed before hook");
     step.Stop = StopReason::Stop;
-    Faux faux = {&step, 1, 0};
-    AgentHarnessConfig config = FauxConfig(&faux, nullptr, 0);
+    ScriptProvider script = {&step, 1, 0};
+    AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
     config.Hooks.AfterTurn = FailAfterTurn;
     AgentHarness harness = {};
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
@@ -1548,15 +1548,15 @@ static void TestHarnessToolsAndHooks() {
     tool.ParamsJsonSchema = SVL("{\"type\":\"object\"}");
     tool.Ctx = &executions;
     tool.Execute = CountExec;
-    FauxStep step = {};
-    FauxToolCall blockedCall[1] = {
-        FauxToolCall{SVL("blocked"), SVL("blocked-call"), SVL("{}")}};
+    ScriptStep step = {};
+    ScriptToolCall blockedCall[1] = {
+        ScriptToolCall{SVL("blocked"), SVL("blocked-call"), SVL("{}")}};
     step.Tools = blockedCall;
     step.ToolCount = 1;
-    Faux faux = {&step, 1, 0};
+    ScriptProvider script = {&step, 1, 0};
     u32 hookCalls = 0;
     AgentHarness harness = {};
-    AgentHarnessConfig config = FauxConfig(&faux, &tool, 1);
+    AgentHarnessConfig config = ScriptConfig(&script, &tool, 1);
     config.Hooks.User = &hookCalls;
     config.Hooks.BeforeTool = FailBeforeTool;
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
@@ -1592,17 +1592,17 @@ static void TestHarnessToolsAndHooks() {
     steer.Description = SVL("queue steering");
     steer.ParamsJsonSchema = SVL("{\"type\":\"object\"}");
     steer.Execute = SteerExec;
-    FauxStep steps[2] = {};
-    FauxToolCall steerCall[1] = {FauxToolCall{SVL("steer"), SVL("call-steer"), SVL("{}")}};
+    ScriptStep steps[2] = {};
+    ScriptToolCall steerCall[1] = {ScriptToolCall{SVL("steer"), SVL("call-steer"), SVL("{}")}};
     steps[0].Tools = steerCall;
     steps[0].ToolCount = 1;
     steps[1].Text = SVL("after steering");
     steps[1].Stop = StopReason::Stop;
-    Faux faux = {steps, 2, 0};
+    ScriptProvider script = {steps, 2, 0};
 
     AgentHarness harness = {};
     steer.Ctx = &harness;
-    AgentHarnessConfig config = FauxConfig(&faux, &steer, 1);
+    AgentHarnessConfig config = ScriptConfig(&script, &steer, 1);
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
     usize queuedBaseline = harness.Queued.Used;
     CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("start"))));
@@ -1636,15 +1636,15 @@ static void TestHarnessCancellationAndBranches() {
     SessionRepository repository = MemoryRepository_AsRepository(&memory);
     SessionLog log = {};
     CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
-    FauxStep step = {};
+    ScriptStep step = {};
     step.Text = SVL("must not run");
-    Faux faux = {&step, 1, 0};
+    ScriptProvider script = {&step, 1, 0};
     AgentHarness harness = {};
-    AgentHarnessConfig config = FauxConfig(&faux, nullptr, 0);
+    AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
     MemoryRepository_FailAfterAppends(&memory, 0);
     CHECK(AgentHarness_Run(&harness, SVL("fail before effect")).Status == SessionStatus::IoError);
-    CHECK_ALL(faux.Index == 0, harness.Faulted);
+    CHECK_ALL(script.Index == 0, harness.Faulted);
     CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
     repository.Close(repository.Ctx);
     ArenaRelease(&arena);
@@ -1668,15 +1668,15 @@ static void TestHarnessCancellationAndBranches() {
     echo.Ctx = &executions;
     echo.Execute = EchoExec;
 
-    FauxStep step = {};
-    FauxToolCall cancelCall[1] = {
-        FauxToolCall{SVL("echo"), SVL("cancel-before-dispatch"), SVL("{}")}};
+    ScriptStep step = {};
+    ScriptToolCall cancelCall[1] = {
+        ScriptToolCall{SVL("echo"), SVL("cancel-before-dispatch"), SVL("{}")}};
     step.Tools = cancelCall;
     step.ToolCount = 1;
-    Faux faux = {&step, 1, 0};
+    ScriptProvider script = {&step, 1, 0};
     BlockingBeforeToolState hook = {};
     AgentHarness harness = {};
-    AgentHarnessConfig config = FauxConfig(&faux, &echo, 1);
+    AgentHarnessConfig config = ScriptConfig(&script, &echo, 1);
     config.Hooks.User = &hook;
     config.Hooks.BeforeTool = BlockingBeforeTool;
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
@@ -1789,12 +1789,12 @@ static void TestHarnessCancellationAndBranches() {
     SessionRepository repository = MemoryRepository_AsRepository(&memory);
     SessionLog log = {};
     CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
-    FauxStep step = {};
+    ScriptStep step = {};
     step.Text = SVL("completed response");
     step.Stop = StopReason::Stop;
-    Faux faux = {&step, 1, 0};
+    ScriptProvider script = {&step, 1, 0};
     BlockingBeforeToolState hook = {};
-    AgentHarnessConfig config = FauxConfig(&faux, nullptr, 0);
+    AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
     config.Hooks.User = &hook;
     config.Hooks.AfterTurn = BlockingAfterTurn;
     AgentHarness harness = {};
@@ -1972,14 +1972,14 @@ static void TestHarnessCancellationAndBranches() {
     SessionRepository repository = MemoryRepository_AsRepository(&memory);
     SessionLog log = {};
     CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
-    FauxStep steps[2] = {};
+    ScriptStep steps[2] = {};
     steps[0].Text = SVL("answer before compaction");
     steps[0].Stop = StopReason::Stop;
     steps[1].Text = SVL("compact summary");
     steps[1].Stop = StopReason::Stop;
-    Faux faux = {steps, 2, 0};
+    ScriptProvider script = {steps, 2, 0};
     AgentHarness harness = {};
-    AgentHarnessConfig config = FauxConfig(&faux, nullptr, 0);
+    AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
     CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("old prompt"))));
     CHECK(SessionResult_IsOk(AgentHarness_Compact(&harness)));
@@ -2025,12 +2025,12 @@ static void TestHarnessCancellationAndBranches() {
     SessionRepository repository = MemoryRepository_AsRepository(&memory);
     SessionLog log = {};
     CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
-    FauxStep step = {};
+    ScriptStep step = {};
     step.Text = SVL("branched response");
     step.Stop = StopReason::Stop;
-    Faux faux = {&step, 1, 0};
+    ScriptProvider script = {&step, 1, 0};
     AgentHarness harness = {};
-    AgentHarnessConfig config = FauxConfig(&faux, nullptr, 0);
+    AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
 
     SessionReduction initial = {};
@@ -2142,9 +2142,9 @@ static void TestHarnessCancellationAndBranches() {
 // Automatic compaction: fires from inside the turn loop when the context eats
 // into the window's reserved headroom, and never as a nested agent lifecycle.
 // ---------------------------------------------------------------------------
-static AgentHarnessConfig AutoCompactConfig(Faux* faux, Tool* tools, u32 toolCount,
+static AgentHarnessConfig AutoCompactConfig(ScriptProvider* script, Tool* tools, u32 toolCount,
                                             bool enabled, u32 keepRecentTokens = 10) {
-  AgentHarnessConfig config = FauxConfig(faux, tools, toolCount);
+  AgentHarnessConfig config = ScriptConfig(script, tools, toolCount);
   config.ModelInfo.ContextWindow = 1000;
   config.Compaction.Enabled = enabled;
   config.Compaction.ReserveTokens = 400;  // threshold at 600 prompt tokens
@@ -2167,7 +2167,7 @@ static void TestHarnessAutoCompaction() {
   echo[0].Ctx = &executions;
   echo[0].Execute = EchoExec;
 
-  FauxToolCall calls[1] = {FauxToolCall{SVL("echo"), SVL("call-1"), SVL("{\"x\":1}")}};
+  ScriptToolCall calls[1] = {ScriptToolCall{SVL("echo"), SVL("call-1"), SVL("{\"x\":1}")}};
 
   // Over the threshold: the loop compacts once before the next provider call.
   {
@@ -2178,7 +2178,7 @@ static void TestHarnessAutoCompaction() {
     SessionLog log = {};
     CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
 
-    FauxStep steps[3] = {};
+    ScriptStep steps[3] = {};
     steps[0].Tools = calls;
     steps[0].ToolCount = 1;
     steps[0].Use = PromptUsage(700);
@@ -2186,10 +2186,10 @@ static void TestHarnessAutoCompaction() {
     steps[1].Stop = StopReason::Stop;
     steps[2].Text = SVL("done");
     steps[2].Stop = StopReason::Stop;
-    Faux faux = {steps, 3, 0};
+    ScriptProvider script = {steps, 3, 0};
 
     AgentHarness harness = {};
-    AgentHarnessConfig config = AutoCompactConfig(&faux, echo, 1, true);
+    AgentHarnessConfig config = AutoCompactConfig(&script, echo, 1, true);
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
 
     AgentHarnessSnapshot watchSnapshot = {};
@@ -2200,7 +2200,7 @@ static void TestHarnessAutoCompaction() {
         AgentHarness_Watch(&arena, &harness, 128, &watchSnapshot, &watch)));
 
     CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("hello"))));
-    CHECK(faux.Index == 3);  // turn, compaction summary, final turn
+    CHECK(script.Index == 3);  // turn, compaction summary, final turn
 
     Array<SessionRecord> records = {};
     CHECK(SessionResult_IsOk(SessionLog_ReadAll(&harness.Log, &arena, &records)));
@@ -2247,19 +2247,19 @@ static void TestHarnessAutoCompaction() {
     SessionLog log = {};
     CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
 
-    FauxStep steps[2] = {};
+    ScriptStep steps[2] = {};
     steps[0].Tools = calls;
     steps[0].ToolCount = 1;
     steps[0].Use = PromptUsage(100);
     steps[1].Text = SVL("done");
     steps[1].Stop = StopReason::Stop;
-    Faux faux = {steps, 2, 0};
+    ScriptProvider script = {steps, 2, 0};
 
     AgentHarness harness = {};
-    AgentHarnessConfig config = AutoCompactConfig(&faux, echo, 1, true);
+    AgentHarnessConfig config = AutoCompactConfig(&script, echo, 1, true);
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
     CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("hello"))));
-    CHECK(faux.Index == 2);
+    CHECK(script.Index == 2);
 
     Array<SessionRecord> records = {};
     CHECK(SessionResult_IsOk(SessionLog_ReadAll(&harness.Log, &arena, &records)));
@@ -2279,19 +2279,19 @@ static void TestHarnessAutoCompaction() {
     SessionLog log = {};
     CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
 
-    FauxStep steps[2] = {};
+    ScriptStep steps[2] = {};
     steps[0].Tools = calls;
     steps[0].ToolCount = 1;
     steps[0].Use = PromptUsage(700);
     steps[1].Text = SVL("done");
     steps[1].Stop = StopReason::Stop;
-    Faux faux = {steps, 2, 0};
+    ScriptProvider script = {steps, 2, 0};
 
     AgentHarness harness = {};
-    AgentHarnessConfig config = AutoCompactConfig(&faux, echo, 1, false);
+    AgentHarnessConfig config = AutoCompactConfig(&script, echo, 1, false);
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
     CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("hello"))));
-    CHECK(faux.Index == 2);
+    CHECK(script.Index == 2);
 
     Array<SessionRecord> records = {};
     CHECK(SessionResult_IsOk(SessionLog_ReadAll(&harness.Log, &arena, &records)));
@@ -2312,7 +2312,7 @@ static void TestHarnessAutoCompaction() {
     SessionLog log = {};
     CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
 
-    FauxStep steps[4] = {};
+    ScriptStep steps[4] = {};
     steps[0].Text = SVL("ok");
     steps[0].Stop = StopReason::Stop;
     steps[0].Use = PromptUsage(100);  // first run stays under the threshold
@@ -2323,15 +2323,15 @@ static void TestHarnessAutoCompaction() {
     steps[2].Stop = StopReason::Stop;
     steps[3].Text = SVL("done");
     steps[3].Stop = StopReason::Stop;
-    Faux faux = {steps, 4, 0};
+    ScriptProvider script = {steps, 4, 0};
 
     AgentHarness harness = {};
-    AgentHarnessConfig config = AutoCompactConfig(&faux, echo, 1, true, 20);
+    AgentHarnessConfig config = AutoCompactConfig(&script, echo, 1, true, 20);
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
 
     CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("hello"))));
     CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("second"))));
-    CHECK(faux.Index == 4);
+    CHECK(script.Index == 4);
 
     Array<SessionRecord> records = {};
     CHECK(SessionResult_IsOk(SessionLog_ReadAll(&harness.Log, &arena, &records)));
@@ -2371,15 +2371,15 @@ static void TestHarnessAutoCompaction() {
     SessionLog log = {};
     CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
 
-    FauxStep steps[2] = {};
+    ScriptStep steps[2] = {};
     steps[0].Tools = calls;
     steps[0].ToolCount = 1;
     steps[0].Use = PromptUsage(700);
     steps[1].Error = SVL("summary provider exploded");
-    Faux faux = {steps, 2, 0};
+    ScriptProvider script = {steps, 2, 0};
 
     AgentHarness harness = {};
-    AgentHarnessConfig config = AutoCompactConfig(&faux, echo, 1, true);
+    AgentHarnessConfig config = AutoCompactConfig(&script, echo, 1, true);
     config.Retry.Enabled = false;  // fail on the first compaction attempt
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
 
@@ -2397,10 +2397,62 @@ static void TestHarnessAutoCompaction() {
   }
 }
 
+// Closing a watch stops further publication but must not discard what was
+// already published: a consumer that shuts down right after a run still needs
+// that run's trailing turn_end/agent_end.
+static void TestHarnessWatchDrainsAfterClose() {
+  Arena arena = ArenaCreate((usize)32 << 20);
+  MemoryRepository memory = {};
+  MemoryRepository_Init(&memory);
+  SessionRepository repository = MemoryRepository_AsRepository(&memory);
+  SessionLog log = {};
+  CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+
+  ScriptStep step = {};
+  step.Text = SVL("done");
+  step.Stop = StopReason::Stop;
+  ScriptProvider script = {&step, 1, 0};
+
+  AgentHarness harness = {};
+  AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
+  CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+
+  AgentHarnessSnapshot snapshot = {};
+  AgentHarnessWatch* watchPtr = ArenaPushStruct(&arena, AgentHarnessWatch);
+  *watchPtr = AgentHarnessWatch{};
+  AgentHarnessWatch& watch = *watchPtr;
+  CHECK(SessionResult_IsOk(
+      AgentHarness_Watch(&arena, &harness, 64, &snapshot, &watch)));
+
+  CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("hello"))));
+
+  // Request the close before reading anything, so every event of the run is
+  // still sitting in the ring buffer.
+  CHECK(SessionResult_IsOk(AgentHarness_WatchRequestClose(&watch)));
+
+  u32 drained = 0;
+  bool sawAgentEnd = false;
+  SessionResult next = SessionResult_Ok();
+  for (;;) {
+    AgentHarnessEvent event = {};
+    next = AgentHarness_WatchNext(&arena, &watch, &event);
+    if (!SessionResult_IsOk(next)) break;
+    drained++;
+    if (event.Kind == AgentHarnessEventKind::TransientAgentEnd) sawAgentEnd = true;
+  }
+  CHECK_ALL(drained > 0, sawAgentEnd, next.Status == SessionStatus::InvalidState);
+
+  CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
+  CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+  repository.Close(repository.Ctx);
+  ArenaRelease(&arena);
+}
+
 void TestHarness() {
   TestHarnessReplayAndIncremental();
   TestHarnessLifecycle();
   TestHarnessWatchers();
+  TestHarnessWatchDrainsAfterClose();
   TestHarnessToolsAndHooks();
   TestHarnessCancellationAndBranches();
   TestHarnessAutoCompaction();

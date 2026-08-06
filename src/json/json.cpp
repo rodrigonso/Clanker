@@ -50,13 +50,6 @@ void Utf8Encode(StrBuf* b, u32 cp) {
   }
 }
 
-int HexVal(char c) {
-  if (c >= '0' && c <= '9') return c - '0';
-  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-  return -1;
-}
-
 StrView ParseString(P* s) {
   s->p++;  // opening quote
   StrBuf b = StrBuf_Make(s->a, 16);
@@ -83,7 +76,7 @@ StrView ParseString(P* s) {
           s->ok = false;
           return StrView{"", 0};
         }
-        int h0 = HexVal(s->p[0]), h1 = HexVal(s->p[1]), h2 = HexVal(s->p[2]), h3 = HexVal(s->p[3]);
+        int h0 = StrView_HexDigit(s->p[0]), h1 = StrView_HexDigit(s->p[1]), h2 = StrView_HexDigit(s->p[2]), h3 = StrView_HexDigit(s->p[3]);
         if ((h0 | h1 | h2 | h3) < 0) {
           s->ok = false;
           return StrView{"", 0};
@@ -91,7 +84,7 @@ StrView ParseString(P* s) {
         u32 cp = ((u32)h0 << 12) | ((u32)h1 << 8) | ((u32)h2 << 4) | (u32)h3;
         s->p += 4;
         if (cp >= 0xD800 && cp <= 0xDBFF && s->end - s->p >= 6 && s->p[0] == '\\' && s->p[1] == 'u') {
-          int l0 = HexVal(s->p[2]), l1 = HexVal(s->p[3]), l2 = HexVal(s->p[4]), l3 = HexVal(s->p[5]);
+          int l0 = StrView_HexDigit(s->p[2]), l1 = StrView_HexDigit(s->p[3]), l2 = StrView_HexDigit(s->p[4]), l3 = StrView_HexDigit(s->p[5]);
           if ((l0 | l1 | l2 | l3) >= 0) {
             u32 lo = ((u32)l0 << 12) | ((u32)l1 << 8) | ((u32)l2 << 4) | (u32)l3;
             if (lo >= 0xDC00 && lo <= 0xDFFF) {

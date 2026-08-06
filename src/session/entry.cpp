@@ -8,48 +8,14 @@ namespace {
 
 constexpr f64 JSON_SAFE_INTEGER_MAX = 9007199254740991.0;
 
-struct ObjectWriter {
-  StrBuf* Out;
-  bool First;
-};
-
-void ObjectBegin(ObjectWriter* w, StrBuf* out) {
-  w->Out = out;
-  w->First = true;
-  StrBuf_AppendChar(out, '{');
-}
-
-void ObjectKey(ObjectWriter* w, const char* key) {
-  if (!w->First) StrBuf_AppendChar(w->Out, ',');
-  w->First = false;
-  Json_WriteString(w->Out, SV(key));
-  StrBuf_AppendChar(w->Out, ':');
-}
-
-void ObjectEnd(ObjectWriter* w) { StrBuf_AppendChar(w->Out, '}'); }
-
-void WriteString(ObjectWriter* w, const char* key, StrView value) {
-  ObjectKey(w, key);
-  Json_WriteString(w->Out, value);
-}
-
-void WriteBool(ObjectWriter* w, const char* key, bool value) {
-  ObjectKey(w, key);
-  StrBuf_AppendCStr(w->Out, value ? "true" : "false");
-}
-
-void WriteU64(ObjectWriter* w, const char* key, u64 value) {
-  ObjectKey(w, key);
-  StrBuf_AppendU64(w->Out, value);
-}
-
-void WriteId(ObjectWriter* w, const char* key, DurableId id) {
-  ObjectKey(w, key);
+// Durable-record extensions over the shared JsonWriter in json/json.h.
+void WriteId(JsonWriter* w, const char* key, DurableId id) {
+  JsonWrite_Key(w, key);
   Json_WriteString(w->Out, DurableId_View(&id));
 }
 
-void WriteOptionalId(ObjectWriter* w, const char* key, DurableId id) {
-  ObjectKey(w, key);
+void WriteOptionalId(JsonWriter* w, const char* key, DurableId id) {
+  JsonWrite_Key(w, key);
   if (DurableId_IsSet(id))
     Json_WriteString(w->Out, DurableId_View(&id));
   else
@@ -157,14 +123,6 @@ bool ParseRecordKind(StrView text, SessionRecordKind* out) {
   return false;
 }
 
-SessionResult Corrupt(const char* message) {
-  return SessionResult_Error(SessionStatus::Corrupt, SV(message));
-}
-
-SessionResult Invalid(const char* message) {
-  return SessionResult_Error(SessionStatus::InvalidArgument, SV(message));
-}
-
 bool ReadRequiredString(const JsonValue* object, const char* key, bool allowEmpty,
                         StrView* out) {
   JsonValue* value = Json_Get(object, key);
@@ -219,71 +177,71 @@ bool ReadOptionalId(const JsonValue* object, const char* key, DurableId* out) {
 }
 
 void WriteContent(StrBuf* out, const Content* content) {
-  ObjectWriter w;
-  ObjectBegin(&w, out);
-  WriteString(&w, "kind", ContentKindName(content->Kind));
+  JsonWriter w;
+  JsonWrite_Begin(&w, out);
+  JsonWrite_String(&w, "kind", ContentKindName(content->Kind));
   switch (content->Kind) {
     case ContentKind::Text:
-      WriteString(&w, "text", content->Text);
-      WriteString(&w, "signature", content->Signature);
+      JsonWrite_String(&w, "text", content->Text);
+      JsonWrite_String(&w, "signature", content->Signature);
       break;
     case ContentKind::Thinking:
-      WriteString(&w, "text", content->Text);
-      WriteString(&w, "signature", content->Signature);
-      WriteBool(&w, "redacted", content->Redacted);
+      JsonWrite_String(&w, "text", content->Text);
+      JsonWrite_String(&w, "signature", content->Signature);
+      JsonWrite_Bool(&w, "redacted", content->Redacted);
       break;
     case ContentKind::ToolCall:
-      WriteString(&w, "toolId", content->ToolId);
-      WriteString(&w, "toolName", content->ToolName);
-      WriteString(&w, "argumentsJson", content->ToolArgsJson);
+      JsonWrite_String(&w, "toolId", content->ToolId);
+      JsonWrite_String(&w, "toolName", content->ToolName);
+      JsonWrite_String(&w, "argumentsJson", content->ToolArgsJson);
       if (content->Signature.Length)
-        WriteString(&w, "signature", content->Signature);
+        JsonWrite_String(&w, "signature", content->Signature);
       break;
     case ContentKind::Image:
-      WriteString(&w, "data", content->ImageData);
-      WriteString(&w, "mimeType", content->ImageMimeType);
+      JsonWrite_String(&w, "data", content->ImageData);
+      JsonWrite_String(&w, "mimeType", content->ImageMimeType);
       break;
   }
-  ObjectEnd(&w);
+  JsonWrite_End(&w);
 }
 
 void WriteUsage(StrBuf* out, const Usage* usage) {
-  ObjectWriter w;
-  ObjectBegin(&w, out);
-  WriteU64(&w, "input", usage->Input);
-  WriteU64(&w, "output", usage->Output);
-  WriteU64(&w, "cacheRead", usage->CacheRead);
-  WriteU64(&w, "cacheWrite", usage->CacheWrite);
-  WriteU64(&w, "reasoning", usage->Reasoning);
-  WriteU64(&w, "totalTokens", usage->TotalTokens);
-  ObjectEnd(&w);
+  JsonWriter w;
+  JsonWrite_Begin(&w, out);
+  JsonWrite_U64(&w, "input", usage->Input);
+  JsonWrite_U64(&w, "output", usage->Output);
+  JsonWrite_U64(&w, "cacheRead", usage->CacheRead);
+  JsonWrite_U64(&w, "cacheWrite", usage->CacheWrite);
+  JsonWrite_U64(&w, "reasoning", usage->Reasoning);
+  JsonWrite_U64(&w, "totalTokens", usage->TotalTokens);
+  JsonWrite_End(&w);
 }
 
 void WriteMessage(StrBuf* out, const Message* message) {
-  ObjectWriter w;
-  ObjectBegin(&w, out);
-  WriteString(&w, "role", RoleName(message->Kind));
-  ObjectKey(&w, "content");
+  JsonWriter w;
+  JsonWrite_Begin(&w, out);
+  JsonWrite_String(&w, "role", RoleName(message->Kind));
+  JsonWrite_Key(&w, "content");
   StrBuf_AppendChar(out, '[');
   for (u32 i = 0; i < message->Content.Count; i++) {
     if (i) StrBuf_AppendChar(out, ',');
     WriteContent(out, &message->Content.Data[i]);
   }
   StrBuf_AppendChar(out, ']');
-  WriteU64(&w, "timestamp", message->Timestamp);
+  JsonWrite_U64(&w, "timestamp", message->Timestamp);
   if (message->Kind == Role::Assistant) {
-    WriteString(&w, "stopReason", StopReasonName(message->Stop));
-    ObjectKey(&w, "usage");
+    JsonWrite_String(&w, "stopReason", StopReasonName(message->Stop));
+    JsonWrite_Key(&w, "usage");
     WriteUsage(out, &message->Use);
-    WriteString(&w, "errorMessage", message->ErrorMessage);
-    WriteString(&w, "model", message->Model);
-    WriteString(&w, "provider", message->Provider);
+    JsonWrite_String(&w, "errorMessage", message->ErrorMessage);
+    JsonWrite_String(&w, "model", message->Model);
+    JsonWrite_String(&w, "provider", message->Provider);
   } else if (message->Kind == Role::ToolResult) {
-    WriteString(&w, "toolCallId", message->ToolCallId);
-    WriteString(&w, "toolName", message->ToolName);
-    WriteBool(&w, "isError", message->IsError);
+    JsonWrite_String(&w, "toolCallId", message->ToolCallId);
+    JsonWrite_String(&w, "toolName", message->ToolName);
+    JsonWrite_Bool(&w, "isError", message->IsError);
   }
-  ObjectEnd(&w);
+  JsonWrite_End(&w);
 }
 
 // Decoded strings are views into the JSON document, which the caller's arena
@@ -452,33 +410,33 @@ Message CloneMessage(Arena* arena, const Message& source) {
 }
 
 void WritePayload(StrBuf* out, const SessionRecord* record) {
-  ObjectWriter w;
-  ObjectBegin(&w, out);
+  JsonWriter w;
+  JsonWrite_Begin(&w, out);
   switch (record->Kind) {
     case SessionRecordKind::SessionStarted:
-      WriteString(&w, "workingDirectory", record->SessionStarted.WorkingDirectory);
-      WriteString(&w, "projectKey", record->SessionStarted.ProjectKey);
-      WriteString(&w, "label", record->SessionStarted.Label);
+      JsonWrite_String(&w, "workingDirectory", record->SessionStarted.WorkingDirectory);
+      JsonWrite_String(&w, "projectKey", record->SessionStarted.ProjectKey);
+      JsonWrite_String(&w, "label", record->SessionStarted.Label);
       WriteOptionalId(&w, "forkedFromSessionId", record->SessionStarted.ForkedFromSessionId);
       WriteOptionalId(&w, "forkedFromEntryId", record->SessionStarted.ForkedFromEntryId);
       break;
     case SessionRecordKind::Message:
       WriteId(&w, "parentId", record->MessageEntry.ParentId);
-      ObjectKey(&w, "message");
+      JsonWrite_Key(&w, "message");
       WriteMessage(out, &record->MessageEntry.Value);
       break;
     case SessionRecordKind::Model:
       WriteId(&w, "parentId", record->ModelEntry.ParentId);
-      WriteString(&w, "provider", record->ModelEntry.Provider);
-      WriteString(&w, "model", record->ModelEntry.Model);
+      JsonWrite_String(&w, "provider", record->ModelEntry.Provider);
+      JsonWrite_String(&w, "model", record->ModelEntry.Model);
       break;
     case SessionRecordKind::Thinking:
       WriteId(&w, "parentId", record->ThinkingEntry.ParentId);
-      WriteString(&w, "level", record->ThinkingEntry.Level);
+      JsonWrite_String(&w, "level", record->ThinkingEntry.Level);
       break;
     case SessionRecordKind::Tools:
       WriteId(&w, "parentId", record->ToolsEntry.ParentId);
-      ObjectKey(&w, "toolNames");
+      JsonWrite_Key(&w, "toolNames");
       StrBuf_AppendChar(out, '[');
       for (u32 i = 0; i < record->ToolsEntry.ToolNames.Count; i++) {
         if (i) StrBuf_AppendChar(out, ',');
@@ -491,25 +449,25 @@ void WritePayload(StrBuf* out, const SessionRecord* record) {
       WriteId(&w, "baseEntryId", record->CompactionEntry.BaseEntryId);
       WriteId(&w, "throughEntryId", record->CompactionEntry.ThroughEntryId);
       WriteId(&w, "sourceHeadId", record->CompactionEntry.SourceHeadId);
-      ObjectKey(&w, "summary");
+      JsonWrite_Key(&w, "summary");
       WriteMessage(out, &record->CompactionEntry.Summary);
       if (record->CompactionEntry.HasUsage) {
-        ObjectKey(&w, "usage");
+        JsonWrite_Key(&w, "usage");
         WriteUsage(out, &record->CompactionEntry.Use);
       }
       break;
     case SessionRecordKind::BranchLabel:
       WriteId(&w, "parentId", record->BranchLabelEntry.ParentId);
-      WriteString(&w, "label", record->BranchLabelEntry.Label);
+      JsonWrite_String(&w, "label", record->BranchLabelEntry.Label);
       break;
     case SessionRecordKind::SessionName:
-      WriteString(&w, "name", record->SessionNameEntry.Name);
+      JsonWrite_String(&w, "name", record->SessionNameEntry.Name);
       break;
     case SessionRecordKind::Leaf:
       WriteId(&w, "leafId", record->LeafEntry.LeafId);
       break;
   }
-  ObjectEnd(&w);
+  JsonWrite_End(&w);
 }
 
 bool DecodePayload(Arena* arena, const JsonValue* payload, SessionRecord* record) {
@@ -628,7 +586,7 @@ SessionResult SessionRecord_PrepareForkCopy(
     const Array<DurableId>* newIds, SessionRecord* out) {
   if (!source || !out || !DurableId_IsSet(targetSessionId) ||
       targetSeq == 0)
-    return Invalid("fork copy arguments are invalid");
+    return SessionResult_Invalid("fork copy arguments are invalid");
 
   SessionRecord copy = *source;
   copy.SchemaVersion = SESSION_SCHEMA_VERSION;
@@ -640,7 +598,7 @@ SessionResult SessionRecord_PrepareForkCopy(
   DurableId parent =
       RemapId(oldIds, newIds, SessionRecord_ParentId(source));
   if (!DurableId_IsSet(parent))
-    return Corrupt("fork branch parent could not be remapped");
+    return SessionResult_Corrupt("fork branch parent could not be remapped");
 
   switch (copy.Kind) {
     case SessionRecordKind::Message: copy.MessageEntry.ParentId = parent; break;
@@ -661,10 +619,10 @@ SessionResult SessionRecord_PrepareForkCopy(
       if (!DurableId_IsSet(copy.CompactionEntry.BaseEntryId) ||
           !DurableId_IsSet(copy.CompactionEntry.ThroughEntryId) ||
           !DurableId_IsSet(copy.CompactionEntry.SourceHeadId))
-        return Corrupt("fork compaction could not be remapped");
+        return SessionResult_Corrupt("fork compaction could not be remapped");
       break;
     default:
-      return Corrupt("fork branch contains a non-tree record");
+      return SessionResult_Corrupt("fork branch contains a non-tree record");
   }
 
   *out = copy;
@@ -672,52 +630,52 @@ SessionResult SessionRecord_PrepareForkCopy(
 }
 
 SessionResult SessionRecord_Validate(const SessionRecord* record) {
-  if (!record) return Invalid("record is null");
+  if (!record) return SessionResult_Invalid("record is null");
   if (record->SchemaVersion != SESSION_SCHEMA_VERSION) {
     return SessionResult_Error(
         record->SchemaVersion > SESSION_SCHEMA_VERSION ? SessionStatus::UnsupportedVersion
                                                        : SessionStatus::Corrupt,
         SVL("unsupported session schema version"));
   }
-  if (!DurableId_IsSet(record->SessionId)) return Invalid("sessionId is required");
-  if (!DurableId_IsSet(record->EntryId)) return Invalid("entryId is required");
+  if (!DurableId_IsSet(record->SessionId)) return SessionResult_Invalid("sessionId is required");
+  if (!DurableId_IsSet(record->EntryId)) return SessionResult_Invalid("entryId is required");
   if (record->Seq == 0 || record->Seq > (u64)JSON_SAFE_INTEGER_MAX)
-    return Invalid("seq must be a positive JSON-safe integer");
+    return SessionResult_Invalid("seq must be a positive JSON-safe integer");
   if (record->CreatedAt > (u64)JSON_SAFE_INTEGER_MAX)
-    return Invalid("createdAt must be a JSON-safe integer");
+    return SessionResult_Invalid("createdAt must be a JSON-safe integer");
   if (SessionRecordKind_Name(record->Kind).Length == 0)
-    return Invalid("record kind is invalid");
+    return SessionResult_Invalid("record kind is invalid");
 
   switch (record->Kind) {
     case SessionRecordKind::SessionStarted:
       if (record->SessionStarted.WorkingDirectory.Length == 0 ||
           record->SessionStarted.ProjectKey.Length == 0)
-        return Invalid("session metadata is incomplete");
+        return SessionResult_Invalid("session metadata is incomplete");
       if (DurableId_IsSet(record->SessionStarted.ForkedFromSessionId) !=
           DurableId_IsSet(record->SessionStarted.ForkedFromEntryId))
-        return Invalid("fork provenance must include both session and entry IDs");
+        return SessionResult_Invalid("fork provenance must include both session and entry IDs");
       break;
     case SessionRecordKind::Message:
       if (!DurableId_IsSet(record->MessageEntry.ParentId) ||
           !MessageValid(&record->MessageEntry.Value))
-        return Invalid("message entry is invalid");
+        return SessionResult_Invalid("message entry is invalid");
       break;
     case SessionRecordKind::Model:
       if (!DurableId_IsSet(record->ModelEntry.ParentId) ||
           record->ModelEntry.Provider.Length == 0 || record->ModelEntry.Model.Length == 0)
-        return Invalid("model entry is invalid");
+        return SessionResult_Invalid("model entry is invalid");
       break;
     case SessionRecordKind::Thinking:
       if (!DurableId_IsSet(record->ThinkingEntry.ParentId) ||
           record->ThinkingEntry.Level.Length == 0)
-        return Invalid("thinking entry is invalid");
+        return SessionResult_Invalid("thinking entry is invalid");
       break;
     case SessionRecordKind::Tools:
       if (!DurableId_IsSet(record->ToolsEntry.ParentId))
-        return Invalid("tools parentId is required");
+        return SessionResult_Invalid("tools parentId is required");
       for (u32 i = 0; i < record->ToolsEntry.ToolNames.Count; i++)
         if (record->ToolsEntry.ToolNames.Data[i].Length == 0)
-          return Invalid("tool names cannot be empty");
+          return SessionResult_Invalid("tool names cannot be empty");
       break;
     case SessionRecordKind::Compaction:
       if (!DurableId_IsSet(record->CompactionEntry.ParentId) ||
@@ -725,51 +683,51 @@ SessionResult SessionRecord_Validate(const SessionRecord* record) {
           !DurableId_IsSet(record->CompactionEntry.ThroughEntryId) ||
           !DurableId_IsSet(record->CompactionEntry.SourceHeadId) ||
           !MessageValid(&record->CompactionEntry.Summary))
-        return Invalid("compaction entry is invalid");
+        return SessionResult_Invalid("compaction entry is invalid");
       break;
     case SessionRecordKind::BranchLabel:
       if (!DurableId_IsSet(record->BranchLabelEntry.ParentId) ||
           record->BranchLabelEntry.Label.Length == 0)
-        return Invalid("branch label entry is invalid");
+        return SessionResult_Invalid("branch label entry is invalid");
       break;
     case SessionRecordKind::SessionName:
       break;
     case SessionRecordKind::Leaf:
       if (!DurableId_IsSet(record->LeafEntry.LeafId))
-        return Invalid("leaf marker requires a target entry ID");
+        return SessionResult_Invalid("leaf marker requires a target entry ID");
       break;
   }
   return SessionResult_Ok(record->Seq);
 }
 
 SessionResult SessionRecord_Encode(StrBuf* out, const SessionRecord* record) {
-  if (!out) return Invalid("output buffer is null");
+  if (!out) return SessionResult_Invalid("output buffer is null");
   SessionResult valid = SessionRecord_Validate(record);
   if (!SessionResult_IsOk(valid)) return valid;
 
-  ObjectWriter w;
-  ObjectBegin(&w, out);
-  WriteU64(&w, "schemaVersion", record->SchemaVersion);
+  JsonWriter w;
+  JsonWrite_Begin(&w, out);
+  JsonWrite_U64(&w, "schemaVersion", record->SchemaVersion);
   WriteId(&w, "sessionId", record->SessionId);
-  WriteU64(&w, "seq", record->Seq);
+  JsonWrite_U64(&w, "seq", record->Seq);
   WriteId(&w, "entryId", record->EntryId);
-  WriteString(&w, "type", SessionRecordKind_Name(record->Kind));
-  WriteU64(&w, "createdAt", record->CreatedAt);
-  ObjectKey(&w, "payload");
+  JsonWrite_String(&w, "type", SessionRecordKind_Name(record->Kind));
+  JsonWrite_U64(&w, "createdAt", record->CreatedAt);
+  JsonWrite_Key(&w, "payload");
   WritePayload(out, record);
-  ObjectEnd(&w);
+  JsonWrite_End(&w);
   return SessionResult_Ok(record->Seq);
 }
 
 SessionResult SessionRecord_Decode(Arena* arena, StrView text, SessionRecord* out) {
-  if (!arena || !out || !text.Data) return Invalid("decode arguments are invalid");
+  if (!arena || !out || !text.Data) return SessionResult_Invalid("decode arguments are invalid");
   JsonValue* root = Json_Parse(arena, text);
-  if (!Json_IsObject(root)) return Corrupt("record is not valid JSON object");
+  if (!Json_IsObject(root)) return SessionResult_Corrupt("record is not valid JSON object");
 
   SessionRecord record = {};
   u64 version = 0;
   if (!ReadRequiredU64(root, "schemaVersion", &version) || version > 0xFFFFFFFFull)
-    return Corrupt("schemaVersion is missing or invalid");
+    return SessionResult_Corrupt("schemaVersion is missing or invalid");
   record.SchemaVersion = (u32)version;
   if (record.SchemaVersion != SESSION_SCHEMA_VERSION) {
     return SessionResult_Error(
@@ -783,7 +741,7 @@ SessionResult SessionRecord_Decode(Arena* arena, StrView text, SessionRecord* ou
       !ParseRecordKind(Json_GetStr(root, "type"), &record.Kind) ||
       !ReadRequiredU64(root, "createdAt", &record.CreatedAt) ||
       !DecodePayload(arena, Json_Get(root, "payload"), &record)) {
-    return Corrupt("record fields are missing or invalid");
+    return SessionResult_Corrupt("record fields are missing or invalid");
   }
 
   SessionResult valid = SessionRecord_Validate(&record);
@@ -799,7 +757,7 @@ SessionResult SessionRecord_Decode(Arena* arena, StrView text, SessionRecord* ou
 
 SessionResult SessionRecord_Clone(Arena* arena, const SessionRecord* source,
                                   SessionRecord* out) {
-  if (!arena || !source || !out) return Invalid("clone arguments are invalid");
+  if (!arena || !source || !out) return SessionResult_Invalid("clone arguments are invalid");
   SessionRecord clone = *source;
   switch (source->Kind) {
     case SessionRecordKind::SessionStarted:

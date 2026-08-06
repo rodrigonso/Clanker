@@ -1,5 +1,7 @@
 #include "tui/linemodel.h"
 
+#include "base/sysinfo.h"
+
 #include <string.h>
 #include <time.h>
 
@@ -160,13 +162,8 @@ bool NeedsSeparator(const Entry* previous, const Entry* current) {
 }
 
 StrView FormatTimestamp(Arena* arena, u64 timestampMs) {
-  time_t seconds = (time_t)(timestampMs / 1000ull);
   struct tm local = {};
-#if defined(_WIN32)
-  if (localtime_s(&local, &seconds) != 0) return StrView{};
-#else
-  if (!localtime_r(&seconds, &local)) return StrView{};
-#endif
+  if (!Sys_LocalTime(timestampMs, &local)) return StrView{};
   char* text = (char*)ArenaAlloc(arena, 5, 1);
   text[0] = (char)('0' + local.tm_hour / 10);
   text[1] = (char)('0' + local.tm_hour % 10);

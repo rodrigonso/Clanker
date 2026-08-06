@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "agent/event.h"
+#include "agent/event_json.h"
 #include "agent/harness.h"
 #include "app/command.h"
 #include "app/plain_select.h"
@@ -17,7 +18,7 @@
 #include "base/arena.h"
 #include "base/str.h"
 #include "base/sysinfo.h"
-#include "llm/faux.h"
+
 #include "net/browser.h"
 #include "net/http.h"
 #include "term/term.h"
@@ -103,8 +104,7 @@ struct InteractiveRuntime {
   PromptContextOptions PromptOptions;
   HarnessEventPump* EventPump;
   AgentSink EventSink;
-  bool Faux;
-  bool AutoOpen;
+ bool AutoOpen;
   Tui* TuiView;
   AppAuth* Auth;
   AuthWarmup* AuthWarmupState;
@@ -300,7 +300,7 @@ static StrView AuthGuidance(Arena* arena, const ProviderSpec* spec, bool interac
   }
   if (!canLogin && !spec->ApiKeyEnvVar)
     StrBuf_AppendCStr(&b, "Configure credentials for this provider");
-  StrBuf_AppendCStr(&b, " before sending a prompt (or use --faux for an offline demo).");
+  StrBuf_AppendCStr(&b, " before sending a prompt.");
   return StrBuf_View(&b);
 }
 
@@ -428,7 +428,20 @@ struct HarnessEventPump {
   bool StopRequested;
   volatile i32 Exited;
   bool Started;
+  // `--mode json`: write raw watch events as NDJSON instead of translating them
+  // into the human-facing AgentSink.
+  bool JsonOutput;
 };
+
+// One event, one line, flushed immediately so a consumer reading the pipe sees
+// progress as it happens. Events with no JSON representation emit nothing.
+static void EmitHarnessEventJson(Arena* arena, const AgentHarnessEvent* event) {
+  StrBuf line = StrBuf_Make(arena, 256);
+  if (!AgentEventJson_Write(&line, event)) return;
+  fwrite(line.Data, 1, line.Length, stdout);
+  fputc('\n', stdout);
+  fflush(stdout);
+}
 
 static void ClearLiveToolEnds(HarnessEventPump* pump) {
   ArenaReset(&pump->CompletionMem);
@@ -575,7 +588,10 @@ static void RunHarnessEventPump(void* user) {
       continue;
     }
     if (!SessionResult_IsOk(next)) break;
-    PumpHarnessEvent(pump, &event);
+    if (pump->JsonOutput)
+      EmitHarnessEventJson(&scratch, &event);
+    else
+      PumpHarnessEvent(pump, &event);
   }
   ArenaRelease(&scratch);
   pump->Exited = 1;
@@ -585,11 +601,13 @@ static SessionResult StartHarnessEventPump(Arena* arena, AgentHarness* harness,
                                            AgentSink sink,
                                            Tui* tuiView,
                                            HarnessEventPump* pump,
-                                           AgentHarnessSnapshot* snapshot) {
+                                           AgentHarnessSnapshot* snapshot,
+                                           bool jsonOutput = false) {
   memset(pump, 0, sizeof(*pump));
   pump->Harness = harness;
   pump->TuiView = tuiView;
   pump->Sink = sink;
+  pump->JsonOutput = jsonOutput;
   pump->CompletionMem = ArenaCreate((usize)4 << 20);
   ClearLiveToolEnds(pump);
   Mutex_Init(&pump->WatchGuard);
@@ -1161,8 +1179,7 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
 }
 
 static bool RuntimeCheckAuth(InteractiveRuntime* rt, const AppCommandUx* ux, bool asError) {
-  if (rt->Faux) return true;
-  FinishRuntimeAuthWarmup(rt);
+ FinishRuntimeAuthWarmup(rt);
   volatile i32* abort =
       rt->TuiView ? Tui_OperationAbort(rt->TuiView) : &g_abort;
   if (abort && *abort) return false;
@@ -1609,16 +1626,7 @@ static SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
   ModelRequestProfile targetProfile = config.Stream.Profile;
   if (targetState && targetState->Provider.Length &&
       targetState->Model.Length) {
-    if (rt->Faux) {
-      if (!StrView_Eq(targetState->Provider, SVL("faux"))) {
-        SessionLog_Close(&target);
-        PromptContext_Release(&nextPrompt);
-        ArenaRelease(&scratch);
-        return SessionResult_Error(
-            SessionStatus::InvalidState,
-            SVL("the target session does not use the faux provider"));
-      }
-    } else {
+    {
       targetSpec = ProviderRegistry_Find(targetState->Provider);
       if (!targetSpec || !targetSpec->CreateModel ||
           !targetSpec->CreateProvider) {
@@ -1790,13 +1798,8 @@ static StrView FormatRelativeAge(Arena* arena, u64 timestamp, u64 now) {
 
 static StrView FormatTimestamp(Arena* arena, u64 timestamp) {
   if (!timestamp) return SVL("(unknown)");
-  time_t seconds = (time_t)(timestamp / 1000);
   struct tm local = {};
-#if defined(_WIN32)
-  if (localtime_s(&local, &seconds) != 0) return SVL("(unknown)");
-#else
-  if (!localtime_r(&seconds, &local)) return SVL("(unknown)");
-#endif
+  if (!Sys_LocalTime(timestamp, &local)) return SVL("(unknown)");
   char value[32];
   int length =
       snprintf(value, sizeof(value), "%04d-%02d-%02d %02d:%02d:%02d",
@@ -2655,7 +2658,7 @@ static AppCommandHandlers RuntimeCommandHandlers(InteractiveRuntime* rt) {
   handlers.Reload = HandleReloadCommand;
   bool selectorsAvailable = rt->TuiView || Term_IsInteractive();
   if (selectorsAvailable) handlers.Trust = HandleTrustCommand;
-  if (!rt->Faux && selectorsAvailable) {
+  if (selectorsAvailable) {
     handlers.Login = HandleLoginCommand;
     handlers.Model = HandleModelCommand;
   }
@@ -2720,6 +2723,9 @@ static void PrintHelp() {
       "Usage: clank [options]\n"
       "  -m <model>        Override the configured model for this run only\n"
       "  -p <prompt>       Run a single prompt and exit (print mode)\n"
+      "  --mode <text|json>\n"
+      "                    Print-mode output: human text (default) or an\n"
+      "                    NDJSON event stream on stdout. Requires -p\n"
       "  -c, --continue    Continue the most recent session for this project\n"
       "  -r, --resume ID   Resume an exact session ID from any project\n"
       "  --no-session      Keep the session in memory; write no session files\n"
@@ -2734,8 +2740,7 @@ static void PrintHelp() {
       "  --login [prov]    OAuth login in your browser (anthropic or openai)\n"
       "  --logout [prov]   Remove stored credentials (default: anthropic)\n"
       "  --no-open         Do not auto-open a browser for --login or interactive /login\n"
-      "  --faux            Scripted provider (no key/network; for demos)\n"
-      "  --help            Show this help\n\n"
+     "  --help            Show this help\n\n"
       "Auth: run `--login anthropic` for Claude Pro/Max or `--login openai` for\n"
       "a ChatGPT subscription; alternatively set ANTHROPIC_API_KEY or OPENAI_API_KEY.\n"
       "Interactive commands: /session, /name, /sessions, /resume, /tree,\n"
@@ -2851,7 +2856,7 @@ static StrView SessionProjectKey(Arena* arena, StrView workingDirectory) {
 }
 
 // Plain line REPL (non-TTY / fallback): the original fgets loop.
-static void RunPlainRepl(InteractiveRuntime* rt, Faux* fauxState) {
+static void RunPlainRepl(InteractiveRuntime* rt) {
   EnableTerminal();
   rt->TuiView = nullptr;
   HarnessEventPump pump = {};
@@ -2866,10 +2871,7 @@ static void RunPlainRepl(InteractiveRuntime* rt, Faux* fauxState) {
   }
   rt->EventPump = &pump;
   rt->EventSink = sink;
-  if (rt->Faux)
-    printf("Clank (faux demo). Ctrl+C interrupts a turn, /exit quits.\n");
-  else
-    printf("Clank (%.*s / %.*s). Ctrl+C interrupts a turn, /exit quits.\n",
+  printf("Clank (%.*s / %.*s). Ctrl+C interrupts a turn, /exit quits.\n",
            (int)rt->Spec->Name.Length, rt->Spec->Name.Data, (int)rt->CurrentModel.Id.Length,
            rt->CurrentModel.Id.Data);
 
@@ -2880,7 +2882,7 @@ static void RunPlainRepl(InteractiveRuntime* rt, Faux* fauxState) {
       PromptContextReport(rt->Mem, rt->Prompt, rt->HasProjectResources,
                           rt->ProjectTrusted, SVL("Prompt context loaded.")));
   EmitPromptDiagnostics(rt->Prompt, &commandUx);
-  if (!rt->Faux) RuntimeCheckAuth(rt, &commandUx, false);
+  RuntimeCheckAuth(rt, &commandUx, false);
   AppCommandHandlers handlers = RuntimeCommandHandlers(rt);
   for (;;) {
     fputs("\n\x1b[1m\xe2\x80\xba \x1b[0m", stdout);
@@ -2898,8 +2900,7 @@ static void RunPlainRepl(InteractiveRuntime* rt, Faux* fauxState) {
     g_abort = 0;
     if (!RuntimeCheckAuth(rt, &commandUx, true)) continue;
     if (g_abort) continue;
-    if (rt->Faux) fauxState->Index = 0;
-    SessionResult run = RunHarnessPrompt(rt->Harness, SV(line));
+   SessionResult run = RunHarnessPrompt(rt->Harness, SV(line));
     ReportHarnessResult(run);
   }
   StopHarnessEventPump(&pump);
@@ -2907,18 +2908,15 @@ static void RunPlainRepl(InteractiveRuntime* rt, Faux* fauxState) {
 }
 
 // Full-screen TUI REPL. Falls back to the plain REPL if not a TTY.
-static void RunTuiRepl(InteractiveRuntime* rt, Faux* fauxState) {
+static void RunTuiRepl(InteractiveRuntime* rt) {
   TuiOpts opts;
-  opts.ModelName = rt->Faux ? SVL("faux") : rt->CurrentModel.Id;
+  opts.ModelName = rt->CurrentModel.Id;
   opts.Profile = rt->Harness->Config.Stream.Profile;
   opts.Color = (getenv("NO_COLOR") == nullptr);
   u32 catalogCount = AppCommandSpec_Count();
   TuiCommandSpec* commands = ArenaPushArray(rt->Mem, TuiCommandSpec, catalogCount);
   for (u32 i = 0; i < catalogCount; i++) {
     const AppCommandSpec* command = AppCommandSpec_At(i);
-    if (rt->Faux &&
-        (command->Kind == AppCommandKind::Login || command->Kind == AppCommandKind::Model))
-      continue;
     commands[opts.CommandCount++] =
         TuiCommandSpec{command->Name, command->Alias, command->Description};
   }
@@ -2926,8 +2924,8 @@ static void RunTuiRepl(InteractiveRuntime* rt, Faux* fauxState) {
 
   Tui tui;
   if (!Tui_Start(&tui, rt->Mem, opts)) {
-    if (!rt->Faux) Http_GlobalInit();
-    RunPlainRepl(rt, fauxState);
+    Http_GlobalInit();
+    RunPlainRepl(rt);
     return;
   }
   rt->TuiView = &tui;
@@ -2951,11 +2949,9 @@ static void RunTuiRepl(InteractiveRuntime* rt, Faux* fauxState) {
                         snapshot.Transcript.Count);
 
   AuthWarmup warmup = {};
-  if (!rt->Faux) {
-    Http_GlobalInit();
-    rt->AuthWarmupState = &warmup;
-    StartAuthWarmup(&warmup, rt->Auth, rt->Spec, Tui_OperationAbort(&tui));
-  }
+  Http_GlobalInit();
+  rt->AuthWarmupState = &warmup;
+  StartAuthWarmup(&warmup, rt->Auth, rt->Spec, Tui_OperationAbort(&tui));
   Tui_LoadStartupContext(&tui);
 
   AppCommandUx commandUx = {&tui, TuiCommandNotice, TuiCommandError};
@@ -2981,8 +2977,7 @@ static void RunTuiRepl(InteractiveRuntime* rt, Faux* fauxState) {
     if (!authenticated || cancelled) continue;
     *Tui_Abort(&tui) = 0;
     if (!Tui_AcceptPrompt(&tui, submission.Text)) continue;
-    if (rt->Faux) fauxState->Index = 0;
-    SessionResult run = RunHarnessPrompt(rt->Harness, submission.Text);
+   SessionResult run = RunHarnessPrompt(rt->Harness, submission.Text);
     if (!SessionResult_IsOk(run)) Tui_CommandError(&tui, run.Message);
   }
   CancelRuntimeAuthWarmup(rt);
@@ -2996,6 +2991,7 @@ int main(int argc, char** argv) {
   Arena arena = ArenaCreate((usize)2 << 30);
   const char* modelOverride = nullptr;
   const char* onePrompt = nullptr;
+  bool jsonMode = false;
   const char* loginProvider = nullptr;
   const char* logoutProvider = nullptr;
   const char* resumeSession = nullptr;
@@ -3003,7 +2999,6 @@ int main(int argc, char** argv) {
   StrView explicitSystemPrompt = {};
   Array<StrView> explicitAppendPrompts = Array_Make<StrView>(&arena, 4);
   ProjectTrustOverride trustOverride = ProjectTrustOverride::Unspecified;
-  bool faux = false;
   bool noOpen = false;
   bool noSession = false;
   bool noContextFiles = false;
@@ -3024,6 +3019,20 @@ int main(int argc, char** argv) {
         return 1;
       }
       onePrompt = argv[++i];
+    } else if (strcmp(argv[i], "--mode") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "error: --mode requires text or json\n");
+        ArenaRelease(&arena);
+        return 1;
+      }
+      const char* value = argv[++i];
+      if (strcmp(value, "json") == 0) {
+        jsonMode = true;
+      } else if (strcmp(value, "text") != 0) {
+        fprintf(stderr, "error: unknown mode '%s' (expected text or json)\n", value);
+        ArenaRelease(&arena);
+        return 1;
+      }
     } else if (strcmp(argv[i], "--system-prompt") == 0) {
       if (i + 1 >= argc) {
         fprintf(stderr, "error: --system-prompt requires a value\n");
@@ -3060,8 +3069,6 @@ int main(int argc, char** argv) {
         return 1;
       }
       trustOverride = ProjectTrustOverride::Untrusted;
-    } else if (strcmp(argv[i], "--faux") == 0) {
-      faux = true;
     } else if (strcmp(argv[i], "--no-session") == 0) {
       noSession = true;
     } else if (strcmp(argv[i], "-c") == 0 ||
@@ -3100,6 +3107,14 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  // JSON is a machine surface for a single non-interactive run; there is no
+  // meaningful interactive form of it without a bidirectional protocol.
+  if (jsonMode && !onePrompt) {
+    fprintf(stderr, "error: --mode json requires -p <prompt>\n");
+    ArenaRelease(&arena);
+    return 1;
+  }
+
   StrView authPath = AuthStore_DefaultPath(&arena);
   StrView settingsPath = AppSettings_DefaultPath(&arena);
   signal(SIGINT, OnSigint);
@@ -3122,14 +3137,12 @@ int main(int argc, char** argv) {
   appAuth.Mem = &arena;
   appAuth.Path = authPath;
   RuntimeSelection selected =
-      LoadRuntimeSelection(&arena, settingsPath, faux ? nullptr : modelOverride);
-  if (!faux) {
-    if (!selected.Spec || !selected.Spec->CreateProvider || !selected.Spec->CreateModel) {
-      fprintf(stderr, "error: no usable built-in provider is registered\n");
-      Http_GlobalShutdown();
-      ArenaRelease(&arena);
-      return 1;
-    }
+      LoadRuntimeSelection(&arena, settingsPath, modelOverride);
+  if (!selected.Spec || !selected.Spec->CreateProvider || !selected.Spec->CreateModel) {
+    fprintf(stderr, "error: no usable built-in provider is registered\n");
+    Http_GlobalShutdown();
+    ArenaRelease(&arena);
+    return 1;
   }
 
   StrView workingDirectory = Sys_CurrentDir(&arena);
@@ -3204,21 +3217,11 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  Model model = faux ? Model{} : selected.Spec->CreateModel(&arena, selected.ModelId);
-  if (faux) {
-    model.Id = SVL("faux-model");
-    model.Name = model.Id;
-    model.Provider = SVL("faux");
-  }
+  Model model = selected.Spec->CreateModel(&arena, selected.ModelId);
   bool unsupportedProfilePreference = false;
-  ModelRequestProfile preference =
-      faux ? ModelRequestProfile{}
-           : Model_NormalizeRequestPreference(
-                 &model, selected.RequestedProfile,
-                 &unsupportedProfilePreference);
-  ModelRequestProfile profile =
-      faux ? ModelRequestProfile{}
-           : Model_ResolveRequestProfile(&model, preference);
+  ModelRequestProfile preference = Model_NormalizeRequestPreference(
+      &model, selected.RequestedProfile, &unsupportedProfilePreference);
+  ModelRequestProfile profile = Model_ResolveRequestProfile(&model, preference);
   if (unsupportedProfilePreference) {
     fprintf(stderr,
             "warning: saved effort/context preferences are unsupported by model "
@@ -3257,34 +3260,17 @@ int main(int argc, char** argv) {
     PrintPromptDiagnostics(&promptContext);
   }
 
-  FauxStep steps[2] = {};
-  FauxToolCall fauxCall = {SVL("shell"), SVL("t1"),
-                           SVL("{\"command\":\"echo hello-from-shell\"}")};
-  Faux fauxState = {};
-  if (faux) {
-    steps[0].Text = SVL("Let me run a quick command.\n");
-    steps[0].Tools = &fauxCall;
-    steps[0].ToolCount = 1;
-    steps[1].Text = SVL("The command printed its greeting. All done.");
-    steps[1].Stop = StopReason::Stop;
-    fauxState.Steps = steps;
-    fauxState.Count = 2;
-  }
-
   AgentHarnessConfig harnessConfig = {};
   harnessConfig.SystemPrompt = promptContext.SystemPrompt;
   harnessConfig.ModelInfo = model;
   harnessConfig.Tools = tools;
   harnessConfig.ToolCount = sizeof(tools) / sizeof(tools[0]);
-  harnessConfig.ProviderImpl =
-      faux ? Faux_Provider(&fauxState) : selected.Spec->CreateProvider(&arena);
+  harnessConfig.ProviderImpl = selected.Spec->CreateProvider(&arena);
   harnessConfig.Stream.Profile = profile;
   harnessConfig.ToolExec = ToolExecution::Parallel;
   harnessConfig.Compaction = selected.Compaction;
-  if (!faux) {
-    harnessConfig.AuthUser = &appAuth;
-    harnessConfig.ResolveAuth = AppResolveAuth;
-  }
+  harnessConfig.AuthUser = &appAuth;
+  harnessConfig.ResolveAuth = AppResolveAuth;
 
   SessionLog sessionLog = {};
   SessionInfo sessionInfo = {};
@@ -3356,18 +3342,7 @@ int main(int argc, char** argv) {
         AgentHarness_Snapshot(&scratch, &harness, &state);
     if (SessionResult_IsOk(snapshot) && state.Provider.Length &&
         state.Model.Length) {
-      if (faux) {
-        if (!StrView_Eq(state.Provider, SVL("faux"))) {
-          fprintf(stderr,
-                  "error: session provider '%.*s' cannot run in faux mode\n",
-                  (int)state.Provider.Length, state.Provider.Data);
-          ArenaRelease(&scratch);
-          AgentHarness_Close(&harness);
-          sessions.Close(sessions.Ctx);
-          ArenaRelease(&arena);
-          return 1;
-        }
-      } else {
+      {
         const ProviderSpec* restored = ProviderRegistry_Find(state.Provider);
         if (!restored || !restored->CreateProvider ||
             !restored->CreateModel) {
@@ -3452,19 +3427,18 @@ int main(int argc, char** argv) {
   runtime.DefaultTrust = selected.DefaultTrust;
   runtime.Prompt = &promptContext;
   runtime.PromptOptions = promptOptions;
-  runtime.Faux = faux;
   runtime.AutoOpen = !noOpen;
   runtime.Auth = &appAuth;
 
   if (onePrompt) {
     EnableTerminal();
-    if (!faux) Http_GlobalInit();
+    Http_GlobalInit();
     HarnessEventPump pump = {};
     AgentHarnessSnapshot snapshot = {};
     AgentSink sink = {nullptr, ReplSink};
     SessionResult watching =
         StartHarnessEventPump(&arena, &harness, sink, nullptr, &pump,
-                              &snapshot);
+                              &snapshot, jsonMode);
     if (!SessionResult_IsOk(watching)) {
       ReportHarnessResult(watching);
       AgentHarness_Close(&harness);
@@ -3474,7 +3448,7 @@ int main(int argc, char** argv) {
       return 1;
     }
     g_abort = 0;
-    if (!faux && !ResolvePromptAuth(&harness, &g_abort)) {
+    if (!ResolvePromptAuth(&harness, &g_abort)) {
       if (g_abort) {
         StopHarnessEventPump(&pump);
         AgentHarness_Close(&harness);
@@ -3495,6 +3469,20 @@ int main(int argc, char** argv) {
     g_abort = 0;
     SessionResult run = RunHarnessPrompt(&harness, SV(onePrompt));
     StopHarnessEventPump(&pump);
+    if (jsonMode) {
+      // Terminator: the pump has drained, so this is always the last line and
+      // carries the same verdict as the exit code.
+      StrBuf line = StrBuf_Make(&arena, 128);
+      JsonWriter w = {};
+      JsonWrite_Begin(&w, &line);
+      JsonWrite_String(&w, "type", SVL("result"));
+      JsonWrite_Bool(&w, "ok", SessionResult_IsOk(run));
+      if (!SessionResult_IsOk(run)) JsonWrite_String(&w, "error", run.Message);
+      JsonWrite_End(&w);
+      fwrite(line.Data, 1, line.Length, stdout);
+      fputc('\n', stdout);
+      fflush(stdout);
+    }
     ReportHarnessResult(run);
     MaybeReportMem();
     AgentHarness_Close(&harness);
@@ -3505,10 +3493,10 @@ int main(int argc, char** argv) {
   }
 
   if (Term_IsInteractive())
-    RunTuiRepl(&runtime, &fauxState);
+    RunTuiRepl(&runtime);
   else {
-    if (!faux) Http_GlobalInit();
-    RunPlainRepl(&runtime, &fauxState);
+    Http_GlobalInit();
+    RunPlainRepl(&runtime);
   }
 
   MaybeReportMem();

@@ -23,10 +23,6 @@ struct MemoryLogHandle {
 
 namespace {
 
-SessionResult Invalid(const char* message) {
-  return SessionResult_Error(SessionStatus::InvalidArgument, SV(message));
-}
-
 const SessionRecord* SessionRoot(const MemorySession* session) {
   return session && session->Records.Count ? &session->Records.Data[0]
                                            : nullptr;
@@ -108,7 +104,7 @@ SessionResult CloneRecords(Arena* arena, const Array<SessionRecord>* source,
 // snapshot (e.g. export, or the one-time load at harness Init).
 SessionResult ReadAll(void* context, Arena* arena, Array<SessionRecord>* out) {
   MemoryLogHandle* handle = (MemoryLogHandle*)context;
-  if (!handle || !arena || !out) return Invalid("read arguments are invalid");
+  if (!handle || !arena || !out) return SessionResult_Invalid("read arguments are invalid");
   MemoryRepository* repository = handle->Repository;
   ScopedLock lock(&repository->Lock);
   if (handle->Closed)
@@ -119,7 +115,7 @@ SessionResult ReadAll(void* context, Arena* arena, Array<SessionRecord>* out) {
 
 SessionResult PrepareRecord(const MemorySession* session, u64 seq,
                             const SessionRecord* input, SessionRecord* out) {
-  if (!input || !out) return Invalid("append record is null");
+  if (!input || !out) return SessionResult_Invalid("append record is null");
   SessionRecord record = *input;
   record.SchemaVersion = SESSION_SCHEMA_VERSION;
   record.SessionId = SessionId(session);
@@ -132,7 +128,7 @@ SessionResult PrepareRecord(const MemorySession* session, u64 seq,
 
 SessionResult AppendBatch(void* context, SessionRecord* input, u32 count) {
   MemoryLogHandle* handle = (MemoryLogHandle*)context;
-  if (!handle || !input || count == 0) return Invalid("append batch is empty");
+  if (!handle || !input || count == 0) return SessionResult_Invalid("append batch is empty");
   MemoryRepository* repository = handle->Repository;
   ScopedLock lock(&repository->Lock);
   if (handle->Closed)
@@ -267,7 +263,7 @@ SessionResult Create(void* context, Arena* arena, const SessionCreateOptions* op
       options->ProjectKey.Length == 0 || options->WorkingDirectory.Length == 0 ||
       (DurableId_IsSet(options->ForkedFromSessionId) !=
        DurableId_IsSet(options->ForkedFromEntryId)))
-    return Invalid("create arguments are invalid");
+    return SessionResult_Invalid("create arguments are invalid");
   ScopedLock lock(&repository->Lock);
   if (DurableId_IsSet(options->RequestedId) &&
       IdExists(repository, options->RequestedId))
@@ -294,7 +290,7 @@ SessionResult Open(void* context, Arena* arena, const SessionOpenOptions* option
   MemoryRepository* repository = (MemoryRepository*)context;
   if (!repository || !arena || !options || !outLog || !outInfo ||
       !DurableId_IsSet(options->SessionId) || options->ProjectKey.Length == 0)
-    return Invalid("open arguments are invalid");
+    return SessionResult_Invalid("open arguments are invalid");
   ScopedLock lock(&repository->Lock);
   MemorySession* session =
       FindSession(repository, options->ProjectKey, options->SessionId);
@@ -321,7 +317,7 @@ SessionResult Resolve(void* context, Arena* arena, DurableId sessionId,
                       SessionInfo* outInfo) {
   MemoryRepository* repository = (MemoryRepository*)context;
   if (!repository || !arena || !outInfo || !DurableId_IsSet(sessionId))
-    return Invalid("resolve arguments are invalid");
+    return SessionResult_Invalid("resolve arguments are invalid");
   ScopedLock lock(&repository->Lock);
   MemorySession* found = nullptr;
   for (u32 i = 0; i < repository->Sessions.Count; i++) {
@@ -348,7 +344,7 @@ SessionResult List(void* context, Arena* arena,
        options->Scope != SessionListScope::AllProjects) ||
       (options->Scope == SessionListScope::CurrentProject &&
        options->ProjectKey.Length == 0))
-    return Invalid("list arguments are invalid");
+    return SessionResult_Invalid("list arguments are invalid");
   if (options->SkippedCount) *options->SkippedCount = 0;
   ScopedLock lock(&repository->Lock);
   Array<SessionInfo> items =
@@ -377,7 +373,7 @@ SessionResult Fork(void* context, Arena* arena, const SessionForkOptions* option
       !DurableId_IsSet(options->SourceSessionId) ||
       !DurableId_IsSet(options->SourceHeadId) || options->ProjectKey.Length == 0 ||
       options->WorkingDirectory.Length == 0)
-    return Invalid("fork arguments are invalid");
+    return SessionResult_Invalid("fork arguments are invalid");
   ScopedLock lock(&repository->Lock);
   MemorySession* source =
       FindSession(repository, options->ProjectKey, options->SourceSessionId);

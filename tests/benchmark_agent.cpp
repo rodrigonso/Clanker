@@ -13,7 +13,7 @@
 #include "agent/harness.h"
 #include "base/arena.h"
 #include "base/thread.h"
-#include "llm/faux.h"
+#include "script_provider.h"
 #include "session/memory_repository.h"
 
 namespace {
@@ -43,7 +43,7 @@ struct BenchTiming {
 };
 
 struct BenchProvider {
-  Faux Script;
+  ScriptProvider Script;
   BenchTiming* Timing;
 };
 
@@ -98,7 +98,7 @@ bool BenchProviderStream(void* context, Arena* arena, const Model* model,
                          StreamSink sink, Message* out) {
   BenchProvider* provider = (BenchProvider*)context;
   RecordProviderStart(provider->Timing);
-  return Faux_Stream(&provider->Script, arena, model, llm, options, sink, out);
+  return ScriptProvider_Stream(&provider->Script, arena, model, llm, options, sink, out);
 }
 
 bool BenchToolExecute(void* context, Arena* arena, StrView, const ToolArgs*,
@@ -133,9 +133,9 @@ StrView BenchToolId(Arena* arena, const char* prefix, u32 index) {
 }
 
 void BuildSequentialScript(Arena* arena, u32 cycles, BenchProvider* provider) {
-  FauxStep* steps = ArenaPushArray(arena, FauxStep, cycles + 1);
+  ScriptStep* steps = ArenaPushArray(arena, ScriptStep, cycles + 1);
   for (u32 i = 0; i < cycles; i++) {
-    FauxToolCall* call = ArenaPushStruct(arena, FauxToolCall);
+    ScriptToolCall* call = ArenaPushStruct(arena, ScriptToolCall);
     call->Name = SVL("bench_tool");
     call->Id = BenchToolId(arena, "cycle-", i);
     call->ArgsJson = SVL("{\"n\":1}");
@@ -149,8 +149,8 @@ void BuildSequentialScript(Arena* arena, u32 cycles, BenchProvider* provider) {
 }
 
 void BuildParallelScript(Arena* arena, u32 count, BenchProvider* provider) {
-  FauxStep* steps = ArenaPushArray(arena, FauxStep, 2);
-  FauxToolCall* calls = ArenaPushArray(arena, FauxToolCall, count);
+  ScriptStep* steps = ArenaPushArray(arena, ScriptStep, 2);
+  ScriptToolCall* calls = ArenaPushArray(arena, ScriptToolCall, count);
   for (u32 i = 0; i < count; i++) {
     calls[i].Name = SVL("bench_tool");
     calls[i].Id = BenchToolId(arena, "parallel-", i);
@@ -205,8 +205,8 @@ bool RunOnce(u32 size, bool parallel, BenchRun* out) {
 
   AgentHarnessConfig config = {};
   config.SystemPrompt = SVL("bench");
-  config.ModelInfo.Id = SVL("faux");
-  config.ModelInfo.Provider = SVL("faux");
+  config.ModelInfo.Id = SVL("script");
+  config.ModelInfo.Provider = SVL("script");
   config.Tools = &tool;
   config.ToolCount = 1;
   config.ProviderImpl.Ctx = &provider;

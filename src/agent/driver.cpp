@@ -5,13 +5,6 @@
 
 namespace {
 
-SessionResult HookFailure(SessionResult result, const char* fallback) {
-  if (SessionResult_IsOk(result)) return result;
-  return SessionResult_Error(
-      SessionStatus::HookError,
-      result.Message.Length ? result.Message : SV(fallback), result.Seq);
-}
-
 SessionRecord NewMessageRecord(DurableId parentId, const Message& value) {
   SessionRecord record = {};
   record.EntryId = DurableId_Generate();
@@ -97,7 +90,7 @@ SessionResult RunAssistantTurn(AgentHarness* harness, AgentTurnKind turnKind, Du
   if (extraTrailingMessage) Array_Push(&contextMessages, *extraTrailingMessage);
 
   if (harness->Config.Hooks.BeforeContext) {
-    SessionResult hooked = HookFailure(
+    SessionResult hooked = AgentHook_Failure(
         harness->Config.Hooks.BeforeContext(harness->Config.Hooks.User, &harness->Work,
                                             turnKind, headId, &contextMessages),
         "before-context hook failed");
@@ -115,7 +108,7 @@ SessionResult RunAssistantTurn(AgentHarness* harness, AgentTurnKind turnKind, Du
     effective.Context = request.Context;
     effective.Options = harness->Config.Stream;
     if (harness->Config.Hooks.BeforeProvider) {
-      SessionResult hooked = HookFailure(
+      SessionResult hooked = AgentHook_Failure(
           harness->Config.Hooks.BeforeProvider(harness->Config.Hooks.User, &harness->Work,
                                                turnKind, attemptIndex, &effective),
           "before-provider hook failed");
@@ -147,7 +140,7 @@ SessionResult RunAssistantTurn(AgentHarness* harness, AgentTurnKind turnKind, Du
     AgentProviderAttemptResult attempt = AgentProvider_RunAttempt(&input);
 
     if (harness->Config.Hooks.AfterProvider) {
-      SessionResult hooked = HookFailure(
+      SessionResult hooked = AgentHook_Failure(
           harness->Config.Hooks.AfterProvider(harness->Config.Hooks.User, &harness->Work,
                                               turnKind, attemptIndex, &attempt.Assistant),
           "after-provider hook failed");
@@ -199,7 +192,7 @@ SessionResult RunToolBatch(AgentHarness* harness, DurableId* ioHead, const Messa
         harness->Config.Hooks.BeforeTool &&
         SessionResult_IsOk(beforeToolFailure)) {
       StrView arguments = content.ToolArgsJson;
-      SessionResult hooked = HookFailure(
+      SessionResult hooked = AgentHook_Failure(
           harness->Config.Hooks.BeforeTool(harness->Config.Hooks.User, arena, content.ToolName,
                                            &arguments),
           "before-tool hook failed");
@@ -399,7 +392,7 @@ SessionResult ContinueRun(AgentHarness* harness, DurableId* ioHead) {
     AgentCompactionCut cut = {};
     if (ShouldAutoCompact(harness, *ioHead, &cut)) {
       if (harness->Config.Hooks.BeforeCompaction) {
-        SessionResult hooked = HookFailure(
+        SessionResult hooked = AgentHook_Failure(
             harness->Config.Hooks.BeforeCompaction(harness->Config.Hooks.User,
                                                    &harness->Work, *ioHead),
             "before-compaction hook failed");
@@ -502,7 +495,7 @@ SessionResult AgentDriver_Run(AgentHarness* harness, StrView prompt) {
   if (SessionResult_IsOk(result)) {
     Message accepted = Message_User(&harness->Work, StrView_Dup(&harness->Work, prompt));
     if (harness->Config.Hooks.BeforeRun) {
-      result = HookFailure(
+      result = AgentHook_Failure(
           harness->Config.Hooks.BeforeRun(harness->Config.Hooks.User, &harness->Work, &accepted),
           "before-run hook failed");
     }
@@ -528,7 +521,7 @@ SessionResult AgentDriver_Run(AgentHarness* harness, StrView prompt) {
     error = result.Message;
   }
   if (harness->Config.Hooks.AfterTurn) {
-    SessionResult afterTurn = HookFailure(
+    SessionResult afterTurn = AgentHook_Failure(
         harness->Config.Hooks.AfterTurn(harness->Config.Hooks.User, &harness->Work,
                                         AgentTurnKind::Run, outcome, error),
         "after-turn hook failed");
@@ -548,7 +541,7 @@ SessionResult AgentDriver_Compact(AgentHarness* harness) {
 
   SessionResult result = SessionResult_Ok();
   if (harness->Config.Hooks.BeforeCompaction) {
-    result = HookFailure(
+    result = AgentHook_Failure(
         harness->Config.Hooks.BeforeCompaction(harness->Config.Hooks.User, &harness->Work, head),
         "before-compaction hook failed");
   }
@@ -570,7 +563,7 @@ SessionResult AgentDriver_Compact(AgentHarness* harness) {
   }
 
   if (harness->Config.Hooks.AfterTurn) {
-    SessionResult afterTurn = HookFailure(
+    SessionResult afterTurn = AgentHook_Failure(
         harness->Config.Hooks.AfterTurn(harness->Config.Hooks.User, &harness->Work,
                                         AgentTurnKind::Compaction, outcome, error),
         "after-turn hook failed");

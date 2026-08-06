@@ -46,3 +46,41 @@ inline bool Json_IsString(const JsonValue* v) { return v && v->Kind == JsonKind:
 u32 Json_FormatNumber(char* dst, u32 cap, f64 value);
 void Json_WriteString(StrBuf* b, StrView s);
 void Json_WriteValue(StrBuf* b, const JsonValue* value);
+
+// Minimal streaming writer for hand-built JSON objects. Tracks only whether a
+// separating comma is due, so nesting is the caller's business: begin a nested
+// object or array after JsonWrite_Key and close it yourself.
+struct JsonWriter {
+  StrBuf* Out;
+  bool First;
+};
+
+inline void JsonWrite_Begin(JsonWriter* w, StrBuf* out) {
+  w->Out = out;
+  w->First = true;
+  StrBuf_AppendChar(out, '{');
+}
+
+inline void JsonWrite_Key(JsonWriter* w, const char* key) {
+  if (!w->First) StrBuf_AppendChar(w->Out, ',');
+  w->First = false;
+  Json_WriteString(w->Out, SV(key));
+  StrBuf_AppendChar(w->Out, ':');
+}
+
+inline void JsonWrite_End(JsonWriter* w) { StrBuf_AppendChar(w->Out, '}'); }
+
+inline void JsonWrite_String(JsonWriter* w, const char* key, StrView value) {
+  JsonWrite_Key(w, key);
+  Json_WriteString(w->Out, value);
+}
+
+inline void JsonWrite_Bool(JsonWriter* w, const char* key, bool value) {
+  JsonWrite_Key(w, key);
+  StrBuf_AppendCStr(w->Out, value ? "true" : "false");
+}
+
+inline void JsonWrite_U64(JsonWriter* w, const char* key, u64 value) {
+  JsonWrite_Key(w, key);
+  StrBuf_AppendU64(w->Out, value);
+}

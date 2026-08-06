@@ -19,9 +19,9 @@ is the running gap list — it is not a roadmap commitment.
 
 | | Clank | pi |
 |---|---:|---:|
-| Implementation source | 28,367 lines (`src/`) | 10 workspace packages, 9 published to npm |
-| Test source | 11,245 lines (`tests/`) | per-package suites plus a private `evals` package |
-| Offline test run | 34 suites, 1,705 checks, 0 failures | not measured here |
+| Implementation source | 28,211 lines (`src/`) | 10 workspace packages, 9 published to npm |
+| Test source | 11,623 lines (`tests/`) | per-package suites plus a private `evals` package |
+| Offline test run | 35 suites, 1,766 checks, 0 failures | not measured here |
 | Runtime dependencies | libcurl, C runtime, OS APIs | Node ≥ 22.19.0 or Bun, plus an npm dependency tree |
 | Text providers | 2 | 39 |
 | Wire protocols | 2 | 10 |
@@ -143,8 +143,8 @@ Windows x64, `CLANK_PRINT_MEM=1`:
 
 | measurement | value |
 |---|---:|
-| Clank full faux run (libcurl init + agent + `shell` tool execution), peak RSS | **~8.9 MB** (8,868–8,900 KB over 5 runs) |
-| Same workload, Debug build | ~11.0 MB |
+| Clank complete live run (libcurl + TLS + one prompt/response over HTTPS), peak RSS | **~12.4 MB** (12,376–12,452 KB over 3 runs) |
+
 | Bare `node -e` process RSS (Node 24.13.0), for reference | ~33 MB |
 | `clank.exe` on disk (Release, libcurl statically linked) | ~0.97 MB |
 
@@ -158,7 +158,7 @@ against a specific pi measurement.
 
 | capability | status | notes |
 |---|---|---|
-| Anthropic Messages provider + faux | ✅ | hand-rolled SSE build/parse, offline fixtures |
+| Anthropic Messages provider | ✅ | hand-rolled SSE build/parse, offline fixtures |
 | OpenAI Responses provider | ✅ | public Responses API by key; ChatGPT subscription uses the Codex backend protocol, isolated behind separate fixtures |
 | Remaining built-in providers | ❌ | pi's 39 provider entries include a separate `openai-codex`, so Clank's two providers cover three of them; the other ~36 are absent: Bedrock, Google, Vertex, Azure, GitHub Copilot, Groq, xAI, OpenRouter, DeepSeek, Mistral, Cerebras, Fireworks, Together, Moonshot, MiniMax, Qwen, Xiaomi, Z.ai, Nvidia, HuggingFace, Baseten, Cloudflare, Vercel AI Gateway, opencode, Radius, ant-ling, kimi-coding, and regional variants |
 | Wire protocols | 🟡 | Clank implements `anthropic-messages` and `openai-responses` (plus the Codex backend variant). pi's `KnownApi` has 10: `openai-completions`, `mistral-conversations`, `openai-responses`, `azure-openai-responses`, `openai-codex-responses`, `anthropic-messages`, `bedrock-converse-stream`, `google-generative-ai`, `google-vertex`, `pi-messages` |
@@ -251,7 +251,7 @@ and model-visible state and keeps active turns and queues in memory.
 | capability | status | notes |
 |---|---|---|
 | Print mode (`-p`) · interactive TUI · plain REPL fallback | ✅ | |
-| JSON mode (`--mode json`) · RPC mode (`--mode rpc`) | ❌ | pi streams NDJSON events and offers bidirectional stdio RPC with `pi-client` / `pi-server`. This is the main blocker for CI, automation, and SDK embedding |
+| JSON mode (`--mode json`) | ✅ | NDJSON event stream on stdout covering the full watch surface; durable records are emitted in the session schema. Requires `-p` |
 | CLI flags | 🟡 | Clank has 14 long and 8 short. pi has 38 long and 14 short, adding provider, thinking, tools, models, extension, skill, template, theme, export, session-dir, verbose, offline, list-models, and tui-mode |
 | Unknown-flag passthrough to extensions | ❌ | |
 | TUI core: differential renderer, markdown, multi-line editor, reusable components, status line, scroll, selection, abort, `NO_COLOR` | ✅ core | |
@@ -286,7 +286,7 @@ plumbing, Anthropic and OpenAI SSE plus OAuth, durable branchable sessions,
 automatic and manual compaction with a retained tail, prompt/context/trust
 assembly, a full-screen differential TUI, and equivalents for all seven pi
 tools. It does so in 28k lines with no C++ standard library, runs the
-documented faux workload at ~8.9 MB peak RSS, and was measurably faster than
+documented live workload at ~12.4 MB peak RSS, and was measurably faster than
 the pinned pi harness across every sequential depth tested.
 
 The gaps fall into three buckets:
@@ -294,9 +294,9 @@ The gaps fall into three buckets:
 1. **Breadth.** 2 providers against 39, 2 wire protocols against 10, no model
    catalog metadata beyond capability hints, no cost accounting. This is the
    largest raw gap and the most mechanical to close.
-2. **Surfaces.** No `--mode json` and no RPC means Clank cannot be driven
-   programmatically, which rules out CI use and SDK embedding. This is a small
-   amount of work with a disproportionate payoff.
+2. **Surfaces.** `--mode json` now exposes the agent as an NDJSON event
+   stream, so CI and scripting work. RPC (bidirectional stdin protocol) is
+   still absent, which is what SDK embedding would want.
 3. **Ecosystem.** Extensions, skills, prompt templates, themes, keybindings,
    import/export/share, telemetry. Clank has no extension seam, so everything
    downstream of it — including subagents — is unreachable rather than merely
@@ -337,7 +337,7 @@ Re-measure Clank's side from a Release build:
 cmake -S . -B build-rel -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build-rel --target clank clank_tests
 .\build-rel\clank_tests.exe
-$env:CLANK_PRINT_MEM=1; .\build-rel\clank.exe --faux -p "read README.md"
+$env:CLANK_PRINT_MEM=1; .\build-rel\clank.exe --no-session -p "hello"
 ```
 
 Update the metadata table (date, pi ref, Clank ref) when re-running.

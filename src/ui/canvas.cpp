@@ -18,16 +18,7 @@ void PaintNode(UiContext* ui, u32 index) {
   for (u32 child = node->FirstChild; child != UI_NODE_NONE;
        child = ui->Nodes.Data[child].NextSibling)
     PaintNode(ui, child);
-  if (ui->DebugBounds && index != 0 && node->Rect.Width &&
-      node->Rect.Height) {
-    UiCanvas canvas{ui, ui->Target, node->Rect, node->Clip};
-    Style debug = StyleMake(196, COL_DEFAULT, ATTR_DIM);
-    UiCanvas_PutChar(&canvas, 0, 0, '+', debug);
-    if (node->Rect.Width > 1)
-      UiCanvas_PutChar(&canvas, node->Rect.Width - 1, 0, '+', debug);
-    if (node->Rect.Height > 1)
-      UiCanvas_PutChar(&canvas, 0, node->Rect.Height - 1, '+', debug);
-  }
+
 }
 
 }  // namespace

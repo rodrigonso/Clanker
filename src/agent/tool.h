@@ -22,15 +22,11 @@ inline const JsonValue* ToolArgs_Get(const ToolArgs* args, const char* key) {
 inline StrView ToolArgs_GetStr(const ToolArgs* args, const char* key) {
   return args ? Json_GetStr(args->Root, key) : StrView{};
 }
-inline f64 ToolArgs_GetNum(const ToolArgs* args, const char* key, f64 fallback) {
-  return args ? Json_GetNum(args->Root, key, fallback) : fallback;
-}
+
 inline i64 ToolArgs_GetInt(const ToolArgs* args, const char* key, i64 fallback) {
   return args ? Json_GetInt(args->Root, key, fallback) : fallback;
 }
-inline bool ToolArgs_GetBool(const ToolArgs* args, const char* key, bool fallback) {
-  return args ? Json_GetBool(args->Root, key, fallback) : fallback;
-}
+
 
 struct ToolUpdateSink {
   void* User;

@@ -85,9 +85,8 @@ Custom components receive assigned geometry and a clipped, local-coordinate
 
 ## Diagnostics
 
-`Ui_GetMetrics` reports frame node count, hit-region count, focusable count, and
-frame-arena bytes. `Ui_SetDebugBounds` enables an opt-in cell overlay for
-inspecting assigned component rectangles.
+`Ui_GetMetrics` reports frame node count, hit-region count, and frame-arena
+bytes.
 
 The `ui`, `ui_widgets`, and `ui_demo` test suites exercise the tree, layout,
 events, widgets, and a standalone screen that does not link application types.

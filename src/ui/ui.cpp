@@ -172,12 +172,7 @@ void Ui_ActivateScope(UiContext* ui, u32 node) {
   ui->RequestedScope = ui->Nodes.Data[node].Id;
 }
 
-void Ui_SetDebugBounds(UiContext* ui, bool enabled) {
-  if (ui) ui->DebugBounds = enabled;
-}
-
 UiMetrics Ui_GetMetrics(const UiContext* ui) {
   if (!ui) return {};
-  return UiMetrics{ui->Nodes.Count, ui->HitRegions.Count,
-                   ui->FocusEntries.Count, ui->FrameMem.Used};
+  return UiMetrics{ui->Nodes.Count, ui->HitRegions.Count, ui->FrameMem.Used};
 }

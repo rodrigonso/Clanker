@@ -46,14 +46,6 @@ inline T* Array_Push(Array<T>* a, const T& value) {
 }
 
 template <typename T>
-inline T* Array_PushEmpty(Array<T>* a) {
-  if (a->Count >= a->Capacity) ArrayInternal::Grow(a, a->Count + 1);
-  T* slot = &a->Data[a->Count++];
-  *slot = T{};
-  return slot;
-}
-
-template <typename T>
 inline T* Array_Get(Array<T>* a, u32 index) {
   return index < a->Count ? &a->Data[index] : nullptr;
 }

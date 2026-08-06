@@ -4,7 +4,7 @@
 #include "base/arena.h"
 #include "base/array.h"
 #include "check.h"
-#include "llm/faux.h"
+#include "script_provider.h"
 #include "session/memory_repository.h"
 #include "tui/tui.h"
 
@@ -161,7 +161,7 @@ bool SessionContextPreserved(const Tui* t, const AgentHarness* harness) {
 }
 
 bool InitTestHarness(Arena* arena, MemoryRepository* memory,
-                     AgentHarness* harness, Faux* faux) {
+                     AgentHarness* harness, ScriptProvider* script) {
   MemoryRepository_Init(memory);
   SessionRepository repository = MemoryRepository_AsRepository(memory);
   SessionCreateOptions create = {};
@@ -174,9 +174,9 @@ bool InitTestHarness(Arena* arena, MemoryRepository* memory,
     return false;
   AgentHarnessConfig config = {};
   config.SystemPrompt = SVL("sys");
-  config.ModelInfo.Provider = SVL("faux");
-  config.ModelInfo.Id = SVL("faux-model");
-  config.ProviderImpl = Faux_Provider(faux);
+  config.ModelInfo.Provider = SVL("script");
+  config.ModelInfo.Id = SVL("script-model");
+  config.ProviderImpl = ScriptProvider_Make(script);
   config.ToolExec = ToolExecution::Parallel;
   return SessionResult_IsOk(AgentHarness_Init(harness, log, &config));
 }
@@ -590,10 +590,10 @@ void TestTui() {
   // for application preflight before an idle prompt is rendered.
   {
     Arena a2 = ArenaCreate();
-    Faux faux = {};
+    ScriptProvider script = {};
     MemoryRepository memory = {};
     AgentHarness harness = {};
-    CHECK(InitTestHarness(&a2, &memory, &harness, &faux));
+    CHECK(InitTestHarness(&a2, &memory, &harness, &script));
 
     TuiOpts o2;
     o2.ModelName = SVL("m");
@@ -784,18 +784,18 @@ void TestTui() {
     ArenaRelease(&ap);
   }
 
-  // A durable snapshot hydrates a completed faux-provider turn.
+  // A durable snapshot hydrates a completed script-provider turn.
   {
     Arena a3 = ArenaCreate();
-    FauxStep step = {};
+    ScriptStep step = {};
     step.Text = SVL("Here is the explanation");
     step.Stop = StopReason::Stop;
-    Faux faux = {};
-    faux.Steps = &step;
-    faux.Count = 1;
+    ScriptProvider script = {};
+    script.Steps = &step;
+    script.Count = 1;
     MemoryRepository memory = {};
     AgentHarness harness = {};
-    CHECK(InitTestHarness(&a3, &memory, &harness, &faux));
+    CHECK(InitTestHarness(&a3, &memory, &harness, &script));
 
     TuiOpts o3;
     o3.ModelName = SVL("m");
@@ -1693,10 +1693,10 @@ void TestTui() {
     orr.Color = false;
     Tui resetTui;
     Tui_InitModel(&resetTui, &ar, orr);
-    Faux faux = {};
+    ScriptProvider script = {};
     MemoryRepository memory = {};
     AgentHarness harness = {};
-    CHECK(InitTestHarness(&ar, &memory, &harness, &faux));
+    CHECK(InitTestHarness(&ar, &memory, &harness, &script));
     resetTui.Harness = &harness;
     Tui_SetStartupContext(&resetTui, SVL("kept-cwd"), SVL("kept-branch"));
 

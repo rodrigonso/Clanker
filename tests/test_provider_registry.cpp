@@ -182,7 +182,7 @@ static void TestAnthropicModelDiscoveryFailures() {
 void TestProviderRegistry() {
   CHECK_ALL(ProviderRegistry_Count() == 2,
             ProviderRegistry_At(ProviderRegistry_Count()) == nullptr,
-            ProviderRegistry_Find(SVL("faux")) == nullptr,
+            ProviderRegistry_Find(SVL("nonexistent")) == nullptr,
             ProviderRegistry_Find(SVL("missing")) == nullptr);
 
   const ProviderSpec* spec = ProviderRegistry_Find(SVL("anthropic"));

@@ -1,6 +1,5 @@
 #include "auth/store.h"
 
-#include <stdio.h>
 #include <stdlib.h>
 
 #include "base/array.h"

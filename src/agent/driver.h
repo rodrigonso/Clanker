@@ -15,6 +15,15 @@ SessionResult AgentDriver_Compact(AgentHarness* harness);
 
 // Internal seams shared by harness.cpp and driver.cpp.
 
+// Normalizes a hook's result into a HookError, keeping the hook's own message
+// when it supplied one.
+inline SessionResult AgentHook_Failure(SessionResult result, const char* fallback) {
+  if (SessionResult_IsOk(result)) return result;
+  return SessionResult_Error(
+      SessionStatus::HookError,
+      result.Message.Length ? result.Message : SV(fallback), result.Seq);
+}
+
 // Appends records to the session log, then folds each into the harness's own
 // maintained Records/Reduction (O(1) per record: never re-validates, clones,
 // or reloads history). Notifies watchers of each new durable record.

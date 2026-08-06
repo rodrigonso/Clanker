@@ -268,14 +268,14 @@ void TestHandlerOutcomes() {
   AppCommand_Dispatch(SVL("/model"), &handlers, &ux);
   CHECK(ctx.Errors == 1 && StrView_EqCStr(ctx.LastError, "Discovery failed."));
 
-  AppCommandHandlers faux = {};
-  AppCommand_Dispatch(SVL("/login"), &faux, &ux);
+  AppCommandHandlers noHandlers = {};
+  AppCommand_Dispatch(SVL("/login"), &noHandlers, &ux);
   CHECK(ctx.Errors == 2 && StrView_Contains(ctx.LastError, "unavailable in this mode"));
-  AppCommand_Dispatch(SVL("/model"), &faux, &ux);
+  AppCommand_Dispatch(SVL("/model"), &noHandlers, &ux);
   CHECK(ctx.Errors == 3 && StrView_Contains(ctx.LastError, "unavailable in this mode"));
 
-  AppCommandDispatchResult clear = AppCommand_Dispatch(SVL("/clear"), &faux, &ux);
-  AppCommandDispatchResult exit = AppCommand_Dispatch(SVL("/exit"), &faux, &ux);
+  AppCommandDispatchResult clear = AppCommand_Dispatch(SVL("/clear"), &noHandlers, &ux);
+  AppCommandDispatchResult exit = AppCommand_Dispatch(SVL("/exit"), &noHandlers, &ux);
   CHECK_ALL(clear.Action == AppLoopAction::ResetSession,
             exit.Action == AppLoopAction::Exit);
 }

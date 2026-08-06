@@ -2,14 +2,6 @@
 
 namespace {
 
-SessionResult Invalid(const char* message) {
-  return SessionResult_Error(SessionStatus::InvalidArgument, SV(message));
-}
-
-SessionResult Corrupt(const char* message) {
-  return SessionResult_Error(SessionStatus::Corrupt, SV(message));
-}
-
 const SessionRecord* FindEntry(const SessionReduction* reduction, DurableId id) {
   u32 index;
   if (!DurableIdIndex_Find(&reduction->Index, id, &index)) return nullptr;
@@ -115,7 +107,7 @@ SessionResult SessionReducer_ValidateAppend(const SessionReduction* reduction,
                                             const SessionRecord* candidate,
                                             const SessionRecord* pending,
                                             u32 pendingCount) {
-  if (!reduction || !candidate) return Invalid("validate-append arguments are invalid");
+  if (!reduction || !candidate) return SessionResult_Invalid("validate-append arguments are invalid");
   SessionResult self = SessionRecord_Validate(candidate);
   if (!SessionResult_IsOk(self)) return self;
 
@@ -129,41 +121,41 @@ SessionResult SessionReducer_ValidateAppend(const SessionReduction* reduction,
 
   u64 priorCount = (u64)reduction->RecordCount + pendingCount;
   if (candidate->Seq != priorCount + 1)
-    return Invalid("seq must be contiguous with the existing log");
+    return SessionResult_Invalid("seq must be contiguous with the existing log");
 
   if (reduction->RecordCount > 0 &&
       !DurableId_Eq(candidate->SessionId, reduction->Records[0].SessionId))
-    return Invalid("sessionId must match the log it is appended to");
+    return SessionResult_Invalid("sessionId must match the log it is appended to");
   if (reduction->RecordCount == 0 && pendingCount > 0 &&
       !DurableId_Eq(candidate->SessionId, pending[0].SessionId))
-    return Invalid("sessionId must match the log it is appended to");
+    return SessionResult_Invalid("sessionId must match the log it is appended to");
 
   if (DurableIdIndex_Contains(&reduction->Index, candidate->EntryId) ||
       PendingContains(pending, pendingCount, candidate->EntryId, false))
-    return Invalid("entryId already exists in this session");
+    return SessionResult_Invalid("entryId already exists in this session");
 
   if (candidate->Kind == SessionRecordKind::SessionStarted) {
-    if (priorCount != 0) return Invalid("sessionStarted must be the first record");
+    if (priorCount != 0) return SessionResult_Invalid("sessionStarted must be the first record");
     return SessionResult_Ok(candidate->Seq);
   }
-  if (priorCount == 0) return Invalid("the first record must be sessionStarted");
+  if (priorCount == 0) return SessionResult_Invalid("the first record must be sessionStarted");
 
   if (candidate->Kind == SessionRecordKind::SessionName) return SessionResult_Ok(candidate->Seq);
 
   if (candidate->Kind == SessionRecordKind::Leaf) {
     if (!treeExists(candidate->LeafEntry.LeafId))
-      return Invalid("leaf target entryId was not found");
+      return SessionResult_Invalid("leaf target entryId was not found");
     return SessionResult_Ok(candidate->Seq);
   }
 
   DurableId parent = SessionRecord_ParentId(candidate);
-  if (!treeExists(parent)) return Invalid("parentId was not found in this session");
+  if (!treeExists(parent)) return SessionResult_Invalid("parentId was not found in this session");
 
   if (candidate->Kind == SessionRecordKind::Compaction) {
     if (!treeExists(candidate->CompactionEntry.BaseEntryId) ||
         !treeExists(candidate->CompactionEntry.ThroughEntryId) ||
         !treeExists(candidate->CompactionEntry.SourceHeadId))
-      return Invalid("compaction references an entryId that was not found");
+      return SessionResult_Invalid("compaction references an entryId that was not found");
   }
 
   return SessionResult_Ok(candidate->Seq);
@@ -173,7 +165,7 @@ SessionResult SessionReducer_Ancestry(const SessionReduction* reduction, Arena* 
                                       DurableId headId,
                                       Array<const SessionRecord*>* outBranch) {
   if (!arena || !reduction || !outBranch || !DurableId_IsSet(headId))
-    return Invalid("ancestry arguments are invalid");
+    return SessionResult_Invalid("ancestry arguments are invalid");
   const SessionRecord* current = FindEntry(reduction, headId);
   if (!current) return SessionResult_Error(SessionStatus::NotFound, SVL("session head was not found"));
 
@@ -184,11 +176,11 @@ SessionResult SessionReducer_Ancestry(const SessionReduction* reduction, Arena* 
     if (current->Kind == SessionRecordKind::SessionStarted) break;
     DurableId parent = SessionRecord_ParentId(current);
     current = FindEntry(reduction, parent);
-    if (!current) return Corrupt("branch parent was not found");
+    if (!current) return SessionResult_Corrupt("branch parent was not found");
   }
   if (reverse.Count == 0 ||
       reverse.Data[reverse.Count - 1]->Kind != SessionRecordKind::SessionStarted)
-    return Corrupt("branch does not reach the session root");
+    return SessionResult_Corrupt("branch does not reach the session root");
 
   Array<const SessionRecord*> branch =
       Array_Make<const SessionRecord*>(arena, reverse.Count);
@@ -206,7 +198,7 @@ enum class ContextSlot : u8 {
 
 SessionResult SessionReducer_Context(Arena* arena, const SessionReduction* reduction,
                                      DurableId headId, Array<Message>* outMessages) {
-  if (!arena || !reduction || !outMessages) return Invalid("context arguments are invalid");
+  if (!arena || !reduction || !outMessages) return SessionResult_Invalid("context arguments are invalid");
   Array<const SessionRecord*> branch = {};
   SessionResult ancestry = SessionReducer_Ancestry(reduction, arena, headId, &branch);
   if (!SessionResult_IsOk(ancestry)) return ancestry;
@@ -248,9 +240,9 @@ SessionResult SessionReducer_Context(Arena* arena, const SessionReduction* reduc
     u32 through = 0;
     if (!DurableIdIndex_Find(&position, record->CompactionEntry.BaseEntryId, &base) ||
         !DurableIdIndex_Find(&position, record->CompactionEntry.ThroughEntryId, &through))
-      return Corrupt("compaction span references an entry that is not on this branch");
-    if (base > through) return Corrupt("compaction span ends before it begins");
-    if (through >= i) return Corrupt("compaction span reaches its own entry or later");
+      return SessionResult_Corrupt("compaction span references an entry that is not on this branch");
+    if (base > through) return SessionResult_Corrupt("compaction span ends before it begins");
+    if (through >= i) return SessionResult_Corrupt("compaction span reaches its own entry or later");
     for (u32 k = base; k <= through; k++) {
       slot[k] = ContextSlot::Suppressed;
       anchor[k] = nullptr;
@@ -274,7 +266,7 @@ SessionResult SessionReducer_Context(Arena* arena, const SessionReduction* reduc
 
 SessionResult SessionReducer_Reduce(Arena* arena, const SessionRecord* records, u32 count,
                                     SessionReduction* out) {
-  if (!arena || !records || count == 0 || !out) return Invalid("reducer arguments are invalid");
+  if (!arena || !records || count == 0 || !out) return SessionResult_Invalid("reducer arguments are invalid");
   SessionResult valid = SessionRecords_Validate(records, count);
   if (!SessionResult_IsOk(valid)) return valid;
 
@@ -287,12 +279,12 @@ SessionResult SessionReducer_Reduce(Arena* arena, const SessionRecord* records, 
 }
 
 SessionResult SessionRecords_Validate(const SessionRecord* records, u32 count) {
-  if (!records || count == 0) return Invalid("records are required");
+  if (!records || count == 0) return SessionResult_Invalid("records are required");
   if (records[0].Kind != SessionRecordKind::SessionStarted)
-    return Corrupt("the first record must be sessionStarted");
+    return SessionResult_Corrupt("the first record must be sessionStarted");
 
   if (count > (1u << 30))
-    return Corrupt("session contains too many records");
+    return SessionResult_Corrupt("session contains too many records");
   usize indexBytes = DurableIdIndex_AllocationSize(count);
   Arena scratch = ArenaCreate(indexBytes + ((usize)64 << 10));
   DurableIdIndex index;
@@ -310,15 +302,15 @@ SessionResult SessionRecords_Validate(const SessionRecord* records, u32 count) {
       break;
     }
     if (!DurableId_Eq(record->SessionId, sessionId)) {
-      result = Corrupt("all records must share the same sessionId");
+      result = SessionResult_Corrupt("all records must share the same sessionId");
       break;
     }
     if (record->Seq != (u64)i + 1) {
-      result = Corrupt("seq must be contiguous starting at 1");
+      result = SessionResult_Corrupt("seq must be contiguous starting at 1");
       break;
     }
     if (DurableIdIndex_Contains(&index, record->EntryId)) {
-      result = Corrupt("duplicate entryId in session log");
+      result = SessionResult_Corrupt("duplicate entryId in session log");
       break;
     }
 
@@ -330,7 +322,7 @@ SessionResult SessionRecords_Validate(const SessionRecord* records, u32 count) {
 
     if (record->Kind == SessionRecordKind::SessionStarted) {
       if (i != 0) {
-        result = Corrupt("sessionStarted must be the first record");
+        result = SessionResult_Corrupt("sessionStarted must be the first record");
         break;
       }
       headId = record->EntryId;
@@ -339,7 +331,7 @@ SessionResult SessionRecords_Validate(const SessionRecord* records, u32 count) {
       // no parent, does not affect head
     } else if (record->Kind == SessionRecordKind::Leaf) {
       if (!treeExists(record->LeafEntry.LeafId)) {
-        result = Corrupt("leaf target entryId was not found");
+        result = SessionResult_Corrupt("leaf target entryId was not found");
         break;
       }
       headId = record->LeafEntry.LeafId;
@@ -347,14 +339,14 @@ SessionResult SessionRecords_Validate(const SessionRecord* records, u32 count) {
     } else {
       DurableId parent = SessionRecord_ParentId(record);
       if (!treeExists(parent)) {
-        result = Corrupt("parentId was not found before its reference");
+        result = SessionResult_Corrupt("parentId was not found before its reference");
         break;
       }
       if (record->Kind == SessionRecordKind::Compaction) {
         if (!treeExists(record->CompactionEntry.BaseEntryId) ||
             !treeExists(record->CompactionEntry.ThroughEntryId) ||
             !treeExists(record->CompactionEntry.SourceHeadId)) {
-          result = Corrupt("compaction references an entryId that was not found");
+          result = SessionResult_Corrupt("compaction references an entryId that was not found");
           break;
         }
       }

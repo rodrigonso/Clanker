@@ -4,23 +4,12 @@
 
 namespace {
 
-SessionResult Invalid(const char* message) {
-  return SessionResult_Error(SessionStatus::InvalidArgument, SV(message));
-}
-
 SessionResult EnsureIdleLocked(const AgentHarness* harness, StrView busyMessage) {
   if (harness->Faulted)
     return SessionResult_Error(SessionStatus::Faulted,
                                SVL("agent harness is faulted"));
   if (harness->Running) return SessionResult_Error(SessionStatus::Busy, busyMessage);
   return SessionResult_Ok();
-}
-
-SessionResult HookFailure(SessionResult result, const char* fallback) {
-  if (SessionResult_IsOk(result)) return result;
-  return SessionResult_Error(
-      SessionStatus::HookError,
-      result.Message.Length ? result.Message : SV(fallback), result.Seq);
 }
 
 // Every non-durable event kind shares the same clone shape: dup whichever
@@ -180,7 +169,7 @@ void PublishToWatchers(AgentHarness* harness, AgentHarnessEvent* event) {
 
 SessionResult QueueMessage(AgentHarness* harness, Array<Message>* queue, StrView text) {
   if (!harness || !harness->Initialized || !queue || text.Length == 0)
-    return Invalid("queue arguments are invalid");
+    return SessionResult_Invalid("queue arguments are invalid");
   {
     ScopedLock lock(&harness->StateLock);
     if (harness->Faulted)
@@ -431,7 +420,7 @@ SessionResult AgentHarness_Init(AgentHarness* harness, SessionLog log,
                                 const AgentHarnessConfig* config) {
   if (!harness || !config || !log.ReadAll || !log.Append || !log.Writable ||
       !Model_RequestProfileIsValid(&config->ModelInfo, config->Stream.Profile))
-    return Invalid("harness initialization arguments are invalid");
+    return SessionResult_Invalid("harness initialization arguments are invalid");
   *harness = AgentHarness{};
   harness->Log = log;
   harness->Config = *config;
@@ -459,7 +448,7 @@ SessionResult AgentHarness_Init(AgentHarness* harness, SessionLog log,
                            : SVL("{\"type\":\"object\",\"properties\":{}}");
       if (!JsonSchema_Compile(&harness->Runtime, schema, &runtime->Schema, &schemaError)) {
         AgentHarness_Close(harness);
-        return Invalid("tool parameter schema is invalid or unsupported");
+        return SessionResult_Invalid("tool parameter schema is invalid or unsupported");
       }
     }
   }
@@ -510,7 +499,7 @@ SessionResult AgentHarness_Close(AgentHarness* harness) {
 SessionResult AgentHarness_Snapshot(Arena* arena, AgentHarness* harness,
                                     SessionReduction* out) {
   if (!arena || !harness || !harness->Initialized || !out)
-    return Invalid("snapshot arguments are invalid");
+    return SessionResult_Invalid("snapshot arguments are invalid");
   ScopedLock lock(&harness->StateLock);
   return CloneReduction(arena, &harness->Reduction, out);
 }
@@ -518,7 +507,7 @@ SessionResult AgentHarness_Snapshot(Arena* arena, AgentHarness* harness,
 SessionResult AgentHarness_SnapshotFull(Arena* arena, AgentHarness* harness,
                                         AgentHarnessSnapshot* out) {
   if (!arena || !harness || !harness->Initialized || !out)
-    return Invalid("snapshot arguments are invalid");
+    return SessionResult_Invalid("snapshot arguments are invalid");
   ScopedLock lock(&harness->StateLock);
   return BuildSnapshotLocked(arena, harness, out);
 }
@@ -528,10 +517,10 @@ SessionResult AgentHarness_Watch(Arena* arena, AgentHarness* harness, u32 capaci
                                  AgentHarnessWatch* outWatch) {
   if (!arena || !harness || !harness->Initialized || !outSnapshot || !outWatch ||
       outWatch->Initialized)
-    return Invalid("watch arguments are invalid");
+    return SessionResult_Invalid("watch arguments are invalid");
   if (capacity == 0) capacity = 16;
   if (capacity > AGENT_HARNESS_MAX_WATCH_EVENTS)
-    return Invalid("watch capacity exceeds the supported maximum");
+    return SessionResult_Invalid("watch capacity exceeds the supported maximum");
 
   *outWatch = AgentHarnessWatch{};
   outWatch->Owner = harness;
@@ -566,7 +555,7 @@ SessionResult AgentHarness_Watch(Arena* arena, AgentHarness* harness, u32 capaci
 SessionResult AgentHarness_WatchNext(Arena* arena, AgentHarnessWatch* watch,
                                      AgentHarnessEvent* out) {
   if (!arena || !watch || !watch->Initialized || !out)
-    return Invalid("watch next arguments are invalid");
+    return SessionResult_Invalid("watch next arguments are invalid");
   Mutex_Lock(&watch->Lock);
   watch->Waiting++;
   while (watch->Count == 0 && !watch->Lagged && !watch->Closed)
@@ -577,7 +566,10 @@ SessionResult AgentHarness_WatchNext(Arena* arena, AgentHarnessWatch* watch,
     return SessionResult_Error(SessionStatus::WatcherLagged,
                                SVL("watcher fell behind; take a new snapshot"));
   }
-  if (watch->Closed) {
+  // Closing stops further publication; it does not discard what was already
+  // published. Drain the buffer first so a consumer shutting down right after a
+  // run still receives that run's trailing turn_end/agent_end.
+  if (watch->Count == 0) {
     watch->Waiting--;
     Mutex_Unlock(&watch->Lock);
     return SessionResult_Error(SessionStatus::InvalidState, SVL("watcher is closed"));
@@ -595,7 +587,7 @@ SessionResult AgentHarness_WatchNext(Arena* arena, AgentHarnessWatch* watch,
 }
 
 SessionResult AgentHarness_WatchRequestClose(AgentHarnessWatch* watch) {
-  if (!watch || !watch->Initialized) return Invalid("watch close arguments are invalid");
+  if (!watch || !watch->Initialized) return SessionResult_Invalid("watch close arguments are invalid");
   AgentHarness* owner = watch->Owner;
   if (owner) {
     ScopedLock ownerLock(&owner->StateLock);
@@ -619,7 +611,7 @@ SessionResult AgentHarness_WatchRequestClose(AgentHarnessWatch* watch) {
 }
 
 SessionResult AgentHarness_WatchClose(AgentHarnessWatch* watch) {
-  if (!watch || !watch->Initialized) return Invalid("watch close arguments are invalid");
+  if (!watch || !watch->Initialized) return SessionResult_Invalid("watch close arguments are invalid");
   AgentHarness* owner = watch->Owner;
   if (owner) {
     ScopedLock ownerLock(&owner->StateLock);
@@ -654,7 +646,7 @@ SessionResult AgentHarness_WatchClose(AgentHarnessWatch* watch) {
 
 SessionResult AgentHarness_Run(AgentHarness* harness, StrView prompt) {
   if (!harness || !harness->Initialized || prompt.Length == 0)
-    return Invalid("run arguments are invalid");
+    return SessionResult_Invalid("run arguments are invalid");
   {
     ScopedLock lock(&harness->StateLock);
     SessionResult idle = EnsureIdleLocked(harness, SVL("agent harness is already running"));
@@ -676,7 +668,7 @@ SessionResult AgentHarness_Run(AgentHarness* harness, StrView prompt) {
 }
 
 SessionResult AgentHarness_Compact(AgentHarness* harness) {
-  if (!harness || !harness->Initialized) return Invalid("compaction arguments are invalid");
+  if (!harness || !harness->Initialized) return SessionResult_Invalid("compaction arguments are invalid");
   {
     ScopedLock lock(&harness->StateLock);
     SessionResult idle = EnsureIdleLocked(harness, SVL("agent harness is already running"));
@@ -699,7 +691,7 @@ SessionResult AgentHarness_Compact(AgentHarness* harness) {
 
 SessionResult AgentHarness_Navigate(AgentHarness* harness, DurableId targetEntryId) {
   if (!harness || !harness->Initialized || !DurableId_IsSet(targetEntryId))
-    return Invalid("navigation arguments are invalid");
+    return SessionResult_Invalid("navigation arguments are invalid");
   {
     ScopedLock lock(&harness->StateLock);
     SessionResult idle = EnsureIdleLocked(harness, SVL("agent harness is already running"));
@@ -711,7 +703,7 @@ SessionResult AgentHarness_Navigate(AgentHarness* harness, DurableId targetEntry
   DurableId target = targetEntryId;
   SessionResult result = SessionResult_Ok();
   if (harness->Config.Hooks.BeforeNavigation) {
-    result = HookFailure(harness->Config.Hooks.BeforeNavigation(harness->Config.Hooks.User,
+    result = AgentHook_Failure(harness->Config.Hooks.BeforeNavigation(harness->Config.Hooks.User,
                                                                 &harness->Work, &target),
                          "before-navigation hook failed");
   }
@@ -747,7 +739,7 @@ SessionResult AgentHarness_Navigate(AgentHarness* harness, DurableId targetEntry
 
 SessionResult AgentHarness_LabelBranch(AgentHarness* harness, StrView label) {
   if (!harness || !harness->Initialized || label.Length == 0)
-    return Invalid("branch label arguments are invalid");
+    return SessionResult_Invalid("branch label arguments are invalid");
   DurableId head;
   {
     ScopedLock lock(&harness->StateLock);
@@ -764,7 +756,7 @@ SessionResult AgentHarness_LabelBranch(AgentHarness* harness, StrView label) {
 }
 
 SessionResult AgentHarness_SetName(AgentHarness* harness, StrView name) {
-  if (!harness || !harness->Initialized) return Invalid("session name arguments are invalid");
+  if (!harness || !harness->Initialized) return SessionResult_Invalid("session name arguments are invalid");
   {
     ScopedLock lock(&harness->StateLock);
     SessionResult idle = EnsureIdleLocked(harness, SVL("agent harness is running"));
@@ -782,7 +774,7 @@ SessionResult AgentHarness_SetModel(AgentHarness* harness, Model model, Provider
   if (!harness || !harness->Initialized || model.Id.Length == 0 ||
       model.Provider.Length == 0 || !provider.Stream ||
       !Model_RequestProfileIsValid(&model, profile))
-    return Invalid("model arguments are invalid");
+    return SessionResult_Invalid("model arguments are invalid");
   profile = Model_ResolveRequestProfile(&model, profile);
   DurableId head;
   {
@@ -818,7 +810,7 @@ SessionResult AgentHarness_Fork(Arena* arena, AgentHarness* harness,
                                 SessionLog* outLog, SessionInfo* outInfo) {
   if (!arena || !harness || !harness->Initialized || !repository || !repository->Fork ||
       !outLog || !outInfo)
-    return Invalid("fork arguments are invalid");
+    return SessionResult_Invalid("fork arguments are invalid");
 
   DurableId sessionId;
   DurableId headId;
@@ -848,7 +840,7 @@ SessionResult AgentHarness_Fork(Arena* arena, AgentHarness* harness,
 }
 
 SessionResult AgentHarness_RequestCancel(AgentHarness* harness) {
-  if (!harness || !harness->Initialized) return Invalid("cancel arguments are invalid");
+  if (!harness || !harness->Initialized) return SessionResult_Invalid("cancel arguments are invalid");
   {
     ScopedLock lock(&harness->StateLock);
     if (harness->Faulted)
