@@ -51,6 +51,14 @@ struct Tool {
   StrView Name;
   StrView Label;
   StrView Description;
+  // System-prompt contributions, mirroring pi's `promptSnippet` /
+  // `promptGuidelines`. `Description` is the model-facing schema text; these
+  // are the prose the prompt builder renders. A tool is listed under
+  // "Available tools" only when it supplies a `PromptSnippet`. Prefer
+  // `Tool_SetPromptGuidelines` over assigning the pointer and count directly.
+  StrView PromptSnippet;
+  const StrView* PromptGuidelines;
+  u32 PromptGuidelineCount;
   StrView ParamsJsonSchema;
   ToolExecMode ExecMode;  // Default => may run in parallel; Sequential => forces serial batch
   void* Ctx;
@@ -65,6 +73,14 @@ struct ToolRuntime {
   const Tool* Definition;
   JsonSchema Schema;
 };
+
+// Binds a guideline array to a tool so the pointer and its count cannot drift.
+template <usize N>
+inline void Tool_SetPromptGuidelines(Tool* tool,
+                                     const StrView (&guidelines)[N]) {
+  tool->PromptGuidelines = guidelines;
+  tool->PromptGuidelineCount = (u32)N;
+}
 
 inline ToolDef Tool_ToDef(const Tool& t) {
   ToolDef d;

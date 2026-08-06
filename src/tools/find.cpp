@@ -144,6 +144,7 @@ Tool FindTool() {
   t.Name = SVL("find");
   t.Label = SVL("Find");
   t.Description = SVL("Find files and directories by glob pattern.");
+  t.PromptSnippet = SVL("Find files by glob pattern (respects .gitignore)");
   t.ParamsJsonSchema = SVL(
       "{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\",\"description\":\"Glob "
       "pattern to match files, e.g. '*.ts', '**/*.json', or 'src/**/*.spec.ts'\"},\"path\":{"

@@ -69,11 +69,16 @@ static bool WriteExec(void* ctx, Arena* arena, StrView id,
   return ok;
 }
 
+constexpr StrView kWritePromptGuidelines[] = {
+    SVL("Use write only for new files or complete rewrites.")};
+
 Tool WriteTool() {
   Tool t = {};
   t.Name = SVL("write");
   t.Label = SVL("Write");
   t.Description = SVL("Write content to a file, creating parent directories as needed.");
+  t.PromptSnippet = SVL("Create or overwrite files");
+  Tool_SetPromptGuidelines(&t, kWritePromptGuidelines);
   t.ParamsJsonSchema = SVL(
       "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Path to "
       "the file to write (relative or absolute)\"},\"content\":{\"type\":\"string\","

@@ -23,6 +23,16 @@ i32 FindText(StrView haystack, const char* needle) {
   return -1;
 }
 
+i32 CountText(StrView haystack, const char* needle) {
+  StrView value = SV(needle);
+  if (!value.Length || value.Length > haystack.Length) return 0;
+  i32 count = 0;
+  for (u32 i = 0; i + value.Length <= haystack.Length; i++) {
+    if (memcmp(haystack.Data + i, value.Data, value.Length) == 0) count++;
+  }
+  return count;
+}
+
 void RemoveDir(const char* path) {
 #if defined(_WIN32)
   _rmdir(path);
@@ -31,32 +41,86 @@ void RemoveDir(const char* path) {
 #endif
 }
 
+constexpr StrView kReadGuidelines[] = {
+    SVL("Use read to examine files instead of cat or sed."),
+    SVL("Shared guideline")};
+constexpr StrView kShellGuidelines[] = {SVL("Shared guideline")};
+
+Tool MakeTool(const char* name, StrView snippet, const StrView* guidelines,
+              u32 guidelineCount) {
+  Tool tool = {};
+  tool.Name = SV(name);
+  tool.Description = SV("schema description, never used in the prompt");
+  tool.PromptSnippet = snippet;
+  tool.PromptGuidelines = guidelines;
+  tool.PromptGuidelineCount = guidelineCount;
+  return tool;
+}
 void TestPromptAssembly(Arena* scratch, StrView root, StrView cwd,
                         StrView agentDirectory) {
-  Tool tools[2] = {};
-  tools[0].Name = SVL("read");
-  tools[0].Description = SVL("Read a file");
-  tools[1].Name = SVL("shell");
-  tools[1].Description = SVL("Run a shell command");
+  Tool tools[3] = {
+      MakeTool("read", SVL("Read file contents"), kReadGuidelines, 2),
+      MakeTool("shell", SVL("Execute shell commands (ls, grep, find, etc.)"),
+               kShellGuidelines, 1),
+      // No snippet: must stay out of the "Available tools" list.
+      MakeTool("silent_tool", {}, nullptr, 0)};
 
   PromptContextOptions options = {};
   options.WorkingDirectory = cwd;
   options.AgentDirectory = agentDirectory;
   options.Tools = tools;
-  options.ToolCount = 2;
+  options.ToolCount = 3;
   options.NoContextFiles = true;
   options.ProjectTrusted = true;
   PromptContext context = {};
   StrBuf error = StrBuf_Make(scratch, 128);
   CHECK(PromptContext_Build(&options, &context, &error));
-  CHECK_ALL(StrView_Contains(context.SystemPrompt, "Available tools:"),
-            StrView_Contains(context.SystemPrompt, "- read: Read a file"),
-            StrView_Contains(context.SystemPrompt, "- shell: Run a shell command"),
-            StrView_Contains(context.SystemPrompt, "Current working directory:"),
-            !StrView_Contains(context.SystemPrompt, "2026"));
+  // The whole default prompt, byte for byte, up to the varying cwd. Tool lines
+  // follow tool order and use snippets; guidelines are the conditional shell
+  // bullet, then tool contributions in tool order with duplicates collapsed,
+  // then the two always-on bullets.
+  CHECK_ALL(
+      FindText(context.SystemPrompt,
+               "You are an expert coding assistant operating inside Clank, a "
+               "coding agent harness. You help users by reading files, "
+               "executing commands, editing code, and writing new files."
+               "\n\nAvailable tools:"
+               "\n- read: Read file contents"
+               "\n- shell: Execute shell commands (ls, grep, find, etc.)"
+               "\n\nGuidelines:"
+               "\n- Use shell for file operations like ls, rg, find"
+               "\n- Use read to examine files instead of cat or sed."
+               "\n- Shared guideline"
+               "\n- Be concise in your responses"
+               "\n- Show file paths clearly when working with files"
+               "\nCurrent working directory: ") == 0,
+      CountText(context.SystemPrompt, "- Shared guideline") == 1,
+      !StrView_Contains(context.SystemPrompt, "silent_tool"),
+      !StrView_Contains(context.SystemPrompt, "schema description"),
+      !StrView_Contains(context.SystemPrompt, "2026"));
+  PromptContext_Release(&context);
+
+  // A dedicated search tool suppresses the shell fallback bullet.
+  Tool searchTools[2] = {
+      tools[1],
+      MakeTool("grep", SVL("Search file contents for patterns"), nullptr, 0)};
+  options.Tools = searchTools;
+  options.ToolCount = 2;
+  StrBuf_Clear(&error);
+  CHECK(PromptContext_Build(&options, &context, &error));
+  CHECK(!StrView_Contains(context.SystemPrompt, "Use shell for file operations"));
+  PromptContext_Release(&context);
+
+  options.Tools = nullptr;
+  options.ToolCount = 0;
+  StrBuf_Clear(&error);
+  CHECK(PromptContext_Build(&options, &context, &error));
+  CHECK(StrView_Contains(context.SystemPrompt, "Available tools:\n(none)\n"));
   PromptContext_Release(&context);
 
   StrView appendInputs[] = {SVL("first addition"), SVL("second addition")};
+  options.Tools = tools;
+  options.ToolCount = 3;
   options.HasExplicitSystemPrompt = true;
   options.ExplicitSystemPrompt = SVL("custom base");
   options.ExplicitAppendPrompts = appendInputs;
@@ -120,8 +184,27 @@ void TestDiscoveryAndTrust(Arena* scratch, StrView root, StrView cwd,
             StrView_Contains(context.SystemPrompt, "project append"),
             StrView_Contains(context.SystemPrompt,
                              "<project_instructions path=\""),
+            StrView_Contains(context.SystemPrompt,
+                             "\n\n<project_context>\n\n"
+                             "Project-specific instructions and guidelines:\n\n"
+                             "<project_instructions path=\""),
+            StrView_Contains(context.SystemPrompt,
+                             "\n</project_instructions>\n\n"),
+            StrView_Contains(context.SystemPrompt,
+                             "</project_context>\n\nCurrent working directory:"),
             !StrView_Contains(context.SystemPrompt, "global base"),
             !StrView_Contains(context.SystemPrompt, "global append"));
+  PromptContext_Release(&context);
+
+  // AGENTS.override.md wins over other candidates in the same directory.
+  StrView cwdOverride = Fs_Join(scratch, cwd, SVL("AGENTS.override.md"));
+  CHECK(ConfigFile_WriteAtomic(scratch, cwdOverride, SVL("cwd override")));
+  StrBuf_Clear(&error);
+  CHECK(PromptContext_Build(&options, &context, &error));
+  CHECK_ALL(StrView_Contains(context.SystemPrompt, "cwd override"),
+            !StrView_Contains(context.SystemPrompt, "cwd context"),
+            StrView_Contains(context.SystemPrompt, "root context"),
+            context.ContextFiles.Count == 3);
   PromptContext_Release(&context);
 }
 
@@ -144,6 +227,7 @@ void TestPromptContext() {
       "clank_prompt_context_test/global/APPEND_SYSTEM.md",
       "clank_prompt_context_test/AGENTS.md",
       "clank_prompt_context_test/work/child/CLAUDE.md",
+      "clank_prompt_context_test/work/child/AGENTS.override.md",
       "clank_prompt_context_test/work/child/.clank/SYSTEM.md",
       "clank_prompt_context_test/work/child/.clank/APPEND_SYSTEM.md",
   };

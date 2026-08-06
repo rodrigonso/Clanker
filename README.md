@@ -137,11 +137,17 @@ ctest --preset vs2026-debug
 ## Project context and system prompts
 
 Clank builds the system prompt from the active tool catalog, project
-instructions, and cwd. It loads the first regular file named `AGENTS.md`,
-`AGENTS.MD`, `CLAUDE.md`, or `CLAUDE.MD` from `~/.clank` and each directory
-from the filesystem root through cwd. Global context is applied first, followed
-by broad-to-specific project context. Use `--no-context-files` (`-nc`) to
-disable this discovery.
+instructions, and cwd. It loads the first regular file named
+`AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, or `CLAUDE.MD`
+from `~/.clank` and each directory from the filesystem root through cwd.
+`AGENTS.override.md` therefore wins over the other candidates in its own
+directory, while every other directory still layers normally. Global context is
+applied first, followed by broad-to-specific project context. Use
+`--no-context-files` (`-nc`) to disable this discovery.
+
+Tools contribute their own prompt text: a one-line snippet for the `Available
+tools` list and optional guideline bullets that are merged, in tool order, with
+the always-on guidelines. A tool without a snippet is not listed.
 
 `~/.clank/SYSTEM.md` replaces the built-in prompt globally, and
 `~/.clank/APPEND_SYSTEM.md` appends instructions. Trusted projects can override

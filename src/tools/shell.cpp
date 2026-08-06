@@ -176,6 +176,7 @@ Tool ShellTool() {
   t.Name = SVL("shell");
   t.Label = SVL("Shell");
   t.Description = SVL("Run a shell command and return combined stdout/stderr.");
+  t.PromptSnippet = SVL("Execute shell commands (ls, grep, find, etc.)");
   t.ParamsJsonSchema = SVL(
       "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"Shell "
       "command to execute\"},\"timeout\":{\"type\":\"number\",\"description\":\"Timeout in seconds "

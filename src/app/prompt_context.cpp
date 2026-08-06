@@ -9,7 +9,14 @@ constexpr u64 kMaxPromptFileBytes = (u64)4 << 20;
 constexpr u32 kMaxSystemPromptBytes = (u32)16 << 20;
 
 const StrView kContextCandidates[] = {
-    SVL("AGENTS.md"), SVL("AGENTS.MD"), SVL("CLAUDE.md"), SVL("CLAUDE.MD")};
+    SVL("AGENTS.override.md"), SVL("AGENTS.md"), SVL("AGENTS.MD"),
+    SVL("CLAUDE.md"), SVL("CLAUDE.MD")};
+
+// Identity text for the built-in prompt, mirroring pi's `buildSystemPrompt`.
+constexpr const char* kDefaultPromptPreamble =
+    "You are an expert coding assistant operating inside Clank, a coding agent "
+    "harness. You help users by reading files, executing commands, editing "
+    "code, and writing new files.";
 
 StrView PathRoot(StrView path) {
   if (!path.Length) return {};
@@ -271,29 +278,79 @@ bool AppendEscapedAttribute(StrBuf* out, StrView value) {
   return true;
 }
 
-bool BuildDefaultPrompt(const PromptContextOptions* options, StrBuf* prompt) {
-  if (!AppendCStrLimited(
-          prompt,
-          "You are Clank, an expert coding assistant.\n\nAvailable tools:\n"))
-    return false;
-  if (!options->ToolCount) {
-    if (!AppendCStrLimited(prompt, "(none)\n")) return false;
-  } else {
-    for (u32 i = 0; i < options->ToolCount; i++) {
-      const Tool& tool = options->Tools[i];
-      if (!AppendCStrLimited(prompt, "- ") || !AppendLimited(prompt, tool.Name) ||
-          !AppendCStrLimited(prompt, ": ") ||
-          !AppendLimited(prompt, tool.Description) ||
-          !AppendCStrLimited(prompt, "\n"))
-        return false;
-    }
+bool HasTool(const PromptContextOptions* options, StrView name) {
+  for (u32 i = 0; i < options->ToolCount; i++)
+    if (StrView_Eq(options->Tools[i].Name, name)) return true;
+  return false;
+}
+
+void AddGuideline(Array<StrView>* guidelines, StrView value) {
+  if (!value.Length) return;
+  for (u32 i = 0; i < guidelines->Count; i++)
+    if (StrView_Eq(guidelines->Data[i], value)) return;
+  Array_Push(guidelines, value);
+}
+
+// A tool is listed only when it supplies a snippet, so tools that exist purely
+// for the model's benefit stay out of the prompt.
+bool AppendToolList(const PromptContextOptions* options, StrBuf* prompt) {
+  bool listedAny = false;
+  for (u32 i = 0; i < options->ToolCount; i++) {
+    const Tool& tool = options->Tools[i];
+    if (!tool.PromptSnippet.Length) continue;
+    if (!AppendCStrLimited(prompt, "- ") || !AppendLimited(prompt, tool.Name) ||
+        !AppendCStrLimited(prompt, ": ") ||
+        !AppendLimited(prompt, tool.PromptSnippet) ||
+        !AppendCStrLimited(prompt, "\n"))
+      return false;
+    listedAny = true;
   }
-  return AppendCStrLimited(
-      prompt,
-      "\nGuidelines:\n"
-      "- Use the available tools when they help complete the task.\n"
-      "- Keep responses concise and focused on the requested outcome.\n"
-      "- Refer to files with clear paths when discussing code changes.");
+  return listedAny || AppendCStrLimited(prompt, "(none)\n");
+}
+
+// Guideline order mirrors pi: the shell fallback bullet, then each tool's own
+// bullets in tool order, then the always-on pair. Duplicates are dropped so
+// tools can share advice without repeating it in the prompt.
+Array<StrView> CollectGuidelines(Arena* arena,
+                                 const PromptContextOptions* options) {
+  Array<StrView> guidelines = Array_Make<StrView>(arena, 16);
+  // Only worth steering the model toward the shell when no dedicated search or
+  // listing tool is active. Keyed on Clank's built-in tool names.
+  if (HasTool(options, SVL("shell")) && !HasTool(options, SVL("grep")) &&
+      !HasTool(options, SVL("find")) && !HasTool(options, SVL("ls")))
+    AddGuideline(&guidelines,
+                 SVL("Use shell for file operations like ls, rg, find"));
+
+  for (u32 i = 0; i < options->ToolCount; i++) {
+    const Tool& tool = options->Tools[i];
+    for (u32 j = 0; j < tool.PromptGuidelineCount; j++)
+      AddGuideline(&guidelines, tool.PromptGuidelines[j]);
+  }
+
+  AddGuideline(&guidelines, SVL("Be concise in your responses"));
+  AddGuideline(&guidelines,
+               SVL("Show file paths clearly when working with files"));
+  return guidelines;
+}
+
+// Mirrors pi's `buildSystemPrompt` default branch: a fixed preamble, an
+// opt-in tool list built from one-line snippets, then guidelines composed from
+// the active tool set.
+bool BuildDefaultPrompt(PromptContext* context,
+                        const PromptContextOptions* options, StrBuf* prompt) {
+  if (!AppendCStrLimited(prompt, kDefaultPromptPreamble) ||
+      !AppendCStrLimited(prompt, "\n\nAvailable tools:\n") ||
+      !AppendToolList(options, prompt) ||
+      !AppendCStrLimited(prompt, "\nGuidelines:"))
+    return false;
+
+  Array<StrView> guidelines = CollectGuidelines(&context->Mem, options);
+  for (u32 i = 0; i < guidelines.Count; i++) {
+    if (!AppendCStrLimited(prompt, "\n- ") ||
+        !AppendLimited(prompt, guidelines.Data[i]))
+      return false;
+  }
+  return true;
 }
 
 bool BuildFinalPrompt(PromptContext* context,
@@ -303,7 +360,7 @@ bool BuildFinalPrompt(PromptContext* context,
   StrBuf prompt = StrBuf_Make(&context->Mem, 4096);
   if (basePrompt.Data) {
     if (!AppendLimited(&prompt, basePrompt)) goto too_large;
-  } else if (!BuildDefaultPrompt(options, &prompt)) {
+  } else if (!BuildDefaultPrompt(context, options, &prompt)) {
     goto too_large;
   }
 
@@ -314,24 +371,27 @@ bool BuildFinalPrompt(PromptContext* context,
   }
 
   if (context->ContextFiles.Count) {
-    if (!AppendCStrLimited(&prompt, "\n\n<project_context>"))
+    if (!AppendCStrLimited(
+            &prompt,
+            "\n\n<project_context>\n\n"
+            "Project-specific instructions and guidelines:\n\n"))
       goto too_large;
     for (u32 i = 0; i < context->ContextFiles.Count; i++) {
       const PromptContextFile& file = context->ContextFiles.Data[i];
       StrView posixPath = Fs_ToPosix(&context->Mem, file.Path);
-      if (!AppendCStrLimited(&prompt, "\n<project_instructions path=\"") ||
+      if (!AppendCStrLimited(&prompt, "<project_instructions path=\"") ||
           !AppendEscapedAttribute(&prompt, posixPath) ||
           !AppendCStrLimited(&prompt, "\">\n") ||
           !AppendLimited(&prompt, file.Content) ||
-          !AppendCStrLimited(&prompt, "\n</project_instructions>"))
+          !AppendCStrLimited(&prompt, "\n</project_instructions>\n\n"))
         goto too_large;
     }
-    if (!AppendCStrLimited(&prompt, "\n</project_context>")) goto too_large;
+    if (!AppendCStrLimited(&prompt, "</project_context>\n")) goto too_large;
   }
 
   {
     StrView cwd = Fs_ToPosix(&context->Mem, options->WorkingDirectory);
-    if (!AppendCStrLimited(&prompt, "\n\nCurrent working directory: ") ||
+    if (!AppendCStrLimited(&prompt, "\nCurrent working directory: ") ||
         !AppendLimited(&prompt, cwd))
       goto too_large;
   }

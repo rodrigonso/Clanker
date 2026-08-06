@@ -411,6 +411,7 @@ Tool GrepTool() {
       SVL("Search file contents for a pattern. Returns matching lines with file paths and line "
           "numbers. Respects .gitignore. Output is truncated to 100 matches or 50KB (whichever is "
           "hit first). Long lines are truncated to 500 chars.");
+  tool.PromptSnippet = SVL("Search file contents for patterns (respects .gitignore)");
   tool.ParamsJsonSchema = SVL(
       "{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\",\"description\":\"Search "
       "pattern (regex or literal string)\"},\"path\":{\"type\":\"string\",\"description\":\"Directory "

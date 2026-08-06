@@ -109,6 +109,7 @@ Tool LsTool() {
   t.Name = SVL("ls");
   t.Label = SVL("List");
   t.Description = SVL("List files and directories in a directory.");
+  t.PromptSnippet = SVL("List directory contents");
   t.ParamsJsonSchema = SVL(
       "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Directory "
       "to list (default: current directory)\"},\"limit\":{\"type\":\"number\",\"description\":"

@@ -240,7 +240,8 @@ and model-visible state and keeps active turns and queues in memory.
 | subsystem | status | notes |
 |---|---|---|
 | System prompt assembly (cwd, tool docs, overrides, `AGENTS.md`/`CLAUDE.md` discovery) | ✅ | global and project `SYSTEM.md` / `APPEND_SYSTEM.md`, root-to-cwd context discovery, CLI overrides, transactional reload; like pi, omits the date for prompt-cache stability |
-| `AGENTS.override.md` | ❌ | pi allows a per-directory override file |
+| Default prompt text (preamble, tool snippets, guidelines, `<project_context>` layout) | ✅ | byte-aligned with pi's `buildSystemPrompt`: same preamble wording, opt-in `PromptSnippet` tool list, guidelines composed from the active tool set (conditional shell bullet → per-tool contributions in tool order → the two always-on bullets, deduped), and pi's exact `<project_context>` framing. Clank omits pi's "other custom tools" sentence (no extension seam) and its pi-documentation block |
+| `AGENTS.override.md` | ✅ | first candidate per directory, so it wins over `AGENTS.md`/`CLAUDE.md` there while other directories still layer normally |
 | Compaction | 🟡 | automatic thresholds (`reserveTokens` / `keepRecentTokens`, pi's defaults) firing inside the turn loop, plus durable manual `/compact`. Retained tail cuts only at user boundaries so tool calls stay with their results. pi additionally has custom `/compact` instructions, split-turn two-phase summaries, cumulative file tracking, and branch summarization on tree navigation |
 | Skills (`SKILL.md` discovery, frontmatter, prompt injection, `/skill:<name>`) | ❌ | |
 | Prompt templates (`$1`, `$@`, `$ARGUMENTS`, `/templatename`) | ❌ | |

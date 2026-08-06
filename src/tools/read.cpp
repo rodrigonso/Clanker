@@ -187,11 +187,16 @@ static bool ReadExec(void* ctx, Arena* arena, StrView id, const ToolArgs* args,
   return true;
 }
 
+constexpr StrView kReadPromptGuidelines[] = {
+    SVL("Use read to examine files instead of cat or sed.")};
+
 Tool ReadTool() {
   Tool t = {};
   t.Name = SVL("read");
   t.Label = SVL("Read");
   t.Description = SVL("Read a UTF-8 text file or image from disk.");
+  t.PromptSnippet = SVL("Read file contents");
+  Tool_SetPromptGuidelines(&t, kReadPromptGuidelines);
   t.ParamsJsonSchema = SVL(
       "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Path to "
       "the file to read (relative or absolute)\"},\"offset\":{\"type\":\"number\",\"description\":"
