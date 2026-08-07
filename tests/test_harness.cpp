@@ -3142,11 +3142,55 @@ void TestHarnessWatchOverflow() {
   ArenaRelease(&arena);
 }
 
+// The harness keeps an in-memory clone of every record, which is what makes
+// folding and snapshots O(1), so State grows with the conversation by design.
+// This pins the rate: it is roughly twice the raw text, and a change that added
+// another clone per turn would show up here rather than as a slow leak.
+void TestHarnessStateGrowthRate() {
+  Arena arena = ArenaCreate();
+  MemoryRepository memory = {};
+  MemoryRepository_Init(&memory);
+  SessionRepository repository = MemoryRepository_AsRepository(&memory);
+  SessionLog log = {};
+  CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+
+  static char body[2048];
+  for (u32 i = 0; i < sizeof(body); i++) body[i] = 'a' + (char)(i % 26);
+  ScriptStep step = {};
+  step.Text = StrView{body, (u32)sizeof(body)};
+  step.Stop = StopReason::Stop;
+  ScriptProvider script = {&step, 1, 0};
+  AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
+  config.Compaction = {};  // measure raw growth, not the compaction policy
+  AgentHarness harness = {};
+  CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+
+  const u32 kTurns = 100;
+  for (u32 turn = 0; turn < kTurns; turn++) {
+    script.Index = 0;
+    CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("prompt"))));
+  }
+
+  // Two records per turn (user + assistant) carrying ~2 KB of text. Arena
+  // growth abandons the block it grew out of, so some overhead is inherent;
+  // 6 KB/turn leaves room for that without hiding a second copy.
+  usize perTurn = harness.State.Used / kTurns;
+  CHECK_ALL(harness.Records.Count == kTurns * 2 + 1, perTurn > sizeof(body),
+            perTurn < (usize)6 * 1024);
+
+  // Closing releases State: growth is bounded by one continuous session, not by
+  // the life of the process, which is why /clear and a session switch reset it.
+  CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+  CHECK(harness.State.Base == nullptr);
+  ArenaRelease(&arena);
+}
+
 void TestHarness() {
   TestHarnessReplayAndIncremental();
   TestHarnessLifecycle();
   TestHarnessWatchers();
   TestHarnessWatchOverflow();
+  TestHarnessStateGrowthRate();
   TestHarnessWatchDrainsAfterClose();
   TestHarnessToolsAndHooks();
   TestHarnessPerTurnHooks();
