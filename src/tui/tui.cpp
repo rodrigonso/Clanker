@@ -16,6 +16,13 @@ constexpr u64 kDoubleEscapeMs = 500;
 constexpr u64 kSpinnerFrameMs = 60;
 constexpr u64 kCopyNoticeMs = 1500;
 
+// Compaction copies the live transcript, so it should not run constantly, but a
+// fixed high threshold never fires: 800 turns of 2 KB replies only reach ~7 MB.
+// Compact once the arena passes this floor, and thereafter only once it has
+// doubled relative to the live set measured at the last compaction, which keeps
+// the copying amortized no matter how large the scrollback cap is.
+constexpr usize TUI_SESSION_COMPACT_FLOOR = (usize)2 << 20;
+
 Style TuiSt(const Tui* t, u8 fg, u8 attr) {
   return Style{t->Color ? fg : COL_DEFAULT, COL_DEFAULT, attr};
 }
@@ -2551,13 +2558,85 @@ void Tui_HydrateTranscript(Tui* t, const Message* messages, u32 count) {
   Mutex_Unlock(&t->Lock);
 }
 
-void Tui_ReplaceTranscript(Tui* t, const Message* messages, u32 count) {
-  if (!t || (!messages && count)) return;
-  Mutex_Lock(&t->Lock);
+// Every Tui field that can hold a string owned by SessionMem and is not rebuilt
+// by RebuildTranscriptLocked below. Missing one here is a use-after-free, not a
+// leak, so the list is kept next to the swap that depends on it.
+static void ClearSessionScopedStringsLocked(Tui* t) {
+  t->StateTool = {};
+  t->RetryStatus = {};
+  t->OperationLabel = {};
+  t->OperationStatus = {};
+  t->ModalTitle = {};
+  t->ModalPrompt = {};
+  t->ModalOptions = nullptr;
+  t->ModalOptionCount = 0;
+  t->ModalTextResult = {};
+}
+
+// A modal or a running operation is displaying strings owned by SessionMem and
+// is waiting on a caller that will read them again, so the arena cannot move
+// out from under it.
+static bool SessionArenaSwapSafeLocked(const Tui* t) {
+  return t->ModalKind == TuiModalKind::None &&
+         t->ModalResult != TuiModalResult::Pending && !t->OperationActive;
+}
+
+// Rebuilds the transcript from `messages`, moving it onto a fresh SessionMem
+// when that is safe. The move is the point: SessionMem is a bump allocator, so
+// entries the scrollback cap has already dropped are only reclaimed by copying
+// the survivors somewhere else and releasing the old arena. When a swap is not
+// safe the rebuild still happens, just without reclaiming.
+static void RebuildTranscriptLocked(Tui* t, const Message* messages, u32 count) {
   u16 width = t->Model.Width;
   u32 cap = t->Model.Cap;
+  bool swap = SessionArenaSwapSafeLocked(t);
+
+  Arena next = {};
+  TuiSubmission preserved[64] = {};
+  u32 preservedCount = 0;
+  StrView editText = {};
+  u32 editCursor = 0;
+  Array<StrView> history = {};
+  if (swap) {
+    next = ArenaCreate();
+    preservedCount = t->QCount;
+    for (u32 i = 0; i < preservedCount; i++) {
+      const TuiSubmission& queued = t->Queue[(t->QHead + i) % 64];
+      preserved[i].Kind = queued.Kind;
+      preserved[i].Text = StrView_Dup(&next, queued.Text);
+    }
+    // Whatever the user has already typed, and their recall history, are theirs
+    // -- reclaiming memory must not eat them.
+    editText = StrView_Dup(&next, LineEdit_Text(&t->Edit));
+    editCursor = LineEdit_Cursor(&t->Edit);
+    history = Array_Make<StrView>(&next, t->Edit.History.Count ? t->Edit.History.Count : 1);
+    for (u32 i = 0; i < t->Edit.History.Count; i++)
+      Array_Push(&history, StrView_Dup(&next, t->Edit.History.Data[i]));
+  }
+
   LineModel_Release(&t->Model);
+  if (swap) {
+    ArenaRelease(&t->SessionMem);
+    t->SessionMem = next;
+    ClearSessionScopedStringsLocked(t);
+  }
   LineModel_Init(&t->Model, &t->SessionMem, width, cap, t->Color);
+  if (swap) {
+    LineEdit_Init(&t->Edit, &t->SessionMem);
+    LineEdit_Init(&t->ModalEdit, &t->SessionMem);
+    t->InputUi = UiTextInputState{&t->Edit, 0, false};
+    if (editText.Length) {
+      LineEdit_InsertText(&t->Edit, editText);
+      LineEdit_SetCursor(&t->Edit, editCursor);
+    }
+    for (u32 i = 0; i < history.Count; i++)
+      Array_Push(&t->Edit.History, history.Data[i]);
+    memset(t->Queue, 0, sizeof(t->Queue));
+    for (u32 i = 0; i < preservedCount; i++) t->Queue[i] = preserved[i];
+    t->QHead = 0;
+    t->QTail = preservedCount % 64;
+    t->QCount = preservedCount;
+  }
   StreamReveal_Init(&t->Reveal, &t->SessionMem);
   t->DisplayEvents = Array_Make<TuiDisplayEvent>(&t->SessionMem, 16);
   t->DisplayHead = 0;
@@ -2566,8 +2645,45 @@ void Tui_ReplaceTranscript(Tui* t, const Message* messages, u32 count) {
   t->StateTool = {};
   t->State = t->AgentRunning ? TuiState::Thinking : TuiState::Idle;
   HydrateTranscriptLocked(t, messages, count);
+  // The live set, for deciding when the next compaction is worth its copy.
+  if (swap) t->SessionMemBaseline = t->SessionMem.Used;
+}
+
+void Tui_ReplaceTranscript(Tui* t, const Message* messages, u32 count) {
+  if (!t || (!messages && count)) return;
+  Mutex_Lock(&t->Lock);
+  RebuildTranscriptLocked(t, messages, count);
   Wake(t);
   Mutex_Unlock(&t->Lock);
+}
+
+bool Tui_SessionMemoryWantsCompaction(Tui* t) {
+  if (!t) return false;
+  Mutex_Lock(&t->Lock);
+  usize used = t->SessionMem.Used;
+  bool worthIt = used > TUI_SESSION_COMPACT_FLOOR &&
+                 used > t->SessionMemBaseline * 2;
+  bool wants = t->SessionUp && worthIt && !t->AgentRunning && !t->Stop && !t->Quit &&
+               !Tui_HasPendingDisplay(t) && SessionArenaSwapSafeLocked(t);
+  Mutex_Unlock(&t->Lock);
+  return wants;
+}
+
+bool Tui_CompactSessionMemory(Tui* t, const Message* messages, u32 count) {
+  if (!t || (!messages && count)) return false;
+  Mutex_Lock(&t->Lock);
+  // Re-check under the lock: the caller sampled the condition before building
+  // the transcript, and the input thread runs the whole time.
+  if (!t->SessionUp || t->AgentRunning || t->Stop || t->Quit ||
+      Tui_HasPendingDisplay(t) || !SessionArenaSwapSafeLocked(t)) {
+    Mutex_Unlock(&t->Lock);
+    return false;
+  }
+  RebuildTranscriptLocked(t, messages, count);
+  t->Follow = true;
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+  return true;
 }
 
 void Tui_FeedInput(Tui* t, const char* data, u32 n) {

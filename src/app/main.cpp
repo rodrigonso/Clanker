@@ -150,7 +150,8 @@ static void RunPlainRepl(InteractiveRuntime* rt) {
     size_t L = strlen(line);
     while (L && (line[L - 1] == '\n' || line[L - 1] == '\r')) line[--L] = 0;
     if (L == 0) continue;
-    AppCommandDispatchResult command = AppCommand_Dispatch(SV(line), &handlers, &commandUx);
+    AppCommandDispatchResult command =
+        RuntimeDispatchCommand(rt, SV(line), &handlers, &commandUx);
     if (command.Handled) {
       if (command.Action == AppLoopAction::Exit) break;
       if (command.Action == AppLoopAction::ResetSession) RuntimeResetSession(rt, &commandUx);
@@ -167,6 +168,30 @@ static void RunPlainRepl(InteractiveRuntime* rt) {
 }
 
 // Full-screen TUI REPL. Falls back to the plain REPL if not a TTY.
+static void MaybeCompactTuiSession(InteractiveRuntime* rt, Tui* tui) {
+  if (!Tui_SessionMemoryWantsCompaction(tui)) return;
+  // The transcript is rebuilt from the harness, which is the authority, so the
+  // copy is what the user was already looking at.
+  Arena scratch = ArenaCreate((usize)64 << 20);
+  AgentHarnessSnapshot snapshot = {};
+  SessionResult taken =
+      AgentHarness_SnapshotFull(&scratch, rt->Harness, &snapshot);
+  if (SessionResult_IsOk(taken)) {
+    // Only the tail can ever be on screen -- the scrollback cap drops the rest
+    // immediately -- and rebuilding from the whole history would make each
+    // compaction cost grow with session length instead of with the live set.
+    const u32 kMaxRebuiltMessages = 400;
+    const Message* messages = snapshot.Transcript.Data;
+    u32 count = snapshot.Transcript.Count;
+    if (count > kMaxRebuiltMessages) {
+      messages += count - kMaxRebuiltMessages;
+      count = kMaxRebuiltMessages;
+    }
+    Tui_CompactSessionMemory(tui, messages, count);
+  }
+  ArenaRelease(&scratch);
+}
+
 static void RunTuiRepl(InteractiveRuntime* rt) {
   TuiOpts opts;
   opts.ModelName = rt->CurrentModel.Id;
@@ -221,11 +246,12 @@ static void RunTuiRepl(InteractiveRuntime* rt) {
   EmitPromptDiagnostics(rt->Prompt, &commandUx);
   AppCommandHandlers handlers = RuntimeCommandHandlers(rt);
   for (;;) {
+    MaybeCompactTuiSession(rt, &tui);
     TuiSubmission submission = {};
     if (!Tui_WaitForSubmit(&tui, &submission)) break;
     if (submission.Kind == TuiSubmissionKind::Command) {
       AppCommandDispatchResult command =
-          AppCommand_Dispatch(submission.Text, &handlers, &commandUx);
+          RuntimeDispatchCommand(rt, submission.Text, &handlers, &commandUx);
       if (command.Action == AppLoopAction::Exit) break;
       if (command.Action == AppLoopAction::ResetSession) RuntimeResetSession(rt, &commandUx);
       continue;
@@ -673,6 +699,8 @@ int main(int argc, char** argv) {
 
   InteractiveRuntime runtime = {};
   runtime.Mem = &arena;
+  // Sized for one command's report; `/tree` on a large session is the biggest.
+  runtime.CommandMem = ArenaCreate((usize)16 << 20);
   runtime.AuthPath = authPath;
   runtime.SettingsPath = settingsPath;
   runtime.Spec = selected.Spec;

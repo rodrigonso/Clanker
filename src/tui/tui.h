@@ -80,6 +80,9 @@ struct Tui {
   // Resettable conversation/UI arena. Terminal, screen, synchronization, cwd,
   // branch, and current model survive Tui_ClearSession.
   Arena SessionMem;
+  // SessionMem.Used right after the last compaction, i.e. the size of the live
+  // transcript. Compaction waits for the arena to double past it.
+  usize SessionMemBaseline;
   Arena ToolUpdateMem;
   Arena ScreenMem;
   AgentHarness* Harness;
@@ -225,6 +228,14 @@ void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts);
 bool Tui_ClearSession(Tui* t);
 void Tui_HydrateTranscript(Tui* t, const Message* messages, u32 count);
 void Tui_ReplaceTranscript(Tui* t, const Message* messages, u32 count);
+
+// SessionMem is a bump allocator, so transcript entries dropped by the
+// scrollback cap stay resident until the survivors are copied elsewhere.
+// `WantsCompaction` samples the threshold and the idle conditions; the caller
+// then builds a transcript and hands it to `CompactSessionMemory`, which
+// re-checks under the lock and returns false if the moment has passed.
+bool Tui_SessionMemoryWantsCompaction(Tui* t);
+bool Tui_CompactSessionMemory(Tui* t, const Message* messages, u32 count);
 
 // Push raw input bytes, decode them, and apply the resulting keys under the
 // lock. InputLoop uses this; headless tests use it to drive input (scroll,

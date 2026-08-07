@@ -194,9 +194,92 @@ bool InitTestHarness(Arena* arena, MemoryRepository* memory,
 
 }  // namespace
 
+// SessionMem is a bump allocator, so an entry dropped by the scrollback cap is
+// only reclaimed by copying the survivors to a fresh arena. Without compaction
+// the arena grew ~6 KB per turn forever, long after the visible transcript had
+// stopped growing.
+void TestSessionMemoryCompaction(Arena* outer) {
+  TuiOpts opts;
+  opts.ModelName = SVL("mem");
+  opts.Color = false;
+  Tui t;
+  Tui_InitModel(&t, outer, opts);
+
+  static char body[2048];
+  for (u32 i = 0; i < sizeof(body); i++) body[i] = 'a' + (char)(i % 26);
+  StrView text = StrView{body, (u32)sizeof(body)};
+
+  Message assistant = {};
+  assistant.Kind = Role::Assistant;
+  SessionRecord record = {};
+
+  auto runTurn = [&](u32 turn) {
+    Tui_AcceptPrompt(&t, SVL("prompt"));
+    AgentHarnessEvent delta = {};
+    delta.Kind = AgentHarnessEventKind::TransientStream;
+    delta.Stream.Kind = StreamEventKind::TextDelta;
+    delta.Stream.Delta = text;
+    Tui_HarnessEvent(&t, &delta);
+    AgentHarnessEvent done = AssistantRecordEvent(&record, &assistant);
+    Tui_HarnessEvent(&t, &done);
+    AgentHarnessEvent end = {};
+    end.Kind = AgentHarnessEventKind::TransientAgentEnd;
+    Tui_HarnessEvent(&t, &end);
+    DrainDisplay(&t, 1000 + turn * 32ull);
+  };
+
+  // Long enough for the scrollback cap to start dropping entries.
+  for (u32 turn = 0; turn < 200; turn++) runTurn(turn);
+  u32 settledEntries = t.Model.Entries.Count;
+  usize before = t.SessionMem.Used;
+
+  // Type something and build recall history: compaction must not eat either.
+  Tui_FeedInput(&t, "draft prompt", 12);
+  StrView typed = LineEdit_Text(&t.Edit);
+  CHECK(StrView_EqCStr(typed, "draft prompt"));
+
+  for (u32 turn = 200; turn < 320; turn++) runTurn(turn);
+
+  // The visible transcript has plateaued, so any further growth is dead weight.
+  CHECK(t.Model.Entries.Count == settledEntries);
+  usize after = t.SessionMem.Used;
+  CHECK(after > before);
+
+  // Compact against the transcript the model is already showing.
+  Arena scratch = ArenaCreate();
+  Array<Message> transcript = Array_Make<Message>(&scratch, 8);
+  for (u32 i = 0; i < 40; i++) {
+    Message user = Message_User(&scratch, SVL("prompt"));
+    Array_Push(&transcript, user);
+    Message reply = Message_AssistantEmpty(&scratch);
+    Array_Push(&reply.Content, Content_Text(text));
+    Array_Push(&transcript, reply);
+  }
+  CHECK(Tui_CompactSessionMemory(&t, transcript.Data, transcript.Count));
+
+  // The dead weight is gone and the live set is intact.
+  CHECK(t.SessionMem.Used < after / 2);
+  CHECK(t.Model.Entries.Count == transcript.Count);
+  CHECK(StrView_EqCStr(LineEdit_Text(&t.Edit), "draft prompt"));
+
+  // Still usable afterwards: the swap rebuilt every pointer into the arena.
+  runTurn(320);
+  CHECK(t.Model.Entries.Count > transcript.Count);
+
+  // An open modal is displaying SessionMem strings, so the arena must not move.
+  StrView options[2] = {SVL("one"), SVL("two")};
+  CHECK(Tui_BeginSelection(&t, SVL("pick"), options, 2));
+  CHECK(!Tui_SessionMemoryWantsCompaction(&t));
+  CHECK(!Tui_CompactSessionMemory(&t, transcript.Data, transcript.Count));
+
+  ArenaRelease(&scratch);
+  Tui_Stop(&t);
+}
+
 void TestTui() {
   g_displayDrainsOk = true;
   Arena a = ArenaCreate();
+  TestSessionMemoryCompaction(&a);
   TuiOpts o;
   o.ModelName = SVL("test-model");
   o.Color = true;
