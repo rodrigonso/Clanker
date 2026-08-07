@@ -4,6 +4,7 @@
 #include "base/array.h"
 #include "base/str.h"
 #include "base/sysinfo.h"
+#include "base/thread.h"
 #include "check.h"
 
 static bool IsSingleLine(StrView text) {
@@ -66,6 +67,30 @@ void TestStr() {
 
 void TestHostInfo() {
   Arena a = ArenaCreate();
+
+  // NowMillis must actually be millisecond-resolution wall clock. It used to be
+  // time(nullptr)*1000, which only ever landed on exact multiples of 1000 and
+  // made sub-second timestamps indistinguishable.
+  {
+    u64 now = NowMillis();
+    // Sanity: after 2020-01-01 and before 2100, i.e. plausibly a Unix epoch ms.
+    CHECK_ALL(now > 1577836800000ull, now < 4102444800000ull);
+
+    // Sample across a short sleep; a 1-second-granularity clock would report
+    // every sample as a multiple of 1000.
+    bool sawSubSecond = (now % 1000ull) != 0;
+    for (int i = 0; i < 40 && !sawSubSecond; i++) {
+      Sleep_Ms(3);
+      if (NowMillis() % 1000ull != 0) sawSubSecond = true;
+    }
+    CHECK(sawSubSecond);
+
+    // Monotone across a sleep, and advancing by roughly the slept amount.
+    u64 before = NowMillis();
+    Sleep_Ms(30);
+    u64 after = NowMillis();
+    CHECK_ALL(after >= before, after - before < 5000ull);
+  }
 
   // Pure HEAD parsing: "ref: refs/heads/<branch>" -> <branch> (slashes kept).
   CHECK_ALL(StrView_EqCStr(Git_BranchFromHead(SVL("ref: refs/heads/main\n")), "main"),

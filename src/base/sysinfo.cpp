@@ -15,6 +15,18 @@
 #endif
 
 #if defined(_WIN32)
+// FILETIME counts 100 ns ticks from 1601-01-01; this is the gap to the Unix
+// epoch in the same units.
+static const u64 FILETIME_EPOCH_DELTA = 116444736000000000ull;
+
+u64 NowMillis() {
+  FILETIME ft = {};
+  GetSystemTimeAsFileTime(&ft);
+  u64 ticks = ((u64)ft.dwHighDateTime << 32) | (u64)ft.dwLowDateTime;
+  if (ticks < FILETIME_EPOCH_DELTA) return 0;
+  return (ticks - FILETIME_EPOCH_DELTA) / 10000ull;
+}
+
 u64 PeakRssBytes() {
   PROCESS_MEMORY_COUNTERS pmc = {};
   if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) return (u64)pmc.PeakWorkingSetSize;
@@ -22,6 +34,12 @@ u64 PeakRssBytes() {
 }
 #else
 #include <sys/resource.h>
+
+u64 NowMillis() {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return (u64)time(nullptr) * 1000ull;
+  return (u64)ts.tv_sec * 1000ull + (u64)(ts.tv_nsec / 1000000L);
+}
 
 u64 PeakRssBytes() {
   struct rusage r;

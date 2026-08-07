@@ -46,5 +46,10 @@ inline T AddSaturated(T a, U b) {
   return limit - a < addend ? limit : (T)(a + addend);
 }
 
-// Low-resolution wall clock in milliseconds. Used for message timestamps.
-inline u64 NowMillis() { return (u64)time(nullptr) * 1000ull; }
+// Wall clock in milliseconds since the Unix epoch. Backs message timestamps,
+// session CreatedAt, and credential expiry, so the unit has to mean what it
+// says: this was `time(nullptr) * 1000` and only ever moved in 1000 ms steps.
+//
+// Wall clock, not monotonic -- it can jump when the system clock is adjusted.
+// Use MonotonicMillis() from base/thread.h to measure a duration.
+u64 NowMillis();
