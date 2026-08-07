@@ -7,7 +7,7 @@ enum class KeyKind : u8 {
   None,  // recognised but ignored (e.g. unknown escape)
   Char,  // a printable codepoint (Codepoint)
   Enter,    // submit
-  Newline,  // Ctrl+J / Alt+Enter / newline inside a paste
+  Newline,  // Shift+Enter / Ctrl+J / Alt+Enter / newline inside a paste
   Backspace,
   Delete,
   Tab,

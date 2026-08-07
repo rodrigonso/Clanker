@@ -34,14 +34,13 @@ bool Term_Enter(Term* t) {
 
   t->Active = true;
   Term_TrackForRestore(t);
-  // Alt screen, clear, home, bracketed paste, and SGR all-motion mouse tracking.
-  Term_WriteStr("\x1b[?1049h\x1b[2J\x1b[H\x1b[?2004h\x1b[?1003h\x1b[?1006h");
+  Term_WriteStr(Term_SetupSequence());
   return true;
 }
 
 void Term_Exit(Term* t) {
   if (!t->Active) return;
-  Term_WriteStr("\x1b[?1006l\x1b[?1003l\x1b[?2004l\x1b[?25h\x1b[?1049l");
+  Term_WriteStr(Term_TeardownSequence());
   FlushConsoleInputBuffer((HANDLE)t->HIn);
   SetConsoleMode((HANDLE)t->HOut, t->SavedOutMode);
   SetConsoleMode((HANDLE)t->HIn, t->SavedInMode);

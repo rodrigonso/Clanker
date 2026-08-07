@@ -34,6 +34,78 @@ static void Clear(Key* out) {
   out->MouseY = 0;
 }
 
+// Modifier params are 1 + bitmask on both the legacy and enhanced encodings.
+static void ApplyMods(u32 mods, Key* out) {
+  u32 m = mods >= 2 ? mods - 1 : 0;
+  out->Shift = (m & 1) != 0;
+  out->Alt = (m & 2) != 0;
+  out->Ctrl = (m & 4) != 0;
+}
+
+// Map a legacy control byte, or a Ctrl+letter recovered from an enhanced key
+// report, onto the shared key vocabulary. False for bytes with no binding.
+static bool MapControlByte(u32 b, Key* out) {
+  switch (b) {
+    case 0x0d: out->Kind = KeyKind::Enter; return true;
+    case 0x0a: out->Kind = KeyKind::Newline; return true;  // Ctrl+J
+    case 0x7f:
+    case 0x08: out->Kind = KeyKind::Backspace; return true;
+    case 0x09: out->Kind = KeyKind::Tab; return true;
+    case 0x03: out->Kind = KeyKind::CtrlC; return true;
+    case 0x04: out->Kind = KeyKind::CtrlD; return true;
+    case 0x0c: out->Kind = KeyKind::CtrlL; return true;
+    case 0x0f: out->Kind = KeyKind::CtrlO; return true;
+    case 0x15: out->Kind = KeyKind::CtrlU; return true;
+    case 0x0b: out->Kind = KeyKind::CtrlK; return true;
+    case 0x17: out->Kind = KeyKind::CtrlW; return true;
+    case 0x01: out->Kind = KeyKind::Home; return true;  // Ctrl+A
+    case 0x05: out->Kind = KeyKind::End; return true;   // Ctrl+E
+    default: return false;
+  }
+}
+
+const u32 kModsAlt = 3;  // the legacy meta prefix is exactly Alt
+const u32 kKeypadEnter = 57414;
+
+// Decode one key report carrying a code plus modifiers. Shared by the kitty and
+// modifyOtherKeys encodings and by the legacy ESC-prefixed (Alt) form, so all
+// three stay in agreement. Enabling either protocol re-encodes keys that were
+// previously plain bytes -- Escape, Ctrl+letter, Alt+key -- so every binding
+// has to survive this path.
+static void MapEnhancedKey(u32 code, u32 mods, Key* out) {
+  Clear(out);
+  ApplyMods(mods, out);
+
+  switch (code) {
+    case 0x0d:
+    case kKeypadEnter:
+      out->Kind = (out->Shift || out->Alt) ? KeyKind::Newline : KeyKind::Enter;
+      return;
+    case 0x0a: out->Kind = KeyKind::Newline; return;
+    case 0x1b: out->Kind = KeyKind::Escape; return;
+    case 0x09: out->Kind = KeyKind::Tab; return;
+    case 0x08:
+    case 0x7f: out->Kind = out->Alt ? KeyKind::CtrlW : KeyKind::Backspace; return;
+    default: break;
+  }
+  // Ctrl+Alt+<letter> must not alias onto the plain Ctrl binding, or
+  // Ctrl+Alt+D would quit; the legacy form decoded to a dropped Alt'd Char.
+  if (out->Ctrl && !out->Alt && code >= 'a' && code <= 'z') {
+    if (!MapControlByte(code & 0x1f, out)) out->Kind = KeyKind::None;
+    return;
+  }
+  if (out->Alt && !out->Ctrl) {
+    if (code == 'b') { out->Kind = KeyKind::WordLeft; return; }
+    if (code == 'f') { out->Kind = KeyKind::WordRight; return; }
+  }
+  // kitty reports functional keys in the private use area; they are not text.
+  if (!out->Ctrl && code >= 0x20 && code <= 0x10ffff &&
+      !(code >= 0xe000 && code <= 0xf8ff)) {
+    out->Kind = KeyKind::Char;
+    out->Codepoint = code;
+  }
+}
+
 // Decode one UTF-8 scalar at the buffer front. Returns false if incomplete.
 static bool DecodeUtf8(KeyDecoder* d, Key* out) {
   unsigned char c = (unsigned char)d->Buf[0];
@@ -84,15 +156,22 @@ static bool ParseCsi(KeyDecoder* d, Key* out) {
   u32 p[4] = {0, 0, 0, 0};
   u32 np = 0;
   bool haveDigit = false;
+  bool inSubParam = false;
   while (i < d->Len) {
     char ch = d->Buf[i];
     if (ch >= '0' && ch <= '9') {
-      u32 idx = np < 4 ? np : 3;
-      p[idx] = p[idx] * 10 + (u32)(ch - '0');
-      haveDigit = true;
+      if (!inSubParam) {
+        u32 idx = np < 4 ? np : 3;
+        p[idx] = p[idx] * 10 + (u32)(ch - '0');
+        haveDigit = true;
+      }
       i++;
     } else if (ch == ';') {
       if (np < 3) np++;
+      inSubParam = false;
+      i++;
+    } else if (ch == ':') {
+      inSubParam = true;  // kitty sub-parameters carry no binding we use
       i++;
     } else {
       break;
@@ -102,6 +181,22 @@ static bool ParseCsi(KeyDecoder* d, Key* out) {
   char fin = d->Buf[i];
   u32 total = i + 1;
   u32 mod = (np >= 1 && haveDigit) ? p[1] : 0;  // second param carries modifiers
+
+  // Enhanced keyboard reports: kitty sends CSI <code> ; <mods> u, xterm's
+  // modifyOtherKeys sends CSI 27 ; <mods> ; <code> ~.
+  if (fin == 'u' && haveDigit) {
+    u32 code = p[0];
+    // kitty reports the base layout key rather than the shifted character.
+    if (mod == 2 && code >= 'a' && code <= 'z') code -= 'a' - 'A';
+    MapEnhancedKey(code, mod, out);
+    Consume(d, total);
+    return true;
+  }
+  if (fin == '~' && haveDigit && np >= 2 && p[0] == 27) {
+    MapEnhancedKey(p[2], p[1], out);
+    Consume(d, total);
+    return true;
+  }
 
   KeyKind k = KeyKind::None;
   switch (fin) {
@@ -129,10 +224,7 @@ static bool ParseCsi(KeyDecoder* d, Key* out) {
   Clear(out);
   out->Kind = k;
   if (mod >= 2) {
-    u32 m = mod - 1;
-    out->Shift = (m & 1) != 0;
-    out->Alt = (m & 2) != 0;
-    out->Ctrl = (m & 4) != 0;
+    ApplyMods(mod, out);
     if (out->Ctrl && k == KeyKind::Left) out->Kind = KeyKind::WordLeft;
     if (out->Ctrl && k == KeyKind::Right) out->Kind = KeyKind::WordRight;
   }
@@ -224,22 +316,9 @@ bool KeyDecoder_Next(KeyDecoder* d, Key* out) {
   }
 
   if (c != 0x1b) {
-    switch (c) {
-      case 0x0d: Consume(d, 1); out->Kind = KeyKind::Enter; return true;
-      case 0x0a: Consume(d, 1); out->Kind = KeyKind::Newline; return true;
-      case 0x7f:
-      case 0x08: Consume(d, 1); out->Kind = KeyKind::Backspace; return true;
-      case 0x09: Consume(d, 1); out->Kind = KeyKind::Tab; return true;
-      case 0x03: Consume(d, 1); out->Kind = KeyKind::CtrlC; return true;
-      case 0x04: Consume(d, 1); out->Kind = KeyKind::CtrlD; return true;
-      case 0x0c: Consume(d, 1); out->Kind = KeyKind::CtrlL; return true;
-      case 0x0f: Consume(d, 1); out->Kind = KeyKind::CtrlO; return true;
-      case 0x15: Consume(d, 1); out->Kind = KeyKind::CtrlU; return true;
-      case 0x0b: Consume(d, 1); out->Kind = KeyKind::CtrlK; return true;
-      case 0x17: Consume(d, 1); out->Kind = KeyKind::CtrlW; return true;
-      case 0x01: Consume(d, 1); out->Kind = KeyKind::Home; return true;  // Ctrl+A
-      case 0x05: Consume(d, 1); out->Kind = KeyKind::End; return true;   // Ctrl+E
-      default: break;
+    if (MapControlByte(c, out)) {
+      Consume(d, 1);
+      return true;
     }
     if (c < 0x20) {
       Consume(d, 1);
@@ -267,30 +346,8 @@ bool KeyDecoder_Next(KeyDecoder* d, Key* out) {
     if (c1 == '[' && d->Len >= 3 && d->Buf[2] == '<') return ParseMouse(d, out);
     return ParseCsi(d, out);
   }
-  if (c1 == '\r' || c1 == '\n') {
-    Consume(d, 2);
-    out->Kind = KeyKind::Newline;  // Alt+Enter
-    return true;
-  }
-  if (c1 == 'b') {
-    Consume(d, 2);
-    out->Kind = KeyKind::WordLeft;
-    return true;
-  }
-  if (c1 == 'f') {
-    Consume(d, 2);
-    out->Kind = KeyKind::WordRight;
-    return true;
-  }
-  if (c1 == 0x7f || c1 == 0x08) {
-    Consume(d, 2);
-    out->Kind = KeyKind::CtrlW;  // Alt+Backspace -> delete word
-    return true;
-  }
-  // Alt + printable
+  // ESC + <char> is the legacy meta prefix, i.e. Alt+<char>.
   Consume(d, 2);
-  out->Kind = KeyKind::Char;
-  out->Codepoint = c1;
-  out->Alt = true;
+  MapEnhancedKey(c1, kModsAlt, out);
   return true;
 }

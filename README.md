@@ -326,7 +326,8 @@ component library. Layout, focus, hit-testing, pointer capture, reusable
 widgets, and custom component integration are documented in
 [`docs/UI.md`](docs/UI.md).
 
-Keys: **Enter** sends · **Ctrl+J** / Alt+Enter inserts a newline · arrows move
+Keys: **Enter** sends · **Shift+Enter** / Ctrl+J / Alt+Enter inserts a newline ·
+arrows move
 (↑/↓ across lines, then through history at the edges) · **Ctrl+←/→** word jump ·
 Home/End · **Shift** + movement selects composer text ·
 **Ctrl+W/U/K** delete word / to start / to end · **mouse wheel** scrolls the
@@ -342,6 +343,14 @@ tools when any is collapsed, otherwise collapses all · **Ctrl+D** quits ·
 **Ctrl+L** repaints.
 Honors `NO_COLOR`. Bracketed paste inserts literal multi-line text and replaces
 a composer selection.
+
+Shift+Enter needs a terminal that reports modified keys: entering the TUI
+requests the kitty keyboard protocol (kitty, WezTerm, Ghostty, foot, Alacritty,
+iTerm2, Windows Terminal 1.25+) and xterm's `modifyOtherKeys` level 2 (xterm,
+VTE/GNOME Terminal, Konsole), and releases both on exit. Terminals that
+implement neither — including legacy Windows conhost — cannot distinguish
+Shift+Enter from Enter, so it submits there; Ctrl+J and Alt+Enter work
+everywhere.
 
 When stdin/stdout isn't a TTY (pipes, redirected) or with `-p`, it falls back to
 a plain line renderer. Plain and piped output write provider deltas immediately

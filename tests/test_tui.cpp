@@ -719,6 +719,49 @@ void TestTui() {
     ArenaRelease(&ae);
   }
 
+  // Shift+Enter inserts a newline instead of submitting. It only arrives via
+  // the enhanced keyboard protocols requested on terminal entry, which also
+  // re-encode Escape, which the cancel path depends on.
+  {
+    Arena an = ArenaCreate();
+    Tui tn;
+    InitHeadlessTui(&tn, &an, false);
+
+    Feed(&tn, "one");
+    Feed(&tn, "\x1b[13;2u");  // kitty Shift+Enter
+    Feed(&tn, "two");
+    Feed(&tn, "\x1b[27;2;13~");  // modifyOtherKeys Shift+Enter
+    Feed(&tn, "three");
+    CHECK_ALL(StrView_Eq(LineEdit_Text(&tn.Edit), SVL("one\ntwo\nthree")),
+              tn.QCount == 0);
+
+    // Ctrl+J and Alt+Enter keep working through the new encoding too.
+    Feed(&tn, "\x1b[106;5u\x1b[13;3u");
+    CHECK_ALL(StrView_Eq(LineEdit_Text(&tn.Edit), SVL("one\ntwo\nthree\n\n")),
+              tn.QCount == 0);
+
+    // An unmodified Enter still submits.
+    Feed(&tn, "\x1b[13u");
+    CHECK_ALL(tn.QCount == 1, LineEdit_Empty(&tn.Edit));
+    Feed(&tn, "again\r");
+    CHECK_ALL(tn.QCount == 2, LineEdit_Empty(&tn.Edit));
+
+    // Ctrl+Alt+D must stay inert rather than aliasing onto Ctrl+D and quitting.
+    Feed(&tn, "\x1b[100;7u");
+    CHECK_ALL(!tn.Stop, !tn.Quit);
+
+    // Escape arrives as CSI 27 u once the kitty protocol is active, so the
+    // double-Escape composer clear must still fire.
+    Feed(&tn, "draft");
+    Feed(&tn, "\x1b[27u");
+    CHECK_ALL(StrView_Eq(LineEdit_Text(&tn.Edit), SVL("draft")), tn.EscapeArmed);
+    Feed(&tn, "\x1b[27u");
+    CHECK_ALL(LineEdit_Empty(&tn.Edit), !tn.EscapeArmed);
+
+    Tui_Stop(&tn);
+    ArenaRelease(&an);
+  }
+
   // Slash input opens a prefix-filtered command palette. Arrow keys select a
   // command, Enter submits its canonical name, and Escape dismisses the flyout
   // without modifying the composer.

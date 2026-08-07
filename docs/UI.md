@@ -16,6 +16,25 @@ clank_tui   transcript, command palette, modals, agent/application state
 Application code paints through `UiCanvas`; only `clank_ui` writes to `Screen`.
 `Screen_Flush` remains responsible for suppressing unchanged terminal output.
 
+## Keyboard Protocols
+
+`Term_Enter` requests two enhanced keyboard protocols alongside the alternate
+screen, bracketed paste, and SGR mouse tracking: the kitty keyboard protocol
+flag 1 (`CSI > 1 u`, popped with `CSI < 1 u`) and xterm `modifyOtherKeys` level
+2 (`CSI > 4 ; 2 m`, reset with `CSI > 4 ; 0 m`). Without them the legacy byte
+stream sends a bare CR for both Enter and Shift+Enter, so modified keys are
+unreportable. Terminals that implement neither ignore the requests and keep
+sending the legacy encoding.
+
+Both protocols also re-encode keys that would otherwise be plain bytes —
+Escape becomes `CSI 27 u`, Ctrl+C becomes `CSI 99 ; 5 u`, Alt+b becomes
+`CSI 98 ; 3 u`. `KeyDecoder` therefore routes the legacy bytes and both
+enhanced forms through one shared mapping so bindings cannot drift apart, and
+normalizes everything back to the same `KeyKind` vocabulary. The setup and
+teardown strings live in `Term_SetupSequence` / `Term_TeardownSequence` so that
+every mode set on entry is reset exactly once on exit, including via the
+`atexit` restore path.
+
 ## Frame Lifetime
 
 1. Call `Ui_BeginFrame` with the target `Screen`.

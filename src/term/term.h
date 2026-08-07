@@ -38,6 +38,11 @@ void Term_Size(const Term* t, u16* cols, u16* rows);
 void Term_Write(const char* data, u32 len);
 void Term_WriteStr(const char* s);
 
+// Mode strings written on enter/exit. Shared by every platform backend so that
+// each mode set on entry is reset on exit exactly once.
+const char* Term_SetupSequence();
+const char* Term_TeardownSequence();
+
 // Append an OSC 52 clipboard-set sequence using padded RFC 4648 base64.
 // Binary-safe. Reuse `out` across copies to avoid per-copy allocations.
 // Terminal integrations must call this on the render/output thread so the
