@@ -67,6 +67,27 @@ struct TuiCommandSpec {
   StrView Description;
 };
 
+// Strings whose storage belongs to SessionMem and which nothing rebuilds when
+// that arena is swapped. Grouping them is what makes the swap safe by
+// construction: RebuildTranscriptLocked clears this whole struct, so a member
+// added here is covered automatically, and a SessionMem-backed StrView added
+// anywhere else on Tui is now visibly the wrong thing to do.
+//
+// The large objects (Model, Edit, ModalEdit, Reveal, DisplayEvents,
+// ToolUpdates) deliberately stay outside: each is explicitly re-initialised
+// against the new arena, so none of them is part of this hazard.
+struct TuiSessionStrings {
+  StrView StateTool;        // name of the running tool
+  StrView RetryStatus;      // "provider request in 250 ms (1/3)"
+  StrView OperationLabel;   // long-running command banner
+  StrView OperationStatus;
+  StrView ModalTitle;
+  StrView ModalPrompt;
+  StrView* ModalOptions;    // array itself is also SessionMem-owned
+  u32 ModalOptionCount;
+  StrView ModalTextResult;
+};
+
 struct TuiOpts {
   StrView ModelName = {};
   ModelRequestProfile Profile = {};
@@ -125,8 +146,6 @@ struct Tui {
 
   // Status.
   TuiState State;
-  StrView StateTool;
-  StrView RetryStatus;
   Usage Use;
   u32 Spinner;
   u64 SpinnerStartMs;
@@ -139,20 +158,17 @@ struct Tui {
   u32 CommandPaletteFirst;
   bool CommandPaletteDismissed;
   bool OperationActive;
-  StrView OperationLabel;
-  StrView OperationStatus;
   volatile i32 OperationAbortFlag;
 
   // Modal selection / text entry.
   TuiModalKind ModalKind;
   TuiModalResult ModalResult;
-  StrView ModalTitle;
-  StrView ModalPrompt;
-  StrView* ModalOptions;
-  u32 ModalOptionCount;
   u32 ModalSelected;
   u32 ModalFirst;
-  StrView ModalTextResult;
+
+  // Everything above points at Tui-lifetime or inline storage. These do not:
+  // see TuiSessionStrings.
+  TuiSessionStrings Sess;
 
   // Startup context shown on the sticky line below the prompt.
   StrView Cwd;     // working directory, home-abbreviated for display

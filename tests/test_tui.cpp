@@ -153,7 +153,7 @@ bool SessionUiCleared(const Tui* t, usize usedBefore) {
          t->Edit.History.Count == 0 && LineEdit_Empty(&t->ModalEdit) &&
          t->ModalEdit.History.Count == 0 && !Tui_HasPendingDisplay(t) &&
          t->DisplayHead == 0 && t->Use.Input == 0 && t->Use.Output == 0 &&
-         t->State == TuiState::Idle && t->StateTool.Length == 0 &&
+         t->State == TuiState::Idle && t->Sess.StateTool.Length == 0 &&
          t->QueuedCount == 0 && t->Follow && t->Top == 0 && t->LastTop == 0 &&
          t->LastPaneH == 0 && t->HoveredEntryId == 0 && t->PressedEntryId == 0 &&
          !t->HasMouse && !t->InputUi.Dragging && t->Ui.Captured == 0 &&
@@ -261,6 +261,12 @@ void TestSessionMemoryCompaction(Arena* outer) {
   CHECK(t.SessionMem.Used < after / 2);
   CHECK(t.Model.Entries.Count == transcript.Count);
   CHECK(StrView_EqCStr(LineEdit_Text(&t.Edit), "draft prompt"));
+
+  // Compaction released the arena those strings pointed into, so every one of
+  // them must be gone. Checking the struct wholesale is what makes this survive
+  // someone adding a tenth field.
+  const TuiSessionStrings zero = {};
+  CHECK(memcmp(&t.Sess, &zero, sizeof(zero)) == 0);
 
   // Still usable afterwards: the swap rebuilt every pointer into the arena.
   runTurn(320);
@@ -394,11 +400,11 @@ void TestTui() {
   ev.Retry.DelayMs = 250;
   Tui_HarnessEvent(&t, &ev);
   CHECK_ALL(t.State == TuiState::Retry,
-            StrView_Contains(t.RetryStatus, "assistant turn"),
-            StrView_Contains(t.RetryStatus, "250 ms"));
+            StrView_Contains(t.Sess.RetryStatus, "assistant turn"),
+            StrView_Contains(t.Sess.RetryStatus, "250 ms"));
   ev.Kind = AgentHarnessEventKind::TransientRetryEnd;
   Tui_HarnessEvent(&t, &ev);
-  CHECK_ALL(t.State == TuiState::Thinking, !t.RetryStatus.Length);
+  CHECK_ALL(t.State == TuiState::Thinking, !t.Sess.RetryStatus.Length);
 
   // The assistant entry is begun lazily on the first text delta, so a turn that
   // streams no text (tool-only) renders no assistant header at all.
@@ -1891,8 +1897,8 @@ void TestTui() {
 
     Tui_BeginOperation(&tc, SVL("login"));
     Tui_SetOperationStatus(&tc, SVL("waiting for approval"));
-    CHECK_ALL(tc.OperationActive, StrView_Eq(tc.OperationLabel, SVL("login")),
-              StrView_Eq(tc.OperationStatus, SVL("waiting for approval")),
+    CHECK_ALL(tc.OperationActive, StrView_Eq(tc.Sess.OperationLabel, SVL("login")),
+              StrView_Eq(tc.Sess.OperationStatus, SVL("waiting for approval")),
               *Tui_OperationAbort(&tc) == 0);
     Feed(&tc, "\x03");
     CHECK_ALL(*Tui_OperationAbort(&tc) == 1, !tc.Quit, !tc.Stop);
@@ -1950,7 +1956,7 @@ void TestTui() {
     resetTui.Use.Input = 11;
     resetTui.Use.Output = 7;
     resetTui.State = TuiState::Streaming;
-    resetTui.StateTool = SVL("old tool");
+    resetTui.Sess.StateTool = SVL("old tool");
     resetTui.QueuedCount = 3;
     resetTui.Top = 4;
     resetTui.LastTop = 3;

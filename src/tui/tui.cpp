@@ -434,12 +434,12 @@ void FormatStatus(Tui* t, char* left, u32 leftCap, u32* ll, char* right,
   } else if (t->OperationActive) {
     Put(left, leftCap, ll, kSpinner[t->Spinner % 10]);
     Put(left, leftCap, ll, " ");
-    for (u32 i = 0; i < t->OperationLabel.Length && *ll < leftCap - 1; i++)
-      left[(*ll)++] = t->OperationLabel.Data[i];
-    if (t->OperationStatus.Length) {
+    for (u32 i = 0; i < t->Sess.OperationLabel.Length && *ll < leftCap - 1; i++)
+      left[(*ll)++] = t->Sess.OperationLabel.Data[i];
+    if (t->Sess.OperationStatus.Length) {
       Put(left, leftCap, ll, ": ");
-      for (u32 i = 0; i < t->OperationStatus.Length && *ll < leftCap - 1; i++)
-        left[(*ll)++] = t->OperationStatus.Data[i];
+      for (u32 i = 0; i < t->Sess.OperationStatus.Length && *ll < leftCap - 1; i++)
+        left[(*ll)++] = t->Sess.OperationStatus.Data[i];
     }
   } else if (t->State == TuiState::Idle) {
     Put(left, leftCap, ll, "ready");
@@ -448,12 +448,12 @@ void FormatStatus(Tui* t, char* left, u32 leftCap, u32* ll, char* right,
     Put(left, leftCap, ll, " ");
     if (t->State == TuiState::Tool) {
       Put(left, leftCap, ll, "running ");
-      for (u32 i = 0; i < t->StateTool.Length && *ll < leftCap - 1; i++)
-        left[(*ll)++] = t->StateTool.Data[i];
+      for (u32 i = 0; i < t->Sess.StateTool.Length && *ll < leftCap - 1; i++)
+        left[(*ll)++] = t->Sess.StateTool.Data[i];
     } else if (t->State == TuiState::Retry) {
       Put(left, leftCap, ll, "retrying ");
-      for (u32 i = 0; i < t->RetryStatus.Length && *ll < leftCap - 1; i++)
-        left[(*ll)++] = t->RetryStatus.Data[i];
+      for (u32 i = 0; i < t->Sess.RetryStatus.Length && *ll < leftCap - 1; i++)
+        left[(*ll)++] = t->Sess.RetryStatus.Data[i];
     } else if (t->State == TuiState::Streaming) {
       Put(left, leftCap, ll, "responding");
     } else {
@@ -596,7 +596,7 @@ void ApplyDisplayEvent(Tui* t, const TuiDisplayEvent& ev) {
     case TuiDisplayEventKind::ToolStart:
       LineModel_AddTool(&t->Model, ev.ToolCallId, ev.ToolName, ev.ToolArgsJson);
       t->State = TuiState::Tool;
-      t->StateTool = ev.ToolName;
+      t->Sess.StateTool = ev.ToolName;
       break;
     case TuiDisplayEventKind::ToolUpdate:
       if (ev.ToolUpdateSlot < TUI_TOOL_UPDATE_SLOT_COUNT) {
@@ -778,7 +778,7 @@ void PaintModalNode(UiContext*, const UiNode* node, UiCanvas* canvas) {
   u16 panelW = data->Cols > 76 ? 72 : (u16)(data->Cols - 2);
   u16 desiredH =
       t->ModalKind == TuiModalKind::Select
-          ? (u16)((t->ModalOptionCount < 12 ? t->ModalOptionCount : 12) + 3)
+          ? (u16)((t->Sess.ModalOptionCount < 12 ? t->Sess.ModalOptionCount : 12) + 3)
           : 6;
   u16 panelH = desiredH < data->TopBorderY ? desiredH : data->TopBorderY;
   if (panelH < 4) return;
@@ -802,7 +802,7 @@ void PaintModalNode(UiContext*, const UiNode* node, UiCanvas* canvas) {
   title.Attr |= ATTR_BOLD;
   UiCanvas_PutTextClipped(
       canvas, titleX, (u16)(y0 + 1),
-      compactText ? t->ModalPrompt : t->ModalTitle, title,
+      compactText ? t->Sess.ModalPrompt : t->Sess.ModalTitle, title,
       (u16)(x1 - 1));
 
   if (t->ModalKind == TuiModalKind::Select) {
@@ -811,11 +811,11 @@ void PaintModalNode(UiContext*, const UiNode* node, UiCanvas* canvas) {
     if (t->ModalSelected >= t->ModalFirst + visible)
       t->ModalFirst = t->ModalSelected - visible + 1;
     u32 maxFirst =
-        t->ModalOptionCount > visible ? t->ModalOptionCount - visible : 0;
+        t->Sess.ModalOptionCount > visible ? t->Sess.ModalOptionCount - visible : 0;
     if (t->ModalFirst > maxFirst) t->ModalFirst = maxFirst;
     for (u32 row = 0; row < visible; row++) {
       u32 index = t->ModalFirst + row;
-      if (index >= t->ModalOptionCount) break;
+      if (index >= t->Sess.ModalOptionCount) break;
       u16 y = (u16)(y0 + 2 + row);
       bool selected = index == t->ModalSelected;
       Style option = panel;
@@ -829,7 +829,7 @@ void PaintModalNode(UiContext*, const UiNode* node, UiCanvas* canvas) {
           selected ? SVL("\xe2\x80\xba ") : SVL("  "), option,
           (u16)(x1 - 1));
       UiCanvas_PutTextClipped(canvas, (u16)(x0 + 4), y,
-                              t->ModalOptions[index], option,
+                              t->Sess.ModalOptions[index], option,
                               (u16)(x1 - 1));
     }
     UiCanvas_SetCursor(canvas, node->Id, false, 0, 0);
@@ -840,7 +840,7 @@ void PaintModalNode(UiContext*, const UiNode* node, UiCanvas* canvas) {
   prompt.Attr |= ATTR_DIM;
   if (!compactText)
     UiCanvas_PutTextClipped(canvas, (u16)(x0 + 2), (u16)(y0 + 2),
-                            t->ModalPrompt, prompt, (u16)(x1 - 1));
+                            t->Sess.ModalPrompt, prompt, (u16)(x1 - 1));
   u16 editY = (u16)(y1 - 1);
   Style edit = panel;
   edit.Attr |= ATTR_REVERSE;
@@ -1449,11 +1449,11 @@ void HandleSelectKey(Tui* t, const Key& k) {
       if (t->ModalSelected > 0) t->ModalSelected--;
       break;
     case KeyKind::Down:
-      if (t->ModalSelected + 1 < t->ModalOptionCount) t->ModalSelected++;
+      if (t->ModalSelected + 1 < t->Sess.ModalOptionCount) t->ModalSelected++;
       break;
     case KeyKind::Home: t->ModalSelected = 0; break;
     case KeyKind::End:
-      if (t->ModalOptionCount) t->ModalSelected = t->ModalOptionCount - 1;
+      if (t->Sess.ModalOptionCount) t->ModalSelected = t->Sess.ModalOptionCount - 1;
       break;
     case KeyKind::Enter: FinishModal(t, TuiModalResult::Confirmed); break;
     case KeyKind::Backspace: FinishModal(t, TuiModalResult::Back); break;
@@ -1472,7 +1472,7 @@ void HandleTextKey(Tui* t, const Key& k) {
       if (!k.Alt && k.Codepoint >= 0x20) LineEdit_InsertChar(&t->ModalEdit, k.Codepoint);
       break;
     case KeyKind::Enter:
-      t->ModalTextResult =
+      t->Sess.ModalTextResult =
           StrView_Dup(&t->SessionMem, LineEdit_Text(&t->ModalEdit));
       FinishModal(t, TuiModalResult::Confirmed);
       break;
@@ -2163,9 +2163,10 @@ void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts) {
   t->State = TuiState::Idle;
 }
 
+static void ClearSessionScopedStringsLocked(Tui* t);
+
 bool Tui_ClearSession(Tui* t) {
-  Mutex_Lock(&t->Lock);
-  if (t->AgentRunning || (t->Harness && t->Harness->Running) || t->Stop ||
+  Mutex_Lock(&t->Lock);  if (t->AgentRunning || (t->Harness && t->Harness->Running) || t->Stop ||
       t->Quit) {
     Mutex_Unlock(&t->Lock);
     return false;
@@ -2209,8 +2210,9 @@ bool Tui_ClearSession(Tui* t) {
   t->EscapeArmed = false;
   ClearCopyNotice(t);
   t->State = TuiState::Idle;
-  t->StateTool = {};
-  t->RetryStatus = {};
+  // This path releases SessionMem too, so it clears the scoped strings the same
+  // exhaustive way the rebuild does.
+  ClearSessionScopedStringsLocked(t);
   t->Use = {};
   t->Spinner = 0;
   t->SpinnerStartMs = 0;
@@ -2219,18 +2221,11 @@ bool Tui_ClearSession(Tui* t) {
   t->CommandPaletteFirst = 0;
   t->CommandPaletteDismissed = false;
   t->OperationActive = false;
-  t->OperationLabel = {};
-  t->OperationStatus = {};
   Atomic_StoreI32(&t->OperationAbortFlag, 0);
   t->ModalKind = TuiModalKind::None;
   t->ModalResult = TuiModalResult::None;
-  t->ModalTitle = {};
-  t->ModalPrompt = {};
-  t->ModalOptions = nullptr;
-  t->ModalOptionCount = 0;
   t->ModalSelected = 0;
   t->ModalFirst = 0;
-  t->ModalTextResult = {};
   t->Follow = true;
   t->Top = 0;
   t->LastTop = 0;
@@ -2361,15 +2356,15 @@ void Tui_BeginOperation(Tui* t, StrView label) {
   Mutex_Lock(&t->Lock);
   if (t->Stop || t->Quit) {
     t->OperationActive = false;
-    t->OperationLabel = {};
-    t->OperationStatus = {};
+    t->Sess.OperationLabel = {};
+    t->Sess.OperationStatus = {};
     Atomic_StoreI32(&t->OperationAbortFlag, 1);
     Mutex_Unlock(&t->Lock);
     return;
   }
   t->OperationActive = true;
-  t->OperationLabel = StrView_Dup(&t->SessionMem, label);
-  t->OperationStatus = {};
+  t->Sess.OperationLabel = StrView_Dup(&t->SessionMem, label);
+  t->Sess.OperationStatus = {};
   Atomic_StoreI32(&t->OperationAbortFlag, 0);
   t->Spinner = 0;
   t->SpinnerStartMs = 0;
@@ -2379,7 +2374,7 @@ void Tui_BeginOperation(Tui* t, StrView label) {
 
 void Tui_SetOperationStatus(Tui* t, StrView status) {
   Mutex_Lock(&t->Lock);
-  if (t->OperationActive) t->OperationStatus = StrView_Dup(&t->SessionMem, status);
+  if (t->OperationActive) t->Sess.OperationStatus = StrView_Dup(&t->SessionMem, status);
   Wake(t);
   Mutex_Unlock(&t->Lock);
 }
@@ -2388,8 +2383,8 @@ bool Tui_EndOperation(Tui* t) {
   Mutex_Lock(&t->Lock);
   bool cancelled = Atomic_LoadI32(&t->OperationAbortFlag) != 0 || t->Stop || t->Quit;
   t->OperationActive = false;
-  t->OperationLabel = {};
-  t->OperationStatus = {};
+  t->Sess.OperationLabel = {};
+  t->Sess.OperationStatus = {};
   Wake(t);
   Mutex_Unlock(&t->Lock);
   return cancelled;
@@ -2406,15 +2401,15 @@ bool Tui_BeginSelection(Tui* t, StrView title, const StrView* options, u32 optio
     return false;
   }
   Ui_CancelPointer(&t->Ui);
-  t->ModalOptions = ArenaPushArray(&t->SessionMem, StrView, optionCount);
+  t->Sess.ModalOptions = ArenaPushArray(&t->SessionMem, StrView, optionCount);
   for (u32 i = 0; i < optionCount; i++)
-    t->ModalOptions[i] = StrView_Dup(&t->SessionMem, options[i]);
-  t->ModalOptionCount = optionCount;
+    t->Sess.ModalOptions[i] = StrView_Dup(&t->SessionMem, options[i]);
+  t->Sess.ModalOptionCount = optionCount;
   t->ModalSelected = initialSelection < optionCount ? initialSelection : optionCount - 1;
   t->ModalFirst = 0;
-  t->ModalTitle = StrView_Dup(&t->SessionMem, title);
-  t->ModalPrompt = {};
-  t->ModalTextResult = {};
+  t->Sess.ModalTitle = StrView_Dup(&t->SessionMem, title);
+  t->Sess.ModalPrompt = {};
+  t->Sess.ModalTextResult = {};
   t->ModalKind = TuiModalKind::Select;
   t->ModalResult = TuiModalResult::Pending;
   Wake(t);
@@ -2431,13 +2426,13 @@ bool Tui_BeginTextEntry(Tui* t, StrView title, StrView prompt, StrView initial) 
   Ui_CancelPointer(&t->Ui);
   LineEdit_Clear(&t->ModalEdit);
   LineEdit_InsertText(&t->ModalEdit, initial);
-  t->ModalTitle = StrView_Dup(&t->SessionMem, title);
-  t->ModalPrompt = StrView_Dup(&t->SessionMem, prompt);
-  t->ModalOptions = nullptr;
-  t->ModalOptionCount = 0;
+  t->Sess.ModalTitle = StrView_Dup(&t->SessionMem, title);
+  t->Sess.ModalPrompt = StrView_Dup(&t->SessionMem, prompt);
+  t->Sess.ModalOptions = nullptr;
+  t->Sess.ModalOptionCount = 0;
   t->ModalSelected = 0;
   t->ModalFirst = 0;
-  t->ModalTextResult = {};
+  t->Sess.ModalTextResult = {};
   t->ModalKind = TuiModalKind::Text;
   t->ModalResult = TuiModalResult::Pending;
   Wake(t);
@@ -2449,7 +2444,7 @@ TuiModalResult Tui_GetModalResult(Tui* t, u32* selected, StrView* text) {
   Mutex_Lock(&t->Lock);
   TuiModalResult result = t->ModalResult;
   if (selected) *selected = t->ModalSelected;
-  if (text) *text = t->ModalTextResult;
+  if (text) *text = t->Sess.ModalTextResult;
   Mutex_Unlock(&t->Lock);
   return result;
 }
@@ -2477,7 +2472,7 @@ TuiModalResult Tui_ReadText(Tui* t, StrView title, StrView prompt,
     Cond_Wait(&t->ModalCv, &t->Lock);
   TuiModalResult result = t->ModalResult;
   if (out)
-    *out = result == TuiModalResult::Confirmed ? t->ModalTextResult : StrView{};
+    *out = result == TuiModalResult::Confirmed ? t->Sess.ModalTextResult : StrView{};
   Mutex_Unlock(&t->Lock);
   return result;
 }
@@ -2566,15 +2561,10 @@ void Tui_HydrateTranscript(Tui* t, const Message* messages, u32 count) {
 // by RebuildTranscriptLocked below. Missing one here is a use-after-free, not a
 // leak, so the list is kept next to the swap that depends on it.
 static void ClearSessionScopedStringsLocked(Tui* t) {
-  t->StateTool = {};
-  t->RetryStatus = {};
-  t->OperationLabel = {};
-  t->OperationStatus = {};
-  t->ModalTitle = {};
-  t->ModalPrompt = {};
-  t->ModalOptions = nullptr;
-  t->ModalOptionCount = 0;
-  t->ModalTextResult = {};
+  // Every member is SessionMem-owned by construction, so this is exhaustive
+  // without a hand-maintained list -- which is the point of the struct. It used
+  // to be nine assignments that a new field could silently escape.
+  t->Sess = TuiSessionStrings{};
 }
 
 // A modal or a running operation is displaying strings owned by SessionMem and
@@ -2651,7 +2641,7 @@ static void RebuildTranscriptLocked(Tui* t, const Message* messages, u32 count,
   t->DisplayHead = 0;
   ResetToolUpdates(t);
   t->Use = {};
-  t->StateTool = {};
+  t->Sess.StateTool = {};
   t->State = t->AgentRunning ? TuiState::Thinking : TuiState::Idle;
   HydrateTranscriptLocked(t, messages, count);
   // The live set, for deciding when the next compaction is worth its copy.
@@ -2718,7 +2708,7 @@ void Tui_HarnessEvent(void* user, const AgentHarnessEvent* ev) {
   switch (ev->Kind) {
     case AgentHarnessEventKind::TransientAgentStart:
       t->AgentRunning = true;
-      t->RetryStatus = {};
+      t->Sess.RetryStatus = {};
       t->LastEscapeMs = 0;
       t->EscapeArmed = false;
       if (!Tui_HasPendingDisplay(t)) t->State = TuiState::Thinking;
@@ -2780,7 +2770,7 @@ void Tui_HarnessEvent(void* user, const AgentHarnessEvent* ev) {
     }
     case AgentHarnessEventKind::TransientAgentEnd:
       t->AgentRunning = false;
-      t->RetryStatus = {};
+      t->Sess.RetryStatus = {};
       t->LastEscapeMs = 0;
       t->EscapeArmed = false;
       QueueDisplayEvent(t, TuiDisplayEventKind::AgentEnd);
@@ -2799,12 +2789,12 @@ void Tui_HarnessEvent(void* user, const AgentHarnessEvent* ev) {
       StrBuf_AppendChar(&status, '/');
       StrBuf_AppendU64(&status, ev->Retry.MaxAttempts);
       StrBuf_AppendChar(&status, ')');
-      t->RetryStatus = StrBuf_View(&status);
+      t->Sess.RetryStatus = StrBuf_View(&status);
       t->State = TuiState::Retry;
       break;
     }
     case AgentHarnessEventKind::TransientRetryEnd:
-      t->RetryStatus = {};
+      t->Sess.RetryStatus = {};
       if (t->State == TuiState::Retry) t->State = TuiState::Thinking;
       break;
     case AgentHarnessEventKind::TransientQueueUpdate:
