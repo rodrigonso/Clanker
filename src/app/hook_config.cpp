@@ -1,5 +1,7 @@
 #include "app/hook_config.h"
 
+#include "app/config_paths.h"
+
 #include "base/config_file.h"
 #include "base/sysinfo.h"
 #include "json/json.h"
@@ -59,14 +61,7 @@ void ReadGroup(const JsonValue* group, Array<HookCommand>* out) {
 }  // namespace
 
 StrView HookConfig_DefaultPath(Arena* arena) {
-  StrView home = Sys_HomeDir(arena);
-  StrBuf path = StrBuf_Make(arena, home.Length + 24);
-  if (home.Length > 0)
-    StrBuf_Append(&path, home);
-  else
-    StrBuf_AppendChar(&path, '.');
-  StrBuf_AppendCStr(&path, "/.clank/hooks.json");
-  return StrBuf_View(&path);
+  return ClankDataPath(arena, "hooks.json");
 }
 
 HookConfigLoadResult HookConfig_Parse(Arena* arena, StrView text, HookConfig* out) {

@@ -58,6 +58,7 @@ const Suite kSuites[] = {
     {"crypto", TestCrypto, TagDefault, "sha256 and random"},
     {"auth", TestAuth, TagDefault, "credential store and OAuth"},
     {"command", TestCommand, TagDefault, "slash command parsing"},
+    {"app", TestApp, TagDefault, "app runtime, session keys, trust menu"},
     {"hooks", TestHooks, TagDefault, "external lifecycle hooks"},
     {"prompt_context", TestPromptContext, TagDefault, "system prompt and project context"},
     {"project_trust", TestProjectTrust, TagDefault, "hierarchical project trust"},

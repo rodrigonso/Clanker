@@ -1,5 +1,7 @@
 #include "app/settings.h"
 
+#include "app/config_paths.h"
+
 #include "base/config_file.h"
 #include "base/sysinfo.h"
 #include "json/json.h"
@@ -23,14 +25,7 @@ bool ReadTokenCount(JsonValue* object, const char* key, u32* io) {
 }  // namespace
 
 StrView AppSettings_DefaultPath(Arena* a) {
-  StrView home = Sys_HomeDir(a);
-  StrBuf path = StrBuf_Make(a, home.Length + 24);
-  if (home.Length > 0)
-    StrBuf_Append(&path, home);
-  else
-    StrBuf_AppendChar(&path, '.');
-  StrBuf_AppendCStr(&path, "/.clank/settings.json");
-  return StrBuf_View(&path);
+  return ClankDataPath(a, "settings.json");
 }
 
 AppSettingsLoadResult AppSettings_Load(Arena* a, StrView path, AppSettings* out) {

@@ -1,5 +1,7 @@
 #include "app/project_trust.h"
 
+#include "app/config_paths.h"
+
 #include "base/config_file.h"
 #include "base/process_file_lock.h"
 #include "base/sysinfo.h"
@@ -125,11 +127,7 @@ bool DefaultProjectTrust_Parse(StrView value, DefaultProjectTrust* out) {
 }
 
 StrView ProjectTrust_DefaultPath(Arena* arena) {
-  StrView home = Sys_HomeDir(arena);
-  StrBuf path = StrBuf_Make(arena, home.Length + 24);
-  StrBuf_Append(&path, home.Length ? home : SVL("."));
-  StrBuf_AppendCStr(&path, "/.clank/trust.json");
-  return StrBuf_View(&path);
+  return ClankDataPath(arena, "trust.json");
 }
 
 StrView ProjectTrust_CanonicalPath(Arena* arena, StrView path) {
