@@ -55,6 +55,31 @@ void* ArenaAlloc(Arena* a, usize size, usize align) {
 
 void ArenaReset(Arena* a) { a->Used = 0; }
 
+void ArenaTrim(Arena* a, usize keepBytes) {
+  if (!a->Base) return;
+  // Only ever safe once the arena's contents are dead: this hands the pages
+  // back to the OS, so anything still pointing into them is reading unmapped
+  // memory afterwards.
+  FFI(a->Used > keepBytes);
+  // Compared before rounding: RoundUp overflows to 0 near SIZE_MAX, which would
+  // decommit the whole arena for a keep that covers all of it.
+  if (keepBytes >= a->Committed) return;
+  usize keep = RoundUp(keepBytes, ARENA_COMMIT_CHUNK);
+  if (keep >= a->Committed) return;
+#if defined(_WIN32)
+  // Decommit leaves the range reserved, so Base stays valid and ArenaCommitTo
+  // can commit it again.
+  if (!VirtualFree(a->Base + keep, a->Committed - keep, MEM_DECOMMIT)) CLANK_TRAP();
+#else
+  // MADV_DONTNEED drops the physical pages; PROT_NONE is what actually restores
+  // the "not committed" state this arena's commit model is written against, so
+  // ArenaCommitTo's mprotect on the next growth is not a no-op.
+  if (mprotect(a->Base + keep, a->Committed - keep, PROT_NONE) != 0) CLANK_TRAP();
+  madvise(a->Base + keep, a->Committed - keep, MADV_DONTNEED);
+#endif
+  a->Committed = keep;
+}
+
 void ArenaRestore(Arena* a, usize pos) {
   FFI(pos > a->Used);
   a->Used = pos;

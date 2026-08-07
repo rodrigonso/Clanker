@@ -3185,11 +3185,114 @@ void TestHarnessStateGrowthRate() {
   ArenaRelease(&arena);
 }
 
+// harness->Work is reset once per run but allocated into on every turn -- the
+// provider builds each request body from it (driver.cpp: input.Arena) -- so a
+// run of N turns holds N request bodies at once. Reset alone kept that peak
+// committed for the life of the process, which is what put a real session at
+// 62 MB in one arena.
+void TestHarnessWorkArenaTrim() {
+  Arena arena = ArenaCreate();
+  MemoryRepository memory = {};
+  MemoryRepository_Init(&memory);
+  SessionRepository repository = MemoryRepository_AsRepository(&memory);
+  SessionLog log = {};
+  CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+
+  // Each turn calls the tool, so the run keeps looping and Work keeps growing.
+  // Each turn duplicates its assistant text into Work (the real provider puts a
+  // whole request body there), so eight tool-looping turns deposit ~4 MB --
+  // several times the floor the trim keeps.
+  static char body[512 * 1024];
+  for (u32 i = 0; i < sizeof(body); i++) body[i] = 'a' + (char)(i % 26);
+  u32 executions = 0;  // EchoExec increments this through a u32*
+  Tool echo = {};
+  echo.Name = SVL("echo");
+  echo.Description = SVL("echo arguments");
+  echo.ParamsJsonSchema = SVL("{\"type\":\"object\"}");
+  echo.Ctx = &executions;
+  echo.Execute = EchoExec;
+
+  ScriptToolCall call[1] = {ScriptToolCall{SVL("echo"), SVL("c1"), SVL("{\"x\":1}")}};
+  ScriptStep steps[9] = {};
+  for (u32 i = 0; i < 8; i++) {
+    steps[i].Text = StrView{body, (u32)sizeof(body)};
+    steps[i].Tools = call;
+    steps[i].ToolCount = 1;
+  }
+  steps[8].Text = SVL("done");
+  steps[8].Stop = StopReason::Stop;
+
+  ScriptProvider script = {steps, 9, 0};
+  AgentHarnessConfig config = ScriptConfig(&script, &echo, 1);
+  config.Compaction = {};
+  config.Retry.Enabled = false;  // a scripted error must fail the run, not retry
+  AgentHarness harness = {};
+  CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+
+  // A short run first, to establish what one turn costs.
+  script.Index = 8;
+  CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("short"))));
+  usize afterShort = harness.Work.Committed;
+
+  // Then a nine-turn run depositing ~4 MB into Work. What the run peaks at is
+  // not the point; what matters is that the peak is handed back at the end of
+  // it rather than retained for the life of the harness. Without the trim
+  // Committed stays at the high-water mark and this fails.
+  script.Index = 0;
+  CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("long"))));
+  usize afterLong = harness.Work.Committed;
+
+  // 1 MiB keep (harness.cpp WORK_ARENA_KEEP_BYTES) + one 64 KiB commit chunk.
+  usize floor = ((usize)1 << 20) + (usize)64 * 1024;
+  CHECK_ALL(afterShort <= floor, afterLong <= floor, harness.Work.Used == 0);
+
+  // The trim must not have broken the run itself.
+  CHECK(executions >= 8);
+
+  // An accepted run that fails *after* allocating past the trim floor. The
+  // provider's error message is Work-backed, so returning it without copying it
+  // out first hands the caller memory the trim has just unmapped.
+  static char errText[64];
+  for (u32 i = 0; i < sizeof(errText); i++) errText[i] = 'e';
+  ScriptStep failSteps[4] = {};
+  for (u32 i = 0; i < 3; i++) {
+    failSteps[i].Text = StrView{body, (u32)sizeof(body)};
+    failSteps[i].Tools = call;
+    failSteps[i].ToolCount = 1;
+  }
+  failSteps[3].Error = StrView{errText, (u32)sizeof(errText)};
+  script.Steps = failSteps;
+  script.Count = 4;
+  script.Index = 0;
+
+  SessionResult failed = AgentHarness_Run(&harness, SVL("fail"));
+  CHECK(failed.Status == SessionStatus::ProviderError);
+  CHECK(failed.Message.Length == sizeof(errText));
+  bool intact = failed.Message.Length == sizeof(errText);
+  for (u32 i = 0; i < failed.Message.Length && intact; i++)
+    if (failed.Message.Data[i] != 'e') intact = false;
+  CHECK(intact);
+  CHECK(harness.Work.Committed <= floor);
+
+  // The copy lands in LastResult, which holds one message rather than growing
+  // by one per failure, so repeated failures must not accumulate.
+  usize afterFirstFailure = harness.LastResult.Used;
+  for (u32 i = 0; i < 5; i++) {
+    script.Index = 0;
+    CHECK(!SessionResult_IsOk(AgentHarness_Run(&harness, SVL("fail"))));
+  }
+  CHECK(harness.LastResult.Used == afterFirstFailure);
+
+  CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+  ArenaRelease(&arena);
+}
+
 void TestHarness() {
   TestHarnessReplayAndIncremental();
   TestHarnessLifecycle();
   TestHarnessWatchers();
   TestHarnessWatchOverflow();
+  TestHarnessWorkArenaTrim();
   TestHarnessStateGrowthRate();
   TestHarnessWatchDrainsAfterClose();
   TestHarnessToolsAndHooks();

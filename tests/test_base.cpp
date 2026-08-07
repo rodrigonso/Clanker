@@ -29,6 +29,37 @@ void TestArena() {
   big[0] = 1;
   big[5 * 1024 * 1024 - 1] = 2;
   CHECK(big[0] == 1 && big[5 * 1024 * 1024 - 1] == 2);
+
+  // ArenaReset recycles address space but keeps the pages, so an arena that
+  // spiked once holds that peak for its whole life. ArenaTrim is what gives it
+  // back, and the reservation survives so the arena keeps working.
+  usize peak = a.Committed;
+  CHECK(peak >= 5 * 1024 * 1024);
+  ArenaReset(&a);
+  CHECK_ALL(a.Used == 0, a.Committed == peak);  // reset alone frees nothing
+
+  ArenaTrim(&a, 64 * 1024);
+  CHECK_ALL(a.Committed < peak, a.Committed <= 64 * 1024, a.Used == 0);
+
+  // Still usable: the range is reserved, so it commits again on demand.
+  byte* again = (byte*)ArenaAlloc(&a, 2 * 1024 * 1024, 1);
+  again[0] = 3;
+  again[2 * 1024 * 1024 - 1] = 4;
+  CHECK_ALL(again[0] == 3, again[2 * 1024 * 1024 - 1] == 4,
+            a.Committed >= 2 * 1024 * 1024);
+
+  // Trimming to at or above what is committed is a no-op, which is what keeps
+  // it cheap to call unconditionally.
+  usize before = a.Committed;
+  ArenaReset(&a);
+  ArenaTrim(&a, before * 2);
+  CHECK(a.Committed == before);
+
+  // A keep near SIZE_MAX must stay a no-op: rounding it up to a commit chunk
+  // wraps to zero, which would decommit everything the keep was covering.
+  ArenaTrim(&a, (usize)0 - 1);
+  CHECK(a.Committed == before);
+
   ArenaRelease(&a);
 }
 

@@ -43,6 +43,11 @@ struct AgentHarness {
   Arena State;    // maintained Records + Reduction/index; append-only, never reloaded
   Arena Queued;   // queued message text; recycled whenever all queues drain
   Arena Work;     // per-run scratch; reset after each Run/Compact/Navigate call
+  // Holds only the returned SessionResult's message, which callers read after
+  // Work has been handed back. Separate from State because State is append-only
+  // and a run that fails without persisting anything would otherwise leave a
+  // permanent copy behind on every failure.
+  Arena LastResult;
   ToolRuntime* RuntimeTools;
   Mutex StateLock;  // guards Records/Reduction/Queues/Running/Faulted/Watchers
   // Guards the watcher registry only (Watchers/WatcherCount and each entry's
@@ -93,6 +98,9 @@ SessionResult AgentHarness_WatchNext(Arena* arena, AgentHarnessWatch* watch,
                                      AgentHarnessEvent* out);
 SessionResult AgentHarness_WatchRequestClose(AgentHarnessWatch* watch);
 SessionResult AgentHarness_WatchClose(AgentHarnessWatch* watch);
+// A returned SessionResult's Message is owned by the harness and stays valid
+// only until the next accepted Run/Compact/Navigate. Copy it if you need it to
+// outlive that; the run's scratch memory is handed back to the OS on return.
 SessionResult AgentHarness_Run(AgentHarness* harness, StrView prompt);
 SessionResult AgentHarness_Compact(AgentHarness* harness);
 SessionResult AgentHarness_Navigate(AgentHarness* harness, DurableId targetEntryId);

@@ -294,21 +294,35 @@ void ResetQueuesIfEmptyLocked(AgentHarness* harness) {
   harness->Queues.NextTurn = Array_Make<Message>(&harness->Queued, 4);
 }
 
+// Committed pages kept on Work between runs. Enough that back-to-back short
+// runs never re-fault, small enough that a long run's peak does not linger.
+constexpr usize WORK_ARENA_KEEP_BYTES = (usize)1 << 20;
+
+// Ends the run: publishes agent_end, then recycles Work and hands its pages
+// back. `result` is rewritten in place because its message may point into Work
+// -- a hook's error, or the driver's automatic-compaction wrapper -- and both
+// callers return it after this. ArenaReset alone left those bytes mapped, so a
+// stale read happened to work; trimming actually unmaps them. The copy goes to
+// LastResult, not State: State is append-only, so putting it there would retain
+// one message per failure for the life of the harness.
 void CompleteAgentTurnLocked(AgentHarness* harness, AgentTurnKind turn,
-                             const SessionResult& result) {
+                             SessionResult* result) {
   AgentTurnOutcome outcome =
-      SessionResult_IsOk(result)
+      SessionResult_IsOk(*result)
           ? AgentTurnOutcome::Succeeded
-          : result.Status == SessionStatus::Cancelled
+          : result->Status == SessionStatus::Cancelled
                 ? AgentTurnOutcome::Aborted
                 : AgentTurnOutcome::Failed;
+  if (result->Message.Length)
+    result->Message = StrView_Dup(&harness->LastResult, result->Message);
   AgentHarnessEvent event = {};
   event.Kind = AgentHarnessEventKind::TransientAgentEnd;
   event.Turn.Kind = turn;
   event.Turn.Outcome = outcome;
-  event.Turn.Error = result.Message;
+  event.Turn.Error = result->Message;
   PublishToWatchers(harness, &event);
   ArenaReset(&harness->Work);
+  ArenaTrim(&harness->Work, WORK_ARENA_KEEP_BYTES);
   harness->Running = false;
 }
 
@@ -540,6 +554,7 @@ SessionResult AgentHarness_Init(AgentHarness* harness, SessionLog log,
   harness->State = ArenaCreate();
   harness->Queued = ArenaCreate();
   harness->Work = ArenaCreate();
+  harness->LastResult = ArenaCreate();
   Mutex_Init(&harness->StateLock);
   Mutex_Init(&harness->WatcherLock);
   harness->Initialized = true;
@@ -604,6 +619,7 @@ SessionResult AgentHarness_Close(AgentHarness* harness) {
   ArenaRelease(&harness->State);
   ArenaRelease(&harness->Queued);
   ArenaRelease(&harness->Work);
+  ArenaRelease(&harness->LastResult);
   *harness = AgentHarness{};
   return SessionResult_Ok();
 }
@@ -790,6 +806,8 @@ SessionResult AgentHarness_Run(AgentHarness* harness, StrView prompt) {
     SessionResult idle = EnsureIdleLocked(harness, SVL("agent harness is already running"));
     if (!SessionResult_IsOk(idle)) return idle;
     harness->Running = true;
+    // Last operation is over; its message is no longer promised to the caller.
+    ArenaReset(&harness->LastResult);
     Atomic_StoreI32(&harness->AbortFlag, 0);
   }
 
@@ -800,7 +818,7 @@ SessionResult AgentHarness_Run(AgentHarness* harness, StrView prompt) {
     ApplyAcceptedCancellationLocked(harness, &result);
     if (result.Status == SessionStatus::IoError || result.Status == SessionStatus::Faulted)
       harness->Faulted = true;
-    CompleteAgentTurnLocked(harness, AgentTurnKind::Run, result);
+    CompleteAgentTurnLocked(harness, AgentTurnKind::Run, &result);
   }
   return result;
 }
@@ -812,6 +830,8 @@ SessionResult AgentHarness_Compact(AgentHarness* harness) {
     SessionResult idle = EnsureIdleLocked(harness, SVL("agent harness is already running"));
     if (!SessionResult_IsOk(idle)) return idle;
     harness->Running = true;
+    // Last operation is over; its message is no longer promised to the caller.
+    ArenaReset(&harness->LastResult);
     Atomic_StoreI32(&harness->AbortFlag, 0);
   }
 
@@ -822,7 +842,7 @@ SessionResult AgentHarness_Compact(AgentHarness* harness) {
     ApplyAcceptedCancellationLocked(harness, &result);
     if (result.Status == SessionStatus::IoError || result.Status == SessionStatus::Faulted)
       harness->Faulted = true;
-    CompleteAgentTurnLocked(harness, AgentTurnKind::Compaction, result);
+    CompleteAgentTurnLocked(harness, AgentTurnKind::Compaction, &result);
   }
   return result;
 }
@@ -835,6 +855,8 @@ SessionResult AgentHarness_Navigate(AgentHarness* harness, DurableId targetEntry
     SessionResult idle = EnsureIdleLocked(harness, SVL("agent harness is already running"));
     if (!SessionResult_IsOk(idle)) return idle;
     harness->Running = true;
+    // Last operation is over; its message is no longer promised to the caller.
+    ArenaReset(&harness->LastResult);
     Atomic_StoreI32(&harness->AbortFlag, 0);
   }
 
@@ -869,7 +891,10 @@ SessionResult AgentHarness_Navigate(AgentHarness* harness, DurableId targetEntry
     ApplyAcceptedCancellationLocked(harness, &result);
     if (result.Status == SessionStatus::IoError || result.Status == SessionStatus::Faulted)
       harness->Faulted = true;
+    if (result.Message.Length)
+      result.Message = StrView_Dup(&harness->LastResult, result.Message);
     ArenaReset(&harness->Work);
+    ArenaTrim(&harness->Work, WORK_ARENA_KEEP_BYTES);
     harness->Running = false;
   }
   return result;
@@ -920,6 +945,8 @@ SessionResult AgentHarness_SetModel(AgentHarness* harness, Model model, Provider
     SessionResult idle = EnsureIdleLocked(harness, SVL("agent harness is running"));
     if (!SessionResult_IsOk(idle)) return idle;
     harness->Running = true;
+    // Last operation is over; its message is no longer promised to the caller.
+    ArenaReset(&harness->LastResult);
     head = harness->Reduction.HeadId;
   }
   SessionRecord setting = {};

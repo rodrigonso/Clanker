@@ -17,6 +17,18 @@ Arena ArenaCreate(usize reserveBytes = (usize)1 << 30);
 void* ArenaAlloc(Arena* a, usize size, usize align);
 void ArenaReset(Arena* a);            // Roll Used back to 0, keep committed pages
 void ArenaRestore(Arena* a, usize pos);  // Roll Used back to a saved mark
+
+// Hand committed pages above `keepBytes` back to the OS, keeping the
+// reservation so the arena stays usable and grows again on demand.
+//
+// Deliberately separate from ArenaReset rather than folded into it: reset runs
+// per streamed token, per rendered frame, per layout and per shell chunk, and a
+// decommit syscall on those paths would cost far more than the pages are worth.
+// Call this only where an arena is known to have spiked and then gone idle.
+//
+// Traps if `Used` is above `keepBytes` -- that would be decommitting live data.
+void ArenaTrim(Arena* a, usize keepBytes);
+
 void ArenaRelease(Arena* a);          // Release the whole reservation
 
 #define ArenaPushStruct(a, T) (T*)ArenaAlloc((a), sizeof(T), alignof(T))
