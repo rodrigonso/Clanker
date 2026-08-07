@@ -1289,13 +1289,13 @@ void DoSubmit(Tui* t) {
     return;
   }
 
-  if (t->AgentRunning && t->Harness) {
+  if (t->AgentRunning && t->Agent.Steer) {
     QueueUserDisplayLocked(t, line);
-    SessionResult queued = AgentHarness_QueueSteering(t->Harness, line);
-    if (!SessionResult_IsOk(queued)) {
+    StrView error = {};
+    if (!t->Agent.Steer(t->Agent.User, line, &error)) {
       TuiDisplayEvent* display =
           QueueDisplayEvent(t, TuiDisplayEventKind::Error);
-      SetDisplayPayload(t, display, queued.Message);
+      SetDisplayPayload(t, display, error);
     }
   } else {
     if (!QPush(t, TuiSubmission{TuiSubmissionKind::Prompt, line})) {
@@ -1777,13 +1777,9 @@ void HandleKey(Tui* t, const Key& k) {
       t->EscapeArmed = !doubleEscape;
       if (doubleEscape) {
         if (t->AgentRunning) {
-          if (t->Harness) {
-            SessionResult cancelled =
-                AgentHarness_RequestCancel(t->Harness);
-            if (!SessionResult_IsOk(cancelled)) Atomic_StoreI32(&t->AbortFlag, 1);
-          } else {
+          if (!t->Agent.RequestCancel ||
+              !t->Agent.RequestCancel(t->Agent.User))
             Atomic_StoreI32(&t->AbortFlag, 1);
-          }
         } else {
           FocusComposer(t);
           LineEdit_Clear(&t->Edit);
@@ -1947,13 +1943,9 @@ void HandleKey(Tui* t, const Key& k) {
       if (t->OperationActive)
         Atomic_StoreI32(&t->OperationAbortFlag, 1);
       else if (t->AgentRunning) {
-        if (t->Harness) {
-          SessionResult cancelled =
-              AgentHarness_RequestCancel(t->Harness);
-          if (!SessionResult_IsOk(cancelled)) Atomic_StoreI32(&t->AbortFlag, 1);
-        } else {
+        if (!t->Agent.RequestCancel ||
+            !t->Agent.RequestCancel(t->Agent.User))
           Atomic_StoreI32(&t->AbortFlag, 1);
-        }
       }
       else if (!LineEdit_Empty(&t->Edit)) {
         LineEdit_Clear(&t->Edit);
@@ -2166,7 +2158,7 @@ void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts) {
 static void ClearSessionScopedStringsLocked(Tui* t);
 
 bool Tui_ClearSession(Tui* t) {
-  Mutex_Lock(&t->Lock);  if (t->AgentRunning || (t->Harness && t->Harness->Running) || t->Stop ||
+  Mutex_Lock(&t->Lock);  if (t->AgentRunning || (t->Agent.IsBusy && t->Agent.IsBusy(t->Agent.User)) || t->Stop ||
       t->Quit) {
     Mutex_Unlock(&t->Lock);
     return false;
@@ -2702,118 +2694,136 @@ void Tui_FeedInput(Tui* t, const char* data, u32 n) {
   Mutex_Unlock(&t->Lock);
 }
 
-void Tui_HarnessEvent(void* user, const AgentHarnessEvent* ev) {
-  Tui* t = (Tui*)user;
+// ---- progress reporting -------------------------------------------------
+// One call per thing the driver observed. Each takes the lock, records display
+// state, and wakes the render thread; none of them knows what produced it.
+
+void Tui_TurnStarted(Tui* t) {
   Mutex_Lock(&t->Lock);
-  switch (ev->Kind) {
-    case AgentHarnessEventKind::TransientAgentStart:
-      t->AgentRunning = true;
-      t->Sess.RetryStatus = {};
-      t->LastEscapeMs = 0;
-      t->EscapeArmed = false;
-      if (!Tui_HasPendingDisplay(t)) t->State = TuiState::Thinking;
-      t->Spinner = 0;
-      t->SpinnerStartMs = 0;
-      break;
-    case AgentHarnessEventKind::TransientStream:
-      if (ev->Stream.Kind == StreamEventKind::TextDelta) QueueText(t, ev->Stream.Delta);
-      break;
-    // The assistant turn has no transient "message end"; the durable record is
-    // the authoritative completion, carrying the final stop reason and usage.
-    case AgentHarnessEventKind::DurableRecord: {
-      if (ev->Record->Kind != SessionRecordKind::Message) break;
-      const Message* message = &ev->Record->MessageEntry.Value;
-      if (message->Kind != Role::Assistant) break;
-      TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::MessageEnd);
-      display->Stop = message->Stop;
-      display->Use = message->Use;
-      if (message->ErrorMessage.Length) SetDisplayPayload(t, display, message->ErrorMessage);
-      break;
+  t->AgentRunning = true;
+  t->Sess.RetryStatus = {};
+  t->LastEscapeMs = 0;
+  t->EscapeArmed = false;
+  if (!Tui_HasPendingDisplay(t)) t->State = TuiState::Thinking;
+  t->Spinner = 0;
+  t->SpinnerStartMs = 0;
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+}
+
+void Tui_AppendAssistantText(Tui* t, StrView text) {
+  Mutex_Lock(&t->Lock);
+  QueueText(t, text);
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+}
+
+void Tui_AssistantMessageEnded(Tui* t, StopReason stop, Usage use,
+                               StrView errorMessage) {
+  Mutex_Lock(&t->Lock);
+  TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::MessageEnd);
+  display->Stop = stop;
+  display->Use = use;
+  if (errorMessage.Length) SetDisplayPayload(t, display, errorMessage);
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+}
+
+void Tui_ToolStarted(Tui* t, StrView callId, StrView name, StrView argumentsJson) {
+  Mutex_Lock(&t->Lock);
+  TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::ToolStart);
+  display->ToolCallId = StrView_Dup(&t->SessionMem, callId);
+  display->ToolName = StrView_Dup(&t->SessionMem, name);
+  display->ToolArgsJson = StrView_Dup(&t->SessionMem, argumentsJson);
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+}
+
+void Tui_ToolProgress(Tui* t, StrView callId, StrView preview) {
+  Mutex_Lock(&t->Lock);
+  u16 slotIndex = 0;
+  TuiToolUpdateSlot* slot = AcquireToolUpdate(t, callId, &slotIndex);
+  if (slot) {
+    StrBuf_Clear(&slot->Payload);
+    Sanitize_Display(&slot->Payload, Truncate(preview, 1500));
+    // Only queue once per slot: a fast tool would otherwise fill the display
+    // queue with updates that all render the same latest preview.
+    if (!slot->Queued) {
+      TuiDisplayEvent* display =
+          QueueDisplayEvent(t, TuiDisplayEventKind::ToolUpdate);
+      display->ToolCallId = slot->ToolCallId;
+      display->ToolUpdateSlot = slotIndex;
+      slot->Queued = true;
     }
-    case AgentHarnessEventKind::TransientToolStart: {
-      TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::ToolStart);
-      display->ToolCallId = StrView_Dup(&t->SessionMem, ev->Tool.CallId);
-      display->ToolName = StrView_Dup(&t->SessionMem, ev->Tool.Name);
-      display->ToolArgsJson = StrView_Dup(&t->SessionMem, ev->Tool.ArgumentsJson);
-      break;
-    }
-    case AgentHarnessEventKind::TransientToolUpdate: {
-      StrView preview = StrView{nullptr, 0};
-      if (ev->Tool.Result.Content.Count > 0)
-        preview = ev->Tool.Result.Content.Data[0].Text;
-      u16 slotIndex = 0;
-      TuiToolUpdateSlot* slot =
-          AcquireToolUpdate(t, ev->Tool.CallId, &slotIndex);
-      if (!slot) break;
-      StrBuf_Clear(&slot->Payload);
-      Sanitize_Display(&slot->Payload, Truncate(preview, 1500));
-      if (!slot->Queued) {
-        TuiDisplayEvent* display =
-            QueueDisplayEvent(t, TuiDisplayEventKind::ToolUpdate);
-        display->ToolCallId = slot->ToolCallId;
-        display->ToolUpdateSlot = slotIndex;
-        slot->Queued = true;
-      }
-      break;
-    }
-    case AgentHarnessEventKind::TransientToolEnd: {
-      StrView preview = StrView{nullptr, 0};
-      if (ev->Tool.Result.Content.Count > 0) preview = ev->Tool.Result.Content.Data[0].Text;
-      TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::ToolEnd);
-      display->ToolCallId = StrView_Dup(&t->SessionMem, ev->Tool.CallId);
-      display->Payload = StrBuf_Make(&t->SessionMem, preview.Length + 1);
-      Sanitize_Display(&display->Payload, preview);
-      display->IsError = ev->Tool.IsError;
-      if (TuiToolUpdateSlot* slot = FindToolUpdate(t, ev->Tool.CallId))
-        slot->Active = false;
-      break;
-    }
-    case AgentHarnessEventKind::TransientAgentEnd:
-      t->AgentRunning = false;
-      t->Sess.RetryStatus = {};
-      t->LastEscapeMs = 0;
-      t->EscapeArmed = false;
-      QueueDisplayEvent(t, TuiDisplayEventKind::AgentEnd);
-      break;
-    case AgentHarnessEventKind::TransientRetryStart: {
-      StrBuf status = StrBuf_Make(
-          &t->SessionMem, ev->Retry.Error.Length + 96);
-      StrBuf_AppendCStr(
-          &status, ev->Retry.Layer == RetryLayer::ProviderRequest
-                       ? "provider request"
-                       : "assistant turn");
-      StrBuf_AppendCStr(&status, " in ");
-      StrBuf_AppendU64(&status, ev->Retry.DelayMs);
-      StrBuf_AppendCStr(&status, " ms (");
-      StrBuf_AppendU64(&status, ev->Retry.Attempt);
-      StrBuf_AppendChar(&status, '/');
-      StrBuf_AppendU64(&status, ev->Retry.MaxAttempts);
-      StrBuf_AppendChar(&status, ')');
-      t->Sess.RetryStatus = StrBuf_View(&status);
-      t->State = TuiState::Retry;
-      break;
-    }
-    case AgentHarnessEventKind::TransientRetryEnd:
-      t->Sess.RetryStatus = {};
-      if (t->State == TuiState::Retry) t->State = TuiState::Thinking;
-      break;
-    case AgentHarnessEventKind::TransientQueueUpdate:
-      t->QueuedCount =
-          ev->Queue.SteerCount + ev->Queue.FollowUpCount + ev->Queue.NextTurnCount;
-      break;
-    // Only progress rendering was skipped; the transcript is still complete, so
-    // say so inline rather than rebuilding it.
-    case AgentHarnessEventKind::TransientEventsDropped: {
-      TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::Notice);
-      StrBuf notice = StrBuf_Make(&t->SessionMem, 64);
-      StrBuf_AppendCStr(&notice, "skipped ");
-      StrBuf_AppendU64(&notice, ev->Dropped.Count);
-      StrBuf_AppendCStr(&notice, " progress updates to keep up");
-      display->Payload = notice;
-      break;
-    }
-    default: break;
   }
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+}
+
+void Tui_ToolEnded(Tui* t, StrView callId, StrView preview, bool isError) {
+  Mutex_Lock(&t->Lock);
+  TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::ToolEnd);
+  display->ToolCallId = StrView_Dup(&t->SessionMem, callId);
+  display->Payload = StrBuf_Make(&t->SessionMem, preview.Length + 1);
+  Sanitize_Display(&display->Payload, preview);
+  display->IsError = isError;
+  if (TuiToolUpdateSlot* slot = FindToolUpdate(t, callId)) slot->Active = false;
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+}
+
+void Tui_TurnEnded(Tui* t) {
+  Mutex_Lock(&t->Lock);
+  t->AgentRunning = false;
+  t->Sess.RetryStatus = {};
+  t->LastEscapeMs = 0;
+  t->EscapeArmed = false;
+  QueueDisplayEvent(t, TuiDisplayEventKind::AgentEnd);
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+}
+
+void Tui_RetryStarted(Tui* t, bool providerLevel, u32 delayMs, u32 attempt,
+                      u32 maxAttempts) {
+  Mutex_Lock(&t->Lock);
+  StrBuf status = StrBuf_Make(&t->SessionMem, 96);
+  StrBuf_AppendCStr(&status, providerLevel ? "provider request" : "assistant turn");
+  StrBuf_AppendCStr(&status, " in ");
+  StrBuf_AppendU64(&status, delayMs);
+  StrBuf_AppendCStr(&status, " ms (");
+  StrBuf_AppendU64(&status, attempt);
+  StrBuf_AppendChar(&status, '/');
+  StrBuf_AppendU64(&status, maxAttempts);
+  StrBuf_AppendChar(&status, ')');
+  t->Sess.RetryStatus = StrBuf_View(&status);
+  t->State = TuiState::Retry;
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+}
+
+void Tui_RetryEnded(Tui* t) {
+  Mutex_Lock(&t->Lock);
+  t->Sess.RetryStatus = {};
+  if (t->State == TuiState::Retry) t->State = TuiState::Thinking;
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+}
+
+void Tui_SetQueuedCount(Tui* t, u32 count) {
+  Mutex_Lock(&t->Lock);
+  t->QueuedCount = count;
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+}
+
+void Tui_NoticeDroppedEvents(Tui* t, u32 count) {
+  Mutex_Lock(&t->Lock);
+  TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::Notice);
+  StrBuf notice = StrBuf_Make(&t->SessionMem, 64);
+  StrBuf_AppendCStr(&notice, "skipped ");
+  StrBuf_AppendU64(&notice, count);
+  StrBuf_AppendCStr(&notice, " progress updates to keep up");
+  display->Payload = notice;
   Wake(t);
   Mutex_Unlock(&t->Lock);
 }

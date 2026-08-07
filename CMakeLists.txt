@@ -159,7 +159,10 @@ add_library(clank_tui STATIC
   src/tui/linemodel.cpp
   src/tui/toolview.cpp
   src/tui/tui.cpp)
-target_link_libraries(clank_tui PUBLIC clank_ui clank_term clank_agent clank_json)
+# The TUI is a terminal component layer: it takes progress as ordinary calls and
+# asks for steer/cancel through TuiAgentHooks, so it does not link clank_agent.
+# src/app/tui_bridge.cpp is the only place that knows about both.
+target_link_libraries(clank_tui PUBLIC clank_ui clank_term clank_json clank_proto)
 
 # ---- llm providers -------------------------------------------------------
 add_library(clank_proto STATIC
@@ -213,7 +216,8 @@ add_library(clank_app STATIC
   src/app/provider_registry.cpp
   src/app/runtime.cpp
   src/app/session_switch.cpp
-  src/app/settings.cpp)
+  src/app/settings.cpp
+  src/app/tui_bridge.cpp)
 target_link_libraries(clank_app PUBLIC clank_anthropic clank_openai clank_auth clank_tui clank_tools)
 
 # ---- executables ---------------------------------------------------------

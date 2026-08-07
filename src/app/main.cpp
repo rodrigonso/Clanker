@@ -17,6 +17,7 @@
 #include "app/runtime.h"
 #include "app/session_switch.h"
 #include "app/settings.h"
+#include "app/tui_bridge.h"
 #include "auth/oauth.h"
 #include "auth/resolve.h"
 #include "auth/store.h"
@@ -213,11 +214,11 @@ static void RunTuiRepl(InteractiveRuntime* rt) {
     return;
   }
   rt->TuiView = &tui;
-  tui.Harness = rt->Harness;
+  tui.Agent = TuiBridge_AgentHooks(rt->Harness);
 
   HarnessEventPump pump = {};
   AgentHarnessSnapshot snapshot = {};
-  HarnessEventSink sink = {&tui, Tui_HarnessEvent};
+  HarnessEventSink sink = {&tui, TuiBridge_HarnessEvent};
   SessionResult watching =
       StartHarnessEventPump(rt->Mem, rt->Harness, sink, &tui, &pump,
                             &snapshot);

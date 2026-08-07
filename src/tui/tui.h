@@ -1,7 +1,7 @@
 #pragma once
-#include "agent/harness.h"
 #include "base/arena.h"
 #include "base/thread.h"
+#include "llm/types.h"
 #include "term/keys.h"
 #include "ui/lineedit.h"
 #include "tui/linemodel.h"
@@ -13,7 +13,27 @@
 // Full-screen TUI controller. Owns the terminal, a differential renderer, the
 // transcript line model and the multi-line input editor. Runs two background
 // threads (input + render); the caller's thread drives the agent loop and feeds
-// events through Tui_HarnessEvent / drains user input via Tui_WaitForSubmit.
+// progress through the Tui_* reporting calls below.
+//
+// This layer knows nothing about the agent. The three things it needs from a
+// running agent arrive as TuiAgentHooks, and progress arrives as ordinary
+// calls, so `clank_tui` does not link `clank_agent`.
+
+// What the controller asks of whatever is driving it. All three are invoked
+// while the TUI lock is held, which fixes the lock order as
+// `Tui::Lock -> (whatever the implementation takes)`; an implementation must
+// not call back into the TUI.
+struct TuiAgentHooks {
+  void* User;
+  // Queue `text` as a steering message for the turn already in flight. Returns
+  // false and sets `outError` when it was refused.
+  bool (*Steer)(void* user, StrView text, StrView* outError);
+  // Ask for cancellation. Returns false when the request could not be made, in
+  // which case the TUI falls back to raising its own abort flag.
+  bool (*RequestCancel)(void* user);
+  // True while the driver still owns the session.
+  bool (*IsBusy)(void* user);
+};
 
 enum class TuiState : u8 { Idle, Thinking, Streaming, Tool, Retry };
 
@@ -106,9 +126,8 @@ struct Tui {
   usize SessionMemBaseline;
   Arena ToolUpdateMem;
   Arena ScreenMem;
-  AgentHarness* Harness;
-  Term Trm;
-  Screen Scr;
+  TuiAgentHooks Agent;
+  Term Trm;  Screen Scr;
   UiContext Ui;
   UiTextInputState InputUi;
   LineModel Model;
@@ -295,9 +314,26 @@ TuiModalResult Tui_ReadText(Tui* t, StrView title, StrView prompt,
                            StrView initial, StrView* out);
 void Tui_OpenCommandPalette(Tui* t);
 
-// Harness watch-event callback (User = Tui*). Consumes AgentHarnessEvent
-// directly; there is no intermediate agent-event representation.
-void Tui_HarnessEvent(void* user, const AgentHarnessEvent* ev);
+// Progress reporting. Each call is what the driver has just observed, in the
+// order it observed it; the controller decides how to render it. There is no
+// intermediate event struct, so nothing is copied that the calls do not carry.
+void Tui_TurnStarted(Tui* t);
+void Tui_AppendAssistantText(Tui* t, StrView text);
+// The assistant message is complete. `errorMessage` is empty on success.
+void Tui_AssistantMessageEnded(Tui* t, StopReason stop, Usage use,
+                               StrView errorMessage);
+void Tui_ToolStarted(Tui* t, StrView callId, StrView name, StrView argumentsJson);
+void Tui_ToolProgress(Tui* t, StrView callId, StrView preview);
+void Tui_ToolEnded(Tui* t, StrView callId, StrView preview, bool isError);
+void Tui_TurnEnded(Tui* t);
+// `providerLevel` distinguishes a transport retry from a whole-turn retry; the
+// controller only needs the two words it prints, not the driver's enum.
+void Tui_RetryStarted(Tui* t, bool providerLevel, u32 delayMs, u32 attempt,
+                      u32 maxAttempts);
+void Tui_RetryEnded(Tui* t);
+void Tui_SetQueuedCount(Tui* t, u32 count);
+// Progress updates were skipped to keep up; the transcript is still complete.
+void Tui_NoticeDroppedEvents(Tui* t, u32 count);
 
 // Advance the frame-coalesced display pipeline at `nowMs`. Compose uses this under the
 // TUI lock; headless tests call it directly when no TUI threads are running.
