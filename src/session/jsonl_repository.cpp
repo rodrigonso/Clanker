@@ -28,6 +28,7 @@ struct JsonlLogHandle {
   // or re-folds prior history.
   SessionReduction Reduction;
   StrView Path;
+  StrView LockPath;
   FILE* AppendFile;
   Mutex AppendLock;
   bool Writable;
@@ -171,14 +172,13 @@ bool ClaimedInProcess(JsonlRepository* repository, StrView projectKey,
 
 SessionResult AcquireWriter(JsonlRepository* repository, Arena* scratch,
                             StrView projectKey, DurableId sessionId,
-                            u32* outClaimIndex, ProcessFileLock* outLock) {
+                            StrView lockPath, u32* outClaimIndex,
+                            ProcessFileLock* outLock) {
   SessionResult claim =
       AcquireClaim(repository, projectKey, sessionId, outClaimIndex);
   if (!SessionResult_IsOk(claim)) return claim;
   ProcessFileLockStatus status =
-      ProcessFileLock_TryAcquire(scratch,
-                                 LockPath(scratch, repository, projectKey, sessionId),
-                                 outLock);
+      ProcessFileLock_TryAcquire(scratch, lockPath, outLock);
   if (status != ProcessFileLockStatus::Acquired) {
     ReleaseClaim(repository, *outClaimIndex);
     return SessionResult_Error(status == ProcessFileLockStatus::Busy
@@ -195,12 +195,12 @@ bool SessionBusy(JsonlRepository* repository, StrView projectKey,
                  DurableId sessionId) {
   if (ClaimedInProcess(repository, projectKey, sessionId)) return true;
   Arena scratch = ArenaCreate();
+  StrView lockPath = LockPath(&scratch, repository, projectKey, sessionId);
   ProcessFileLock lock = {};
   ProcessFileLockStatus status =
-      ProcessFileLock_TryAcquire(&scratch,
-                                 LockPath(&scratch, repository, projectKey, sessionId),
-                                 &lock);
-  if (status == ProcessFileLockStatus::Acquired) ProcessFileLock_Release(&lock);
+      ProcessFileLock_TryAcquire(&scratch, lockPath, &lock);
+  if (status == ProcessFileLockStatus::Acquired)
+    ProcessFileLock_Release(&lock, lockPath);
   ArenaRelease(&scratch);
   return status == ProcessFileLockStatus::Busy;
 }
@@ -326,7 +326,7 @@ void DestroyHandle(JsonlLogHandle* handle, bool removeData) {
     StrBuf_Append(&native, handle->Path);
     remove(StrBuf_CStr(&native));
   }
-  ProcessFileLock_Release(&handle->WriterLock);
+  ProcessFileLock_Release(&handle->WriterLock, handle->LockPath);
   if (handle->Writable)
     ReleaseClaim(handle->Repository, handle->ClaimIndex);
   handle->Closed = true;
@@ -442,8 +442,8 @@ SessionLog LogInterface(JsonlLogHandle* handle) {
 }
 
 SessionResult InitializeHandle(JsonlRepository* repository, Arena* callerArena,
-                               StrView path, bool writable, u32 claimIndex,
-                               ProcessFileLock writerLock,
+                               StrView path, StrView lockPath, bool writable,
+                               u32 claimIndex, ProcessFileLock writerLock,
                                JsonlLogHandle** outHandle, SessionInfo* outInfo) {
   JsonlLogHandle* handle = ArenaPushStruct(&repository->Mem, JsonlLogHandle);
   *handle = JsonlLogHandle{};
@@ -452,6 +452,7 @@ SessionResult InitializeHandle(JsonlRepository* repository, Arena* callerArena,
   handle->WriterLock = writerLock;
   handle->State = ArenaCreate();
   handle->Path = StrView_Dup(&handle->State, path);
+  handle->LockPath = StrView_Dup(&handle->State, lockPath);
   handle->Writable = writable;
   Mutex_Init(&handle->AppendLock);
 
@@ -529,15 +530,17 @@ SessionResult Create(void* context, Arena* arena, const SessionCreateOptions* op
 
   u32 claimIndex = 0;
   ProcessFileLock writerLock = {};
+  StrView lockPath =
+      LockPath(&scratch, repository, options->ProjectKey, sessionId);
   SessionResult acquired =
       AcquireWriter(repository, &scratch, options->ProjectKey, sessionId,
-                    &claimIndex, &writerLock);
+                    lockPath, &claimIndex, &writerLock);
   if (!SessionResult_IsOk(acquired)) {
     ArenaRelease(&scratch);
     return acquired;
   }
   if (Fs_Exists(path)) {
-    ProcessFileLock_Release(&writerLock);
+    ProcessFileLock_Release(&writerLock, lockPath);
     ReleaseClaim(repository, claimIndex);
     ArenaRelease(&scratch);
     return SessionResult_Error(SessionStatus::Conflict,
@@ -570,7 +573,7 @@ SessionResult Create(void* context, Arena* arena, const SessionCreateOptions* op
   if (!written) {
     if (file) fclose(file);
     remove(StrBuf_CStr(&native));
-    ProcessFileLock_Release(&writerLock);
+    ProcessFileLock_Release(&writerLock, lockPath);
     ReleaseClaim(repository, claimIndex);
     ArenaRelease(&scratch);
     return IoError("failed to create session file");
@@ -583,6 +586,7 @@ SessionResult Create(void* context, Arena* arena, const SessionCreateOptions* op
   handle->WriterLock = writerLock;
   handle->State = ArenaCreate();
   handle->Path = StrView_Dup(&handle->State, path);
+  handle->LockPath = StrView_Dup(&handle->State, lockPath);
   handle->Records = Array_Make<SessionRecord>(&handle->State, 32);
   SessionRecord persistent = {};
   SessionResult copied =
@@ -590,7 +594,7 @@ SessionResult Create(void* context, Arena* arena, const SessionCreateOptions* op
   if (!SessionResult_IsOk(copied)) {
     fclose(file);
     remove(StrBuf_CStr(&native));
-    ProcessFileLock_Release(&writerLock);
+    ProcessFileLock_Release(&writerLock, lockPath);
     ReleaseClaim(repository, claimIndex);
     ArenaRelease(&handle->State);
     ArenaRelease(&scratch);
@@ -634,10 +638,12 @@ SessionResult Open(void* context, Arena* arena, const SessionOpenOptions* option
 
   u32 claimIndex = 0;
   ProcessFileLock writerLock = {};
+  StrView lockPath =
+      LockPath(&scratch, repository, options->ProjectKey, options->SessionId);
   if (options->Writable) {
     SessionResult acquired =
         AcquireWriter(repository, &scratch, options->ProjectKey,
-                      options->SessionId, &claimIndex, &writerLock);
+                      options->SessionId, lockPath, &claimIndex, &writerLock);
     if (!SessionResult_IsOk(acquired)) {
       ArenaRelease(&scratch);
       return acquired;
@@ -646,8 +652,8 @@ SessionResult Open(void* context, Arena* arena, const SessionOpenOptions* option
 
   JsonlLogHandle* handle = nullptr;
   SessionResult initialized =
-      InitializeHandle(repository, arena, path, options->Writable, claimIndex,
-                       writerLock, &handle, outInfo);
+      InitializeHandle(repository, arena, path, lockPath, options->Writable,
+                       claimIndex, writerLock, &handle, outInfo);
   if (!SessionResult_IsOk(initialized)) {
     ArenaRelease(&scratch);
     return initialized;
@@ -925,6 +931,16 @@ StrView JsonlRepository_SessionPath(Arena* arena, JsonlRepository* repository,
     return StrView{"", 0};
   }
   return SessionPath(arena, repository, projectKey, sessionId);
+}
+
+StrView JsonlRepository_SessionDir(Arena* arena, JsonlRepository* repository,
+                                   StrView projectKey, DurableId sessionId) {
+  if (!arena || !repository || !repository->Initialized ||
+      !ValidProjectKey(projectKey) || !DurableId_IsSet(sessionId)) {
+    return StrView{"", 0};
+  }
+  return Fs_Join(arena, ProjectDir(arena, repository, projectKey),
+                 DurableId_View(&sessionId));
 }
 
 void JsonlRepository_Destroy(JsonlRepository* repository) {

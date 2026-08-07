@@ -72,3 +72,37 @@ struct AgentCompactionCut {
 // not implemented.
 bool AgentCompaction_SelectCutPoint(const SessionRecord* const* branch, u32 branchCount,
                                     u32 keepRecentTokens, AgentCompactionCut* out);
+
+// Files the agent touched, split by how it touched them. Mirrors pi's
+// `FileOperations`: paths are the `path` argument of `read`, `write`, and
+// `edit` tool calls. Commands run through `shell` are not inspected, so files
+// they create are not tracked -- the same blind spot pi has.
+struct AgentFileOps {
+  Array<StrView> Read;
+  Array<StrView> Written;
+  Array<StrView> Edited;
+};
+
+// The two lists a compaction reports: paths that were only read, and paths that
+// were written or edited. Sorted and deduplicated.
+struct AgentFileLists {
+  Array<StrView> ReadFiles;
+  Array<StrView> ModifiedFiles;
+};
+
+// Unions every tracked tool-call path on `branch`, up to and including
+// `throughEntryId`, with the lists already stored on any Compaction record in
+// that span. Reading those stored lists is what carries paths across successive
+// compactions, since the turns they came from have been folded away. Paths are
+// copied into `arena`. A zero `throughEntryId` scans the whole branch.
+void AgentCompaction_CollectFileOps(Arena* arena, const SessionRecord* const* branch,
+                                    u32 branchCount, DurableId throughEntryId,
+                                    AgentFileOps* out);
+
+// A path that was written or edited is reported only as modified, never as read.
+void AgentCompaction_BuildFileLists(Arena* arena, const AgentFileOps* ops,
+                                    AgentFileLists* out);
+
+// Appends pi's `<read-files>` / `<modified-files>` sections to a summary body.
+// Appends nothing when both lists are empty.
+void AgentCompaction_AppendFileSections(StrBuf* out, const AgentFileLists* lists);

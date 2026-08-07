@@ -284,6 +284,26 @@ Token pressure is read from the provider's reported usage when there is any
 (prompt + cache + output of the newest assistant turn, plus an estimate for
 anything appended since), and falls back to a byte-based estimate otherwise.
 
+Every summary ends with the files the folded turns touched, taken from the
+`path` argument of `read`, `write`, and `edit` tool calls:
+
+```
+<read-files>
+docs/design.md
+</read-files>
+
+<modified-files>
+src/agent/driver.cpp
+</modified-files>
+```
+
+A path that was written or edited is reported only as modified. The lists are
+stored on the compaction record as well as in the summary text, and each
+compaction reseeds from the ones before it, so paths survive any number of
+successive compactions even though the turns they came from are gone. Files
+created by a `shell` command are not tracked, since only those three tools
+publish a path argument.
+
 Compaction runs at most once per turn; if it succeeds and the context is still
 over budget, the request proceeds and the provider decides. If the compaction
 turn itself fails, the run stops with an `automatic compaction failed` error
@@ -399,7 +419,12 @@ Cross-project resume enters the session's stored working directory, resolves
 project trust again, rebuilds prompt context, and rollback-safely switches the
 session, process cwd, and TUI cwd/branch. `--continue` remains scoped to the current project. Sessions
 live under `~/.clank/sessions/v2/<project-key>/`. Canonical JSONL files also store names without
-a sidecar. Unreadable session files are reported and skipped during
+a sidecar. A writer holds a `<session-id>.lock` sentinel beside its log for as
+long as it is open; the sentinel is removed on release, and on Windows the
+kernel removes it even if the process is killed. A `<session-id>/` directory
+beside the log holds that session's other artifacts, currently the `shell`
+tool's output-overflow logs; it is created only when something needs it.
+Unreadable session files are reported and skipped during
 browsing/continuation. Interactive
 mode may start without credentials and blocks prompts with `/login` guidance;
 `-p` remains fail-fast.

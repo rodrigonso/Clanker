@@ -125,6 +125,8 @@ struct InteractiveRuntime {
   Tui* TuiView;
   AppAuth* Auth;
   AuthWarmup* AuthWarmupState;
+  // Where the shell tool writes overflow logs; repointed on session switch.
+  ShellToolContext* Shell;
 };
 
 struct PromptContextLifetime {
@@ -1609,6 +1611,20 @@ static bool RuntimeRollbackSessionSwitch(
   return restored;
 }
 
+// Points the shell tool at the session's artifact directory, so output that
+// overflows the truncation limit is written beside the log it belongs to.
+// Leaves the view empty when there is no durable backend (`--no-session`),
+// which falls the tool back to the OS temp directory.
+static void RuntimeUpdateShellDirectory(InteractiveRuntime* rt,
+                                        StrView projectKey,
+                                        DurableId sessionId) {
+  if (!rt->Shell) return;
+  rt->Shell->Directory =
+      rt->JsonlSessions ? JsonlRepository_SessionDir(rt->Mem, rt->JsonlSessions,
+                                                     projectKey, sessionId)
+                        : StrView{};
+}
+
 static SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
                                         SessionLog target,
                                         const SessionInfo* targetInfo,
@@ -1790,6 +1806,7 @@ static SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
 
   // The switch replaced the durable session, so later payloads would otherwise
   // keep naming a transcript that is no longer written.
+  RuntimeUpdateShellDirectory(rt, targetInfo->ProjectKey, targetInfo->SessionId);
   if (g_hooks) {
     Arena hookScratch = ArenaCreate((usize)1 << 20);
     HookSessionInfo hookSession = {};
@@ -3296,8 +3313,12 @@ int main(int argc, char** argv) {
             (int)model.Id.Length, model.Id.Data);
   }
   FileLock_Init();
-  Tool tools[] = {ReadTool(), WriteTool(), EditTool(), LsTool(),
-                  FindTool(), GrepTool(), ShellTool()};
+  // Repointed whenever the durable session changes, so shell overflow logs
+  // always land beside the log they belong to. Stays empty under
+  // `--no-session`, which falls the tool back to the OS temp directory.
+  ShellToolContext shellContext = {};
+  Tool tools[] = {ReadTool(), WriteTool(), EditTool(),        LsTool(),
+                  FindTool(), GrepTool(), ShellTool(&shellContext)};
 
   PromptContextOptions promptOptions = {};
   promptOptions.WorkingDirectory = workingDirectory;
@@ -3388,6 +3409,10 @@ int main(int argc, char** argv) {
     Http_GlobalShutdown();
     ArenaRelease(&arena);
     return 1;
+  }
+  if (!noSession) {
+    shellContext.Directory = JsonlRepository_SessionDir(
+        &arena, &jsonlRepository, sessionInfo.ProjectKey, sessionInfo.SessionId);
   }
 
   AgentHarness harness = {};
@@ -3481,6 +3506,7 @@ int main(int argc, char** argv) {
   runtime.Harness = &harness;
   runtime.Sessions = &sessions;
   runtime.JsonlSessions = noSession ? nullptr : &jsonlRepository;
+  runtime.Shell = &shellContext;
   runtime.ProjectKey = projectKey;
   runtime.WorkingDirectory = workingDirectory;
   runtime.AgentDirectory = agentDirectory;
@@ -3497,7 +3523,6 @@ int main(int argc, char** argv) {
   runtime.PromptOptions = promptOptions;
   runtime.AutoOpen = !noOpen;
   runtime.Auth = &appAuth;
-
   // External lifecycle hooks. Started only once the session is durable, so the
   // very first payload can already name the transcript a consumer should read.
   // `--no-session` has no durable path to report, so it reports nothing at all.

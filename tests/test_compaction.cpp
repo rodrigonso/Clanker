@@ -178,6 +178,144 @@ void TestCutPoint(Arena* arena) {
   CHECK(!AgentCompaction_SelectCutPoint(branch.Pointers, branch.Count, 12, nullptr));
 }
 
+// A branch record carrying already-persisted compaction file lists, which is
+// what a later compaction reseeds from.
+SessionRecord CompactionRecord(Arena* arena, DurableId parent,
+                               DurableId baseEntryId, DurableId throughEntryId,
+                               const char* const* readFiles, u32 readCount,
+                               const char* const* modifiedFiles, u32 modifiedCount) {
+  SessionRecord record = {};
+  record.EntryId = DurableId_Generate();
+  record.Kind = SessionRecordKind::Compaction;
+  record.CompactionEntry.ParentId = parent;
+  record.CompactionEntry.BaseEntryId = baseEntryId;
+  record.CompactionEntry.ThroughEntryId = throughEntryId;
+  record.CompactionEntry.SourceHeadId = parent;
+  record.CompactionEntry.Summary = Message_User(arena, SVL("summary"));
+  record.CompactionEntry.ReadFiles = Array_Make<StrView>(arena, readCount ? readCount : 1);
+  for (u32 i = 0; i < readCount; i++)
+    Array_Push(&record.CompactionEntry.ReadFiles, SV(readFiles[i]));
+  record.CompactionEntry.ModifiedFiles =
+      Array_Make<StrView>(arena, modifiedCount ? modifiedCount : 1);
+  for (u32 i = 0; i < modifiedCount; i++)
+    Array_Push(&record.CompactionEntry.ModifiedFiles, SV(modifiedFiles[i]));
+  return record;
+}
+
+bool PathsAre(const Array<StrView>* paths, const char* const* expected, u32 count) {
+  if (paths->Count != count) return false;
+  for (u32 i = 0; i < count; i++)
+    if (!StrView_EqCStr(paths->Data[i], expected[i])) return false;
+  return true;
+}
+
+void TestFileTracking(Arena* arena) {
+  SessionRecord root = RootRecord();
+  SessionRecord readB = MessageRecord(
+      root.EntryId,
+      AssistantToolCall(arena, SVL("c1"), SVL("read"), SVL("{\"path\":\"src/b.cpp\"}")));
+  SessionRecord readA = MessageRecord(
+      readB.EntryId,
+      AssistantToolCall(arena, SVL("c2"), SVL("read"), SVL("{\"path\":\"src/a.cpp\"}")));
+  // Reading then editing the same file must report it only as modified.
+  SessionRecord editB = MessageRecord(
+      readA.EntryId,
+      AssistantToolCall(arena, SVL("c3"), SVL("edit"), SVL("{\"path\":\"src/b.cpp\"}")));
+  SessionRecord wrote = MessageRecord(
+      editB.EntryId,
+      AssistantToolCall(arena, SVL("c4"), SVL("write"), SVL("{\"path\":\"src/new.cpp\"}")));
+  // Neither an untracked tool nor a shell command contributes a path.
+  SessionRecord shell = MessageRecord(
+      wrote.EntryId,
+      AssistantToolCall(arena, SVL("c5"), SVL("shell"),
+                        SVL("{\"command\":\"rm src/gone.cpp\"}")));
+  SessionRecord grep = MessageRecord(
+      shell.EntryId,
+      AssistantToolCall(arena, SVL("c6"), SVL("grep"), SVL("{\"path\":\"src/skip.cpp\"}")));
+  // A tool result echoing a path is not an assistant tool call.
+  SessionRecord result = MessageRecord(
+      grep.EntryId,
+      Message_ToolResult(arena, SVL("c6"), SVL("grep"), SVL("{\"path\":\"src/x\"}"), false));
+
+  const SessionRecord* branch[] = {&root,  &readB,  &readA, &editB,
+                                   &wrote, &shell, &grep,  &result};
+  const u32 branchCount = (u32)(sizeof(branch) / sizeof(branch[0]));
+
+  AgentFileOps ops = {};
+  AgentCompaction_CollectFileOps(arena, branch, branchCount, DurableId{}, &ops);
+  AgentFileLists lists = {};
+  AgentCompaction_BuildFileLists(arena, &ops, &lists);
+
+  const char* expectedRead[] = {"src/a.cpp"};
+  const char* expectedModified[] = {"src/b.cpp", "src/new.cpp"};
+  CHECK_ALL(PathsAre(&lists.ReadFiles, expectedRead, 1),
+            PathsAre(&lists.ModifiedFiles, expectedModified, 2));
+
+  // `through` bounds the scan: stopping at the first read excludes the edit,
+  // so the file is still only-read at that point.
+  AgentFileOps bounded = {};
+  AgentCompaction_CollectFileOps(arena, branch, branchCount, readB.EntryId, &bounded);
+  AgentFileLists boundedLists = {};
+  AgentCompaction_BuildFileLists(arena, &bounded, &boundedLists);
+  const char* boundedRead[] = {"src/b.cpp"};
+  CHECK_ALL(PathsAre(&boundedLists.ReadFiles, boundedRead, 1),
+            boundedLists.ModifiedFiles.Count == 0);
+
+  // A prior compaction's stored lists are the only surviving record of the
+  // turns it folded away, so a later compaction must reseed from them.
+  const char* priorRead[] = {"docs/old.md"};
+  const char* priorModified[] = {"src/older.cpp"};
+  SessionRecord prior = CompactionRecord(arena, root.EntryId, root.EntryId,
+                                         root.EntryId, priorRead, 1, priorModified, 1);
+  SessionRecord after = MessageRecord(
+      prior.EntryId,
+      AssistantToolCall(arena, SVL("c7"), SVL("read"), SVL("{\"path\":\"docs/new.md\"}")));
+  const SessionRecord* cumulative[] = {&root, &prior, &after};
+
+  AgentFileOps carried = {};
+  AgentCompaction_CollectFileOps(arena, cumulative, 3, DurableId{}, &carried);
+  AgentFileLists carriedLists = {};
+  AgentCompaction_BuildFileLists(arena, &carried, &carriedLists);
+  const char* carriedRead[] = {"docs/new.md", "docs/old.md"};
+  const char* carriedModified[] = {"src/older.cpp"};
+  CHECK_ALL(PathsAre(&carriedLists.ReadFiles, carriedRead, 2),
+            PathsAre(&carriedLists.ModifiedFiles, carriedModified, 1));
+
+  StrBuf rendered = StrBuf_Make(arena, 256);
+  StrBuf_AppendCStr(&rendered, "body");
+  AgentCompaction_AppendFileSections(&rendered, &carriedLists);
+  CHECK(StrView_EqCStr(StrBuf_View(&rendered),
+                       "body\n\n<read-files>\ndocs/new.md\ndocs/old.md\n</read-files>"
+                       "\n\n<modified-files>\nsrc/older.cpp\n</modified-files>"));
+
+  // Nothing touched means nothing appended.
+  AgentFileOps none = {};
+  AgentFileLists empty = {};
+  AgentCompaction_CollectFileOps(arena, nullptr, 0, DurableId{}, &none);
+  AgentCompaction_BuildFileLists(arena, &none, &empty);
+  StrBuf bare = StrBuf_Make(arena, 32);
+  StrBuf_AppendCStr(&bare, "body");
+  AgentCompaction_AppendFileSections(&bare, &empty);
+  CHECK(StrView_EqCStr(StrBuf_View(&bare), "body"));
+
+  // Malformed arguments are skipped rather than aborting collection.
+  SessionRecord broken = MessageRecord(
+      root.EntryId, AssistantToolCall(arena, SVL("c8"), SVL("read"), SVL("{\"path\":")));
+  SessionRecord noPath = MessageRecord(
+      broken.EntryId,
+      AssistantToolCall(arena, SVL("c9"), SVL("read"), SVL("{\"limit\":10}")));
+  SessionRecord good = MessageRecord(
+      noPath.EntryId,
+      AssistantToolCall(arena, SVL("c10"), SVL("read"), SVL("{\"path\":\"ok.txt\"}")));
+  const SessionRecord* messy[] = {&root, &broken, &noPath, &good};
+  AgentFileOps messyOps = {};
+  AgentCompaction_CollectFileOps(arena, messy, 4, DurableId{}, &messyOps);
+  AgentFileLists messyLists = {};
+  AgentCompaction_BuildFileLists(arena, &messyOps, &messyLists);
+  const char* messyRead[] = {"ok.txt"};
+  CHECK(PathsAre(&messyLists.ReadFiles, messyRead, 1));
+}
+
 }  // namespace
 
 void TestCompaction() {
@@ -186,5 +324,6 @@ void TestCompaction() {
   TestReportedTokens(&arena);
   TestShouldCompact();
   TestCutPoint(&arena);
+  TestFileTracking(&arena);
   ArenaRelease(&arena);
 }

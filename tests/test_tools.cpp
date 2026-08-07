@@ -8,6 +8,7 @@
 #include "tools/exec.h"
 #include "tools/fs.h"
 #include "tools/tools.h"
+#include "tools/truncate.h"
 #include "tests.h"
 
 #if defined(_WIN32)
@@ -142,6 +143,88 @@ static void TestRead(Arena* a) {
 }
 
 // ---- shell ---------------------------------------------------------------
+
+// The path the truncation notice reports, i.e. everything between
+// "Full output: " and the closing bracket.
+static StrView ReportedOverflowPath(StrView text) {
+  const char* marker = "Full output: ";
+  u32 markerLength = (u32)strlen(marker);
+  if (text.Length < markerLength) return StrView{};
+  for (u32 i = 0; i + markerLength <= text.Length; i++) {
+    if (memcmp(text.Data + i, marker, markerLength) != 0) continue;
+    u32 start = i + markerLength;
+    for (u32 end = start; end < text.Length; end++)
+      if (text.Data[end] == ']') return StrView{text.Data + start, end - start};
+    return StrView{};
+  }
+  return StrView{};
+}
+
+static void RemoveEmptyDir(const char* path) {
+  CLANK_RMDIR(path);
+}
+
+// Output past the truncation limit spills to a file whose path is reported back
+// to the model. That file belongs to the session directory when there is one.
+static void TestShellOverflow(Arena* a) {
+  const char* source = "clank_tool_shell_big.txt";
+  {
+    FILE* f = fopen(source, "wb");
+    CHECK(f != nullptr);
+    if (!f) return;
+    // Comfortably past both the 2000-line and 50KB limits.
+    for (u32 i = 0; i < 3000; i++) fprintf(f, "line %u padding padding\n", i);
+    fclose(f);
+  }
+#if defined(_WIN32)
+  StrView command = SVL("{\"command\":\"type clank_tool_shell_big.txt\"}");
+#else
+  StrView command = SVL("{\"command\":\"cat clank_tool_shell_big.txt\"}");
+#endif
+
+  const char* sessionDir = "clank_tool_shell_session";
+  ShellToolContext context = {};
+  context.Directory = SV(sessionDir);
+  Tool scoped = ShellTool(&context);
+
+  ToolResult out = {};
+  StrBuf err = StrBuf_Make(a, 64);
+  CHECK(RunTool(scoped, a, command, &out, &err));
+  CHECK(out.Content.Count == 1);
+  StrView notice = out.Content.Data[0].Text;
+  StrView logPath = ReportedOverflowPath(notice);
+  // The directory is created on demand, and the spill lands inside it.
+  CHECK_ALL(StrView_Contains(notice, "Showing lines"), logPath.Length > 0,
+            StrView_Contains(logPath, sessionDir),
+            StrView_Contains(logPath, "shell-"), Fs_IsDir(SV(sessionDir)));
+
+  StrBuf logNative = StrBuf_Make(a, logPath.Length + 1);
+  StrBuf_Append(&logNative, logPath);
+  StrView spilled = Slurp(a, StrBuf_CStr(&logNative));
+  // The spill holds the whole output, not the truncated view.
+  CHECK_ALL(spilled.Length > TRUNC_MAX_BYTES,
+            StrView_Contains(spilled, "line 0 padding"),
+            StrView_Contains(spilled, "line 2999 padding"));
+  remove(StrBuf_CStr(&logNative));
+  RemoveEmptyDir(sessionDir);
+  CHECK(!Fs_Exists(SV(sessionDir)));
+
+  // With no session directory the tool falls back to the OS temp directory.
+  Tool unscoped = ShellTool();
+  ToolResult fallback = {};
+  StrBuf fallbackErr = StrBuf_Make(a, 64);
+  CHECK(RunTool(unscoped, a, command, &fallback, &fallbackErr));
+  StrView fallbackPath = ReportedOverflowPath(fallback.Content.Data[0].Text);
+  CHECK_ALL(fallbackPath.Length > 0,
+            !StrView_Contains(fallbackPath, sessionDir),
+            StrView_Contains(fallbackPath, "clank-shell-"));
+  StrBuf fallbackNative = StrBuf_Make(a, fallbackPath.Length + 1);
+  StrBuf_Append(&fallbackNative, fallbackPath);
+  CHECK(Fs_Exists(StrBuf_View(&fallbackNative)));
+  remove(StrBuf_CStr(&fallbackNative));
+
+  remove(source);
+}
 
 static void TestShell(Arena* a) {
   Tool shell = ShellTool();
@@ -385,6 +468,7 @@ void TestTools() {
   Arena a = ArenaCreate();
   TestRead(&a);
   TestShell(&a);
+  TestShellOverflow(&a);
   TestWrite(&a);
   TestEdit(&a);
   TestTreeTools(&a);

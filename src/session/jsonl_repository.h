@@ -28,3 +28,11 @@ SessionRepository JsonlRepository_AsRepository(JsonlRepository* repository);
 // view. The file itself need not exist yet.
 StrView JsonlRepository_SessionPath(Arena* arena, JsonlRepository* repository,
                                     StrView projectKey, DurableId sessionId);
+
+// Directory for one session's non-transcript artifacts, currently the `shell`
+// tool's output-overflow logs. Sits beside the JSONL log and is named for the
+// session, so it is discarded with the session rather than accumulating in a
+// shared location. Owned by `arena`; not created here, and empty for an
+// uninitialized repository or invalid key.
+StrView JsonlRepository_SessionDir(Arena* arena, JsonlRepository* repository,
+                                   StrView projectKey, DurableId sessionId);

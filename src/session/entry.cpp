@@ -398,6 +398,14 @@ Array<Content> CloneContentArray(Arena* arena, const Array<Content>& source) {
   return result;
 }
 
+Array<StrView> CloneStringArray(Arena* arena, const Array<StrView>& source) {
+  Array<StrView> cloned =
+      Array_Make<StrView>(arena, source.Count ? source.Count : 1);
+  for (u32 i = 0; i < source.Count; i++)
+    Array_Push(&cloned, StrView_Dup(arena, source.Data[i]));
+  return cloned;
+}
+
 Message CloneMessage(Arena* arena, const Message& source) {
   Message result = source;
   result.Content = CloneContentArray(arena, source.Content);
@@ -407,6 +415,31 @@ Message CloneMessage(Arena* arena, const Message& source) {
   result.ToolCallId = StrView_Dup(arena, source.ToolCallId);
   result.ToolName = StrView_Dup(arena, source.ToolName);
   return result;
+}
+
+void WriteStringArray(StrBuf* out, const Array<StrView>* values) {
+  StrBuf_AppendChar(out, '[');
+  for (u32 i = 0; i < values->Count; i++) {
+    if (i) StrBuf_AppendChar(out, ',');
+    Json_WriteString(out, values->Data[i]);
+  }
+  StrBuf_AppendChar(out, ']');
+}
+
+// Decodes an optional array of non-empty strings. A missing key yields an empty
+// array so records written before the field existed stay readable.
+bool ReadOptionalStringArray(Arena* arena, const JsonValue* payload, const char* key,
+                             Array<StrView>* out) {
+  *out = Array_Make<StrView>(arena, 1);
+  JsonValue* values = Json_Get(payload, key);
+  if (!values) return true;
+  if (!Json_IsArray(values)) return false;
+  if (values->Count) *out = Array_Make<StrView>(arena, values->Count);
+  for (u32 i = 0; i < values->Count; i++) {
+    if (!Json_IsString(values->Items[i]) || values->Items[i]->Str.Length == 0) return false;
+    Array_Push(out, values->Items[i]->Str);
+  }
+  return true;
 }
 
 void WritePayload(StrBuf* out, const SessionRecord* record) {
@@ -437,12 +470,7 @@ void WritePayload(StrBuf* out, const SessionRecord* record) {
     case SessionRecordKind::Tools:
       WriteId(&w, "parentId", record->ToolsEntry.ParentId);
       JsonWrite_Key(&w, "toolNames");
-      StrBuf_AppendChar(out, '[');
-      for (u32 i = 0; i < record->ToolsEntry.ToolNames.Count; i++) {
-        if (i) StrBuf_AppendChar(out, ',');
-        Json_WriteString(out, record->ToolsEntry.ToolNames.Data[i]);
-      }
-      StrBuf_AppendChar(out, ']');
+      WriteStringArray(out, &record->ToolsEntry.ToolNames);
       break;
     case SessionRecordKind::Compaction:
       WriteId(&w, "parentId", record->CompactionEntry.ParentId);
@@ -454,6 +482,14 @@ void WritePayload(StrBuf* out, const SessionRecord* record) {
       if (record->CompactionEntry.HasUsage) {
         JsonWrite_Key(&w, "usage");
         WriteUsage(out, &record->CompactionEntry.Use);
+      }
+      if (record->CompactionEntry.ReadFiles.Count) {
+        JsonWrite_Key(&w, "readFiles");
+        WriteStringArray(out, &record->CompactionEntry.ReadFiles);
+      }
+      if (record->CompactionEntry.ModifiedFiles.Count) {
+        JsonWrite_Key(&w, "modifiedFiles");
+        WriteStringArray(out, &record->CompactionEntry.ModifiedFiles);
       }
       break;
     case SessionRecordKind::BranchLabel:
@@ -518,9 +554,14 @@ bool DecodePayload(Arena* arena, const JsonValue* payload, SessionRecord* record
         return false;
       }
       JsonValue* usage = Json_Get(payload, "usage");
-      if (!usage) return true;
-      record->CompactionEntry.HasUsage = true;
-      return DecodeUsage(usage, &record->CompactionEntry.Use);
+      if (usage) {
+        record->CompactionEntry.HasUsage = true;
+        if (!DecodeUsage(usage, &record->CompactionEntry.Use)) return false;
+      }
+      return ReadOptionalStringArray(arena, payload, "readFiles",
+                                     &record->CompactionEntry.ReadFiles) &&
+             ReadOptionalStringArray(arena, payload, "modifiedFiles",
+                                     &record->CompactionEntry.ModifiedFiles);
     }
     case SessionRecordKind::BranchLabel:
       return ReadRequiredId(payload, "parentId", &record->BranchLabelEntry.ParentId) &&
@@ -684,6 +725,12 @@ SessionResult SessionRecord_Validate(const SessionRecord* record) {
           !DurableId_IsSet(record->CompactionEntry.SourceHeadId) ||
           !MessageValid(&record->CompactionEntry.Summary))
         return SessionResult_Invalid("compaction entry is invalid");
+      for (u32 i = 0; i < record->CompactionEntry.ReadFiles.Count; i++)
+        if (record->CompactionEntry.ReadFiles.Data[i].Length == 0)
+          return SessionResult_Invalid("compaction file paths cannot be empty");
+      for (u32 i = 0; i < record->CompactionEntry.ModifiedFiles.Count; i++)
+        if (record->CompactionEntry.ModifiedFiles.Data[i].Length == 0)
+          return SessionResult_Invalid("compaction file paths cannot be empty");
       break;
     case SessionRecordKind::BranchLabel:
       if (!DurableId_IsSet(record->BranchLabelEntry.ParentId) ||
@@ -779,15 +826,16 @@ SessionResult SessionRecord_Clone(Arena* arena, const SessionRecord* source,
       break;
     case SessionRecordKind::Tools: {
       const Array<StrView>& names = source->ToolsEntry.ToolNames;
-      Array<StrView> cloned = Array_Make<StrView>(arena, names.Count ? names.Count : 1);
-      for (u32 i = 0; i < names.Count; i++)
-        Array_Push(&cloned, StrView_Dup(arena, names.Data[i]));
-      clone.ToolsEntry.ToolNames = cloned;
+      clone.ToolsEntry.ToolNames = CloneStringArray(arena, names);
       break;
     }
     case SessionRecordKind::Compaction:
       clone.CompactionEntry.Summary =
           CloneMessage(arena, source->CompactionEntry.Summary);
+      clone.CompactionEntry.ReadFiles =
+          CloneStringArray(arena, source->CompactionEntry.ReadFiles);
+      clone.CompactionEntry.ModifiedFiles =
+          CloneStringArray(arena, source->CompactionEntry.ModifiedFiles);
       break;
     case SessionRecordKind::BranchLabel:
       clone.BranchLabelEntry.Label = StrView_Dup(arena, source->BranchLabelEntry.Label);

@@ -179,6 +179,27 @@ static void TestRecordCodec(Arena* arena) {
   CHECK(!StrView_Contains(StrBuf_View(&noUsageJson), "\"usage\""));
   CHECK(SessionResult_IsOk(SessionRecord_Decode(arena, StrBuf_View(&noUsageJson), &decoded)));
   CHECK(!decoded.CompactionEntry.HasUsage);
+  // A compaction written before file tracking existed carries neither key and
+  // must still decode, as empty lists.
+  CHECK_ALL(!StrView_Contains(StrBuf_View(&noUsageJson), "\"readFiles\""),
+            !StrView_Contains(StrBuf_View(&noUsageJson), "\"modifiedFiles\""),
+            decoded.CompactionEntry.ReadFiles.Count == 0,
+            decoded.CompactionEntry.ModifiedFiles.Count == 0);
+
+  StrView readFiles[] = {SVL("docs/a.md")};
+  StrView modifiedFiles[] = {SVL("src/b.cpp"), SVL("src/c.cpp")};
+  compaction.CompactionEntry.ReadFiles = Array<StrView>{readFiles, 1, 1, nullptr};
+  compaction.CompactionEntry.ModifiedFiles = Array<StrView>{modifiedFiles, 2, 2, nullptr};
+  StrBuf filesJson = StrBuf_Make(arena, 512);
+  CHECK(SessionResult_IsOk(SessionRecord_Encode(&filesJson, &compaction)));
+  CHECK(SessionResult_IsOk(SessionRecord_Decode(arena, StrBuf_View(&filesJson), &decoded)));
+  CHECK_ALL(decoded.CompactionEntry.ReadFiles.Count == 1,
+            StrView_EqCStr(decoded.CompactionEntry.ReadFiles.Data[0], "docs/a.md"),
+            decoded.CompactionEntry.ModifiedFiles.Count == 2,
+            StrView_EqCStr(decoded.CompactionEntry.ModifiedFiles.Data[0], "src/b.cpp"),
+            StrView_EqCStr(decoded.CompactionEntry.ModifiedFiles.Data[1], "src/c.cpp"));
+  compaction.CompactionEntry.ReadFiles = {};
+  compaction.CompactionEntry.ModifiedFiles = {};
 
   SessionRecord named = BaseRecord(sessionId, 7, 40, SessionRecordKind::SessionName);
   named.SessionNameEntry.Name = {};
@@ -922,6 +943,28 @@ static void TestJsonlRepository(Arena* arena) {
   JsonlRepository jsonl = {};
   JsonlRepository_Init(&jsonl, root);
   SessionRepository repository = JsonlRepository_AsRepository(&jsonl);
+
+  // The shell tool's overflow directory is the session log path without its
+  // extension, so per-session artifacts sit beside the transcript.
+  StrView artifactDir =
+      JsonlRepository_SessionDir(arena, &jsonl, contractProject, contractId);
+  StrView logPath =
+      JsonlRepository_SessionPath(arena, &jsonl, contractProject, contractId);
+  StrBuf expectedLog = StrBuf_Make(arena, artifactDir.Length + 8);
+  StrBuf_Append(&expectedLog, artifactDir);
+  StrBuf_AppendCStr(&expectedLog, ".jsonl");
+  CHECK_ALL(artifactDir.Length > 0,
+            Fs_PathEquals(StrBuf_View(&expectedLog), logPath),
+            StrView_Contains(artifactDir, "clank-jsonl-contract"));
+  // An unusable repository or key yields nothing rather than a bare root path.
+  JsonlRepository uninitialized = {};
+  CHECK_ALL(JsonlRepository_SessionDir(arena, &uninitialized, contractProject,
+                                       contractId)
+                    .Length == 0,
+            JsonlRepository_SessionDir(arena, &jsonl, contractProject,
+                                       DurableId{})
+                    .Length == 0);
+
   RunRepositoryContract(arena, &repository, contractProject, 120);
   RemoveJsonlArtifacts(arena, root, contractProject, contractId);
   RemoveJsonlArtifacts(arena, root, contractProject, forkId);
@@ -986,8 +1029,12 @@ static void TestJsonlRepository(Arena* arena) {
   SessionInfo info = {};
   CHECK(SessionResult_IsOk(
       RepositoryCreate(&repository, arena, repairId, repairProject, &writer, &info)));
-  CHECK(ChildSeesLockBusy(arena,
-                         JsonlArtifactPath(arena, root, repairProject, repairId, ".lock")));
+  StrView repairLockPath =
+      JsonlArtifactPath(arena, root, repairProject, repairId, ".lock");
+  CHECK(ChildSeesLockBusy(arena, repairLockPath));
+  // The sentinel exists only while the writer holds it; releasing the lock
+  // must not leave one lock file per session behind next to the log.
+  CHECK(Fs_Exists(repairLockPath));
   Array<SessionRecord> rootRecords = {};
   CHECK(SessionResult_IsOk(SessionLog_ReadAll(&writer, arena, &rootRecords)));
   SessionRecord user = {};
@@ -997,6 +1044,7 @@ static void TestJsonlRepository(Arena* arena) {
   user.MessageEntry.Value = UserMessage(arena, "before crash");
   CHECK(SessionResult_IsOk(SessionLog_Append(&writer, &user)));
   SessionLog_Close(&writer);
+  CHECK(!Fs_Exists(repairLockPath));
 
   StrView repairPath = JsonlArtifactPath(arena, root, repairProject, repairId, ".jsonl");
   AppendRaw(arena, repairPath, "{\"torn\":");

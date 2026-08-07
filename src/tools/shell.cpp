@@ -1,6 +1,8 @@
 #include "json/json.h"
 #include "base/thread.h"
+#include "crypto/random.h"
 #include "tools/exec.h"
+#include "tools/fs.h"
 #include "tools/tools.h"
 #include "tools/truncate.h"
 
@@ -9,7 +11,9 @@
 #if defined(_WIN32)
 #include <windows.h>
 #else
+#include <fcntl.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 #endif
@@ -19,39 +23,73 @@ static void Shell_AppendHex16(StrBuf* b, u64 v) {
   for (i32 i = 15; i >= 0; --i) StrBuf_AppendChar(b, hex[(v >> ((u32)i * 4u)) & 0xFu]);
 }
 
-static StrView Shell_WriteTempOutput(Arena* arena, StrView output) {
-  static u32 counter;
-  counter++;
-
+static StrView Shell_WriteTempOutput(Arena* arena, StrView output, StrView directory) {
   StrBuf path = StrBuf_Make(arena, 256);
+  if (directory.Length) {
+    // Created lazily: a session that never overflows leaves no directory.
+    if (!Fs_MkdirP(arena, directory)) return StrView{};
+    StrBuf_Append(&path, directory);
+    char last = path.Data[path.Length - 1];
+    if (last != '/' && last != '\\') StrBuf_AppendChar(&path, '/');
+    StrBuf_AppendCStr(&path, "shell-");
+  } else {
 #if defined(_WIN32)
-  char temp[MAX_PATH];
-  DWORD n = GetTempPathA((DWORD)sizeof(temp), temp);
-  if (n == 0 || n >= (DWORD)sizeof(temp)) return StrView{};
-  StrBuf_Append(&path, StrView{temp, (u32)n});
-  if (path.Length && path.Data[path.Length - 1] != '\\' && path.Data[path.Length - 1] != '/')
-    StrBuf_AppendChar(&path, '\\');
-  u64 unique = ((u64)GetTickCount() << 32) ^ (u64)GetCurrentProcessId() ^ (u64)counter;
+    char temp[MAX_PATH];
+    DWORD n = GetTempPathA((DWORD)sizeof(temp), temp);
+    if (n == 0 || n >= (DWORD)sizeof(temp)) return StrView{};
+    StrBuf_Append(&path, StrView{temp, (u32)n});
+    if (path.Length && path.Data[path.Length - 1] != '\\' &&
+        path.Data[path.Length - 1] != '/')
+      StrBuf_AppendChar(&path, '\\');
 #else
-  const char* tmp = getenv("TMPDIR");
-  if (!tmp || !tmp[0]) tmp = "/tmp";
-  StrBuf_AppendCStr(&path, tmp);
-  if (path.Length && path.Data[path.Length - 1] != '/') StrBuf_AppendChar(&path, '/');
-  struct timespec ts;
-  clock_gettime(CLOCK_REALTIME, &ts);
-  u64 unique = ((u64)(u32)getpid() << 32) ^ (u64)(u32)ts.tv_nsec ^ (u64)counter;
+    const char* tmp = getenv("TMPDIR");
+    if (!tmp || !tmp[0]) tmp = "/tmp";
+    StrBuf_AppendCStr(&path, tmp);
+    if (path.Length && path.Data[path.Length - 1] != '/')
+      StrBuf_AppendChar(&path, '/');
 #endif
-  StrBuf_AppendCStr(&path, "clank-shell-");
-  Shell_AppendHex16(&path, unique);
-  StrBuf_AppendCStr(&path, ".log");
+    StrBuf_AppendCStr(&path, "clank-shell-");
+  }
+  u32 prefixLength = path.Length;
 
-  FILE* f = fopen(StrBuf_CStr(&path), "wb");
-  if (!f) return StrView{};
-  usize written = fwrite(output.Data, 1, output.Length, f);
-  bool closed = fclose(f) == 0;
-  bool ok = written == output.Length && closed;
-  if (!ok) return StrView{};
-  return StrBuf_View(&path);
+  // The OS temp directory is world-writable on POSIX, so a guessable name lets
+  // another user pre-create the path (or a symlink to it) and capture or
+  // redirect the command output. The name is drawn from the CSPRNG and the
+  // file is created exclusively, so an existing path is an error rather than
+  // something to overwrite. A session directory is not shared, but it costs
+  // nothing to hold it to the same standard.
+  for (u32 attempt = 0; attempt < 8; attempt++) {
+    path.Length = prefixLength;
+    u64 unique = 0;
+    RandomBytes((byte*)&unique, sizeof(unique));
+    Shell_AppendHex16(&path, unique);
+    StrBuf_AppendCStr(&path, ".log");
+
+    const char* target = StrBuf_CStr(&path);
+#if defined(_WIN32)
+    FILE* f = nullptr;
+    if (fopen_s(&f, target, "wbx") != 0) f = nullptr;
+#else
+    int fd = open(target, O_CREAT | O_EXCL | O_WRONLY, 0600);
+    if (fd < 0) continue;
+    FILE* f = fdopen(fd, "wb");
+    if (!f) {
+      close(fd);
+      unlink(target);
+      continue;
+    }
+#endif
+    if (!f) continue;
+
+    usize written = fwrite(output.Data, 1, output.Length, f);
+    bool ok = fclose(f) == 0 && written == output.Length;
+    if (!ok) {
+      remove(target);
+      return StrView{};
+    }
+    return StrBuf_View(&path);
+  }
+  return StrView{};
 }
 
 static void Shell_AppendTruncNotice(StrBuf* b, TruncResult tr, StrView path) {
@@ -109,7 +147,6 @@ static bool ShellExec(void* ctx, Arena* arena, StrView id,
                       const ToolArgs* args, volatile i32* abort,
                       const ToolUpdateSink* updates, ToolResult* out,
                       StrBuf* err) {
-  (void)ctx;
   (void)id;
   (void)updates;
   StrView command = ToolArgs_GetStr(args, "command");
@@ -148,7 +185,9 @@ static bool ShellExec(void* ctx, Arena* arena, StrView id,
     StrBuf_Append(&text, tr.Content);
   }
   if (tr.Truncated) {
-    StrView path = Shell_WriteTempOutput(arena, r.Output);
+    const ShellToolContext* shell = (const ShellToolContext*)ctx;
+    StrView path = Shell_WriteTempOutput(arena, r.Output,
+                                         shell ? shell->Directory : StrView{});
     if (path.Length) Shell_AppendTruncNotice(&text, tr, path);
   }
 
@@ -171,7 +210,7 @@ static bool ShellExec(void* ctx, Arena* arena, StrView id,
   return true;
 }
 
-Tool ShellTool() {
+Tool ShellTool(ShellToolContext* context) {
   Tool t = {};
   t.Name = SVL("shell");
   t.Label = SVL("Shell");
@@ -181,6 +220,7 @@ Tool ShellTool() {
       "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"Shell "
       "command to execute\"},\"timeout\":{\"type\":\"number\",\"description\":\"Timeout in seconds "
       "(optional, no default timeout)\"}},\"required\":[\"command\"]}");
+  t.Ctx = context;
   t.Execute = ShellExec;
   return t;
 }

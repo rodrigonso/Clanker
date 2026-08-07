@@ -191,7 +191,7 @@ its command tool `shell`. (`edit-diff.ts` in pi is an internal helper for the
 | pi tool | Clank | notes |
 |---|---|---|
 | `read` | 🟡 | `offset` / `limit`, verbatim text, head truncation, image content blocks. pi additionally supports an injectable `imageProcessor` with `autoResizeImages` (default on) and BMP conversion |
-| `bash` | ✅ | named `shell`; timeout in seconds, process-tree kill, tail truncation, full-output temp log, and throttled live partial output all match |
+| `bash` | ✅ | named `shell`; timeout in seconds, process-tree kill, tail truncation, full-output overflow log, and throttled live partial output all match. Clank writes the overflow log into the session's own directory rather than the OS temp directory, with a CSPRNG name created exclusively; pi uses `randomBytes` in `os.tmpdir()` without an exclusive create |
 | `write` | ✅ | creates parent dirs, overwrites, serialized per-file |
 | `edit` | ✅ | exact + whitespace-tolerant fuzzy multi-edit, mutation lock, unified diff; NFKC omitted |
 | `grep` | ✅ | ripgrep `--json`, with pi-compatible context / literal / ignore-case / glob behavior, limits, cancellation, hidden-file and `.gitignore` semantics, and local/PATH/download discovery |
@@ -235,6 +235,7 @@ and model-visible state and keeps active turns and queues in memory.
 |---|---|---|
 | Append-only branchable message tree · leaf tracking | ✅ | |
 | Compaction retains a recent tail | ✅ | compaction records carry an inclusive `[Base..Through]` span; replay anchors the summary at `Base` and keeps everything outside it verbatim. Legacy whole-branch records replay unchanged |
+| Compaction file tracking | ✅ | compaction records carry sorted `readFiles` / `modifiedFiles`. Both keys are optional, so records written before the fields existed decode as empty |
 | Resume / continue · cross-project resume | ✅ | exact global-ID resume, rollback-safe cwd/trust/context switching; `--continue` scoped to the project |
 | Fork · tree checkout · branch labels · names | ✅ | |
 | Rich session metadata browsing | 🟡 | current-project and all-project listings with times, model, counts, token categories, fork ancestry; no fuzzy/regex search, generated titles, pricing, or deletion UX |
@@ -251,7 +252,7 @@ and model-visible state and keeps active turns and queues in memory.
 | System prompt assembly (cwd, tool docs, overrides, `AGENTS.md`/`CLAUDE.md` discovery) | ✅ | global and project `SYSTEM.md` / `APPEND_SYSTEM.md`, root-to-cwd context discovery, CLI overrides, transactional reload; like pi, omits the date for prompt-cache stability |
 | Default prompt text (preamble, tool snippets, guidelines, `<project_context>` layout) | ✅ | byte-aligned with pi's `buildSystemPrompt`: same preamble wording, opt-in `PromptSnippet` tool list, guidelines composed from the active tool set (conditional shell bullet → per-tool contributions in tool order → the two always-on bullets, deduped), and pi's exact `<project_context>` framing. Clank omits pi's "other custom tools" sentence (no extension seam) and its pi-documentation block |
 | `AGENTS.override.md` | ✅ | first candidate per directory, so it wins over `AGENTS.md`/`CLAUDE.md` there while other directories still layer normally |
-| Compaction | 🟡 | automatic thresholds (`reserveTokens` / `keepRecentTokens`, pi's defaults) firing inside the turn loop, plus durable manual `/compact`. Retained tail cuts only at user boundaries so tool calls stay with their results. pi additionally has custom `/compact` instructions, split-turn two-phase summaries, cumulative file tracking, and branch summarization on tree navigation |
+| Compaction | 🟡 | automatic thresholds (`reserveTokens` / `keepRecentTokens`, pi's defaults) firing inside the turn loop, plus durable manual `/compact`. Retained tail cuts only at user boundaries so tool calls stay with their results. Cumulative file tracking matches pi: `read`/`write`/`edit` paths are collected from the folded span, reported as pi's `<read-files>` / `<modified-files>` sections, persisted on the compaction record, and reseeded by the next compaction. pi additionally has custom `/compact` instructions, split-turn two-phase summaries, and branch summarization on tree navigation |
 | Skills (`SKILL.md` discovery, frontmatter, prompt injection, `/skill:<name>`) | ❌ | |
 | Prompt templates (`$1`, `$@`, `$ARGUMENTS`, `/templatename`) | ❌ | |
 | Subagent / task delegation | ❌ | neither ships built-in subagents, but pi can gain them through its extension API. Clank has no extension seam, so this is unreachable rather than merely absent |

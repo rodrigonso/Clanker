@@ -1,5 +1,7 @@
 #include "agent/compaction.h"
 
+#include "json/json.h"
+
 namespace {
 
 u32 MessageContentBytes(const Message* message) {
@@ -14,6 +16,67 @@ u32 MessageContentBytes(const Message* message) {
   bytes = AddSaturated(bytes, message->ToolName.Length);
   bytes = AddSaturated(bytes, message->ErrorMessage.Length);
   return bytes;
+}
+
+int ComparePaths(StrView a, StrView b) {
+  u32 shared = a.Length < b.Length ? a.Length : b.Length;
+  for (u32 i = 0; i < shared; i++) {
+    u8 left = (u8)a.Data[i];
+    u8 right = (u8)b.Data[i];
+    if (left != right) return left < right ? -1 : 1;
+  }
+  if (a.Length == b.Length) return 0;
+  return a.Length < b.Length ? -1 : 1;
+}
+
+bool ContainsPath(const Array<StrView>* paths, StrView path) {
+  for (u32 i = 0; i < paths->Count; i++)
+    if (StrView_Eq(paths->Data[i], path)) return true;
+  return false;
+}
+
+void AddPath(Arena* arena, Array<StrView>* paths, StrView path) {
+  if (path.Length == 0 || ContainsPath(paths, path)) return;
+  Array_Push(paths, StrView_Dup(arena, path));
+}
+
+void SortPaths(Array<StrView>* paths) {
+  for (u32 i = 1; i < paths->Count; i++) {
+    StrView value = paths->Data[i];
+    u32 slot = i;
+    while (slot > 0 && ComparePaths(paths->Data[slot - 1], value) > 0) {
+      paths->Data[slot] = paths->Data[slot - 1];
+      slot--;
+    }
+    paths->Data[slot] = value;
+  }
+}
+
+// Which bucket a tool call contributes to, or null when the tool is not one of
+// the three whose `path` argument is tracked.
+Array<StrView>* BucketForTool(StrView toolName, AgentFileOps* ops) {
+  if (StrView_EqCStr(toolName, "read")) return &ops->Read;
+  if (StrView_EqCStr(toolName, "write")) return &ops->Written;
+  if (StrView_EqCStr(toolName, "edit")) return &ops->Edited;
+  return nullptr;
+}
+
+void CollectMessagePaths(Arena* arena, const Message* message, AgentFileOps* ops) {
+  if (message->Kind != Role::Assistant) return;
+  for (u32 i = 0; i < message->Content.Count; i++) {
+    const Content* content = &message->Content.Data[i];
+    if (content->Kind != ContentKind::ToolCall || content->ToolArgsJson.Length == 0)
+      continue;
+    Array<StrView>* bucket = BucketForTool(content->ToolName, ops);
+    if (!bucket) continue;
+    // The parser requires a null terminator one past the end, which a StrBuf
+    // maintains but a view into the raw record does not.
+    StrBuf text = StrBuf_Make(arena, content->ToolArgsJson.Length + 1);
+    StrBuf_Append(&text, content->ToolArgsJson);
+    JsonValue* args = Json_Parse(arena, StrBuf_View(&text));
+    if (!Json_IsObject(args)) continue;
+    AddPath(arena, bucket, Json_GetStr(args, "path"));
+  }
 }
 
 }  // namespace
@@ -125,4 +188,77 @@ bool AgentCompaction_SelectCutPoint(const SessionRecord* const* branch, u32 bran
   }
   *out = cut;
   return true;
+}
+
+void AgentCompaction_CollectFileOps(Arena* arena, const SessionRecord* const* branch,
+                                    u32 branchCount, DurableId throughEntryId,
+                                    AgentFileOps* out) {
+  if (!arena || !out) return;
+  out->Read = Array_Make<StrView>(arena, 8);
+  out->Written = Array_Make<StrView>(arena, 8);
+  out->Edited = Array_Make<StrView>(arena, 8);
+  if (!branch) return;
+
+  for (u32 i = 0; i < branchCount; i++) {
+    const SessionRecord* record = branch[i];
+    if (!record) continue;
+    if (record->Kind == SessionRecordKind::Message) {
+      CollectMessagePaths(arena, &record->MessageEntry.Value, out);
+    } else if (record->Kind == SessionRecordKind::Compaction) {
+      // An earlier compaction folded its own span away, so its stored lists are
+      // the only surviving evidence of what those turns touched. Its modified
+      // paths stay modified.
+      const CompactionEntryData* entry = &record->CompactionEntry;
+      for (u32 j = 0; j < entry->ReadFiles.Count; j++)
+        AddPath(arena, &out->Read, entry->ReadFiles.Data[j]);
+      for (u32 j = 0; j < entry->ModifiedFiles.Count; j++)
+        AddPath(arena, &out->Edited, entry->ModifiedFiles.Data[j]);
+    }
+    if (DurableId_IsSet(throughEntryId) &&
+        DurableId_Eq(record->EntryId, throughEntryId))
+      break;
+  }
+}
+
+void AgentCompaction_BuildFileLists(Arena* arena, const AgentFileOps* ops,
+                                    AgentFileLists* out) {
+  if (!arena || !ops || !out) return;
+  u32 modifiedGuess = ops->Written.Count + ops->Edited.Count;
+  out->ReadFiles = Array_Make<StrView>(arena, ops->Read.Count ? ops->Read.Count : 1);
+  out->ModifiedFiles = Array_Make<StrView>(arena, modifiedGuess ? modifiedGuess : 1);
+
+  for (u32 i = 0; i < ops->Written.Count; i++)
+    AddPath(arena, &out->ModifiedFiles, ops->Written.Data[i]);
+  for (u32 i = 0; i < ops->Edited.Count; i++)
+    AddPath(arena, &out->ModifiedFiles, ops->Edited.Data[i]);
+  for (u32 i = 0; i < ops->Read.Count; i++) {
+    if (ContainsPath(&out->ModifiedFiles, ops->Read.Data[i])) continue;
+    AddPath(arena, &out->ReadFiles, ops->Read.Data[i]);
+  }
+
+  SortPaths(&out->ReadFiles);
+  SortPaths(&out->ModifiedFiles);
+}
+
+void AgentCompaction_AppendFileSections(StrBuf* out, const AgentFileLists* lists) {
+  if (!out || !lists) return;
+  struct Section {
+    const char* Open;
+    const char* Close;
+    const Array<StrView>* Paths;
+  };
+  const Section sections[] = {
+      {"<read-files>\n", "\n</read-files>", &lists->ReadFiles},
+      {"<modified-files>\n", "\n</modified-files>", &lists->ModifiedFiles}};
+  for (u32 s = 0; s < sizeof(sections) / sizeof(sections[0]); s++) {
+    const Section& section = sections[s];
+    if (!section.Paths->Count) continue;
+    StrBuf_AppendCStr(out, "\n\n");
+    StrBuf_AppendCStr(out, section.Open);
+    for (u32 i = 0; i < section.Paths->Count; i++) {
+      if (i) StrBuf_AppendChar(out, '\n');
+      StrBuf_Append(out, section.Paths->Data[i]);
+    }
+    StrBuf_AppendCStr(out, section.Close);
+  }
 }

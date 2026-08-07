@@ -474,9 +474,24 @@ SessionResult PerformCompaction(AgentHarness* harness, DurableId head,
       result = SessionResult_Error(
           aborted ? SessionStatus::Cancelled : SessionStatus::ProviderError, error);
     } else {
+      // The span being folded away is the last place these paths appear, so
+      // they are collected before the summary is sealed and carried on the
+      // record for the next compaction to reseed from.
+      AgentFileLists files = {};
+      SessionReduction reduction = AgentHarness_ReduceSnapshot(harness);
+      Array<const SessionRecord*> branch = {};
+      if (SessionResult_IsOk(
+              SessionReducer_Ancestry(&reduction, &harness->Work, head, &branch))) {
+        AgentFileOps ops = {};
+        AgentCompaction_CollectFileOps(&harness->Work, branch.Data, branch.Count,
+                                       throughEntryId, &ops);
+        AgentCompaction_BuildFileLists(&harness->Work, &ops, &files);
+      }
+
       StrBuf wrapped = StrBuf_Make(&harness->Work, summaryText.Length + 48);
       StrBuf_AppendCStr(&wrapped, "Summary of previous conversation:\n");
       StrBuf_Append(&wrapped, summaryText);
+      AgentCompaction_AppendFileSections(&wrapped, &files);
       Message summary = Message_User(&harness->Work, StrBuf_View(&wrapped));
 
       SessionRecord compactionRecord = {};
@@ -489,6 +504,8 @@ SessionResult PerformCompaction(AgentHarness* harness, DurableId head,
       compactionRecord.CompactionEntry.Summary = summary;
       compactionRecord.CompactionEntry.HasUsage = true;
       compactionRecord.CompactionEntry.Use = turn.Assistant.Use;
+      compactionRecord.CompactionEntry.ReadFiles = files.ReadFiles;
+      compactionRecord.CompactionEntry.ModifiedFiles = files.ModifiedFiles;
       result = AgentHarness_Append(harness, &compactionRecord, 1, true);
       if (SessionResult_IsOk(result)) out->NewHead = compactionRecord.EntryId;
     }

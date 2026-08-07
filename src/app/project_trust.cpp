@@ -295,7 +295,7 @@ bool ProjectTrustStore_Update(Arena* scratch, StrView storePath,
     StrBuf_AppendCStr(error, loaded == ProjectTrustStoreLoadResult::Malformed
                                 ? "trust store is malformed"
                                 : "trust store could not be read");
-    ProcessFileLock_Release(&lock);
+    ProcessFileLock_Release(&lock, StrBuf_View(&lockPath));
     return false;
   }
 
@@ -320,7 +320,7 @@ bool ProjectTrustStore_Update(Arena* scratch, StrView storePath,
                ProjectTrustEntry{canonicalDecision, trusted});
 
   bool saved = WriteStore(scratch, storePath, &store);
-  ProcessFileLock_Release(&lock);
+  ProcessFileLock_Release(&lock, StrBuf_View(&lockPath));
   if (!saved) StrBuf_AppendCStr(error, "trust store could not be saved");
   return saved;
 }

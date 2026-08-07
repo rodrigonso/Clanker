@@ -118,7 +118,8 @@ int RunLockProbe(const char* path) {
   ProcessFileLock lock = {};
   ProcessFileLockStatus status =
       ProcessFileLock_TryAcquire(&arena, SV(path), &lock);
-  if (status == ProcessFileLockStatus::Acquired) ProcessFileLock_Release(&lock);
+  if (status == ProcessFileLockStatus::Acquired)
+    ProcessFileLock_Release(&lock, SV(path));
   ArenaRelease(&arena);
   return status == ProcessFileLockStatus::Busy ? 0 : 1;
 }

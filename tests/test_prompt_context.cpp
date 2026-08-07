@@ -41,6 +41,16 @@ void RemoveDir(const char* path) {
 #endif
 }
 
+// Discovery walks every ancestor of cwd, so context files outside the test tree
+// (the repository's own AGENTS.md, or one in the user's home) legitimately load
+// too. Assertions count only what the test itself created.
+u32 CountContextFilesUnder(const PromptContext* context, const char* marker) {
+  u32 count = 0;
+  for (u32 i = 0; i < context->ContextFiles.Count; i++)
+    if (StrView_Contains(context->ContextFiles.Data[i].Path, marker)) count++;
+  return count;
+}
+
 constexpr StrView kReadGuidelines[] = {
     SVL("Use read to examine files instead of cat or sed."),
     SVL("Shared guideline")};
@@ -174,7 +184,7 @@ void TestDiscoveryAndTrust(Arena* scratch, StrView root, StrView cwd,
             !StrView_Contains(context.SystemPrompt, "project append"),
             StrView_Contains(context.SystemPrompt, "global append"),
             globalAt >= 0 && rootAt > globalAt && cwdAt > rootAt,
-            context.ContextFiles.Count == 3);
+            CountContextFilesUnder(&context, "clank_prompt_context_test") == 3);
   PromptContext_Release(&context);
 
   options.ProjectTrusted = true;
@@ -204,7 +214,7 @@ void TestDiscoveryAndTrust(Arena* scratch, StrView root, StrView cwd,
   CHECK_ALL(StrView_Contains(context.SystemPrompt, "cwd override"),
             !StrView_Contains(context.SystemPrompt, "cwd context"),
             StrView_Contains(context.SystemPrompt, "root context"),
-            context.ContextFiles.Count == 3);
+            CountContextFilesUnder(&context, "clank_prompt_context_test") == 3);
   PromptContext_Release(&context);
 }
 

@@ -64,6 +64,14 @@ struct CompactionEntryData {
   Message Summary;
   bool HasUsage;
   Usage Use;
+  // Files the folded span touched, so the paths survive the turns being
+  // summarized away. `ReadFiles` holds paths that were only read; a path that
+  // was written or edited appears in `ModifiedFiles` instead. Both are sorted
+  // and deduplicated, and each compaction reseeds from the ones before it,
+  // which is what makes the tracking cumulative. Absent in logs written before
+  // the fields existed, which decodes as empty.
+  Array<StrView> ReadFiles;
+  Array<StrView> ModifiedFiles;
 };
 
 struct BranchLabelEntryData {
