@@ -1,5 +1,6 @@
 #include <stdio.h>
 
+#include "base/thread.h"
 #include "json/json.h"
 #include "tools/filelock.h"
 #include "tools/fs.h"
@@ -7,7 +8,7 @@
 
 static bool Write_DoLocked(Arena* arena, StrView path, StrView content, volatile i32* abort,
                            ToolResult* out, StrBuf* err) {
-  if (abort && *abort) {
+  if (abort && Atomic_LoadI32(abort)) {
     StrBuf_AppendCStr(err, "aborted");
     return false;
   }

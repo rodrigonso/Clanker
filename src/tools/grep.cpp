@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "base/thread.h"
 #include "json/json.h"
 #include "tools/exec.h"
 #include "tools/fs.h"
@@ -356,7 +357,7 @@ static bool GrepExec(void*, Arena* arena, StrView, const ToolArgs* args,
   if (!capture.LimitHit && capture.Pending.Length)
     Grep_ProcessJsonLine(&capture, StrBuf_View(&capture.Pending));
 
-  if (abort && *abort) {
+  if (abort && Atomic_LoadI32(abort)) {
     StrBuf_AppendCStr(err, "Operation aborted");
     return false;
   }

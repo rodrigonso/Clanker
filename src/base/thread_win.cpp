@@ -59,3 +59,12 @@ void Cond_Broadcast(CondVar* c) { WakeAllConditionVariable((CONDITION_VARIABLE*)
 void Sleep_Ms(u32 ms) { Sleep(ms); }
 
 u64 MonotonicMillis() { return GetTickCount64(); }
+
+void Atomic_StoreI32(volatile i32* target, i32 value) {
+  InterlockedExchange((volatile LONG*)target, (LONG)value);
+}
+
+i32 Atomic_LoadI32(const volatile i32* target) {
+  // No plain interlocked load exists; OR with zero reads without mutating.
+  return (i32)InterlockedOr((volatile LONG*)target, 0);
+}

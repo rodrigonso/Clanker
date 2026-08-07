@@ -1,6 +1,7 @@
 #include "agent/driver.h"
 
 #include "agent/compaction.h"
+#include "base/thread.h"
 #include "net/http.h"
 
 namespace {
@@ -64,7 +65,7 @@ AgentToolEventSink ToolEvents(AgentHarness* harness) {
 bool TryStartTool(void* user) {
   AgentHarness* harness = (AgentHarness*)user;
   ScopedLock lock(&harness->StateLock);
-  return !harness->AbortFlag;
+  return !Atomic_LoadI32(&harness->AbortFlag);
 }
 
 struct TurnRunResult {
@@ -339,7 +340,7 @@ SessionResult RunToolBatch(AgentHarness* harness, DurableId* ioHead, const Messa
   SessionResult beforeToolFailure = SessionResult_Ok();
   for (u32 i = 0; i < assistant->Content.Count; i++) {
     Content content = assistant->Content.Data[i];
-    if (content.Kind == ContentKind::ToolCall && !harness->AbortFlag &&
+    if (content.Kind == ContentKind::ToolCall && !Atomic_LoadI32(&harness->AbortFlag) &&
         harness->Config.Hooks.BeforeTool &&
         SessionResult_IsOk(beforeToolFailure)) {
       StrView arguments = content.ToolArgsJson;
@@ -415,7 +416,7 @@ SessionResult RunToolBatch(AgentHarness* harness, DurableId* ioHead, const Messa
   }
   if (!SessionResult_IsOk(committed)) return committed;
   if (!SessionResult_IsOk(beforeToolFailure)) return beforeToolFailure;
-  return harness->AbortFlag
+  return Atomic_LoadI32(&harness->AbortFlag)
              ? SessionResult_Error(SessionStatus::Cancelled,
                                    SVL("run cancelled during tool execution"))
              : committed;
@@ -591,7 +592,7 @@ SessionResult BuildTurnContext(AgentHarness* harness, DurableId head, const Mess
 
 SessionResult ContinueRun(AgentHarness* harness, DurableId* ioHead, AgentRunState* run) {
   for (;;) {
-    if (harness->AbortFlag)
+    if (Atomic_LoadI32(&harness->AbortFlag))
       return SessionResult_Error(SessionStatus::Cancelled, SVL("run cancelled"));
 
     // Automatic compaction runs before the next provider request, at most once

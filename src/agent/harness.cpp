@@ -1,6 +1,7 @@
 #include "agent/harness.h"
 
 #include "agent/driver.h"
+#include "base/thread.h"
 
 namespace {
 
@@ -214,6 +215,7 @@ SessionResult BuildSnapshotLocked(Arena* arena, AgentHarness* harness,
 }
 
 void CloseRegisteredWatchers(AgentHarness* harness) {
+  ScopedLock registry(&harness->WatcherLock);
   for (u32 i = 0; i < harness->WatcherCount; i++) {
     AgentHarnessWatch* watch = harness->Watchers[i];
     ScopedLock lock(&watch->Lock);
@@ -225,6 +227,7 @@ void CloseRegisteredWatchers(AgentHarness* harness) {
   harness->WatcherCount = 0;
 }
 
+// Requires WatcherLock.
 void PublishToWatchersLocked(AgentHarness* harness, AgentHarnessEvent* event) {
   for (u32 i = 0; i < harness->WatcherCount; i++) {
     AgentHarnessWatch* watch = harness->Watchers[i];
@@ -234,8 +237,10 @@ void PublishToWatchersLocked(AgentHarness* harness, AgentHarnessEvent* event) {
 }
 
 // Generic "publish to every registered watcher" used by every Publish* below.
+// Takes only WatcherLock, so a streamed token never waits on snapshot work.
+// Safe to call with StateLock already held; that is the declared lock order.
 void PublishToWatchers(AgentHarness* harness, AgentHarnessEvent* event) {
-  ScopedLock lock(&harness->StateLock);
+  ScopedLock lock(&harness->WatcherLock);
   PublishToWatchersLocked(harness, event);
 }
 
@@ -277,14 +282,14 @@ void CompleteAgentTurnLocked(AgentHarness* harness, AgentTurnKind turn,
   event.Turn.Kind = turn;
   event.Turn.Outcome = outcome;
   event.Turn.Error = result.Message;
-  PublishToWatchersLocked(harness, &event);
+  PublishToWatchers(harness, &event);
   ArenaReset(&harness->Work);
   harness->Running = false;
 }
 
 void ApplyAcceptedCancellationLocked(AgentHarness* harness,
                                      SessionResult* result) {
-  if (harness->AbortFlag && result->Status != SessionStatus::IoError &&
+  if (Atomic_LoadI32(&harness->AbortFlag) && result->Status != SessionStatus::IoError &&
       result->Status != SessionStatus::Faulted) {
     *result = SessionResult_Error(SessionStatus::Cancelled,
                                   SVL("operation cancelled"));
@@ -298,7 +303,7 @@ SessionResult AgentHarness_Append(AgentHarness* harness, SessionRecord* records,
   ScopedLock lock(&harness->StateLock);
   if (harness->Faulted)
     return SessionResult_Error(SessionStatus::Faulted, SVL("agent harness is faulted"));
-  if (rejectIfCancelled && harness->AbortFlag)
+  if (rejectIfCancelled && Atomic_LoadI32(&harness->AbortFlag))
     return SessionResult_Error(SessionStatus::Cancelled,
                                SVL("operation cancelled before commit"));
   SessionResult result = count == 1 ? SessionLog_Append(&harness->Log, &records[0])
@@ -334,6 +339,7 @@ SessionResult AgentHarness_Append(AgentHarness* harness, SessionRecord* records,
     event.Kind = AgentHarnessEventKind::DurableRecord;
     event.Cursor = records[i].Seq;
     event.Record = &records[i];
+    ScopedLock registry(&harness->WatcherLock);
     for (u32 w = 0; w < harness->WatcherCount; w++) {
       AgentHarnessWatch* watch = harness->Watchers[w];
       if (records[i].Seq > watch->Cursor) EnqueueWatcherEvent(watch, &event);
@@ -492,7 +498,7 @@ void AgentHarness_PublishQueueUpdate(AgentHarness* harness) {
   event.Queue.SteerCount = harness->Queues.Steering.Count;
   event.Queue.FollowUpCount = harness->Queues.FollowUp.Count;
   event.Queue.NextTurnCount = harness->Queues.NextTurn.Count;
-  PublishToWatchersLocked(harness, &event);
+  PublishToWatchers(harness, &event);
 }
 
 SessionResult AgentHarness_Init(AgentHarness* harness, SessionLog log,
@@ -510,6 +516,7 @@ SessionResult AgentHarness_Init(AgentHarness* harness, SessionLog log,
   harness->Queued = ArenaCreate();
   harness->Work = ArenaCreate();
   Mutex_Init(&harness->StateLock);
+  Mutex_Init(&harness->WatcherLock);
   harness->Initialized = true;
   harness->Queues.Steering = Array_Make<Message>(&harness->Queued, 4);
   harness->Queues.FollowUp = Array_Make<Message>(&harness->Queued, 4);
@@ -567,6 +574,7 @@ SessionResult AgentHarness_Close(AgentHarness* harness) {
   }
   SessionLog_Close(&harness->Log);
   Mutex_Destroy(&harness->StateLock);
+  Mutex_Destroy(&harness->WatcherLock);
   ArenaRelease(&harness->Runtime);
   ArenaRelease(&harness->State);
   ArenaRelease(&harness->Queued);
@@ -613,9 +621,13 @@ SessionResult AgentHarness_Watch(Arena* arena, AgentHarness* harness, u32 capaci
   SessionResult result = {};
   {
     ScopedLock lock(&harness->StateLock);
+    ScopedLock registry(&harness->WatcherLock);
     if (harness->WatcherCount == AGENT_HARNESS_MAX_WATCHERS) {
       result = SessionResult_Error(SessionStatus::Busy, SVL("watcher limit reached"));
     } else {
+      // The snapshot and the registration have to be atomic with respect to
+      // appends: a record landing between them would reach neither the
+      // snapshot nor the watcher.
       result = BuildSnapshotLocked(arena, harness, outSnapshot);
       if (SessionResult_IsOk(result)) {
         outWatch->Cursor = outSnapshot->Cursor;
@@ -691,7 +703,7 @@ SessionResult AgentHarness_WatchRequestClose(AgentHarnessWatch* watch) {
   if (!watch || !watch->Initialized) return SessionResult_Invalid("watch close arguments are invalid");
   AgentHarness* owner = watch->Owner;
   if (owner) {
-    ScopedLock ownerLock(&owner->StateLock);
+    ScopedLock ownerLock(&owner->WatcherLock);
     for (u32 i = 0; i < owner->WatcherCount; i++) {
       if (owner->Watchers[i] != watch) continue;
       for (u32 j = i + 1; j < owner->WatcherCount; j++) owner->Watchers[j - 1] = owner->Watchers[j];
@@ -715,7 +727,7 @@ SessionResult AgentHarness_WatchClose(AgentHarnessWatch* watch) {
   if (!watch || !watch->Initialized) return SessionResult_Invalid("watch close arguments are invalid");
   AgentHarness* owner = watch->Owner;
   if (owner) {
-    ScopedLock ownerLock(&owner->StateLock);
+    ScopedLock ownerLock(&owner->WatcherLock);
     for (u32 i = 0; i < owner->WatcherCount; i++) {
       if (owner->Watchers[i] != watch) continue;
       for (u32 j = i + 1; j < owner->WatcherCount; j++) owner->Watchers[j - 1] = owner->Watchers[j];
@@ -753,7 +765,7 @@ SessionResult AgentHarness_Run(AgentHarness* harness, StrView prompt) {
     SessionResult idle = EnsureIdleLocked(harness, SVL("agent harness is already running"));
     if (!SessionResult_IsOk(idle)) return idle;
     harness->Running = true;
-    harness->AbortFlag = 0;
+    Atomic_StoreI32(&harness->AbortFlag, 0);
   }
 
   SessionResult result = AgentDriver_Run(harness, prompt);
@@ -775,7 +787,7 @@ SessionResult AgentHarness_Compact(AgentHarness* harness) {
     SessionResult idle = EnsureIdleLocked(harness, SVL("agent harness is already running"));
     if (!SessionResult_IsOk(idle)) return idle;
     harness->Running = true;
-    harness->AbortFlag = 0;
+    Atomic_StoreI32(&harness->AbortFlag, 0);
   }
 
   SessionResult result = AgentDriver_Compact(harness);
@@ -798,7 +810,7 @@ SessionResult AgentHarness_Navigate(AgentHarness* harness, DurableId targetEntry
     SessionResult idle = EnsureIdleLocked(harness, SVL("agent harness is already running"));
     if (!SessionResult_IsOk(idle)) return idle;
     harness->Running = true;
-    harness->AbortFlag = 0;
+    Atomic_StoreI32(&harness->AbortFlag, 0);
   }
 
   DurableId target = targetEntryId;
@@ -948,10 +960,10 @@ SessionResult AgentHarness_RequestCancel(AgentHarness* harness) {
       return SessionResult_Error(SessionStatus::Faulted, SVL("agent harness is faulted"));
     if (!harness->Running)
       return SessionResult_Error(SessionStatus::InvalidState, SVL("no operation is running"));
-    harness->AbortFlag = 1;
+    Atomic_StoreI32(&harness->AbortFlag, 1);
     AgentHarnessEvent event = {};
     event.Kind = AgentHarnessEventKind::TransientCancelRequested;
-    PublishToWatchersLocked(harness, &event);
+    PublishToWatchers(harness, &event);
   }
   return SessionResult_Ok();
 }

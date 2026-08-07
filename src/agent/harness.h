@@ -45,6 +45,14 @@ struct AgentHarness {
   Arena Work;     // per-run scratch; reset after each Run/Compact/Navigate call
   ToolRuntime* RuntimeTools;
   Mutex StateLock;  // guards Records/Reduction/Queues/Running/Faulted/Watchers
+  // Guards the watcher registry only (Watchers/WatcherCount and each entry's
+  // registration state). Split from StateLock because publishing happens once
+  // per streamed token while StateLock is also held for O(history) snapshot
+  // work; sharing one lock made token delivery wait on it.
+  //
+  // Lock order is StateLock -> WatcherLock -> AgentHarnessWatch::Lock. Nothing
+  // may acquire them in the other direction.
+  Mutex WatcherLock;
 
   // Loaded once at Init (SessionLog_ReadAll -> SessionReducer_Reduce) and
   // folded in O(1) per appended record thereafter -- never reloaded from the
@@ -53,6 +61,8 @@ struct AgentHarness {
   SessionReduction Reduction;
   AgentHarnessQueues Queues;
 
+  // Set with Atomic_StoreI32 and read with Atomic_LoadI32; see base/thread.h.
+  // The pointer is handed to providers and tools, which poll it the same way.
   volatile i32 AbortFlag;
   bool Running;
   bool Faulted;

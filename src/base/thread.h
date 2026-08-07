@@ -47,6 +47,18 @@ void Cond_Broadcast(CondVar* c);
 // Block the calling thread for at least `ms` milliseconds.
 void Sleep_Ms(u32 ms);
 
+// Cancellation flags are set by one thread (a signal handler, a UI action, a
+// watchdog) and polled by another. `volatile` keeps the compiler from caching
+// the poll but says nothing about the store, and MSVC only gives volatile
+// acquire/release semantics under `/volatile:ms`, which this build does not
+// pin. Routing both sides through these keeps the flags correct regardless of
+// compiler mode.
+//
+// Relaxed semantics are sufficient and intentional: a cancellation flag
+// publishes no data alongside itself, so readers only ever branch on it.
+void Atomic_StoreI32(volatile i32* target, i32 value);
+i32 Atomic_LoadI32(const volatile i32* target);
+
 // Monotonic milliseconds for measuring short intervals.
 u64 MonotonicMillis();
 

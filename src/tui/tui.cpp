@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "base/sysinfo.h"
+#include "base/thread.h"
 #include "term/cell.h"
 #include "term/sanitize.h"
 
@@ -1420,8 +1421,8 @@ void FinishModal(Tui* t, TuiModalResult result) {
 }
 
 void RequestStopLocked(Tui* t) {
-  t->AbortFlag = 1;
-  t->OperationAbortFlag = 1;
+  Atomic_StoreI32(&t->AbortFlag, 1);
+  Atomic_StoreI32(&t->OperationAbortFlag, 1);
   t->Quit = true;
   t->Stop = true;
   if (t->ModalResult == TuiModalResult::Pending)
@@ -1447,7 +1448,7 @@ void HandleSelectKey(Tui* t, const Key& k) {
     case KeyKind::Backspace: FinishModal(t, TuiModalResult::Back); break;
     case KeyKind::Escape: FinishModal(t, TuiModalResult::Cancelled); break;
     case KeyKind::CtrlC:
-      if (t->OperationActive) t->OperationAbortFlag = 1;
+      if (t->OperationActive) Atomic_StoreI32(&t->OperationAbortFlag, 1);
       FinishModal(t, TuiModalResult::Cancelled);
       break;
     default: break;
@@ -1482,7 +1483,7 @@ void HandleTextKey(Tui* t, const Key& k) {
     case KeyKind::CtrlK: LineEdit_KillToEnd(&t->ModalEdit); break;
     case KeyKind::Escape: FinishModal(t, TuiModalResult::Cancelled); break;
     case KeyKind::CtrlC:
-      if (t->OperationActive) t->OperationAbortFlag = 1;
+      if (t->OperationActive) Atomic_StoreI32(&t->OperationAbortFlag, 1);
       FinishModal(t, TuiModalResult::Cancelled);
       break;
     default: break;
@@ -1755,7 +1756,7 @@ void HandleKey(Tui* t, const Key& k) {
   if (k.Kind == KeyKind::Escape) {
     bool canArm =
         t->ModalResult != TuiModalResult::Pending &&
-        ((t->AgentRunning && !t->AbortFlag) ||
+        ((t->AgentRunning && !Atomic_LoadI32(&t->AbortFlag)) ||
          (!t->AgentRunning && !t->OperationActive));
     if (canArm) {
       u64 now = MonotonicMillis();
@@ -1768,9 +1769,9 @@ void HandleKey(Tui* t, const Key& k) {
           if (t->Harness) {
             SessionResult cancelled =
                 AgentHarness_RequestCancel(t->Harness);
-            if (!SessionResult_IsOk(cancelled)) t->AbortFlag = 1;
+            if (!SessionResult_IsOk(cancelled)) Atomic_StoreI32(&t->AbortFlag, 1);
           } else {
-            t->AbortFlag = 1;
+            Atomic_StoreI32(&t->AbortFlag, 1);
           }
         } else {
           FocusComposer(t);
@@ -1933,14 +1934,14 @@ void HandleKey(Tui* t, const Key& k) {
         break;
       }
       if (t->OperationActive)
-        t->OperationAbortFlag = 1;
+        Atomic_StoreI32(&t->OperationAbortFlag, 1);
       else if (t->AgentRunning) {
         if (t->Harness) {
           SessionResult cancelled =
               AgentHarness_RequestCancel(t->Harness);
-          if (!SessionResult_IsOk(cancelled)) t->AbortFlag = 1;
+          if (!SessionResult_IsOk(cancelled)) Atomic_StoreI32(&t->AbortFlag, 1);
         } else {
-          t->AbortFlag = 1;
+          Atomic_StoreI32(&t->AbortFlag, 1);
         }
       }
       else if (!LineEdit_Empty(&t->Edit)) {
@@ -2192,7 +2193,7 @@ bool Tui_ClearSession(Tui* t) {
   t->QTail = preservedCount % 64;
   t->QCount = preservedCount;
   t->AgentRunning = false;
-  t->AbortFlag = 0;
+  Atomic_StoreI32(&t->AbortFlag, 0);
   t->LastEscapeMs = 0;
   t->EscapeArmed = false;
   ClearCopyNotice(t);
@@ -2209,7 +2210,7 @@ bool Tui_ClearSession(Tui* t) {
   t->OperationActive = false;
   t->OperationLabel = {};
   t->OperationStatus = {};
-  t->OperationAbortFlag = 0;
+  Atomic_StoreI32(&t->OperationAbortFlag, 0);
   t->ModalKind = TuiModalKind::None;
   t->ModalResult = TuiModalResult::None;
   t->ModalTitle = {};
@@ -2351,14 +2352,14 @@ void Tui_BeginOperation(Tui* t, StrView label) {
     t->OperationActive = false;
     t->OperationLabel = {};
     t->OperationStatus = {};
-    t->OperationAbortFlag = 1;
+    Atomic_StoreI32(&t->OperationAbortFlag, 1);
     Mutex_Unlock(&t->Lock);
     return;
   }
   t->OperationActive = true;
   t->OperationLabel = StrView_Dup(&t->SessionMem, label);
   t->OperationStatus = {};
-  t->OperationAbortFlag = 0;
+  Atomic_StoreI32(&t->OperationAbortFlag, 0);
   t->Spinner = 0;
   t->SpinnerStartMs = 0;
   Wake(t);
@@ -2374,7 +2375,7 @@ void Tui_SetOperationStatus(Tui* t, StrView status) {
 
 bool Tui_EndOperation(Tui* t) {
   Mutex_Lock(&t->Lock);
-  bool cancelled = t->OperationAbortFlag != 0 || t->Stop || t->Quit;
+  bool cancelled = Atomic_LoadI32(&t->OperationAbortFlag) != 0 || t->Stop || t->Quit;
   t->OperationActive = false;
   t->OperationLabel = {};
   t->OperationStatus = {};

@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include "app/plain_select.h"
+#include "base/thread.h"
 
 volatile i32 g_abort = 0;
 AgentHarness* g_activeHarness = nullptr;
@@ -98,7 +99,7 @@ RuntimeInputResult RuntimeReadText(InteractiveRuntime* rt, Arena* arena,
 
 volatile i32* RuntimeBeginOperation(InteractiveRuntime* rt, const AppCommandUx* ux,
                                     StrView label) {
-  g_abort = 0;
+  Atomic_StoreI32(&g_abort, 0);
   if (rt->TuiView) {
     Tui_BeginOperation(rt->TuiView, label);
     return Tui_OperationAbort(rt->TuiView);
@@ -117,7 +118,7 @@ void RuntimeSetOperationStatus(InteractiveRuntime* rt, const AppCommandUx* ux,
 
 bool RuntimeEndOperation(InteractiveRuntime* rt) {
   if (rt->TuiView) return Tui_EndOperation(rt->TuiView);
-  return g_abort != 0;
+  return Atomic_LoadI32(&g_abort) != 0;
 }
 
 AppCommandHandlerResult CommandResult(SessionResult result, StrView successMessage) {

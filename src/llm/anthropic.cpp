@@ -1,4 +1,5 @@
 #include "base/str.h"
+#include "base/thread.h"
 #include "llm/anthropic.h"
 #include "net/http.h"
 
@@ -186,7 +187,7 @@ ProviderModelList Anthropic_ListModelsWithFetch(Arena* arena,
     return AnthropicModelListError(arena, ProviderModelListStatus::Unavailable,
                                    SVL("Anthropic model transport is unavailable"));
   }
-  if (abort && *abort) {
+  if (abort && Atomic_LoadI32(abort)) {
     return AnthropicModelListError(arena, ProviderModelListStatus::Unavailable,
                                    SVL("Anthropic model discovery was aborted"));
   }

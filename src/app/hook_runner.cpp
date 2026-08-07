@@ -1,5 +1,6 @@
 #include "app/hook_runner.h"
 
+#include "base/thread.h"
 #include "json/json.h"
 #include "tools/exec.h"
 
@@ -148,7 +149,7 @@ void RunOne(HookRunner* runner, Arena* scratch, const HookQueueItem* item,
     // Checked between commands as well as inside the wait loop: once shutdown
     // has given up, spawning the rest of an unbounded group only to kill each
     // one is pure latency.
-    if (abort && *abort) break;
+    if (abort && Atomic_LoadI32(abort)) break;
     Exec_RunShellInput(scratch, commands[i]->Command, payloadView, commands[i]->TimeoutMs,
                        abort);
   }

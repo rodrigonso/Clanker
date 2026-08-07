@@ -5,9 +5,9 @@
 
 #include "agent/event_json.h"
 #include "agent/harness.h"
+#include "app/auth_flow.h"
 #include "app/command.h"
 #include "app/commands.h"
-#include "app/auth_flow.h"
 #include "app/event_pump.h"
 #include "app/hook_runner.h"
 #include "app/plain_select.h"
@@ -23,6 +23,7 @@
 #include "base/arena.h"
 #include "base/str.h"
 #include "base/sysinfo.h"
+#include "base/thread.h"
 
 #include "net/browser.h"
 #include "net/http.h"
@@ -48,8 +49,8 @@ static void EnableTerminal() {}
 #endif
 
 static void OnSigint(int) {
-  g_abort = 1;
-  if (g_activeHarness) g_activeHarness->AbortFlag = 1;
+  Atomic_StoreI32(&g_abort, 1);
+  if (g_activeHarness) Atomic_StoreI32(&g_activeHarness->AbortFlag, 1);
 }
 
 // ---- auth wiring ---------------------------------------------------------
@@ -155,9 +156,9 @@ static void RunPlainRepl(InteractiveRuntime* rt) {
       if (command.Action == AppLoopAction::ResetSession) RuntimeResetSession(rt, &commandUx);
       continue;
     }
-    g_abort = 0;
+    Atomic_StoreI32(&g_abort, 0);
     if (!RuntimeCheckAuth(rt, &commandUx, true)) continue;
-    if (g_abort) continue;
+    if (Atomic_LoadI32(&g_abort)) continue;
    SessionResult run = RunHarnessPrompt(rt->Harness, SV(line));
     ReportHarnessResult(run);
   }
@@ -742,9 +743,9 @@ int main(int argc, char** argv) {
       ArenaRelease(&arena);
       return 1;
     }
-    g_abort = 0;
+    Atomic_StoreI32(&g_abort, 0);
     if (!ResolvePromptAuth(&harness, &g_abort)) {
-      if (g_abort) {
+      if (Atomic_LoadI32(&g_abort)) {
         StopHarnessEventPump(&pump);
         EndHookSession();
         AgentHarness_Close(&harness);
@@ -763,7 +764,7 @@ int main(int argc, char** argv) {
       ArenaRelease(&arena);
       return 1;
     }
-    g_abort = 0;
+    Atomic_StoreI32(&g_abort, 0);
     SessionResult run = RunHarnessPrompt(&harness, SV(onePrompt));
     StopHarnessEventPump(&pump);
     if (jsonMode) {

@@ -1,4 +1,5 @@
 #include "auth/oauth.h"
+#include "base/thread.h"
 #include "llm/openai.h"
 #include "net/http.h"
 
@@ -205,7 +206,7 @@ ProviderModelList OpenAI_ListModelsWithFetch(
   if (!fetch)
     return ModelListError(arena, ProviderModelListStatus::Unavailable,
                           SVL("OpenAI model transport is unavailable"));
-  if (abort && *abort)
+  if (abort && Atomic_LoadI32(abort))
     return ModelListError(arena, ProviderModelListStatus::Unavailable,
                           SVL("OpenAI model discovery was aborted"));
 

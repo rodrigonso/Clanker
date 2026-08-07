@@ -339,7 +339,7 @@ HttpResult Http_StreamWithRetryDeps(Arena* arena, const HttpRequest* req, HttpSt
 
     if (!policy || !policy->Enabled) return r;  // policy off -> single attempt, passthrough
     if (r.BodyStarted) return r;                // already forwarded success bytes -> never retry
-    if (abort && *abort) return r;              // user cancellation isn't masked by a retry
+    if (abort && Atomic_LoadI32(abort)) return r;              // user cancellation isn't masked by a retry
 
     bool transportFailure = r.Status < 0;
     if (!HttpRetry_ShouldRetry(policy, r.Status, transportFailure, &r.Meta, attempts)) return r;
@@ -357,14 +357,14 @@ HttpResult Http_StreamWithRetryDeps(Arena* arena, const HttpRequest* req, HttpSt
 
     u32 remaining = delay;
     while (remaining > 0) {
-      if (abort && *abort) break;
+      if (abort && Atomic_LoadI32(abort)) break;
       u32 step = remaining < 100 ? remaining : 100;
       if (deps->Sleep) deps->Sleep(deps->SleepUser, step);
       remaining -= step;
     }
     event.Kind = HttpRetryEventKind::End;
     if (policy->OnEvent) policy->OnEvent(policy->EventUser, &event);
-    if (abort && *abort) {
+    if (abort && Atomic_LoadI32(abort)) {
       HttpResult aborted = {};
       aborted.Status = -1;
       aborted.Error = SVL("aborted");

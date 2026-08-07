@@ -1,5 +1,6 @@
 #include "net/loopback.h"
 
+#include "base/thread.h"
 #include <string.h>
 
 #if defined(_WIN32)
@@ -217,7 +218,7 @@ LoopbackCapture Loopback_WaitForCode(Arena* a, LoopbackServer* s, StrView path, 
 
   SOCKET listenFd = (SOCKET)s->Sock;
   for (;;) {
-    if (abort && *abort) {
+    if (abort && Atomic_LoadI32(abort)) {
       cap.Error = SVL("login cancelled");
       return cap;
     }
@@ -239,7 +240,7 @@ LoopbackCapture Loopback_WaitForCode(Arena* a, LoopbackServer* s, StrView path, 
     u32 total = 0;
     u32 idleTicks = 0;
     while (total < sizeof(buf) - 1) {
-      if (abort && *abort) {
+      if (abort && Atomic_LoadI32(abort)) {
         CloseSock(c);
         cap.Error = SVL("login cancelled");
         return cap;

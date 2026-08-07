@@ -7,6 +7,7 @@
 #include "app/settings.h"
 #include "auth/oauth.h"
 #include "auth/store.h"
+#include "base/thread.h"
 #include "net/browser.h"
 
 void AppAuth_Invalidate(AppAuth* auth) {
@@ -142,7 +143,7 @@ bool AppResolveAuth(void* user, Arena* arena, StrView provider, volatile i32* ab
 }
 
 bool ResolvePromptAuth(AgentHarness* harness, volatile i32* abort) {
-  if (!harness || (abort && *abort)) return false;
+  if (!harness || (abort && Atomic_LoadI32(abort))) return false;
   if (!harness->Config.ResolveAuth)
     return harness->Config.Stream.Auth.Token.Length > 0;
   harness->Config.Stream.Auth = {};
@@ -151,7 +152,7 @@ bool ResolvePromptAuth(AgentHarness* harness, volatile i32* abort) {
                                    harness->Config.ModelInfo.Provider, abort,
                                    &auth))
     return false;
-  if (abort && *abort) return false;
+  if (abort && Atomic_LoadI32(abort)) return false;
   harness->Config.Stream.Auth = auth;
   return true;
 }
@@ -341,7 +342,7 @@ static AppCommandHandlerResult RunOAuthLogin(InteractiveRuntime* rt, const Provi
   if (!OAuth_WaitForCallback(&scratch, cfg, begin.AuthUrl, begin.State, &code,
                              abort, &error,
                              OnLoginReady, &ready)) {
-    bool cancelled = (abort && *abort) || StrView_Contains(StrBuf_View(&error), "cancelled");
+    bool cancelled = (abort && Atomic_LoadI32(abort)) || StrView_Contains(StrBuf_View(&error), "cancelled");
     AppCommandHandlerResult result = {};
     if (cancelled) {
       result.Status = AppCommandHandlerStatus::Cancelled;
@@ -360,7 +361,7 @@ static AppCommandHandlerResult RunOAuthLogin(InteractiveRuntime* rt, const Provi
     return result;
   }
 
-  if (abort && *abort) {
+  if (abort && Atomic_LoadI32(abort)) {
     RuntimeEndOperation(rt);
     ArenaRelease(&scratch);
     return AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled, SVL("Login cancelled.")};
@@ -372,7 +373,7 @@ static AppCommandHandlerResult RunOAuthLogin(InteractiveRuntime* rt, const Provi
   StrBuf_Clear(&error);
   if (!OAuth_ExchangeCode(&scratch, cfg, code.Code, state, begin.Verifier, &credential, &error,
                           abort)) {
-    if (abort && *abort) {
+    if (abort && Atomic_LoadI32(abort)) {
       RuntimeEndOperation(rt);
       ArenaRelease(&scratch);
       return AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled, SVL("Login cancelled.")};
@@ -446,7 +447,7 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
   ProviderAuth auth = {};
   AppResolveAuth(rt->Auth, &scratch, spec->Id, abort, &auth);
   ProviderModelList live = {};
-  if (!(abort && *abort)) {
+  if (!(abort && Atomic_LoadI32(abort))) {
     RuntimeSetOperationStatus(rt, ux, SVL("Fetching the provider model catalog."));
     if (spec->ListModels) {
       live = spec->ListModels(&scratch, auth, abort);
@@ -457,7 +458,7 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
   }
   bool cancelled = RuntimeEndOperation(rt);
 
-  if (cancelled || (abort && *abort)) {
+  if (cancelled || (abort && Atomic_LoadI32(abort))) {
     ArenaRelease(&scratch);
     return RuntimeModelChoice{RuntimeChoiceStatus::Cancelled, Model{}, StrView{}};
   }
@@ -659,9 +660,9 @@ bool RuntimeCheckAuth(InteractiveRuntime* rt, const AppCommandUx* ux, bool asErr
  FinishRuntimeAuthWarmup(rt);
   volatile i32* abort =
       rt->TuiView ? Tui_OperationAbort(rt->TuiView) : &g_abort;
-  if (abort && *abort) return false;
+  if (abort && Atomic_LoadI32(abort)) return false;
   if (rt->Harness && ResolvePromptAuth(rt->Harness, abort)) return true;
-  if (abort && *abort) return false;
+  if (abort && Atomic_LoadI32(abort)) return false;
 
   Arena scratch = ArenaCreate((usize)4 << 20);
   bool interactive = rt->TuiView || Term_IsInteractive();

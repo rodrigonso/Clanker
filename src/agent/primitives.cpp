@@ -1,5 +1,6 @@
 #include "agent/primitives.h"
 
+#include "base/thread.h"
 #include "llm/retry.h"
 
 namespace {
@@ -315,12 +316,12 @@ bool AgentProvider_SleepBackoff(u32 delayMs, volatile i32* abort) {
   constexpr u32 slice = 50;
   u32 elapsed = 0;
   while (elapsed < delayMs) {
-    if (abort && *abort) return true;
+    if (abort && Atomic_LoadI32(abort)) return true;
     u32 step = delayMs - elapsed < slice ? delayMs - elapsed : slice;
     Sleep_Ms(step);
     elapsed += step;
   }
-  return abort && *abort;
+  return abort && Atomic_LoadI32(abort);
 }
 
 void AgentToolBatch_Prepare(Arena* arena, const ToolRuntime* tools, u32 toolCount,

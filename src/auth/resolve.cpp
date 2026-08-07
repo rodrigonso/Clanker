@@ -4,6 +4,7 @@
 
 #include "auth/oauth.h"
 #include "auth/store.h"
+#include "base/thread.h"
 
 void Auth_MergeOAuthRefresh(Arena* a, const Credential* previous,
                             Credential* refreshed) {
@@ -76,7 +77,7 @@ bool AuthTokenCache_Get(const AuthTokenCache* cache, StrView provider,
 bool Auth_ResolveTokenInfo(Arena* a, StrView authPath, StrView providerId,
                            const char* envVar, ResolvedAuthToken* out,
                            volatile i32* abort) {
-  if (!a || !out || (abort && *abort)) return false;
+  if (!a || !out || (abort && Atomic_LoadI32(abort))) return false;
   *out = {};
   Credential c;
   if (AuthStore_Read(a, authPath, providerId, &c)) {
@@ -118,7 +119,7 @@ bool Auth_ResolveTokenInfo(Arena* a, StrView authPath, StrView providerId,
           out->IsFedRamp = nc.IsFedRamp;
           return out->Value.Length > 0;
         }
-        if (abort && *abort) return false;
+        if (abort && Atomic_LoadI32(abort)) return false;
       }
       if (c.Access.Length) {
         out->Value = c.Access;

@@ -1,5 +1,7 @@
 #include "tools/exec.h"
 
+#include "base/thread.h"
+
 // Bound on a stdin payload handed to a child process. The write happens before
 // the wait loop, so anything larger than the pipe buffer would block past both
 // the timeout and `abort` against a child that never reads its stdin. Windows
@@ -161,7 +163,7 @@ ExecArgvResult Exec_RunArgv(Arena* arena, StrView program, const StrView* args, 
       terminated = true;
     }
 
-    if (!terminated && abort && *abort) {
+    if (!terminated && abort && Atomic_LoadI32(abort)) {
       TerminateJobObject(job, 1);
       terminated = true;
     } else if (!terminated && timeoutMs && GetTickCount() - start > timeoutMs) {
@@ -254,9 +256,9 @@ ExecResult Exec_RunStreaming(Arena* arena, StrView command, u32 timeoutMs,
   DWORD start = GetTickCount();
   char buf[4096];
   for (;;) {
-    if ((abort && *abort) || (timeoutMs && (GetTickCount() - start) > timeoutMs)) {
+    if ((abort && Atomic_LoadI32(abort)) || (timeoutMs && (GetTickCount() - start) > timeoutMs)) {
       TerminateJobObject(job, 1);
-      res.TimedOut = !(abort && *abort);
+      res.TimedOut = !(abort && Atomic_LoadI32(abort));
       break;
     }
     DWORD avail = 0;
@@ -394,7 +396,7 @@ ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
   DWORD start = GetTickCount();
   for (;;) {
     if (WaitForSingleObject(pinfo.hProcess, 10) == WAIT_OBJECT_0) break;
-    if (abort && *abort) {
+    if (abort && Atomic_LoadI32(abort)) {
       TerminateJobObject(job, 1);
       break;
     }
@@ -564,7 +566,7 @@ ExecArgvResult Exec_RunArgv(Arena* arena, StrView program, const StrView* args, 
       terminated = true;
     }
 
-    if (!terminated && abort && *abort) {
+    if (!terminated && abort && Atomic_LoadI32(abort)) {
       kill(-pid, SIGKILL);
       terminated = true;
     } else if (!terminated && timeoutMs) {
@@ -649,9 +651,9 @@ ExecResult Exec_RunStreaming(Arena* arena, StrView command, u32 timeoutMs,
     struct timespec t1;
     clock_gettime(CLOCK_MONOTONIC, &t1);
     u64 elapsed = (u64)(t1.tv_sec - t0.tv_sec) * 1000 + (u64)(t1.tv_nsec - t0.tv_nsec) / 1000000;
-    if ((abort && *abort) || (timeoutMs && elapsed > timeoutMs)) {
+    if ((abort && Atomic_LoadI32(abort)) || (timeoutMs && elapsed > timeoutMs)) {
       kill(-pid, SIGKILL);
-      res.TimedOut = !(abort && *abort);
+      res.TimedOut = !(abort && Atomic_LoadI32(abort));
       break;
     }
   }
@@ -733,8 +735,8 @@ ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
     struct timespec t1;
     clock_gettime(CLOCK_MONOTONIC, &t1);
     u64 elapsed = (u64)(t1.tv_sec - t0.tv_sec) * 1000 + (u64)(t1.tv_nsec - t0.tv_nsec) / 1000000;
-    if ((abort && *abort) || (timeoutMs && elapsed > timeoutMs)) {
-      res.TimedOut = !(abort && *abort);
+    if ((abort && Atomic_LoadI32(abort)) || (timeoutMs && elapsed > timeoutMs)) {
+      res.TimedOut = !(abort && Atomic_LoadI32(abort));
       kill(-pid, SIGKILL);
       waitpid(pid, &status, 0);
       break;

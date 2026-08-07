@@ -79,3 +79,11 @@ u64 MonotonicMillis() {
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (u64)ts.tv_sec * 1000ull + (u64)(ts.tv_nsec / 1000000L);
 }
+
+void Atomic_StoreI32(volatile i32* target, i32 value) {
+  __atomic_store_n(target, value, __ATOMIC_SEQ_CST);
+}
+
+i32 Atomic_LoadI32(const volatile i32* target) {
+  return __atomic_load_n(target, __ATOMIC_SEQ_CST);
+}

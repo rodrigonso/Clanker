@@ -288,7 +288,7 @@ StrView ToolManager_DownloadRipgrep(Arena* arena, volatile i32* abort, StrBuf* e
     ToolManager_AppendFetchError(err, "failed to download ripgrep: ", archive);
     return StrView{};
   }
-  if (abort && *abort) {
+  if (abort && Atomic_LoadI32(abort)) {
     StrBuf_AppendCStr(err, "Operation aborted");
     return StrView{};
   }
@@ -440,7 +440,7 @@ StrView ToolManager_EnsureRipgrep(Arena* arena, volatile i32* abort, StrBuf* err
 #else
   if (ToolManager_ExecutableWorks(arena, SVL("rg"), abort)) return SVL("rg");
 #endif
-  if (abort && *abort) {
+  if (abort && Atomic_LoadI32(abort)) {
     StrBuf_AppendCStr(err, "Operation aborted");
     return StrView{};
   }

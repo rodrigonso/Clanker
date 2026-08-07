@@ -1,5 +1,6 @@
 #include "auth/oauth.h"
 
+#include "base/thread.h"
 #include "crypto/base64.h"
 #include "crypto/pkce.h"
 #include "crypto/random.h"
@@ -208,7 +209,7 @@ bool OAuth_ParseRefreshTokenResponse(Arena* a, StrView json,
 static bool PostToken(Arena* a, StrView url, StrView body, StrView contentType, Credential* out,
                       StrBuf* err, volatile i32* abort,
                       bool allowPartial) {
-  if (abort && *abort) {
+  if (abort && Atomic_LoadI32(abort)) {
     StrBuf_AppendCStr(err, "login cancelled");
     return false;
   }
@@ -220,7 +221,7 @@ static bool PostToken(Arena* a, StrView url, StrView body, StrView contentType, 
   req.HeaderCount = 2;
   req.Body = body;
   HttpResponse r = Http_Fetch(a, &req, abort);
-  if (abort && *abort) {
+  if (abort && Atomic_LoadI32(abort)) {
     StrBuf_AppendCStr(err, "login cancelled");
     return false;
   }
