@@ -2199,7 +2199,6 @@ bool Tui_ClearSession(Tui* t) {
   t->State = TuiState::Idle;
   t->StateTool = {};
   t->RetryStatus = {};
-  t->TurnStartMs = 0;
   t->Use = {};
   t->Spinner = 0;
   t->SpinnerStartMs = 0;
@@ -2587,52 +2586,48 @@ void Tui_FeedInput(Tui* t, const char* data, u32 n) {
   Mutex_Unlock(&t->Lock);
 }
 
-void Tui_AgentEvent(void* user, const AgentEvent& ev) {
+void Tui_HarnessEvent(void* user, const AgentHarnessEvent* ev) {
   Tui* t = (Tui*)user;
   Mutex_Lock(&t->Lock);
-  switch (ev.Kind) {
-    case AgentEventKind::AgentStart:
+  switch (ev->Kind) {
+    case AgentHarnessEventKind::TransientAgentStart:
       t->AgentRunning = true;
       t->RetryStatus = {};
       t->LastEscapeMs = 0;
       t->EscapeArmed = false;
       if (!Tui_HasPendingDisplay(t)) t->State = TuiState::Thinking;
-      t->TurnStartMs = NowMillis();
       t->Spinner = 0;
       t->SpinnerStartMs = 0;
       break;
-    case AgentEventKind::MessageStart:
-      // The agent emits message_start for the assistant turn before any content
-      // exists (ev.Msg is the not-yet-built message, often null), so there is
-      // nothing to render yet. The assistant entry is begun lazily on its first
-      // text delta below. This mirrors pi, where the assistant block stays empty
-      // (invisible) until content streams, so tool-only turns show no header.
+    case AgentHarnessEventKind::TransientStream:
+      if (ev->Stream.Kind == StreamEventKind::TextDelta) QueueText(t, ev->Stream.Delta);
       break;
-    case AgentEventKind::MessageUpdate:
-      if (ev.Stream.Kind == StreamEventKind::TextDelta) QueueText(t, ev.Stream.Delta);
-      break;
-    case AgentEventKind::MessageEnd: {
-      if (!ev.Msg || ev.Msg->Kind != Role::Assistant) break;
+    // The assistant turn has no transient "message end"; the durable record is
+    // the authoritative completion, carrying the final stop reason and usage.
+    case AgentHarnessEventKind::DurableRecord: {
+      if (ev->Record->Kind != SessionRecordKind::Message) break;
+      const Message* message = &ev->Record->MessageEntry.Value;
+      if (message->Kind != Role::Assistant) break;
       TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::MessageEnd);
-      display->Stop = ev.Msg->Stop;
-      display->Use = ev.Msg->Use;
-      if (ev.Msg->ErrorMessage.Length) SetDisplayPayload(t, display, ev.Msg->ErrorMessage);
+      display->Stop = message->Stop;
+      display->Use = message->Use;
+      if (message->ErrorMessage.Length) SetDisplayPayload(t, display, message->ErrorMessage);
       break;
     }
-    case AgentEventKind::ToolStart: {
+    case AgentHarnessEventKind::TransientToolStart: {
       TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::ToolStart);
-      display->ToolCallId = StrView_Dup(&t->SessionMem, ev.ToolCallId);
-      display->ToolName = StrView_Dup(&t->SessionMem, ev.ToolName);
-      display->ToolArgsJson = StrView_Dup(&t->SessionMem, ev.ToolArgsJson);
+      display->ToolCallId = StrView_Dup(&t->SessionMem, ev->Tool.CallId);
+      display->ToolName = StrView_Dup(&t->SessionMem, ev->Tool.Name);
+      display->ToolArgsJson = StrView_Dup(&t->SessionMem, ev->Tool.ArgumentsJson);
       break;
     }
-    case AgentEventKind::ToolUpdate: {
+    case AgentHarnessEventKind::TransientToolUpdate: {
       StrView preview = StrView{nullptr, 0};
-      if (ev.Result && ev.Result->Content.Count > 0)
-        preview = ev.Result->Content.Data[0].Text;
+      if (ev->Tool.Result.Content.Count > 0)
+        preview = ev->Tool.Result.Content.Data[0].Text;
       u16 slotIndex = 0;
       TuiToolUpdateSlot* slot =
-          AcquireToolUpdate(t, ev.ToolCallId, &slotIndex);
+          AcquireToolUpdate(t, ev->Tool.CallId, &slotIndex);
       if (!slot) break;
       StrBuf_Clear(&slot->Payload);
       Sanitize_Display(&slot->Payload, Truncate(preview, 1500));
@@ -2645,49 +2640,50 @@ void Tui_AgentEvent(void* user, const AgentEvent& ev) {
       }
       break;
     }
-    case AgentEventKind::ToolEnd: {
+    case AgentHarnessEventKind::TransientToolEnd: {
       StrView preview = StrView{nullptr, 0};
-      if (ev.Result && ev.Result->Content.Count > 0) preview = ev.Result->Content.Data[0].Text;
+      if (ev->Tool.Result.Content.Count > 0) preview = ev->Tool.Result.Content.Data[0].Text;
       TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::ToolEnd);
-      display->ToolCallId = StrView_Dup(&t->SessionMem, ev.ToolCallId);
+      display->ToolCallId = StrView_Dup(&t->SessionMem, ev->Tool.CallId);
       display->Payload = StrBuf_Make(&t->SessionMem, preview.Length + 1);
       Sanitize_Display(&display->Payload, preview);
-      display->IsError = ev.IsError;
-      if (TuiToolUpdateSlot* slot = FindToolUpdate(t, ev.ToolCallId))
+      display->IsError = ev->Tool.IsError;
+      if (TuiToolUpdateSlot* slot = FindToolUpdate(t, ev->Tool.CallId))
         slot->Active = false;
       break;
     }
-    case AgentEventKind::AgentEnd:
+    case AgentHarnessEventKind::TransientAgentEnd:
       t->AgentRunning = false;
       t->RetryStatus = {};
       t->LastEscapeMs = 0;
       t->EscapeArmed = false;
       QueueDisplayEvent(t, TuiDisplayEventKind::AgentEnd);
       break;
-    case AgentEventKind::RetryStart: {
+    case AgentHarnessEventKind::TransientRetryStart: {
       StrBuf status = StrBuf_Make(
-          &t->SessionMem, ev.RetryError.Length + 96);
+          &t->SessionMem, ev->Retry.Error.Length + 96);
       StrBuf_AppendCStr(
-          &status, ev.Layer == RetryLayer::ProviderRequest
+          &status, ev->Retry.Layer == RetryLayer::ProviderRequest
                        ? "provider request"
                        : "assistant turn");
       StrBuf_AppendCStr(&status, " in ");
-      StrBuf_AppendU64(&status, ev.RetryDelayMs);
+      StrBuf_AppendU64(&status, ev->Retry.DelayMs);
       StrBuf_AppendCStr(&status, " ms (");
-      StrBuf_AppendU64(&status, ev.RetryAttempt);
+      StrBuf_AppendU64(&status, ev->Retry.Attempt);
       StrBuf_AppendChar(&status, '/');
-      StrBuf_AppendU64(&status, ev.RetryMaxAttempts);
+      StrBuf_AppendU64(&status, ev->Retry.MaxAttempts);
       StrBuf_AppendChar(&status, ')');
       t->RetryStatus = StrBuf_View(&status);
       t->State = TuiState::Retry;
       break;
     }
-    case AgentEventKind::RetryEnd:
+    case AgentHarnessEventKind::TransientRetryEnd:
       t->RetryStatus = {};
       if (t->State == TuiState::Retry) t->State = TuiState::Thinking;
       break;
-    case AgentEventKind::QueueUpdate:
-      t->QueuedCount = ev.SteerCount + ev.FollowUpCount + ev.NextTurnCount;
+    case AgentHarnessEventKind::TransientQueueUpdate:
+      t->QueuedCount =
+          ev->Queue.SteerCount + ev->Queue.FollowUpCount + ev->Queue.NextTurnCount;
       break;
     default: break;
   }

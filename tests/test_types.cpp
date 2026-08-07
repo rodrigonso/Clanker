@@ -1,4 +1,3 @@
-#include "agent/event.h"
 #include "agent/tool.h"
 #include "base/arena.h"
 #include "check.h"

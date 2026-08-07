@@ -3,7 +3,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "agent/event.h"
 #include "agent/event_json.h"
 #include "agent/harness.h"
 #include "app/command.h"
@@ -95,6 +94,20 @@ struct AuthWarmup {
   bool Joined;
 };
 
+struct HarnessEventPump;
+
+// Human-facing consumer of the ordered watch stream. The pump owns event
+// ordering and tool-completion dedup; consumers just render what arrives.
+struct HarnessEventSink {
+  void* User;
+  void (*OnEvent)(void* user, const AgentHarnessEvent* ev);
+};
+
+static void HarnessEventSink_Emit(const HarnessEventSink& sink,
+                                  const AgentHarnessEvent* ev) {
+  if (sink.OnEvent) sink.OnEvent(sink.User, ev);
+}
+
 struct InteractiveRuntime {
   Arena* Mem;
   StrView AuthPath;
@@ -120,7 +133,7 @@ struct InteractiveRuntime {
   PromptContext* Prompt;
   PromptContextOptions PromptOptions;
   HarnessEventPump* EventPump;
-  AgentSink EventSink;
+  HarnessEventSink EventSink;
  bool AutoOpen;
   Tui* TuiView;
   AppAuth* Auth;
@@ -396,32 +409,36 @@ static void PrintPreview(StrView t) {
   fputs("\x1b[0m\n", stdout);
 }
 
-static void ReplSink(void* user, const AgentEvent& ev) {
+static void ReplSink(void* user, const AgentHarnessEvent* ev) {
   (void)user;
-  switch (ev.Kind) {
-    case AgentEventKind::MessageUpdate:
-      if (ev.Stream.Kind == StreamEventKind::TextDelta) {
-        fwrite(ev.Stream.Delta.Data, 1, ev.Stream.Delta.Length, stdout);
+  switch (ev->Kind) {
+    case AgentHarnessEventKind::TransientStream:
+      if (ev->Stream.Kind == StreamEventKind::TextDelta) {
+        fwrite(ev->Stream.Delta.Data, 1, ev->Stream.Delta.Length, stdout);
         fflush(stdout);
       }
       break;
-    case AgentEventKind::ToolStart:
-      printf("\n\x1b[36m\xe2\x9a\x99 %.*s\x1b[0m \x1b[90m%.*s\x1b[0m\n", (int)ev.ToolName.Length,
-             ev.ToolName.Data, (int)ev.ToolArgsJson.Length, ev.ToolArgsJson.Data);
+    case AgentHarnessEventKind::TransientToolStart:
+      printf("\n\x1b[36m\xe2\x9a\x99 %.*s\x1b[0m \x1b[90m%.*s\x1b[0m\n",
+             (int)ev->Tool.Name.Length, ev->Tool.Name.Data,
+             (int)ev->Tool.ArgumentsJson.Length, ev->Tool.ArgumentsJson.Data);
       break;
-    case AgentEventKind::ToolEnd:
-      if (ev.Result && ev.Result->Content.Count > 0) PrintPreview(ev.Result->Content.Data[0].Text);
+    case AgentHarnessEventKind::TransientToolEnd:
+      if (ev->Tool.Result.Content.Count > 0)
+        PrintPreview(ev->Tool.Result.Content.Data[0].Text);
       break;
-    case AgentEventKind::MessageEnd:
-      if (ev.Msg && ev.Msg->Kind == Role::Assistant) putchar('\n');
+    case AgentHarnessEventKind::DurableRecord:
+      if (ev->Record->Kind == SessionRecordKind::Message &&
+          ev->Record->MessageEntry.Value.Kind == Role::Assistant)
+        putchar('\n');
       break;
-    case AgentEventKind::RetryStart:
+    case AgentHarnessEventKind::TransientRetryStart:
       fprintf(stderr, "\nretrying %s in %u ms (retry %u of %u): %.*s\n",
-              ev.Layer == RetryLayer::ProviderRequest
+              ev->Retry.Layer == RetryLayer::ProviderRequest
                   ? "provider request"
                   : "assistant turn",
-              ev.RetryDelayMs, ev.RetryAttempt, ev.RetryMaxAttempts,
-              (int)ev.RetryError.Length, ev.RetryError.Data);
+              ev->Retry.DelayMs, ev->Retry.Attempt, ev->Retry.MaxAttempts,
+              (int)ev->Retry.Error.Length, ev->Retry.Error.Data);
       break;
     default:
       break;
@@ -438,7 +455,7 @@ struct HarnessEventPump {
   AgentHarnessWatch Watch;
   AgentHarness* Harness;
   Tui* TuiView;
-  AgentSink Sink;
+  HarnessEventSink Sink;
   Arena CompletionMem;
   Array<StrView> LiveToolEnds;
   Thread Worker;
@@ -448,7 +465,7 @@ struct HarnessEventPump {
   volatile i32 Exited;
   bool Started;
   // `--mode json`: write raw watch events as NDJSON instead of translating them
-  // into the human-facing AgentSink.
+  // into the human-facing HarnessEventSink.
   bool JsonOutput;
 };
 
@@ -484,98 +501,45 @@ static bool ConsumeLiveToolEnd(HarnessEventPump* pump, StrView toolCallId) {
   return false;
 }
 
+// Forwards the watch stream to the active consumer, collapsing the two sources
+// of a tool completion into one. A tool's result surfaces twice -- once as the
+// live TransientToolEnd and again as the durable ToolResult record -- so
+// whichever arrives first wins and the other is suppressed.
 static void PumpHarnessEvent(HarnessEventPump* pump,
                              const AgentHarnessEvent* event) {
-  AgentEvent translated = {};
-  switch (event->Kind) {
-    case AgentHarnessEventKind::TransientAgentStart:
-      translated.Kind = AgentEventKind::AgentStart;
-      AgentSink_Emit(pump->Sink, translated);
-      break;
-    case AgentHarnessEventKind::TransientAgentEnd:
-      translated.Kind = AgentEventKind::AgentEnd;
-      AgentSink_Emit(pump->Sink, translated);
-      ClearLiveToolEnds(pump);
-      break;
-    case AgentHarnessEventKind::TransientTurnStart:
-      translated.Kind = AgentEventKind::TurnStart;
-      AgentSink_Emit(pump->Sink, translated);
-      break;
-    case AgentHarnessEventKind::TransientTurnEnd:
-      translated.Kind = AgentEventKind::TurnEnd;
-      AgentSink_Emit(pump->Sink, translated);
-      break;
-    case AgentHarnessEventKind::TransientStream:
-      translated.Kind = AgentEventKind::MessageUpdate;
-      translated.Stream = event->Stream;
-      AgentSink_Emit(pump->Sink, translated);
-      break;
-    case AgentHarnessEventKind::TransientToolStart:
-      translated.Kind = AgentEventKind::ToolStart;
-      translated.ToolCallId = event->ToolCallId;
-      translated.ToolName = event->ToolName;
-      translated.ToolArgsJson = event->ToolArgsJson;
-      AgentSink_Emit(pump->Sink, translated);
-      break;
-    case AgentHarnessEventKind::TransientToolUpdate:
-    case AgentHarnessEventKind::TransientToolEnd:
-      translated.Kind =
-          event->Kind == AgentHarnessEventKind::TransientToolUpdate
-              ? AgentEventKind::ToolUpdate
-              : AgentEventKind::ToolEnd;
-      translated.ToolCallId = event->ToolCallId;
-      translated.ToolName = event->ToolName;
-      translated.Result = &event->ToolResultValue;
-      translated.IsError = event->IsError;
-      AgentSink_Emit(pump->Sink, translated);
-      if (event->Kind == AgentHarnessEventKind::TransientToolEnd)
-        RememberLiveToolEnd(pump, event->ToolCallId);
-      break;
-    case AgentHarnessEventKind::TransientRetryStart:
-    case AgentHarnessEventKind::TransientRetryEnd:
-      translated.Kind =
-          event->Kind == AgentHarnessEventKind::TransientRetryStart
-              ? AgentEventKind::RetryStart
-              : AgentEventKind::RetryEnd;
-      translated.Layer = event->Layer;
-      translated.RetryAttempt = event->RetryAttempt;
-      translated.RetryMaxAttempts = event->RetryMaxAttempts;
-      translated.RetryDelayMs = event->RetryDelayMs;
-      translated.RetryError = event->RetryError;
-      AgentSink_Emit(pump->Sink, translated);
-      break;
-    case AgentHarnessEventKind::TransientQueueUpdate:
-      translated.Kind = AgentEventKind::QueueUpdate;
-      translated.SteerCount = event->SteerCount;
-      translated.FollowUpCount = event->FollowUpCount;
-      translated.NextTurnCount = event->NextTurnCount;
-      AgentSink_Emit(pump->Sink, translated);
-      break;
-    case AgentHarnessEventKind::DurableRecord: {
-      const SessionRecord* record = &event->Record;
-      if (record->Kind != SessionRecordKind::Message) break;
-      if (record->MessageEntry.Value.Kind == Role::Assistant) {
-        translated.Kind = AgentEventKind::MessageEnd;
-        translated.Msg = &record->MessageEntry.Value;
-        AgentSink_Emit(pump->Sink, translated);
-      } else if (record->MessageEntry.Value.Kind == Role::ToolResult) {
-        if (ConsumeLiveToolEnd(
-                pump, record->MessageEntry.Value.ToolCallId))
-          break;
-        ToolResult toolResult = {};
-        toolResult.Content = record->MessageEntry.Value.Content;
-        translated.Kind = AgentEventKind::ToolEnd;
-        translated.ToolCallId = record->MessageEntry.Value.ToolCallId;
-        translated.Result = &toolResult;
-        translated.IsError = record->MessageEntry.Value.IsError;
-        AgentSink_Emit(pump->Sink, translated);
-      }
-      break;
-    }
-    case AgentHarnessEventKind::TransientCancelRequested:
-    default:
-      break;
+  if (event->Kind == AgentHarnessEventKind::TransientToolEnd) {
+    HarnessEventSink_Emit(pump->Sink, event);
+    RememberLiveToolEnd(pump, event->Tool.CallId);
+    return;
   }
+  if (event->Kind == AgentHarnessEventKind::TransientAgentEnd) {
+    HarnessEventSink_Emit(pump->Sink, event);
+    ClearLiveToolEnds(pump);
+    return;
+  }
+  if (event->Kind != AgentHarnessEventKind::DurableRecord) {
+    HarnessEventSink_Emit(pump->Sink, event);
+    return;
+  }
+
+  const SessionRecord* record = event->Record;
+  if (record->Kind != SessionRecordKind::Message) return;
+  const Message* message = &record->MessageEntry.Value;
+  if (message->Kind == Role::Assistant) {
+    HarnessEventSink_Emit(pump->Sink, event);
+    return;
+  }
+  if (message->Kind != Role::ToolResult) return;
+  if (ConsumeLiveToolEnd(pump, message->ToolCallId)) return;
+  // No live end was seen for this call, so replay the durable result in the
+  // same shape a live completion would have taken.
+  AgentHarnessEvent replay = {};
+  replay.Kind = AgentHarnessEventKind::TransientToolEnd;
+  replay.Cursor = event->Cursor;
+  replay.Tool.CallId = message->ToolCallId;
+  replay.Tool.Result.Content = message->Content;
+  replay.Tool.IsError = message->IsError;
+  HarnessEventSink_Emit(pump->Sink, &replay);
 }
 
 static void RunHarnessEventPump(void* user) {
@@ -615,22 +579,22 @@ static void RunHarnessEventPump(void* user) {
     // lifecycle, not whatever this process happens to be rendering.
     switch (event.Kind) {
       case AgentHarnessEventKind::TransientToolStart:
-        HookRunner_Dispatch(g_hooks, HookEvent::PreToolUse, event.ToolName);
+        HookRunner_Dispatch(g_hooks, HookEvent::PreToolUse, event.Tool.Name);
         break;
       case AgentHarnessEventKind::TransientToolEnd:
-        HookRunner_Dispatch(g_hooks, HookEvent::PostToolUse, event.ToolName);
+        HookRunner_Dispatch(g_hooks, HookEvent::PostToolUse, event.Tool.Name);
         break;
       case AgentHarnessEventKind::TransientAgentStart:
         // Compaction is machinery, not a prompt the user submitted.
-        if (event.Turn == AgentTurnKind::Run)
+        if (event.Turn.Kind == AgentTurnKind::Run)
           HookRunner_Dispatch(g_hooks, HookEvent::UserPromptSubmit, StrView{});
         break;
       case AgentHarnessEventKind::TransientAgentEnd:
         // A cancel is how a user stops a run they no longer want, so it ends
         // the turn normally; only an actual error is reported as a failure.
-        if (event.Turn == AgentTurnKind::Run)
+        if (event.Turn.Kind == AgentTurnKind::Run)
           HookRunner_Dispatch(g_hooks,
-                              event.Outcome == AgentTurnOutcome::Failed
+                              event.Turn.Outcome == AgentTurnOutcome::Failed
                                   ? HookEvent::StopFailure
                                   : HookEvent::Stop,
                               StrView{});
@@ -649,7 +613,7 @@ static void RunHarnessEventPump(void* user) {
 }
 
 static SessionResult StartHarnessEventPump(Arena* arena, AgentHarness* harness,
-                                           AgentSink sink,
+                                           HarnessEventSink sink,
                                            Tui* tuiView,
                                            HarnessEventPump* pump,
                                            AgentHarnessSnapshot* snapshot,
@@ -2956,7 +2920,7 @@ static void RunPlainRepl(InteractiveRuntime* rt) {
   rt->TuiView = nullptr;
   HarnessEventPump pump = {};
   AgentHarnessSnapshot snapshot = {};
-  AgentSink sink = {nullptr, ReplSink};
+  HarnessEventSink sink = {nullptr, ReplSink};
   SessionResult watching =
       StartHarnessEventPump(rt->Mem, rt->Harness, sink, nullptr, &pump,
                             &snapshot);
@@ -3028,7 +2992,7 @@ static void RunTuiRepl(InteractiveRuntime* rt) {
 
   HarnessEventPump pump = {};
   AgentHarnessSnapshot snapshot = {};
-  AgentSink sink = {&tui, Tui_AgentEvent};
+  HarnessEventSink sink = {&tui, Tui_HarnessEvent};
   SessionResult watching =
       StartHarnessEventPump(rt->Mem, rt->Harness, sink, &tui, &pump,
                             &snapshot);
@@ -3566,7 +3530,7 @@ int main(int argc, char** argv) {
     Http_GlobalInit();
     HarnessEventPump pump = {};
     AgentHarnessSnapshot snapshot = {};
-    AgentSink sink = {nullptr, ReplSink};
+    HarnessEventSink sink = {nullptr, ReplSink};
     SessionResult watching =
         StartHarnessEventPump(&arena, &harness, sink, nullptr, &pump,
                               &snapshot, jsonMode);

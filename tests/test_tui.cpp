@@ -1,4 +1,3 @@
-#include "agent/event.h"
 #include "agent/harness.h"
 #include <string.h>
 #include "base/arena.h"
@@ -11,6 +10,18 @@
 namespace {
 
 bool g_displayDrainsOk;
+
+// The assistant turn's completion reaches the TUI as the durable record the
+// harness appends, not as a transient event.
+AgentHarnessEvent AssistantRecordEvent(SessionRecord* record, const Message* message) {
+  *record = SessionRecord{};
+  record->Kind = SessionRecordKind::Message;
+  record->MessageEntry.Value = *message;
+  AgentHarnessEvent ev = {};
+  ev.Kind = AgentHarnessEventKind::DurableRecord;
+  ev.Record = record;
+  return ev;
+}
 
 bool AnyRow(Arena* a, Tui* t, const char* needle) {
   for (u32 i = 0; i < LineModel_Count(&t->Model); i++) {
@@ -142,7 +153,7 @@ bool SessionUiCleared(const Tui* t, usize usedBefore) {
          t->Edit.History.Count == 0 && LineEdit_Empty(&t->ModalEdit) &&
          t->ModalEdit.History.Count == 0 && !Tui_HasPendingDisplay(t) &&
          t->DisplayHead == 0 && t->Use.Input == 0 && t->Use.Output == 0 &&
-         t->State == TuiState::Idle && t->StateTool.Length == 0 && t->TurnStartMs == 0 &&
+         t->State == TuiState::Idle && t->StateTool.Length == 0 &&
          t->QueuedCount == 0 && t->Follow && t->Top == 0 && t->LastTop == 0 &&
          t->LastPaneH == 0 && t->HoveredEntryId == 0 && t->PressedEntryId == 0 &&
          !t->HasMouse && !t->InputUi.Dragging && t->Ui.Captured == 0 &&
@@ -269,45 +280,38 @@ void TestTui() {
   Message m = {};
   m.Kind = Role::Assistant;
 
-  AgentEvent ev = {};
-  ev.Kind = AgentEventKind::AgentStart;
-  Tui_AgentEvent(&t, ev);
+  AgentHarnessEvent ev = {};
+  ev.Kind = AgentHarnessEventKind::TransientAgentStart;
+  Tui_HarnessEvent(&t, &ev);
   CHECK(t.State == TuiState::Thinking);
 
   ev = {};
-  ev.Kind = AgentEventKind::RetryStart;
-  ev.Layer = RetryLayer::AssistantTurn;
-  ev.RetryAttempt = 1;
-  ev.RetryMaxAttempts = 3;
-  ev.RetryDelayMs = 250;
-  Tui_AgentEvent(&t, ev);
+  ev.Kind = AgentHarnessEventKind::TransientRetryStart;
+  ev.Retry.Layer = RetryLayer::AssistantTurn;
+  ev.Retry.Attempt = 1;
+  ev.Retry.MaxAttempts = 3;
+  ev.Retry.DelayMs = 250;
+  Tui_HarnessEvent(&t, &ev);
   CHECK_ALL(t.State == TuiState::Retry,
             StrView_Contains(t.RetryStatus, "assistant turn"),
             StrView_Contains(t.RetryStatus, "250 ms"));
-  ev.Kind = AgentEventKind::RetryEnd;
-  Tui_AgentEvent(&t, ev);
+  ev.Kind = AgentHarnessEventKind::TransientRetryEnd;
+  Tui_HarnessEvent(&t, &ev);
   CHECK_ALL(t.State == TuiState::Thinking, !t.RetryStatus.Length);
 
-  // Mirror the real agent loop: message_start for the assistant turn carries a
-  // not-yet-built message (null), so the entry must be begun lazily on the first
-  // text delta. (Passing &m here previously masked that the streamed assistant
-  // text was being dropped in the TUI.)
+  // The assistant entry is begun lazily on the first text delta, so a turn that
+  // streams no text (tool-only) renders no assistant header at all.
   ev = {};
-  ev.Kind = AgentEventKind::MessageStart;
-  ev.Msg = nullptr;
-  Tui_AgentEvent(&t, ev);
-
-  ev = {};
-  ev.Kind = AgentEventKind::MessageUpdate;
+  ev.Kind = AgentHarnessEventKind::TransientStream;
   ev.Stream.Kind = StreamEventKind::TextDelta;
   ev.Stream.Delta = SVL("Hello ");
-  Tui_AgentEvent(&t, ev);
+  Tui_HarnessEvent(&t, &ev);
   CHECK(Tui_AdvanceStream(&t, 1000));
   CHECK_ALL(t.Model.Entries.Count == 1,
             t.Model.Entries.Data[0].Text.Content.Length ==
                 sizeof("Hello ") - 1);
   ev.Stream.Delta = SVL("**world**");
-  Tui_AgentEvent(&t, ev);
+  Tui_HarnessEvent(&t, &ev);
   CHECK(Tui_AdvanceStream(&t, 1016));
   CHECK_ALL(t.Model.Entries.Data[0].Text.Content.Length ==
                 sizeof("Hello **world**") - 1,
@@ -316,17 +320,16 @@ void TestTui() {
   m.Stop = StopReason::ToolUse;
   m.Use.Input = 12;
   m.Use.Output = 7;
-  ev = {};
-  ev.Kind = AgentEventKind::MessageEnd;
-  ev.Msg = &m;
-  Tui_AgentEvent(&t, ev);
+  SessionRecord assistantRecord = {};
+  ev = AssistantRecordEvent(&assistantRecord, &m);
+  Tui_HarnessEvent(&t, &ev);
 
   ev = {};
-  ev.Kind = AgentEventKind::ToolStart;
-  ev.ToolCallId = SVL("shell-1");
-  ev.ToolName = SVL("shell");
-  ev.ToolArgsJson = SVL("{\"command\":\"ls\"}");
-  Tui_AgentEvent(&t, ev);
+  ev.Kind = AgentHarnessEventKind::TransientToolStart;
+  ev.Tool.CallId = SVL("shell-1");
+  ev.Tool.Name = SVL("shell");
+  ev.Tool.ArgumentsJson = SVL("{\"command\":\"ls\"}");
+  Tui_HarnessEvent(&t, &ev);
   CHECK(t.State == TuiState::Streaming);
   CHECK(t.Model.Entries.Count == 1);
 
@@ -334,14 +337,14 @@ void TestTui() {
   tr.Content = Array_Make<Content>(&a, 1);
   Array_Push(&tr.Content, Content_Text(SVL("hello-from-shell")));
   ev = {};
-  ev.Kind = AgentEventKind::ToolEnd;
-  ev.ToolCallId = SVL("shell-1");
-  ev.Result = &tr;
-  Tui_AgentEvent(&t, ev);
+  ev.Kind = AgentHarnessEventKind::TransientToolEnd;
+  ev.Tool.CallId = SVL("shell-1");
+  ev.Tool.Result = tr;
+  Tui_HarnessEvent(&t, &ev);
 
   ev = {};
-  ev.Kind = AgentEventKind::AgentEnd;
-  Tui_AgentEvent(&t, ev);
+  ev.Kind = AgentHarnessEventKind::TransientAgentEnd;
+  Tui_HarnessEvent(&t, &ev);
   CHECK_ALL(!t.AgentRunning, t.State == TuiState::Streaming);
   CHECK(Tui_AdvanceStream(&t, 1032));
   CHECK_ALL(t.Model.Entries.Count == 2,
@@ -708,10 +711,9 @@ void TestTui() {
     Message interrupted = {};
     interrupted.Kind = Role::Assistant;
     interrupted.Stop = StopReason::Aborted;
-    AgentEvent event = {};
-    event.Kind = AgentEventKind::MessageEnd;
-    event.Msg = &interrupted;
-    Tui_AgentEvent(&te, event);
+    SessionRecord interruptedRecord = {};
+    AgentHarnessEvent event = AssistantRecordEvent(&interruptedRecord, &interrupted);
+    Tui_HarnessEvent(&te, &event);
     DrainDisplay(&te);
     CHECK(AnyRow(&ae, &te, "Interrupted by user."));
 
@@ -878,30 +880,29 @@ void TestTui() {
     Tui tq;
     Tui_InitModel(&tq, &aq, oq);
 
-    AgentEvent q = {};
-    q.Kind = AgentEventKind::AgentStart;
-    Tui_AgentEvent(&tq, q);
+    AgentHarnessEvent q = {};
+    q.Kind = AgentHarnessEventKind::TransientAgentStart;
+    Tui_HarnessEvent(&tq, &q);
     q = {};
-    q.Kind = AgentEventKind::MessageUpdate;
+    q.Kind = AgentHarnessEventKind::TransientStream;
     q.Stream.Kind = StreamEventKind::TextDelta;
     q.Stream.Delta = SVL("first response");
-    Tui_AgentEvent(&tq, q);
+    Tui_HarnessEvent(&tq, &q);
 
     Message first = {};
     first.Kind = Role::Assistant;
     first.Stop = StopReason::ToolUse;
-    q = {};
-    q.Kind = AgentEventKind::MessageEnd;
-    q.Msg = &first;
-    Tui_AgentEvent(&tq, q);
+    SessionRecord firstRecord = {};
+    q = AssistantRecordEvent(&firstRecord, &first);
+    Tui_HarnessEvent(&tq, &q);
 
     char args[] = "{\"command\":\"echo original\"}";
     q = {};
-    q.Kind = AgentEventKind::ToolStart;
-    q.ToolCallId = SVL("queued-tool");
-    q.ToolName = SVL("shell");
-    q.ToolArgsJson = StrView{args, (u32)sizeof(args) - 1};
-    Tui_AgentEvent(&tq, q);
+    q.Kind = AgentHarnessEventKind::TransientToolStart;
+    q.Tool.CallId = SVL("queued-tool");
+    q.Tool.Name = SVL("shell");
+    q.Tool.ArgumentsJson = StrView{args, (u32)sizeof(args) - 1};
+    Tui_HarnessEvent(&tq, &q);
 
     char resultText[] = "original result";
     ToolResult result = {};
@@ -909,29 +910,28 @@ void TestTui() {
     Array_Push(&result.Content,
                Content_Text(StrView{resultText, (u32)sizeof(resultText) - 1}));
     q = {};
-    q.Kind = AgentEventKind::ToolEnd;
-    q.ToolCallId = SVL("queued-tool");
-    q.Result = &result;
-    Tui_AgentEvent(&tq, q);
+    q.Kind = AgentHarnessEventKind::TransientToolEnd;
+    q.Tool.CallId = SVL("queued-tool");
+    q.Tool.Result = result;
+    Tui_HarnessEvent(&tq, &q);
 
     memset(args, 'x', sizeof(args) - 1);
     memset(resultText, 'z', sizeof(resultText) - 1);
 
     q = {};
-    q.Kind = AgentEventKind::MessageUpdate;
+    q.Kind = AgentHarnessEventKind::TransientStream;
     q.Stream.Kind = StreamEventKind::TextDelta;
     q.Stream.Delta = SVL("second response");
-    Tui_AgentEvent(&tq, q);
+    Tui_HarnessEvent(&tq, &q);
     Message second = {};
     second.Kind = Role::Assistant;
     second.Stop = StopReason::Stop;
+    SessionRecord secondRecord = {};
+    q = AssistantRecordEvent(&secondRecord, &second);
+    Tui_HarnessEvent(&tq, &q);
     q = {};
-    q.Kind = AgentEventKind::MessageEnd;
-    q.Msg = &second;
-    Tui_AgentEvent(&tq, q);
-    q = {};
-    q.Kind = AgentEventKind::AgentEnd;
-    Tui_AgentEvent(&tq, q);
+    q.Kind = AgentHarnessEventKind::TransientAgentEnd;
+    Tui_HarnessEvent(&tq, &q);
 
     CHECK(tq.Model.Entries.Count == 0);
     DrainDisplay(&tq);
@@ -958,12 +958,12 @@ void TestTui() {
     Tui t4;
     Tui_InitModel(&t4, &a4, o4);
 
-    AgentEvent start = {};
-    start.Kind = AgentEventKind::ToolStart;
-    start.ToolCallId = SVL("long");
-    start.ToolName = SVL("shell");
-    start.ToolArgsJson = SVL("{\"command\":\"long-output\"}");
-    Tui_AgentEvent(&t4, start);
+    AgentHarnessEvent start = {};
+    start.Kind = AgentHarnessEventKind::TransientToolStart;
+    start.Tool.CallId = SVL("long");
+    start.Tool.Name = SVL("shell");
+    start.Tool.ArgumentsJson = SVL("{\"command\":\"long-output\"}");
+    Tui_HarnessEvent(&t4, &start);
 
     char output[1700];
     for (u32 i = 0; i < sizeof(output); i++) output[i] = (i == 20) ? '\x1b' : 'x';
@@ -971,11 +971,11 @@ void TestTui() {
     longResult.Content = Array_Make<Content>(&a4, 1);
     Array_Push(&longResult.Content, Content_Text(StrView{output, (u32)sizeof(output)}));
 
-    AgentEvent end = {};
-    end.Kind = AgentEventKind::ToolEnd;
-    end.ToolCallId = SVL("long");
-    end.Result = &longResult;
-    Tui_AgentEvent(&t4, end);
+    AgentHarnessEvent end = {};
+    end.Kind = AgentHarnessEventKind::TransientToolEnd;
+    end.Tool.CallId = SVL("long");
+    end.Tool.Result = longResult;
+    Tui_HarnessEvent(&t4, &end);
     DrainDisplay(&t4);
 
     CHECK_ALL(
@@ -1104,11 +1104,11 @@ void TestTui() {
     ToolResult inserted = {};
     inserted.Content = Array_Make<Content>(&a6, 1);
     Array_Push(&inserted.Content, Content_Text(SVL("preview one\npreview two")));
-    AgentEvent finish = {};
-    finish.Kind = AgentEventKind::ToolEnd;
-    finish.ToolCallId = SVL("early");
-    finish.Result = &inserted;
-    Tui_AgentEvent(&t6, finish);
+    AgentHarnessEvent finish = {};
+    finish.Kind = AgentHarnessEventKind::TransientToolEnd;
+    finish.Tool.CallId = SVL("early");
+    finish.Tool.Result = inserted;
+    Tui_HarnessEvent(&t6, &finish);
     DrainDisplay(&t6);
     CHECK(LineModel_RowEntryId(&t6.Model, t6.Top) == completionAnchorId);
 
@@ -1125,21 +1125,21 @@ void TestTui() {
     Tui tu;
     Tui_InitModel(&tu, &au, ou);
 
-    AgentEvent start = {};
-    start.Kind = AgentEventKind::ToolStart;
-    start.ToolCallId = SVL("streaming-shell");
-    start.ToolName = SVL("shell");
-    start.ToolArgsJson = SVL("{\"command\":\"echo\"}");
-    Tui_AgentEvent(&tu, start);
+    AgentHarnessEvent start = {};
+    start.Kind = AgentHarnessEventKind::TransientToolStart;
+    start.Tool.CallId = SVL("streaming-shell");
+    start.Tool.Name = SVL("shell");
+    start.Tool.ArgumentsJson = SVL("{\"command\":\"echo\"}");
+    Tui_HarnessEvent(&tu, &start);
 
     ToolResult partial = {};
     partial.Content = Array_Make<Content>(&au, 1);
     Array_Push(&partial.Content, Content_Text(SVL("partial output")));
-    AgentEvent update = {};
-    update.Kind = AgentEventKind::ToolUpdate;
-    update.ToolCallId = SVL("streaming-shell");
-    update.Result = &partial;
-    for (u32 i = 0; i < 100; i++) Tui_AgentEvent(&tu, update);
+    AgentHarnessEvent update = {};
+    update.Kind = AgentHarnessEventKind::TransientToolUpdate;
+    update.Tool.CallId = SVL("streaming-shell");
+    update.Tool.Result = partial;
+    for (u32 i = 0; i < 100; i++) Tui_HarnessEvent(&tu, &update);
     CHECK_ALL(tu.DisplayEvents.Count == 2,
               tu.ToolUpdateMem.Used <= 1501);
     DrainDisplay(&tu);
@@ -1149,7 +1149,7 @@ void TestTui() {
                   StrBuf_View(&tu.Model.Entries.Data[0].Tool.Preview),
                   "partial output"));
     for (u32 i = 0; i < 10; i++) {
-      Tui_AgentEvent(&tu, update);
+      Tui_HarnessEvent(&tu, &update);
       DrainDisplay(&tu);
     }
     CHECK(tu.ToolUpdateMem.Used <= 1501);
@@ -1157,26 +1157,26 @@ void TestTui() {
     ToolResult complete = {};
     complete.Content = Array_Make<Content>(&au, 1);
     Array_Push(&complete.Content, Content_Text(SVL("final output")));
-    AgentEvent finish = {};
-    finish.Kind = AgentEventKind::ToolEnd;
-    finish.ToolCallId = SVL("streaming-shell");
-    finish.Result = &complete;
-    Tui_AgentEvent(&tu, finish);
-    Tui_AgentEvent(&tu, finish);
+    AgentHarnessEvent finish = {};
+    finish.Kind = AgentHarnessEventKind::TransientToolEnd;
+    finish.Tool.CallId = SVL("streaming-shell");
+    finish.Tool.Result = complete;
+    Tui_HarnessEvent(&tu, &finish);
+    Tui_HarnessEvent(&tu, &finish);
     DrainDisplay(&tu);
     CHECK_ALL(tu.Model.Entries.Data[0].Tool.Done,
               StrView_Contains(
                   StrBuf_View(&tu.Model.Entries.Data[0].Tool.Preview),
                   "final output"));
 
-    AgentEvent longUpdate = update;
-    longUpdate.ToolCallId = SVL("long-running-shell");
-    Tui_AgentEvent(&tu, longUpdate);
+    AgentHarnessEvent longUpdate = update;
+    longUpdate.Tool.CallId = SVL("long-running-shell");
+    Tui_HarnessEvent(&tu, &longUpdate);
     DrainDisplay(&tu);
     for (u32 i = 0; i < 10; i++) {
-      Tui_AgentEvent(&tu, update);
+      Tui_HarnessEvent(&tu, &update);
       DrainDisplay(&tu);
-      Tui_AgentEvent(&tu, finish);
+      Tui_HarnessEvent(&tu, &finish);
       DrainDisplay(&tu);
     }
     CHECK(tu.ToolUpdateMem.Used <= 3002);
@@ -1850,7 +1850,6 @@ void TestTui() {
     resetTui.Use.Output = 7;
     resetTui.State = TuiState::Streaming;
     resetTui.StateTool = SVL("old tool");
-    resetTui.TurnStartMs = 99;
     resetTui.QueuedCount = 3;
     resetTui.Top = 4;
     resetTui.LastTop = 3;

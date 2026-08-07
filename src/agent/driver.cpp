@@ -24,13 +24,12 @@ bool ResolveProviderInput(AgentHarnessProviderInput* input) {
   return true;
 }
 
-// Forwards every provider StreamEvent both to watchers (as a transient
-// harness event) and to the caller's own downstream sink (e.g. TUI/REPL
-// rendering), exactly once per event, in delivery order.
+// Forwards every provider StreamEvent to watchers as a transient harness
+// event, exactly once per event, in delivery order. The watch stream is the
+// only delivery path; consumers subscribe through AgentHarness_Watch.
 void OnProviderStreamEvent(void* user, const StreamEvent& event) {
   AgentHarness* harness = (AgentHarness*)user;
   AgentHarness_PublishStream(harness, &event);
-  StreamSink_Emit(harness->Config.StreamEvents, event);
 }
 
 void OnProviderRequestRetry(void* user, const HttpRetryEvent* retry) {

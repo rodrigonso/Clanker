@@ -36,22 +36,22 @@ void WriteToolContent(JsonWriter* w, const ToolResult* result) {
 }
 
 void WriteToolIdentity(JsonWriter* w, const AgentHarnessEvent* event) {
-  JsonWrite_String(w, "id", event->ToolCallId);
-  JsonWrite_String(w, "name", event->ToolName);
+  JsonWrite_String(w, "id", event->Tool.CallId);
+  JsonWrite_String(w, "name", event->Tool.Name);
 }
 
 void WriteOutcome(JsonWriter* w, const AgentHarnessEvent* event) {
-  JsonWrite_String(w, "turn", TurnKindName(event->Turn));
-  JsonWrite_String(w, "outcome", OutcomeName(event->Outcome));
-  if (event->Error.Length) JsonWrite_String(w, "error", event->Error);
+  JsonWrite_String(w, "turn", TurnKindName(event->Turn.Kind));
+  JsonWrite_String(w, "outcome", OutcomeName(event->Turn.Outcome));
+  if (event->Turn.Error.Length) JsonWrite_String(w, "error", event->Turn.Error);
 }
 
 void WriteRetry(JsonWriter* w, const AgentHarnessEvent* event) {
-  JsonWrite_String(w, "layer", RetryLayerName(event->Layer));
-  JsonWrite_U64(w, "attempt", event->RetryAttempt);
-  JsonWrite_U64(w, "maxAttempts", event->RetryMaxAttempts);
-  JsonWrite_U64(w, "delayMs", event->RetryDelayMs);
-  if (event->RetryError.Length) JsonWrite_String(w, "error", event->RetryError);
+  JsonWrite_String(w, "layer", RetryLayerName(event->Retry.Layer));
+  JsonWrite_U64(w, "attempt", event->Retry.Attempt);
+  JsonWrite_U64(w, "maxAttempts", event->Retry.MaxAttempts);
+  JsonWrite_U64(w, "delayMs", event->Retry.DelayMs);
+  if (event->Retry.Error.Length) JsonWrite_String(w, "error", event->Retry.Error);
 }
 
 // Only the deltas carry text a consumer can render; the structural start/end
@@ -85,14 +85,14 @@ bool AgentEventJson_Write(StrBuf* out, const AgentHarnessEvent* event) {
   switch (event->Kind) {
     case AgentHarnessEventKind::DurableRecord:
       JsonWrite_String(&w, "type", SVL("record"));
-      JsonWrite_String(&w, "kind", SessionRecordKind_Name(event->Record.Kind));
+      JsonWrite_String(&w, "kind", SessionRecordKind_Name(event->Record->Kind));
       JsonWrite_Key(&w, "record");
-      if (!SessionResult_IsOk(SessionRecord_Encode(out, &event->Record)))
+      if (!SessionResult_IsOk(SessionRecord_Encode(out, event->Record)))
         return reject();
       break;
     case AgentHarnessEventKind::TransientAgentStart:
       JsonWrite_String(&w, "type", SVL("agent_start"));
-      JsonWrite_String(&w, "turn", TurnKindName(event->Turn));
+      JsonWrite_String(&w, "turn", TurnKindName(event->Turn.Kind));
       break;
     case AgentHarnessEventKind::TransientAgentEnd:
       JsonWrite_String(&w, "type", SVL("agent_end"));
@@ -100,7 +100,7 @@ bool AgentEventJson_Write(StrBuf* out, const AgentHarnessEvent* event) {
       break;
     case AgentHarnessEventKind::TransientTurnStart:
       JsonWrite_String(&w, "type", SVL("turn_start"));
-      JsonWrite_String(&w, "turn", TurnKindName(event->Turn));
+      JsonWrite_String(&w, "turn", TurnKindName(event->Turn.Kind));
       break;
     case AgentHarnessEventKind::TransientTurnEnd:
       JsonWrite_String(&w, "type", SVL("turn_end"));
@@ -119,18 +119,19 @@ bool AgentEventJson_Write(StrBuf* out, const AgentHarnessEvent* event) {
       WriteToolIdentity(&w, event);
       // Arguments are already validated JSON, so embed rather than re-quote.
       JsonWrite_Key(&w, "arguments");
-      StrBuf_Append(out, event->ToolArgsJson.Length ? event->ToolArgsJson : SVL("{}"));
+      StrBuf_Append(out, event->Tool.ArgumentsJson.Length ? event->Tool.ArgumentsJson
+                                                         : SVL("{}"));
       break;
     case AgentHarnessEventKind::TransientToolUpdate:
       JsonWrite_String(&w, "type", SVL("tool_update"));
       WriteToolIdentity(&w, event);
-      WriteToolContent(&w, &event->ToolResultValue);
+      WriteToolContent(&w, &event->Tool.Result);
       break;
     case AgentHarnessEventKind::TransientToolEnd:
       JsonWrite_String(&w, "type", SVL("tool_end"));
       WriteToolIdentity(&w, event);
-      JsonWrite_Bool(&w, "isError", event->IsError);
-      WriteToolContent(&w, &event->ToolResultValue);
+      JsonWrite_Bool(&w, "isError", event->Tool.IsError);
+      WriteToolContent(&w, &event->Tool.Result);
       break;
     case AgentHarnessEventKind::TransientRetryStart:
       JsonWrite_String(&w, "type", SVL("retry_start"));
@@ -142,9 +143,9 @@ bool AgentEventJson_Write(StrBuf* out, const AgentHarnessEvent* event) {
       break;
     case AgentHarnessEventKind::TransientQueueUpdate:
       JsonWrite_String(&w, "type", SVL("queue_update"));
-      JsonWrite_U64(&w, "steer", event->SteerCount);
-      JsonWrite_U64(&w, "followUp", event->FollowUpCount);
-      JsonWrite_U64(&w, "nextTurn", event->NextTurnCount);
+      JsonWrite_U64(&w, "steer", event->Queue.SteerCount);
+      JsonWrite_U64(&w, "followUp", event->Queue.FollowUpCount);
+      JsonWrite_U64(&w, "nextTurn", event->Queue.NextTurnCount);
       break;
     case AgentHarnessEventKind::TransientCancelRequested:
       JsonWrite_String(&w, "type", SVL("cancel_requested"));

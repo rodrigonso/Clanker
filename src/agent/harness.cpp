@@ -12,38 +12,59 @@ SessionResult EnsureIdleLocked(const AgentHarness* harness, StrView busyMessage)
   return SessionResult_Ok();
 }
 
-// Every non-durable event kind shares the same clone shape: dup whichever
-// string/array fields it uses (StrView_Dup is a no-op on an empty view, so
-// duping fields a given kind does not use is harmless).
+// Clones whichever payload the event's kind actually uses. Dispatching on kind
+// (rather than duping every field unconditionally) is required now that the
+// payloads share storage: touching an inactive member would read garbage.
 SessionResult CloneHarnessEvent(Arena* arena, const AgentHarnessEvent* source,
                                 AgentHarnessEvent* out) {
   AgentHarnessEvent clone = *source;
-  if (source->Kind == AgentHarnessEventKind::DurableRecord) {
-    SessionResult copied = SessionRecord_Clone(arena, &source->Record, &clone.Record);
-    if (!SessionResult_IsOk(copied)) return copied;
-    *out = clone;
-    return SessionResult_Ok(source->Cursor);
-  }
-  clone.Stream.Delta = StrView_Dup(arena, source->Stream.Delta);
-  clone.ToolCallId = StrView_Dup(arena, source->ToolCallId);
-  clone.ToolName = StrView_Dup(arena, source->ToolName);
-  clone.ToolArgsJson = StrView_Dup(arena, source->ToolArgsJson);
-  clone.Error = StrView_Dup(arena, source->Error);
-  clone.RetryError = StrView_Dup(arena, source->RetryError);
-  clone.ToolResultValue.Content =
-      Array_Make<Content>(arena, source->ToolResultValue.Content.Count
-                                     ? source->ToolResultValue.Content.Count
-                                     : 1);
-  for (u32 i = 0; i < source->ToolResultValue.Content.Count; i++) {
-    Content content = source->ToolResultValue.Content.Data[i];
-    content.Text = StrView_Dup(arena, content.Text);
-    content.Signature = StrView_Dup(arena, content.Signature);
-    content.ToolId = StrView_Dup(arena, content.ToolId);
-    content.ToolName = StrView_Dup(arena, content.ToolName);
-    content.ToolArgsJson = StrView_Dup(arena, content.ToolArgsJson);
-    content.ImageData = StrView_Dup(arena, content.ImageData);
-    content.ImageMimeType = StrView_Dup(arena, content.ImageMimeType);
-    Array_Push(&clone.ToolResultValue.Content, content);
+  switch (source->Kind) {
+    case AgentHarnessEventKind::DurableRecord: {
+      SessionRecord* record = ArenaPushStruct(arena, SessionRecord);
+      SessionResult copied = SessionRecord_Clone(arena, source->Record, record);
+      if (!SessionResult_IsOk(copied)) return copied;
+      clone.Record = record;
+      break;
+    }
+    case AgentHarnessEventKind::TransientStream:
+      clone.Stream.Delta = StrView_Dup(arena, source->Stream.Delta);
+      break;
+    case AgentHarnessEventKind::TransientAgentStart:
+    case AgentHarnessEventKind::TransientAgentEnd:
+    case AgentHarnessEventKind::TransientTurnStart:
+    case AgentHarnessEventKind::TransientTurnEnd:
+      clone.Turn.Error = StrView_Dup(arena, source->Turn.Error);
+      break;
+    case AgentHarnessEventKind::TransientToolStart:
+    case AgentHarnessEventKind::TransientToolUpdate:
+    case AgentHarnessEventKind::TransientToolEnd: {
+      clone.Tool.CallId = StrView_Dup(arena, source->Tool.CallId);
+      clone.Tool.Name = StrView_Dup(arena, source->Tool.Name);
+      clone.Tool.ArgumentsJson = StrView_Dup(arena, source->Tool.ArgumentsJson);
+      clone.Tool.Result.Content =
+          Array_Make<Content>(arena, source->Tool.Result.Content.Count
+                                         ? source->Tool.Result.Content.Count
+                                         : 1);
+      for (u32 i = 0; i < source->Tool.Result.Content.Count; i++) {
+        Content content = source->Tool.Result.Content.Data[i];
+        content.Text = StrView_Dup(arena, content.Text);
+        content.Signature = StrView_Dup(arena, content.Signature);
+        content.ToolId = StrView_Dup(arena, content.ToolId);
+        content.ToolName = StrView_Dup(arena, content.ToolName);
+        content.ToolArgsJson = StrView_Dup(arena, content.ToolArgsJson);
+        content.ImageData = StrView_Dup(arena, content.ImageData);
+        content.ImageMimeType = StrView_Dup(arena, content.ImageMimeType);
+        Array_Push(&clone.Tool.Result.Content, content);
+      }
+      break;
+    }
+    case AgentHarnessEventKind::TransientRetryStart:
+    case AgentHarnessEventKind::TransientRetryEnd:
+      clone.Retry.Error = StrView_Dup(arena, source->Retry.Error);
+      break;
+    case AgentHarnessEventKind::TransientQueueUpdate:
+    case AgentHarnessEventKind::TransientCancelRequested:
+      break;
   }
   *out = clone;
   return SessionResult_Ok(source->Cursor);
@@ -202,9 +223,9 @@ void CompleteAgentTurnLocked(AgentHarness* harness, AgentTurnKind turn,
                 : AgentTurnOutcome::Failed;
   AgentHarnessEvent event = {};
   event.Kind = AgentHarnessEventKind::TransientAgentEnd;
-  event.Turn = turn;
-  event.Outcome = outcome;
-  event.Error = result.Message;
+  event.Turn.Kind = turn;
+  event.Turn.Outcome = outcome;
+  event.Turn.Error = result.Message;
   PublishToWatchersLocked(harness, &event);
   ArenaReset(&harness->Work);
   harness->Running = false;
@@ -261,7 +282,7 @@ SessionResult AgentHarness_Append(AgentHarness* harness, SessionRecord* records,
     AgentHarnessEvent event = {};
     event.Kind = AgentHarnessEventKind::DurableRecord;
     event.Cursor = records[i].Seq;
-    event.Record = records[i];
+    event.Record = &records[i];
     for (u32 w = 0; w < harness->WatcherCount; w++) {
       AgentHarnessWatch* watch = harness->Watchers[w];
       if (records[i].Seq > watch->Cursor) EnqueueWatcherEvent(watch, &event);
@@ -327,7 +348,7 @@ SessionResult AgentHarness_FlushQueue(AgentHarness* harness, Array<Message>* que
 void AgentHarness_PublishAgentStart(AgentHarness* harness, AgentTurnKind turn) {
   AgentHarnessEvent event = {};
   event.Kind = AgentHarnessEventKind::TransientAgentStart;
-  event.Turn = turn;
+  event.Turn.Kind = turn;
   PublishToWatchers(harness, &event);
 }
 
@@ -335,16 +356,16 @@ void AgentHarness_PublishAgentEnd(AgentHarness* harness, AgentTurnKind turn,
                                  AgentTurnOutcome outcome, StrView error) {
   AgentHarnessEvent event = {};
   event.Kind = AgentHarnessEventKind::TransientAgentEnd;
-  event.Turn = turn;
-  event.Outcome = outcome;
-  event.Error = error;
+  event.Turn.Kind = turn;
+  event.Turn.Outcome = outcome;
+  event.Turn.Error = error;
   PublishToWatchers(harness, &event);
 }
 
 void AgentHarness_PublishTurnStart(AgentHarness* harness, AgentTurnKind turn) {
   AgentHarnessEvent event = {};
   event.Kind = AgentHarnessEventKind::TransientTurnStart;
-  event.Turn = turn;
+  event.Turn.Kind = turn;
   PublishToWatchers(harness, &event);
 }
 
@@ -352,9 +373,9 @@ void AgentHarness_PublishTurnEnd(AgentHarness* harness, AgentTurnKind turn,
                                 AgentTurnOutcome outcome, StrView error) {
   AgentHarnessEvent event = {};
   event.Kind = AgentHarnessEventKind::TransientTurnEnd;
-  event.Turn = turn;
-  event.Outcome = outcome;
-  event.Error = error;
+  event.Turn.Kind = turn;
+  event.Turn.Outcome = outcome;
+  event.Turn.Error = error;
   PublishToWatchers(harness, &event);
 }
 
@@ -370,9 +391,9 @@ void AgentHarness_PublishToolStart(AgentHarness* harness, StrView toolCallId,
                                    StrView toolName, StrView argumentsJson) {
   AgentHarnessEvent event = {};
   event.Kind = AgentHarnessEventKind::TransientToolStart;
-  event.ToolCallId = toolCallId;
-  event.ToolName = toolName;
-  event.ToolArgsJson = argumentsJson;
+  event.Tool.CallId = toolCallId;
+  event.Tool.Name = toolName;
+  event.Tool.ArgumentsJson = argumentsJson;
   PublishToWatchers(harness, &event);
 }
 
@@ -381,9 +402,9 @@ void AgentHarness_PublishToolUpdate(AgentHarness* harness, StrView toolCallId,
   if (!partial) return;
   AgentHarnessEvent event = {};
   event.Kind = AgentHarnessEventKind::TransientToolUpdate;
-  event.ToolCallId = toolCallId;
-  event.ToolName = toolName;
-  event.ToolResultValue = *partial;
+  event.Tool.CallId = toolCallId;
+  event.Tool.Name = toolName;
+  event.Tool.Result = *partial;
   PublishToWatchers(harness, &event);
 }
 
@@ -393,10 +414,10 @@ void AgentHarness_PublishToolEnd(AgentHarness* harness, StrView toolCallId,
   if (!result) return;
   AgentHarnessEvent event = {};
   event.Kind = AgentHarnessEventKind::TransientToolEnd;
-  event.ToolCallId = toolCallId;
-  event.ToolName = toolName;
-  event.ToolResultValue = *result;
-  event.IsError = isError;
+  event.Tool.CallId = toolCallId;
+  event.Tool.Name = toolName;
+  event.Tool.Result = *result;
+  event.Tool.IsError = isError;
   PublishToWatchers(harness, &event);
 }
 
@@ -405,11 +426,11 @@ void AgentHarness_PublishRetry(AgentHarness* harness, AgentHarnessEventKind kind
                                u32 delayMs, StrView error) {
   AgentHarnessEvent event = {};
   event.Kind = kind;
-  event.Layer = layer;
-  event.RetryAttempt = attempt;
-  event.RetryMaxAttempts = maxAttempts;
-  event.RetryDelayMs = delayMs;
-  event.RetryError = error;
+  event.Retry.Layer = layer;
+  event.Retry.Attempt = attempt;
+  event.Retry.MaxAttempts = maxAttempts;
+  event.Retry.DelayMs = delayMs;
+  event.Retry.Error = error;
   PublishToWatchers(harness, &event);
 }
 
@@ -417,9 +438,9 @@ void AgentHarness_PublishQueueUpdate(AgentHarness* harness) {
   AgentHarnessEvent event = {};
   event.Kind = AgentHarnessEventKind::TransientQueueUpdate;
   ScopedLock lock(&harness->StateLock);
-  event.SteerCount = harness->Queues.Steering.Count;
-  event.FollowUpCount = harness->Queues.FollowUp.Count;
-  event.NextTurnCount = harness->Queues.NextTurn.Count;
+  event.Queue.SteerCount = harness->Queues.Steering.Count;
+  event.Queue.FollowUpCount = harness->Queues.FollowUp.Count;
+  event.Queue.NextTurnCount = harness->Queues.NextTurn.Count;
   PublishToWatchersLocked(harness, &event);
 }
 

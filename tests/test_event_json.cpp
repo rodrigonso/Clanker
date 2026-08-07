@@ -30,21 +30,21 @@ void TestTransientShapes(Arena* arena) {
 
   AgentHarnessEvent agentStart = {};
   agentStart.Kind = AgentHarnessEventKind::TransientAgentStart;
-  agentStart.Turn = AgentTurnKind::Run;
+  agentStart.Turn.Kind = AgentTurnKind::Run;
   StrView line = WriteEvent(arena, &agentStart, &wrote);
   CHECK_ALL(wrote, StrView_EqCStr(line, "{\"type\":\"agent_start\",\"turn\":\"run\"}"));
 
   AgentHarnessEvent compactionStart = agentStart;
-  compactionStart.Turn = AgentTurnKind::Compaction;
+  compactionStart.Turn.Kind = AgentTurnKind::Compaction;
   line = WriteEvent(arena, &compactionStart, &wrote);
   CHECK_ALL(wrote,
             StrView_EqCStr(line, "{\"type\":\"agent_start\",\"turn\":\"compaction\"}"));
 
   AgentHarnessEvent agentEnd = {};
   agentEnd.Kind = AgentHarnessEventKind::TransientAgentEnd;
-  agentEnd.Turn = AgentTurnKind::Run;
-  agentEnd.Outcome = AgentTurnOutcome::Failed;
-  agentEnd.Error = SVL("boom");
+  agentEnd.Turn.Kind = AgentTurnKind::Run;
+  agentEnd.Turn.Outcome = AgentTurnOutcome::Failed;
+  agentEnd.Turn.Error = SVL("boom");
   line = WriteEvent(arena, &agentEnd, &wrote);
   CHECK_ALL(wrote,
             StrView_EqCStr(
@@ -54,8 +54,8 @@ void TestTransientShapes(Arena* arena) {
   // A succeeded turn carries no error key at all.
   AgentHarnessEvent turnEnd = {};
   turnEnd.Kind = AgentHarnessEventKind::TransientTurnEnd;
-  turnEnd.Turn = AgentTurnKind::Run;
-  turnEnd.Outcome = AgentTurnOutcome::Succeeded;
+  turnEnd.Turn.Kind = AgentTurnKind::Run;
+  turnEnd.Turn.Outcome = AgentTurnOutcome::Succeeded;
   line = WriteEvent(arena, &turnEnd, &wrote);
   CHECK_ALL(wrote,
             StrView_EqCStr(line,
@@ -82,9 +82,9 @@ void TestTransientShapes(Arena* arena) {
 
   AgentHarnessEvent toolStart = {};
   toolStart.Kind = AgentHarnessEventKind::TransientToolStart;
-  toolStart.ToolCallId = SVL("call-1");
-  toolStart.ToolName = SVL("shell");
-  toolStart.ToolArgsJson = SVL("{\"command\":\"ls\"}");
+  toolStart.Tool.CallId = SVL("call-1");
+  toolStart.Tool.Name = SVL("shell");
+  toolStart.Tool.ArgumentsJson = SVL("{\"command\":\"ls\"}");
   line = WriteEvent(arena, &toolStart, &wrote);
   CHECK_ALL(wrote,
             StrView_EqCStr(line,
@@ -93,7 +93,7 @@ void TestTransientShapes(Arena* arena) {
 
   // Absent arguments still produce a valid object rather than a bare key.
   AgentHarnessEvent bareTool = toolStart;
-  bareTool.ToolArgsJson = StrView{};
+  bareTool.Tool.ArgumentsJson = StrView{};
   line = WriteEvent(arena, &bareTool, &wrote);
   CHECK_ALL(wrote, IsValidEventLine(arena, line, "tool_start"),
             StrView_Contains(line, "\"arguments\":{}"));
@@ -104,10 +104,10 @@ void TestTransientShapes(Arena* arena) {
   Array_Push(&result.Content, Content_Text(SVL("put")));
   AgentHarnessEvent toolEnd = {};
   toolEnd.Kind = AgentHarnessEventKind::TransientToolEnd;
-  toolEnd.ToolCallId = SVL("call-1");
-  toolEnd.ToolName = SVL("shell");
-  toolEnd.IsError = true;
-  toolEnd.ToolResultValue = result;
+  toolEnd.Tool.CallId = SVL("call-1");
+  toolEnd.Tool.Name = SVL("shell");
+  toolEnd.Tool.IsError = true;
+  toolEnd.Tool.Result = result;
   line = WriteEvent(arena, &toolEnd, &wrote);
   CHECK_ALL(wrote,
             StrView_EqCStr(line,
@@ -116,11 +116,11 @@ void TestTransientShapes(Arena* arena) {
 
   AgentHarnessEvent retry = {};
   retry.Kind = AgentHarnessEventKind::TransientRetryStart;
-  retry.Layer = RetryLayer::AssistantTurn;
-  retry.RetryAttempt = 1;
-  retry.RetryMaxAttempts = 3;
-  retry.RetryDelayMs = 250;
-  retry.RetryError = SVL("overloaded");
+  retry.Retry.Layer = RetryLayer::AssistantTurn;
+  retry.Retry.Attempt = 1;
+  retry.Retry.MaxAttempts = 3;
+  retry.Retry.DelayMs = 250;
+  retry.Retry.Error = SVL("overloaded");
   line = WriteEvent(arena, &retry, &wrote);
   CHECK_ALL(wrote, IsValidEventLine(arena, line, "retry_start"),
             StrView_Contains(line, "\"layer\":\"assistant_turn\""),
@@ -128,9 +128,9 @@ void TestTransientShapes(Arena* arena) {
 
   AgentHarnessEvent queue = {};
   queue.Kind = AgentHarnessEventKind::TransientQueueUpdate;
-  queue.SteerCount = 1;
-  queue.FollowUpCount = 2;
-  queue.NextTurnCount = 3;
+  queue.Queue.SteerCount = 1;
+  queue.Queue.FollowUpCount = 2;
+  queue.Queue.NextTurnCount = 3;
   line = WriteEvent(arena, &queue, &wrote);
   CHECK_ALL(wrote,
             StrView_EqCStr(

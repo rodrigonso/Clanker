@@ -1,6 +1,5 @@
 #pragma once
 
-#include "agent/event.h"
 #include "agent/hooks.h"
 #include "agent/tool.h"
 #include "base/thread.h"
@@ -10,6 +9,13 @@ struct AgentHarness;
 
 constexpr u32 AGENT_HARNESS_MAX_WATCHERS = 8;
 constexpr u32 AGENT_HARNESS_MAX_WATCH_EVENTS = 256;
+
+// Distinguishes Pi's two retry layers so a retry_start/retry_end event can
+// say which one paused: ProviderRequest is the transport-level HTTP retry
+// (Config.Stream.Retry / HttpRetryPolicy, handled inside the provider's
+// Stream implementation); AssistantTurn is the harness's own whole-turn
+// retry (Config.Retry / AgentRetryPolicy), driven by the agent loop.
+enum class RetryLayer : u8 { ProviderRequest, AssistantTurn };
 
 // Durable events mirror appended session-tree entries (authoritative for
 // snapshots/replay). Transient events are watcher-only lifecycle notices for
@@ -31,30 +37,57 @@ enum class AgentHarnessEventKind : u8 {
   TransientCancelRequested,  // AgentHarness_RequestCancel set the abort flag
 };
 
+// Payload for the agent/turn lifecycle pairs. `Outcome` and `Error` are only
+// meaningful on the *End kinds.
+struct AgentHarnessTurnEvent {
+  AgentTurnKind Kind;
+  AgentTurnOutcome Outcome;
+  StrView Error;
+};
+
+// Payload shared by tool_start/update/end. `ArgumentsJson` is set only on
+// start; `Result` only on update/end; `IsError` only on end.
+struct AgentHarnessToolEvent {
+  StrView CallId;
+  StrView Name;
+  StrView ArgumentsJson;
+  ToolResult Result;
+  bool IsError;
+};
+
+struct AgentHarnessRetryEvent {
+  RetryLayer Layer;
+  u32 Attempt;
+  u32 MaxAttempts;
+  u32 DelayMs;
+  StrView Error;
+};
+
+struct AgentHarnessQueueEvent {
+  u32 SteerCount;
+  u32 FollowUpCount;
+  u32 NextTurnCount;
+};
+
+// One event is exactly one kind, so the payloads share storage. Every member is
+// trivially copyable, which keeps `= {}` initialization and plain assignment
+// valid without any active-member bookkeeping beyond `Kind`.
+//
+// `Record` is a pointer rather than an inline value: SessionRecord is 408 bytes
+// on its own, and storing it inline would make every queued stream delta pay
+// for it. The pointee is owned by whichever arena cloned the event (a watcher
+// ring slot, or the caller's arena after WatchNext).
 struct AgentHarnessEvent {
   AgentHarnessEventKind Kind;
   u64 Cursor;
-  SessionRecord Record;         // DurableRecord
-  StreamEvent Stream;           // TransientStream
-  StrView ToolCallId;           // tool_* events
-  StrView ToolName;             // tool_* events
-  StrView ToolArgsJson;         // TransientToolStart
-  ToolResult ToolResultValue;   // TransientToolUpdate/TransientToolEnd
-  bool IsError;                 // TransientToolEnd
-
-  AgentTurnKind Turn;           // TransientAgentStart/End, TransientTurnStart/End
-  AgentTurnOutcome Outcome;     // TransientAgentEnd, TransientTurnEnd
-  StrView Error;                // TransientAgentEnd/TransientTurnEnd on failure
-
-  RetryLayer Layer;             // TransientRetryStart/End
-  u32 RetryAttempt;
-  u32 RetryMaxAttempts;
-  u32 RetryDelayMs;
-  StrView RetryError;
-
-  u32 SteerCount;                // TransientQueueUpdate
-  u32 FollowUpCount;
-  u32 NextTurnCount;
+  union {
+    const SessionRecord* Record;   // DurableRecord
+    StreamEvent Stream;            // TransientStream
+    AgentHarnessTurnEvent Turn;    // Transient{Agent,Turn}{Start,End}
+    AgentHarnessToolEvent Tool;    // TransientTool{Start,Update,End}
+    AgentHarnessRetryEvent Retry;  // TransientRetry{Start,End}
+    AgentHarnessQueueEvent Queue;  // TransientQueueUpdate
+  };
 };
 
 struct AgentHarnessSnapshot {

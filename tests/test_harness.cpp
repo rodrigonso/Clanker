@@ -421,9 +421,9 @@ void TallyEvent(WatchTally* tally, const AgentHarnessEvent* event) {
     case AgentHarnessEventKind::TransientAgentStart: tally->AgentStart++; break;
     case AgentHarnessEventKind::TransientAgentEnd:
       tally->AgentEnd++;
-      tally->AgentEndOutcome = event->Outcome;
-      tally->AgentEndHasError = event->Error.Length > 0;
-      if (StrView_Contains(event->Error, "after-turn hook failed"))
+      tally->AgentEndOutcome = event->Turn.Outcome;
+      tally->AgentEndHasError = event->Turn.Error.Length > 0;
+      if (StrView_Contains(event->Turn.Error, "after-turn hook failed"))
         tally->AgentEndErrorMentionsHook = true;
       break;
     case AgentHarnessEventKind::TransientTurnStart: tally->TurnStart++; break;
@@ -434,10 +434,10 @@ void TallyEvent(WatchTally* tally, const AgentHarnessEvent* event) {
     case AgentHarnessEventKind::TransientToolEnd: tally->ToolEnd++; break;
     case AgentHarnessEventKind::TransientRetryStart:
       tally->RetryStart++;
-      tally->LastRetryLayer = event->Layer;
-      tally->LastRetryAttempt = event->RetryAttempt;
-      tally->LastRetryMaxAttempts = event->RetryMaxAttempts;
-      if (StrView_Contains(event->RetryError, "overloaded")) tally->RetryErrorMentionsOverload = true;
+      tally->LastRetryLayer = event->Retry.Layer;
+      tally->LastRetryAttempt = event->Retry.Attempt;
+      tally->LastRetryMaxAttempts = event->Retry.MaxAttempts;
+      if (StrView_Contains(event->Retry.Error, "overloaded")) tally->RetryErrorMentionsOverload = true;
       break;
     case AgentHarnessEventKind::TransientRetryEnd: tally->RetryEnd++; break;
     case AgentHarnessEventKind::TransientQueueUpdate: tally->QueueUpdate++; break;
@@ -999,11 +999,11 @@ static void TestHarnessLifecycle() {
       switch (event.Kind) {
         case AgentHarnessEventKind::TransientAgentStart:
           sawAgentStart = true;
-          agentStartTurn = event.Turn;
+          agentStartTurn = event.Turn.Kind;
           break;
         case AgentHarnessEventKind::TransientTurnStart:
           sawTurnStart = true;
-          turnStartTurn = event.Turn;
+          turnStartTurn = event.Turn.Kind;
           turnStartCount++;
           break;
         case AgentHarnessEventKind::TransientTurnEnd:
@@ -1011,14 +1011,14 @@ static void TestHarnessLifecycle() {
           break;
         case AgentHarnessEventKind::TransientToolStart:
           sawToolStart = true;
-          toolStartCallId = StrView_Dup(&arena, event.ToolCallId);
-          toolStartName = StrView_Dup(&arena, event.ToolName);
-          toolStartArgs = StrView_Dup(&arena, event.ToolArgsJson);
+          toolStartCallId = StrView_Dup(&arena, event.Tool.CallId);
+          toolStartName = StrView_Dup(&arena, event.Tool.Name);
+          toolStartArgs = StrView_Dup(&arena, event.Tool.ArgumentsJson);
           break;
         case AgentHarnessEventKind::TransientAgentEnd:
           sawAgentEnd = true;
-          agentEndTurn = event.Turn;
-          agentEndOutcome = event.Outcome;
+          agentEndTurn = event.Turn.Kind;
+          agentEndOutcome = event.Turn.Outcome;
           finished = true;
           break;
         default:
@@ -1069,12 +1069,12 @@ static void TestHarnessLifecycle() {
       AgentHarnessEvent event = {};
       CHECK(SessionResult_IsOk(AgentHarness_WatchNext(&arena, &watch, &event)));
       if (event.Kind == AgentHarnessEventKind::TransientTurnEnd &&
-          event.Outcome == AgentTurnOutcome::Failed) {
+          event.Turn.Outcome == AgentTurnOutcome::Failed) {
         sawFailedTurnEnd = true;
-        turnEndError = StrView_Dup(&arena, event.Error);
+        turnEndError = StrView_Dup(&arena, event.Turn.Error);
       } else if (event.Kind == AgentHarnessEventKind::TransientAgentEnd) {
-        sawFailedAgentEnd = event.Outcome == AgentTurnOutcome::Failed;
-        agentEndError = StrView_Dup(&arena, event.Error);
+        sawFailedAgentEnd = event.Turn.Outcome == AgentTurnOutcome::Failed;
+        agentEndError = StrView_Dup(&arena, event.Turn.Error);
         finished = true;
       }
     }
@@ -1121,9 +1121,9 @@ static void TestHarnessLifecycle() {
       CHECK(SessionResult_IsOk(AgentHarness_WatchNext(&arena, &watch, &event)));
       CHECK(event.Kind == AgentHarnessEventKind::TransientQueueUpdate);
       queueUpdateCount++;
-      lastSteer = event.SteerCount;
-      lastFollowUp = event.FollowUpCount;
-      lastNextTurn = event.NextTurnCount;
+      lastSteer = event.Queue.SteerCount;
+      lastFollowUp = event.Queue.FollowUpCount;
+      lastNextTurn = event.Queue.NextTurnCount;
     }
     CHECK_ALL(queueUpdateCount == 3, lastSteer == 1, lastFollowUp == 1, lastNextTurn == 1);
 
@@ -1135,12 +1135,12 @@ static void TestHarnessLifecycle() {
       AgentHarnessEvent event = {};
       CHECK(SessionResult_IsOk(AgentHarness_WatchNext(&arena, &watch, &event)));
       if (event.Kind == AgentHarnessEventKind::TransientAgentStart)
-        sawCompactionAgentStart = event.Turn == AgentTurnKind::Compaction;
+        sawCompactionAgentStart = event.Turn.Kind == AgentTurnKind::Compaction;
       else if (event.Kind == AgentHarnessEventKind::TransientTurnStart)
-        sawCompactionTurnStart = event.Turn == AgentTurnKind::Compaction;
+        sawCompactionTurnStart = event.Turn.Kind == AgentTurnKind::Compaction;
       else if (event.Kind == AgentHarnessEventKind::TransientAgentEnd) {
         sawCompactionAgentEnd =
-            event.Turn == AgentTurnKind::Compaction && event.Outcome == AgentTurnOutcome::Succeeded;
+            event.Turn.Kind == AgentTurnKind::Compaction && event.Turn.Outcome == AgentTurnOutcome::Succeeded;
         finished = true;
       }
     }
@@ -1227,7 +1227,7 @@ static void TestHarnessWatchers() {
       if (event.Kind == AgentHarnessEventKind::DurableRecord) {
         durableCount++;
         durableCursor++;
-        CHECK_ALL(event.Cursor == durableCursor, event.Record.Seq == event.Cursor);
+        CHECK_ALL(event.Cursor == durableCursor, event.Record->Seq == event.Cursor);
       } else {
         transientCount++;
         if (event.Kind == AgentHarnessEventKind::TransientStream &&
@@ -1482,12 +1482,12 @@ static void TestHarnessToolsAndHooks() {
       if (event.Kind == AgentHarnessEventKind::TransientToolUpdate) {
         updateCount++;
       } else if (event.Kind == AgentHarnessEventKind::TransientToolEnd && liveEndCount < 2) {
-        liveEnds[liveEndCount++] = StrView_Dup(&arena, event.ToolCallId);
+        liveEnds[liveEndCount++] = StrView_Dup(&arena, event.Tool.CallId);
       } else if (event.Kind == AgentHarnessEventKind::DurableRecord) {
-        if (event.Record.Kind == SessionRecordKind::Message &&
-            event.Record.MessageEntry.Value.Kind == Role::ToolResult && durableResultCount < 2) {
+        if (event.Record->Kind == SessionRecordKind::Message &&
+            event.Record->MessageEntry.Value.Kind == Role::ToolResult && durableResultCount < 2) {
           durableResults[durableResultCount++] =
-              StrView_Dup(&arena, event.Record.MessageEntry.Value.ToolCallId);
+              StrView_Dup(&arena, event.Record->MessageEntry.Value.ToolCallId);
         }
       } else if (event.Kind == AgentHarnessEventKind::TransientAgentEnd) {
         finished = true;
@@ -2721,16 +2721,16 @@ static void TestHarnessAutoCompaction() {
       AgentHarnessEvent event = {};
       CHECK(SessionResult_IsOk(AgentHarness_WatchNext(&arena, &watch, &event)));
       if (event.Kind == AgentHarnessEventKind::TransientTurnStart &&
-          event.Turn == AgentTurnKind::Compaction)
+          event.Turn.Kind == AgentTurnKind::Compaction)
         compactionTurnStarts++;
       else if (event.Kind == AgentHarnessEventKind::TransientTurnEnd &&
-               event.Turn == AgentTurnKind::Compaction)
+               event.Turn.Kind == AgentTurnKind::Compaction)
         compactionTurnEnds++;
       else if (event.Kind == AgentHarnessEventKind::TransientAgentStart &&
-               event.Turn == AgentTurnKind::Compaction)
+               event.Turn.Kind == AgentTurnKind::Compaction)
         compactionAgentEvents++;
       else if (event.Kind == AgentHarnessEventKind::TransientAgentEnd) {
-        if (event.Turn == AgentTurnKind::Compaction)
+        if (event.Turn.Kind == AgentTurnKind::Compaction)
           compactionAgentEvents++;
         else
           agentEnds++;

@@ -76,7 +76,7 @@ re-run against pi HEAD as written — see that section.
 
 | capability | status | notes |
 |---|---|---|
-| Event sequence `agent_start → turn_start → message_* → tool_* → turn_end → agent_end` | ✅ | Clank's 13 `AgentEventKind` values map 1:1 onto pi's 10 `AgentEvent` discriminants and add three: `RetryStart`, `RetryEnd`, `QueueUpdate` |
+| Event sequence `agent_start → turn_start → message_* → tool_* → turn_end → agent_end` | ✅ | Clank's 13 `AgentHarnessEventKind` values cover pi's 10 `AgentEvent` discriminants and add three: `TransientRetryStart`, `TransientRetryEnd`, `TransientQueueUpdate`. Clank has no separate consumer-facing event type: the harness's watch stream *is* the event API, and `DurableRecord` carries what pi splits into `message_start`/`message_end` (the assistant record is authoritative for stop reason and usage) |
 | Data model (text / thinking / tool_call / image) | ✅ | `llm/types.h` mirrors `packages/ai/src/types.ts` |
 | Steering · follow-up · next-turn queues | ✅ | agent-owned thread-safe queues drained at pi's points; `queue_update` carries depths. `GetSteeringMessages` / `GetFollowUpMessages` add pi's pluggable message sources, polled at the same checkpoints (queue first, hook second) |
 | Queue delivery modes (`all` / `one-at-a-time`) | ❌ | pi exposes `steeringMode` and `followUpMode`; Clank always drains the whole queue |

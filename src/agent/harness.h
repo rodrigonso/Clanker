@@ -14,7 +14,6 @@ struct AgentHarnessConfig {
   u32 ToolCount;
   Provider ProviderImpl;
   StreamOptions Stream;
-  StreamSink StreamEvents;
   ToolExecution ToolExec;
   u32 MaxParallelTools;
   AgentRetryPolicy Retry;

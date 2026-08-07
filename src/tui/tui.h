@@ -1,5 +1,4 @@
 #pragma once
-#include "agent/event.h"
 #include "agent/harness.h"
 #include "base/arena.h"
 #include "base/thread.h"
@@ -14,7 +13,7 @@
 // Full-screen TUI controller. Owns the terminal, a differential renderer, the
 // transcript line model and the multi-line input editor. Runs two background
 // threads (input + render); the caller's thread drives the agent loop and feeds
-// events through Tui_AgentEvent / drains user input via Tui_WaitForSubmit.
+// events through Tui_HarnessEvent / drains user input via Tui_WaitForSubmit.
 
 enum class TuiState : u8 { Idle, Thinking, Streaming, Tool, Retry };
 
@@ -125,7 +124,6 @@ struct Tui {
   TuiState State;
   StrView StateTool;
   StrView RetryStatus;
-  u64 TurnStartMs;
   Usage Use;
   u32 Spinner;
   u64 SpinnerStartMs;
@@ -270,8 +268,9 @@ TuiModalResult Tui_ReadText(Tui* t, StrView title, StrView prompt,
                            StrView initial, StrView* out);
 void Tui_OpenCommandPalette(Tui* t);
 
-// AgentSink callback (User = Tui*).
-void Tui_AgentEvent(void* user, const AgentEvent& ev);
+// Harness watch-event callback (User = Tui*). Consumes AgentHarnessEvent
+// directly; there is no intermediate agent-event representation.
+void Tui_HarnessEvent(void* user, const AgentHarnessEvent* ev);
 
 // Advance the frame-coalesced display pipeline at `nowMs`. Compose uses this under the
 // TUI lock; headless tests call it directly when no TUI threads are running.
