@@ -35,6 +35,7 @@ enum class AgentHarnessEventKind : u8 {
   TransientRetryEnd,    // the attempt following a backoff has concluded
   TransientQueueUpdate, // steer/follow-up/next-turn queue depth changed
   TransientCancelRequested,  // AgentHarness_RequestCancel set the abort flag
+  TransientEventsDropped,    // watcher overflowed; N transient events were skipped
 };
 
 // Payload for the agent/turn lifecycle pairs. `Outcome` and `Error` are only
@@ -69,6 +70,13 @@ struct AgentHarnessQueueEvent {
   u32 NextTurnCount;
 };
 
+// Reports a gap in the transient stream. Durable records are never dropped, so
+// a consumer's view of the session tree stays complete across one of these; only
+// progress rendering missed something.
+struct AgentHarnessDroppedEvent {
+  u32 Count;
+};
+
 // One event is exactly one kind, so the payloads share storage. Every member is
 // trivially copyable, which keeps `= {}` initialization and plain assignment
 // valid without any active-member bookkeeping beyond `Kind`.
@@ -87,6 +95,7 @@ struct AgentHarnessEvent {
     AgentHarnessToolEvent Tool;    // TransientTool{Start,Update,End}
     AgentHarnessRetryEvent Retry;  // TransientRetry{Start,End}
     AgentHarnessQueueEvent Queue;  // TransientQueueUpdate
+    AgentHarnessDroppedEvent Dropped;  // TransientEventsDropped
   };
 };
 
@@ -98,8 +107,11 @@ struct AgentHarnessSnapshot {
   bool Faulted;
 };
 
+// One arena per watcher rather than one per ring slot. Every arena commits at
+// 64 KiB granularity, so 256 per-slot arenas cost 16 MiB of committed pages to
+// hold ~27 KB of events. The shared arena is reset whenever the ring drains,
+// which is the common case between bursts.
 struct AgentHarnessWatchSlot {
-  Arena Mem;
   AgentHarnessEvent Event;
 };
 
@@ -108,11 +120,15 @@ struct AgentHarnessWatch {
   DurableId Id;
   Mutex Lock;
   CondVar Changed;
+  Arena Mem;
   AgentHarnessWatchSlot Slots[AGENT_HARNESS_MAX_WATCH_EVENTS];
   u32 Capacity;
   u32 Head;
   u32 Count;
   u64 Cursor;
+  // Transient events discarded since the consumer last saw a gap marker.
+  // Reported once, then cleared; the watcher keeps running.
+  u32 DroppedTransient;
   bool Initialized;
   bool Registered;
   bool Lagged;

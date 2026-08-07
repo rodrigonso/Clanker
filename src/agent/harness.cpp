@@ -64,6 +64,7 @@ SessionResult CloneHarnessEvent(Arena* arena, const AgentHarnessEvent* source,
       break;
     case AgentHarnessEventKind::TransientQueueUpdate:
     case AgentHarnessEventKind::TransientCancelRequested:
+    case AgentHarnessEventKind::TransientEventsDropped:
       break;
   }
   *out = clone;
@@ -74,23 +75,73 @@ void MarkWatcherLagged(AgentHarnessWatch* watch) {
   watch->Lagged = true;
   watch->Count = 0;
   watch->Head = 0;
+  watch->DroppedTransient = 0;
+  ArenaReset(&watch->Mem);
   Cond_Broadcast(&watch->Changed);
+}
+
+// Text deltas are the only high-rate event, and consumers concatenate them
+// anyway, so merging an incoming delta into the pending tail keeps a slow
+// consumer from exhausting the ring during a fast response. Only adjacent
+// deltas on the same content block merge, so ordering is unaffected.
+constexpr u32 WATCH_COALESCE_LIMIT = (u32)64 << 10;
+
+bool CoalesceStreamDelta(AgentHarnessWatch* watch, const AgentHarnessEvent* event) {
+  if (watch->Count == 0) return false;
+  if (event->Kind != AgentHarnessEventKind::TransientStream) return false;
+  if (event->Stream.Kind != StreamEventKind::TextDelta) return false;
+  AgentHarnessEvent* tail =
+      &watch->Slots[(watch->Head + watch->Count - 1) % watch->Capacity].Event;
+  if (tail->Kind != AgentHarnessEventKind::TransientStream) return false;
+  if (tail->Stream.Kind != StreamEventKind::TextDelta) return false;
+  if (tail->Stream.ContentIndex != event->Stream.ContentIndex) return false;
+  u64 merged = (u64)tail->Stream.Delta.Length + event->Stream.Delta.Length;
+  if (merged > WATCH_COALESCE_LIMIT) return false;
+
+  char* data = (char*)ArenaAlloc(&watch->Mem, (usize)merged, 1);
+  memcpy(data, tail->Stream.Delta.Data, tail->Stream.Delta.Length);
+  memcpy(data + tail->Stream.Delta.Length, event->Stream.Delta.Data,
+         event->Stream.Delta.Length);
+  tail->Stream.Delta = StrView{data, (u32)merged};
+  return true;
+}
+
+// Discards the oldest transient event to make room. Durable records are never
+// dropped: they are the consumer's copy of the session tree, and a hole in them
+// could only be repaired by a full re-snapshot. Returns false when every queued
+// event is durable, which is the one case that still forces the lagged path.
+bool DropOldestTransient(AgentHarnessWatch* watch) {
+  for (u32 i = 0; i < watch->Count; i++) {
+    u32 index = (watch->Head + i) % watch->Capacity;
+    if (watch->Slots[index].Event.Kind == AgentHarnessEventKind::DurableRecord)
+      continue;
+    for (u32 j = i; j > 0; j--) {
+      u32 to = (watch->Head + j) % watch->Capacity;
+      u32 from = (watch->Head + j - 1) % watch->Capacity;
+      watch->Slots[to] = watch->Slots[from];
+    }
+    watch->Head = (watch->Head + 1) % watch->Capacity;
+    watch->Count--;
+    watch->DroppedTransient++;
+    return true;
+  }
+  return false;
 }
 
 void EnqueueWatcherEvent(AgentHarnessWatch* watch, const AgentHarnessEvent* event) {
   ScopedLock lock(&watch->Lock);
   if (watch->Closed || watch->Lagged) return;
-  if (watch->Count == watch->Capacity) {
+  if (CoalesceStreamDelta(watch, event)) {
+    Cond_Signal(&watch->Changed);
+    return;
+  }
+  if (watch->Count == watch->Capacity && !DropOldestTransient(watch)) {
     MarkWatcherLagged(watch);
     return;
   }
   u32 index = (watch->Head + watch->Count) % watch->Capacity;
   AgentHarnessWatchSlot* slot = &watch->Slots[index];
-  if (!slot->Mem.Base)
-    slot->Mem = ArenaCreate((usize)16 << 20);
-  else
-    ArenaReset(&slot->Mem);
-  SessionResult copied = CloneHarnessEvent(&slot->Mem, event, &slot->Event);
+  SessionResult copied = CloneHarnessEvent(&watch->Mem, event, &slot->Event);
   if (!SessionResult_IsOk(copied)) {
     MarkWatcherLagged(watch);
     return;
@@ -554,6 +605,7 @@ SessionResult AgentHarness_Watch(Arena* arena, AgentHarness* harness, u32 capaci
   outWatch->Owner = harness;
   outWatch->Id = DurableId_Generate();
   outWatch->Capacity = capacity;
+  outWatch->Mem = ArenaCreate((usize)256 << 20);
   Mutex_Init(&outWatch->Lock);
   Cond_Init(&outWatch->Changed);
   outWatch->Initialized = true;
@@ -573,6 +625,7 @@ SessionResult AgentHarness_Watch(Arena* arena, AgentHarness* harness, u32 capaci
     }
   }
   if (!SessionResult_IsOk(result)) {
+    ArenaRelease(&outWatch->Mem);
     Cond_Destroy(&outWatch->Changed);
     Mutex_Destroy(&outWatch->Lock);
     *outWatch = AgentHarnessWatch{};
@@ -586,13 +639,28 @@ SessionResult AgentHarness_WatchNext(Arena* arena, AgentHarnessWatch* watch,
     return SessionResult_Invalid("watch next arguments are invalid");
   Mutex_Lock(&watch->Lock);
   watch->Waiting++;
-  while (watch->Count == 0 && !watch->Lagged && !watch->Closed)
+  while (watch->Count == 0 && watch->DroppedTransient == 0 && !watch->Lagged &&
+         !watch->Closed)
     Cond_Wait(&watch->Changed, &watch->Lock);
   if (watch->Lagged) {
     watch->Waiting--;
     Mutex_Unlock(&watch->Lock);
     return SessionResult_Error(SessionStatus::WatcherLagged,
                                SVL("watcher fell behind; take a new snapshot"));
+  }
+  // The gap is reported at the head, which is where the discarded events were.
+  // Nothing durable was lost, so the consumer keeps its transcript and only
+  // needs to note that progress rendering skipped ahead.
+  if (watch->DroppedTransient) {
+    AgentHarnessEvent dropped = {};
+    dropped.Kind = AgentHarnessEventKind::TransientEventsDropped;
+    dropped.Cursor = watch->Cursor;
+    dropped.Dropped.Count = watch->DroppedTransient;
+    watch->DroppedTransient = 0;
+    *out = dropped;
+    watch->Waiting--;
+    Mutex_Unlock(&watch->Lock);
+    return SessionResult_Ok(dropped.Cursor);
   }
   // Closing stops further publication; it does not discard what was already
   // published. Drain the buffer first so a consumer shutting down right after a
@@ -605,9 +673,14 @@ SessionResult AgentHarness_WatchNext(Arena* arena, AgentHarnessWatch* watch,
   AgentHarnessWatchSlot* slot = &watch->Slots[watch->Head];
   SessionResult copied = CloneHarnessEvent(arena, &slot->Event, out);
   if (SessionResult_IsOk(copied)) {
-    ArenaReset(&slot->Mem);
     watch->Head = (watch->Head + 1) % watch->Capacity;
     watch->Count--;
+    // Every queued event has been handed over, so the ring's backing memory can
+    // go back to the caller-visible high-water mark instead of growing forever.
+    if (watch->Count == 0) {
+      watch->Head = 0;
+      ArenaReset(&watch->Mem);
+    }
   }
   watch->Waiting--;
   Mutex_Unlock(&watch->Lock);
@@ -665,7 +738,7 @@ SessionResult AgentHarness_WatchClose(AgentHarnessWatch* watch) {
       return SessionResult_Error(SessionStatus::Busy,
                                  SVL("watcher still has a waiting consumer"));
   }
-  for (u32 i = 0; i < AGENT_HARNESS_MAX_WATCH_EVENTS; i++) ArenaRelease(&watch->Slots[i].Mem);
+  ArenaRelease(&watch->Mem);
   Cond_Destroy(&watch->Changed);
   Mutex_Destroy(&watch->Lock);
   *watch = AgentHarnessWatch{};

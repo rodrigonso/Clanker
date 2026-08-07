@@ -3002,10 +3002,118 @@ static void TestHarnessWatchDrainsAfterClose() {
   ArenaRelease(&arena);
 }
 
+// Ring-buffer behaviour under a consumer that cannot keep up. Driving the
+// publish seams directly keeps this focused on the watcher rather than on a
+// provider script's timing.
+void TestHarnessWatchOverflow() {
+  Arena arena = ArenaCreate();
+  MemoryRepository memory = {};
+  MemoryRepository_Init(&memory);
+  SessionRepository repository = MemoryRepository_AsRepository(&memory);
+  SessionLog log = {};
+  CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+
+  ScriptStep step = {};
+  step.Text = SVL("overflow");
+  step.Stop = StopReason::Stop;
+  ScriptProvider script = {&step, 1, 0};
+  AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
+  AgentHarness harness = {};
+  CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+
+  // Adjacent text deltas on the same content block collapse into one queued
+  // event, so a burst far larger than the ring still fits.
+  {
+    AgentHarnessSnapshot snapshot = {};
+    AgentHarnessWatch watch = {};
+    CHECK(SessionResult_IsOk(
+        AgentHarness_Watch(&arena, &harness, 8, &snapshot, &watch)));
+
+    for (u32 i = 0; i < 200; i++) {
+      StreamEvent delta = {};
+      delta.Kind = StreamEventKind::TextDelta;
+      delta.ContentIndex = 0;
+      delta.Delta = SVL("x");
+      AgentHarness_PublishStream(&harness, &delta);
+    }
+    CHECK_ALL(watch.Count == 1, !watch.Lagged, watch.DroppedTransient == 0);
+
+    AgentHarnessEvent event = {};
+    CHECK(SessionResult_IsOk(AgentHarness_WatchNext(&arena, &watch, &event)));
+    CHECK_ALL(event.Kind == AgentHarnessEventKind::TransientStream,
+              event.Stream.Delta.Length == 200);
+    // Draining the ring returns its backing memory rather than growing forever.
+    CHECK_ALL(watch.Count == 0, watch.Mem.Used == 0);
+    CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
+  }
+
+  // A different content index cannot merge, so the ring genuinely overflows.
+  // The watcher keeps running and reports the gap instead of dying.
+  {
+    AgentHarnessSnapshot snapshot = {};
+    AgentHarnessWatch watch = {};
+    CHECK(SessionResult_IsOk(
+        AgentHarness_Watch(&arena, &harness, 8, &snapshot, &watch)));
+
+    for (u32 i = 0; i < 20; i++) {
+      StreamEvent delta = {};
+      delta.Kind = StreamEventKind::TextDelta;
+      delta.ContentIndex = i;  // never adjacent-mergeable
+      delta.Delta = SVL("y");
+      AgentHarness_PublishStream(&harness, &delta);
+    }
+    CHECK_ALL(!watch.Lagged, watch.Count == 8, watch.DroppedTransient == 12);
+
+    // The gap is reported once, at the head, and then the stream resumes with
+    // the oldest surviving event.
+    AgentHarnessEvent event = {};
+    CHECK(SessionResult_IsOk(AgentHarness_WatchNext(&arena, &watch, &event)));
+    CHECK_ALL(event.Kind == AgentHarnessEventKind::TransientEventsDropped,
+              event.Dropped.Count == 12);
+    CHECK(SessionResult_IsOk(AgentHarness_WatchNext(&arena, &watch, &event)));
+    CHECK_ALL(event.Kind == AgentHarnessEventKind::TransientStream,
+              event.Stream.ContentIndex == 12);
+    CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
+  }
+
+  // Durable records are never sacrificed to make room: losing one would leave
+  // the consumer's transcript short an entry.
+  {
+    AgentHarnessSnapshot snapshot = {};
+    AgentHarnessWatch watch = {};
+    CHECK(SessionResult_IsOk(
+        AgentHarness_Watch(&arena, &harness, 4, &snapshot, &watch)));
+
+    CHECK(SessionResult_IsOk(AgentHarness_QueueNextTurn(&harness, SVL("queued"))));
+    CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("hello"))));
+
+    u32 durable = 0;
+    u32 dropped = 0;
+    for (;;) {
+      AgentHarnessEvent event = {};
+      SessionResult next = AgentHarness_WatchNext(&arena, &watch, &event);
+      if (!SessionResult_IsOk(next)) break;
+      if (event.Kind == AgentHarnessEventKind::DurableRecord) durable++;
+      if (event.Kind == AgentHarnessEventKind::TransientEventsDropped)
+        dropped += event.Dropped.Count;
+      if (event.Kind == AgentHarnessEventKind::TransientAgentEnd) break;
+    }
+    // A four-slot ring cannot hold a whole run, so events were certainly
+    // discarded -- yet every durable record still arrived.
+    SessionReduction reduction = AgentHarness_ReduceSnapshot(&harness);
+    CHECK_ALL(!watch.Lagged, dropped > 0, durable == reduction.RecordCount - 1);
+    CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
+  }
+
+  CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+  ArenaRelease(&arena);
+}
+
 void TestHarness() {
   TestHarnessReplayAndIncremental();
   TestHarnessLifecycle();
   TestHarnessWatchers();
+  TestHarnessWatchOverflow();
   TestHarnessWatchDrainsAfterClose();
   TestHarnessToolsAndHooks();
   TestHarnessPerTurnHooks();

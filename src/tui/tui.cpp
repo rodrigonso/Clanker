@@ -2685,6 +2685,17 @@ void Tui_HarnessEvent(void* user, const AgentHarnessEvent* ev) {
       t->QueuedCount =
           ev->Queue.SteerCount + ev->Queue.FollowUpCount + ev->Queue.NextTurnCount;
       break;
+    // Only progress rendering was skipped; the transcript is still complete, so
+    // say so inline rather than rebuilding it.
+    case AgentHarnessEventKind::TransientEventsDropped: {
+      TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::Notice);
+      StrBuf notice = StrBuf_Make(&t->SessionMem, 64);
+      StrBuf_AppendCStr(&notice, "skipped ");
+      StrBuf_AppendU64(&notice, ev->Dropped.Count);
+      StrBuf_AppendCStr(&notice, " progress updates to keep up");
+      display->Payload = notice;
+      break;
+    }
     default: break;
   }
   Wake(t);

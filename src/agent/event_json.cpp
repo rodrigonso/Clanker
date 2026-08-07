@@ -150,6 +150,10 @@ bool AgentEventJson_Write(StrBuf* out, const AgentHarnessEvent* event) {
     case AgentHarnessEventKind::TransientCancelRequested:
       JsonWrite_String(&w, "type", SVL("cancel_requested"));
       break;
+    case AgentHarnessEventKind::TransientEventsDropped:
+      JsonWrite_String(&w, "type", SVL("events_dropped"));
+      JsonWrite_U64(&w, "count", event->Dropped.Count);
+      break;
     default:
       return reject();
   }
