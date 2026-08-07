@@ -1415,6 +1415,94 @@ void TestTui() {
     ArenaRelease(&as);
   }
 
+  // A successful copy confirms on the status row, counting characters rather
+  // than bytes, and retires on the compose clock.
+  {
+    Arena as = ArenaCreate();
+    TuiOpts os;
+    os.ModelName = SVL("m");
+    os.Color = true;
+    Tui ts;
+    Tui_InitModel(&ts, &as, os);
+    Feed(&ts, "copy");
+    Feed(&ts, "\x1b[1;6D");
+    Feed(&ts, "\x03");
+    CHECK_ALL(ts.CopyNoticeActive, ts.CopyNoticeChars == 4,
+              ts.CopyNoticeExpiryMs == 0);
+
+    // The first frame stamps the deadline and takes over the left status text.
+    Tui_ComposeFrame(&ts, 20, 12, 100000);
+    u16 statusY = (u16)(ts.Scr.Rows - 1);
+    CHECK_ALL(ts.CopyNoticeExpiryMs == 101500,
+              ScreenRowContains(&ts, statusY, "copied 4 chars"),
+              !ScreenRowContains(&ts, statusY, "ready"),
+              Screen_BackAt(&ts.Scr, 1, statusY).Ch == 'c',
+              Screen_BackAt(&ts.Scr, 1, statusY).St.Fg == 114);
+
+    // It survives right up to the deadline, then restores the agent state.
+    Tui_ComposeFrame(&ts, 20, 12, 101499);
+    CHECK_ALL(ts.CopyNoticeActive,
+              ScreenRowContains(&ts, statusY, "copied 4 chars"));
+    Tui_ComposeFrame(&ts, 20, 12, 101500);
+    CHECK_ALL(!ts.CopyNoticeActive, ts.CopyNoticeChars == 0,
+              ts.CopyNoticeExpiryMs == 0,
+              ScreenRowContains(&ts, statusY, "ready"),
+              !ScreenRowContains(&ts, statusY, "copied"));
+    Tui_Stop(&ts);
+    ArenaRelease(&as);
+  }
+
+  // Pointer motion keeps the confirmation, the next keystroke retires it, and a
+  // Ctrl+C that copies nothing never arms one.
+  {
+    Arena as = ArenaCreate();
+    TuiOpts os;
+    os.ModelName = SVL("m");
+    os.Color = false;
+    Tui ts;
+    Tui_InitModel(&ts, &as, os);
+    Feed(&ts, "copy");
+    Feed(&ts, "\x1b[1;6D");
+    Feed(&ts, "\x03");
+    Tui_ComposeFrame(&ts, 20, 12, 100000);
+    CHECK(ts.CopyNoticeActive);
+
+    Feed(&ts, "\x1b[<35;6;6M");
+    CHECK(ts.CopyNoticeActive);
+
+    Feed(&ts, "x");
+    u16 statusY = (u16)(ts.Scr.Rows - 1);
+    CHECK(!ts.CopyNoticeActive);
+    Tui_ComposeFrame(&ts, 20, 12, 100010);
+    CHECK_ALL(ScreenRowContains(&ts, statusY, "ready"),
+              !ScreenRowContains(&ts, statusY, "copied"));
+
+    ts.AgentRunning = true;
+    ts.AbortFlag = 0;
+    Feed(&ts, "\x03");
+    CHECK_ALL(ts.AbortFlag == 1, !ts.CopyNoticeActive);
+    Tui_Stop(&ts);
+    ArenaRelease(&as);
+  }
+
+  // Multi-byte selections report characters, not bytes, and singular units.
+  {
+    Arena as = ArenaCreate();
+    TuiOpts os;
+    os.ModelName = SVL("m");
+    os.Color = false;
+    Tui ts;
+    Tui_InitModel(&ts, &as, os);
+    LineModel_AddNotice(&ts.Model, EntryKind::Info, SVL("wide \xe5\xa5\xbdx"));
+    Tui_ComposeFrame(&ts, 20, 12, 100000);
+    Feed(&ts, "\x1b[<0;11;1M\x1b[<32;10;1M\x1b[<0;10;1m\x03");
+    CHECK_ALL(ts.ClipboardRaw.Length == 3, ts.CopyNoticeChars == 1);
+    Tui_ComposeFrame(&ts, 20, 12, 100010);
+    CHECK(ScreenRowContains(&ts, (u16)(ts.Scr.Rows - 1), "copied 1 char"));
+    Tui_Stop(&ts);
+    ArenaRelease(&as);
+  }
+
   // Edge dragging auto-scrolls at a controlled cadence and extends the
   // absolute transcript focus across pages while remaining detached.
   {

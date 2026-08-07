@@ -196,6 +196,12 @@ struct Tui {
   StrBuf ClipboardRaw;
   StrBuf ClipboardOsc;
 
+  // Transient "copied N chars" status-bar confirmation. Armed by the copy key
+  // handler; the deadline is assigned and enforced against the compose clock.
+  u32 CopyNoticeChars;
+  u64 CopyNoticeExpiryMs;  // 0 while armed but not yet stamped by a frame
+  bool CopyNoticeActive;
+
   // Received assistant text coalesced at render-frame boundaries.
   StreamReveal Reveal;
   Array<TuiDisplayEvent> DisplayEvents;

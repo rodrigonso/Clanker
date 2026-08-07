@@ -13,6 +13,7 @@ const char* kSpinner[10] = {"\xe2\xa0\x8b", "\xe2\xa0\x99", "\xe2\xa0\xb9", "\xe
                             "\xe2\xa0\x87", "\xe2\xa0\x8f"};
 constexpr u64 kDoubleEscapeMs = 500;
 constexpr u64 kSpinnerFrameMs = 60;
+constexpr u64 kCopyNoticeMs = 1500;
 
 Style TuiSt(const Tui* t, u8 fg, u8 attr) {
   return Style{t->Color ? fg : COL_DEFAULT, COL_DEFAULT, attr};
@@ -263,6 +264,44 @@ StrView Truncate(StrView s, u32 maxBytes) {
 }
 
 const u8 SELECTION_BG = 238;
+const u8 COPY_NOTICE_FG = 114;
+
+// Number of Unicode scalars in a UTF-8 string, so the copy confirmation counts
+// characters rather than bytes.
+u32 Utf8Count(StrView s) {
+  u32 offset = 0;
+  u32 count = 0;
+  while (offset < s.Length) {
+    Utf8Decode(s, &offset);
+    count++;
+  }
+  return count;
+}
+
+void ClearCopyNotice(Tui* t) {
+  t->CopyNoticeActive = false;
+  t->CopyNoticeChars = 0;
+  t->CopyNoticeExpiryMs = 0;
+}
+
+// Show a copy confirmation on the status row. The deadline stays unset until a
+// frame stamps it, so expiry is driven by the compose clock.
+void ArmCopyNotice(Tui* t, StrView text) {
+  t->CopyNoticeActive = true;
+  t->CopyNoticeChars = Utf8Count(text);
+  t->CopyNoticeExpiryMs = 0;
+}
+
+// Stamp a freshly armed notice with its deadline, then retire it once the
+// compose clock passes that deadline.
+void AdvanceCopyNotice(Tui* t, u64 nowMs) {
+  if (!t->CopyNoticeActive) return;
+  if (t->CopyNoticeExpiryMs == 0) {
+    t->CopyNoticeExpiryMs = nowMs + kCopyNoticeMs;
+    return;
+  }
+  if (nowMs >= t->CopyNoticeExpiryMs) ClearCopyNotice(t);
+}
 
 void ClearTranscriptSelection(Tui* t) {
   if (t->TranscriptSelectionRevision == 0 && !t->TranscriptDragging)
@@ -380,7 +419,11 @@ bool GetTranscriptSelection(Tui* t, TranscriptSelection* selection) {
 void FormatStatus(Tui* t, char* left, u32 leftCap, u32* ll, char* right,
                   u32 rightCap, u32* rl, u16 cols) {
   *ll = 0;
-  if (t->OperationActive) {
+  if (t->CopyNoticeActive) {
+    Put(left, leftCap, ll, "copied ");
+    PutNum(left, leftCap, ll, t->CopyNoticeChars);
+    Put(left, leftCap, ll, t->CopyNoticeChars == 1 ? " char" : " chars");
+  } else if (t->OperationActive) {
     Put(left, leftCap, ll, kSpinner[t->Spinner % 10]);
     Put(left, leftCap, ll, " ");
     for (u32 i = 0; i < t->OperationLabel.Length && *ll < leftCap - 1; i++)
@@ -988,7 +1031,8 @@ void BuildStatusComponents(Tui* t, u16 statusY, u16 cols) {
   UiTextProps leftProps = {};
   leftProps.Layout.Width = Ui_Fill();
   leftProps.Layout.Height = Ui_Fill();
-  leftProps.StyleValue = style;
+  leftProps.StyleValue =
+      t->CopyNoticeActive ? TuiSt(t, COPY_NOTICE_FG, ATTR_NONE) : style;
   Ui_Text(&t->Ui, Ui_Key(SVL("left")), StrView{left, leftLength}, leftProps);
   UiTextProps rightProps = {};
   rightProps.Layout.Width = Ui_Content();
@@ -1022,6 +1066,7 @@ void ComposeAtSize(Tui* t, u16 cols, u16 rows, u64 nowMs) {
     ClearTranscriptSelection(t);
     Screen_Resize(&t->Scr, cols, rows);
   }
+  AdvanceCopyNotice(t, nowMs);
   if (cols < 6 || rows < 6) {
     ViewportAnchor anchor = CaptureViewportAnchor(t);
     ResetScrollbar(t);
@@ -1702,6 +1747,11 @@ bool DispatchPointerKey(Tui* t, const Key& key) {
 
 void HandleKey(Tui* t, const Key& k) {
   ValidateTranscriptSelection(t);
+  // Any deliberate keystroke retires the copy confirmation early. Idle pointer
+  // motion does not, so a drag-select followed by Ctrl+C keeps it visible. A
+  // copying Ctrl+C re-arms below, after this clear.
+  if (k.Kind != KeyKind::None && k.Kind != KeyKind::MouseMove)
+    ClearCopyNotice(t);
   if (k.Kind == KeyKind::Escape) {
     bool canArm =
         t->ModalResult != TuiModalResult::Pending &&
@@ -1878,7 +1928,10 @@ void HandleKey(Tui* t, const Key& k) {
       } else {
         copied = QueueTranscriptClipboard(t);
       }
-      if (copied) break;
+      if (copied) {
+        ArmCopyNotice(t, StrBuf_View(&t->ClipboardRaw));
+        break;
+      }
       if (t->OperationActive)
         t->OperationAbortFlag = 1;
       else if (t->AgentRunning) {
@@ -1964,7 +2017,7 @@ void RenderLoop(void* arg) {
                        : (Tui_HasPendingDisplay(t)
                               ? kMinFrameMs
                               : ((t->State != TuiState::Idle ||
-                                  t->OperationActive)
+                                  t->OperationActive || t->CopyNoticeActive)
                                      ? 60
                                      : 200));
     if (!t->Dirty && !t->Stop) Cond_WaitTimeout(&t->RenderCv, &t->Lock, interval);
@@ -2142,6 +2195,7 @@ bool Tui_ClearSession(Tui* t) {
   t->AbortFlag = 0;
   t->LastEscapeMs = 0;
   t->EscapeArmed = false;
+  ClearCopyNotice(t);
   t->State = TuiState::Idle;
   t->StateTool = {};
   t->RetryStatus = {};

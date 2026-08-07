@@ -110,7 +110,17 @@ ctest --test-dir build
 On Windows with the VS toolchain, run the commands from a `vcvars64` shell (or
 use the VS-bundled CMake/Ninja). `build.ps1` builds only the `clank` executable
 by default, skips redundant configure passes, and accepts `-Test` to build and
-run the unit tests.
+run the unit tests. `run.ps1` builds incrementally and then launches the
+executable in your current directory:
+
+```powershell
+.\run.ps1                             # build, then start the TUI
+.\run.ps1 -- -c                       # forward Clank's own flags after --
+.\run.ps1 -NoBuild --help             # skip the build, run what's there
+```
+
+Put `--` before Clank's short options: without it PowerShell binds `-c` to
+`run.ps1`'s own `-Config`.
 
 ### Visual Studio 2026
 
@@ -323,7 +333,8 @@ Home/End · **Shift** + movement selects composer text ·
 transcript · **left-drag** selects transcript or composer text (and auto-scrolls
 the transcript) · an overflow-only scrollbar can be clicked or dragged (track
 clicks center its thumb) · type during a turn to **steer** · **Ctrl+C** copies
-selections via OSC 52; otherwise it interrupts a turn, cancels a command
+selections via OSC 52 and confirms with a transient `copied N chars` message on
+the status row; otherwise it interrupts a turn, cancels a command
 operation, clears the composer, or quits · double-press **Escape** within 500 ms
 to clear an idle composer or interrupt an active turn · hover or **left click**
 a turn's first row to highlight or collapse/expand it · **Ctrl+O** expands all
