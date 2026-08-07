@@ -84,4 +84,49 @@ bool SessionArenaSwapSafeLocked(const Tui* t);
 void RebuildTranscriptLocked(Tui* t, const Message* messages, u32 count,
                              bool allowSwap);
 
+
+// ---- modal ---------------------------------------------------------------
+
+struct ModalComponentData {
+  Tui* Controller;
+  u16 Cols;
+  u16 TopBorderY;
+};
+
+
+void PaintModalNode(UiContext*, const UiNode* node, UiCanvas* canvas);
+void FinishModal(Tui* t, TuiModalResult result);
+void RequestStopLocked(Tui* t);
+void HandleSelectKey(Tui* t, const Key& k);
+void HandleTextKey(Tui* t, const Key& k);
+
+
+// ---- selection / clipboard ----------------------------------------------
+
+struct TranscriptSelection {
+  u32 FirstRow;
+  u32 LastRow;
+  u16 FirstCell;
+  u16 LastCell;
+};
+
+void FocusComposer(Tui* t);
+bool TranscriptPointsDiffer(const Tui* t);
+bool NormalizeTranscriptSelection(const Tui* t, TranscriptSelection* selection);
+bool TranscriptRangeForRow(const TranscriptSelection* selection, u32 row,
+                           const DisplayRowLayout* layout, DisplayRowRange* out);
+void RefreshTranscriptSelectionHash(Tui* t);
+bool ValidateTranscriptSelection(Tui* t);
+bool GetTranscriptSelection(Tui* t, TranscriptSelection* selection);
+u16 TranscriptMouseCell(const Tui* t, u16 x);
+bool TranscriptMousePoint(const Tui* t, u16 x, u16 y, u32* row, u16* cell);
+void ScrollBy(Tui* t, i32 delta);
+void UpdateMouseDrag(Tui* t);
+bool AdvanceSelectionTick(Tui* t, u64 nowMs);
+void QueueClipboard(Tui* t, StrView text);
+bool QueueTranscriptClipboard(Tui* t);
+bool PrepareClipboardOutput(Tui* t);
+void WriteTermOutput(void* user, const char* data, u32 n);
+bool DrainShutdownOutput(Tui* t, ScreenWriter write, void* user);
+
 }  // namespace TuiInternal
