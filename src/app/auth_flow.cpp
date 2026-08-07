@@ -352,7 +352,7 @@ static AppCommandHandlerResult RunOAuthLogin(InteractiveRuntime* rt, const Provi
       StrBuf_AppendCStr(&message, "Login failed: ");
       StrBuf_Append(&message, StrBuf_View(&error));
       result.Status = AppCommandHandlerStatus::Failed;
-      result.Message = StrView_Dup(rt->Mem, StrBuf_View(&message));
+      result.Message = StrView_Dup(&rt->CommandMem, StrBuf_View(&message));
     }
     if (RuntimeEndOperation(rt))
       result = AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled,
@@ -382,7 +382,7 @@ static AppCommandHandlerResult RunOAuthLogin(InteractiveRuntime* rt, const Provi
     StrBuf_AppendCStr(&message, "Login failed: ");
     StrBuf_Append(&message, StrBuf_View(&error));
     AppCommandHandlerResult result = {AppCommandHandlerStatus::Failed,
-                                      StrView_Dup(rt->Mem, StrBuf_View(&message))};
+                                      StrView_Dup(&rt->CommandMem, StrBuf_View(&message))};
     if (RuntimeEndOperation(rt))
       result = AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled,
                                        SVL("Login cancelled.")};
@@ -397,7 +397,7 @@ static AppCommandHandlerResult RunOAuthLogin(InteractiveRuntime* rt, const Provi
     StrBuf_Append(&message, rt->AuthPath);
     StrBuf_AppendChar(&message, '.');
     AppCommandHandlerResult result = {AppCommandHandlerStatus::Failed,
-                                      StrView_Dup(rt->Mem, StrBuf_View(&message))};
+                                      StrView_Dup(&rt->CommandMem, StrBuf_View(&message))};
     if (RuntimeEndOperation(rt))
       result = AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled,
                                        SVL("Login cancelled.")};
@@ -413,7 +413,7 @@ static AppCommandHandlerResult RunOAuthLogin(InteractiveRuntime* rt, const Provi
   StrBuf_Append(&message, rt->AuthPath);
   StrBuf_AppendChar(&message, '.');
   AppCommandHandlerResult result = {AppCommandHandlerStatus::Success,
-                                    StrView_Dup(rt->Mem, StrBuf_View(&message))};
+                                    StrView_Dup(&rt->CommandMem, StrBuf_View(&message))};
   if (RuntimeEndOperation(rt))
     result = AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled,
                                      SVL("Login cancelled.")};
@@ -734,7 +734,7 @@ bool ActivateRuntimeSelection(InteractiveRuntime* rt, const ProviderSpec* spec,
 StrView SelectionMessage(InteractiveRuntime* rt, const char* prefix) {
   ModelRequestProfile profile = rt->Harness->Config.Stream.Profile;
   StrBuf message =
-      StrBuf_Make(rt->Mem, rt->Spec->Name.Length +
+      StrBuf_Make(&rt->CommandMem, rt->Spec->Name.Length +
                                rt->CurrentModel.Id.Length + 96);
   StrBuf_AppendCStr(&message, prefix);
   StrBuf_Append(&message, rt->Spec->Name);
@@ -825,7 +825,7 @@ AppCommandHandlerResult HandleLoginCommand(void* user, const AppCommandUx* ux) {
             SVL("Login succeeded, but the provider could not be activated.")};
 
       StrBuf notice =
-          StrBuf_Make(rt->Mem, provider.Spec->Name.Length +
+          StrBuf_Make(&rt->CommandMem, provider.Spec->Name.Length +
                                   provider.Spec->DefaultModel.Length + 96);
       StrBuf_AppendCStr(&notice,
                        model.Status == RuntimeChoiceStatus::Cancelled

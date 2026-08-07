@@ -130,7 +130,16 @@ AppCommandHandlerResult CommandResult(SessionResult result, StrView successMessa
 
 AppCommandHandlerResult RuntimeOwnedFailure(InteractiveRuntime* rt, StrView message) {
   return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
-                                 StrView_Dup(rt->Mem, message)};
+                                 StrView_Dup(&rt->CommandMem, message)};
+}
+
+AppCommandDispatchResult RuntimeDispatchCommand(InteractiveRuntime* rt, StrView input,
+                                                const AppCommandHandlers* handlers,
+                                                const AppCommandUx* ux) {
+  // The previous command's message has already been rendered by the time the
+  // next one is submitted, so its storage is free to reuse.
+  ArenaReset(&rt->CommandMem);
+  return AppCommand_Dispatch(input, handlers, ux);
 }
 
 AppCommandHandlerResult ReturnToCommandPalette(InteractiveRuntime* rt) {

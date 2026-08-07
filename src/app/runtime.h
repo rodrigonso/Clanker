@@ -56,6 +56,12 @@ inline void HarnessEventSink_Emit(const HarnessEventSink& sink,
 
 struct InteractiveRuntime {
   Arena* Mem;
+  // Scratch for one slash command's user-visible result. Reset at the start of
+  // every dispatch, so a command that renders a large report (`/tree` on a big
+  // session is tens of KB) costs that once rather than once per invocation for
+  // the life of the process. Only values consumed before the next dispatch may
+  // live here; anything installed on the runtime or the harness belongs on Mem.
+  Arena CommandMem;
   StrView AuthPath;
   StrView SettingsPath;
   const ProviderSpec* Spec;
@@ -136,6 +142,13 @@ bool RuntimeEndOperation(InteractiveRuntime* rt);
 AppCommandHandlerResult CommandResult(SessionResult result, StrView successMessage);
 AppCommandHandlerResult RuntimeOwnedFailure(InteractiveRuntime* rt, StrView message);
 AppCommandHandlerResult ReturnToCommandPalette(InteractiveRuntime* rt);
+
+// Dispatches one slash command, recycling the previous command's result
+// storage first. Every caller must go through this rather than
+// AppCommand_Dispatch so CommandMem cannot be left to grow.
+AppCommandDispatchResult RuntimeDispatchCommand(InteractiveRuntime* rt, StrView input,
+                                                const AppCommandHandlers* handlers,
+                                                const AppCommandUx* ux);
 
 // ---- prompt context reporting -------------------------------------------
 

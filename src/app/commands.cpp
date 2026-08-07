@@ -53,7 +53,7 @@ static AppCommandHandlerResult HandleSessionCommand(
       return ReturnToCommandPalette(rt);
     return AppCommandHandlerResult{AppCommandHandlerStatus::Success, {}};
   }
-  StrBuf text = StrBuf_Make(rt->Mem, 768);
+  StrBuf text = StrBuf_Make(&rt->CommandMem, 768);
   for (u32 i = 0; i < lines.Count; i++) {
     StrBuf_Append(&text, lines.Data[i]);
     if (i + 1 < lines.Count) StrBuf_AppendChar(&text, '\n');
@@ -211,7 +211,7 @@ list_scope:
     return AppCommandHandlerResult{AppCommandHandlerStatus::Success, {}};
   }
 
-  StrBuf text = StrBuf_Make(rt->Mem, optionCount * 96 + 32);
+  StrBuf text = StrBuf_Make(&rt->CommandMem, optionCount * 96 + 32);
   for (u32 i = 0; i < optionCount; i++) {
     StrBuf_Append(&text, rows.Options[i]);
     if (i + 1 < optionCount) StrBuf_AppendChar(&text, '\n');
@@ -350,7 +350,7 @@ static AppCommandHandlerResult HandleTreeCommand(
     ArenaRelease(&scratch);
     return CommandResult(snapshot, {});
   }
-  StrBuf text = StrBuf_Make(rt->Mem, state.RecordCount * 72 + 32);
+  StrBuf text = StrBuf_Make(&rt->CommandMem, state.RecordCount * 72 + 32);
   u32 treeCount = 0;
   for (u32 i = 0; i < state.RecordCount; i++) {
     const SessionRecord* record = &state.Records[i];

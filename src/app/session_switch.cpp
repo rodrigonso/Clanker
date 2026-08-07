@@ -127,7 +127,7 @@ SessionResult ResolveRuntimeProjectTrust(
   if (!ProjectTrustStore_Update(scratch, rt->TrustPath, decision.DecisionPath,
                                 decision.Trusted, decision.RemovePath, &error))
     return SessionResult_Error(SessionStatus::IoError,
-                               StrView_Dup(rt->Mem, StrBuf_View(&error)));
+                               StrView_Dup(&rt->CommandMem, StrBuf_View(&error)));
   return SessionResult_Ok();
 }
 
@@ -244,7 +244,7 @@ SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
     StrBuf error = StrBuf_Make(&scratch, 160);
     if (!PromptContext_Build(&nextPromptOptions, &nextPrompt, &error)) {
       SessionLog_Close(&target);
-      StrView message = StrView_Dup(rt->Mem, StrBuf_View(&error));
+      StrView message = StrView_Dup(&rt->CommandMem, StrBuf_View(&error));
       ArenaRelease(&scratch);
       return SessionResult_Error(SessionStatus::IoError, message);
     }
