@@ -87,23 +87,38 @@ void MarkWatcherLagged(AgentHarnessWatch* watch) {
 // deltas on the same content block merge, so ordering is unaffected.
 constexpr u32 WATCH_COALESCE_LIMIT = (u32)64 << 10;
 
+// The ring's arena is only reclaimed when the ring drains, and a consumer that
+// has stopped draining entirely never gets there. Degrade to the recoverable
+// lagged path well before ArenaAlloc would trap on the reservation.
+constexpr usize WATCH_ARENA_SOFT_LIMIT = (usize)32 << 20;
+
 bool CoalesceStreamDelta(AgentHarnessWatch* watch, const AgentHarnessEvent* event) {
   if (watch->Count == 0) return false;
   if (event->Kind != AgentHarnessEventKind::TransientStream) return false;
   if (event->Stream.Kind != StreamEventKind::TextDelta) return false;
-  AgentHarnessEvent* tail =
-      &watch->Slots[(watch->Head + watch->Count - 1) % watch->Capacity].Event;
+  AgentHarnessWatchSlot* slot =
+      &watch->Slots[(watch->Head + watch->Count - 1) % watch->Capacity];
+  AgentHarnessEvent* tail = &slot->Event;
   if (tail->Kind != AgentHarnessEventKind::TransientStream) return false;
   if (tail->Stream.Kind != StreamEventKind::TextDelta) return false;
   if (tail->Stream.ContentIndex != event->Stream.ContentIndex) return false;
   u64 merged = (u64)tail->Stream.Delta.Length + event->Stream.Delta.Length;
   if (merged > WATCH_COALESCE_LIMIT) return false;
 
-  char* data = (char*)ArenaAlloc(&watch->Mem, (usize)merged, 1);
-  memcpy(data, tail->Stream.Delta.Data, tail->Stream.Delta.Length);
-  memcpy(data + tail->Stream.Delta.Length, event->Stream.Delta.Data,
-         event->Stream.Delta.Length);
-  tail->Stream.Delta = StrView{data, (u32)merged};
+  // Grow geometrically so a tail built from N deltas costs O(N) arena in total
+  // rather than O(N^2), then append in place.
+  if (merged > slot->StreamCapacity) {
+    u32 capacity = slot->StreamCapacity ? slot->StreamCapacity : 256;
+    while (capacity < merged) capacity *= 2;
+    if (capacity > WATCH_COALESCE_LIMIT) capacity = WATCH_COALESCE_LIMIT;
+    char* grown = (char*)ArenaAlloc(&watch->Mem, capacity, 1);
+    memcpy(grown, tail->Stream.Delta.Data, tail->Stream.Delta.Length);
+    tail->Stream.Delta.Data = grown;
+    slot->StreamCapacity = capacity;
+  }
+  memcpy((char*)tail->Stream.Delta.Data + tail->Stream.Delta.Length,
+         event->Stream.Delta.Data, event->Stream.Delta.Length);
+  tail->Stream.Delta.Length = (u32)merged;
   return true;
 }
 
@@ -136,6 +151,13 @@ void EnqueueWatcherEvent(AgentHarnessWatch* watch, const AgentHarnessEvent* even
     Cond_Signal(&watch->Changed);
     return;
   }
+  // Dropping the oldest event frees a slot but reclaims no arena, so a consumer
+  // that never drains would otherwise grow Mem until ArenaAlloc trapped on the
+  // reservation. Hand it the recoverable lagged path instead.
+  if (watch->Mem.Used > WATCH_ARENA_SOFT_LIMIT) {
+    MarkWatcherLagged(watch);
+    return;
+  }
   if (watch->Count == watch->Capacity && !DropOldestTransient(watch)) {
     MarkWatcherLagged(watch);
     return;
@@ -147,6 +169,9 @@ void EnqueueWatcherEvent(AgentHarnessWatch* watch, const AgentHarnessEvent* even
     MarkWatcherLagged(watch);
     return;
   }
+  // The clone is exact-fit, so any capacity the slot's previous occupant had is
+  // gone with it.
+  slot->StreamCapacity = 0;
   watch->Count++;
   if (event->Kind == AgentHarnessEventKind::DurableRecord) watch->Cursor = event->Cursor;
   Cond_Signal(&watch->Changed);

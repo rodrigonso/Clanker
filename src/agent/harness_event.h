@@ -113,6 +113,11 @@ struct AgentHarnessSnapshot {
 // which is the common case between bursts.
 struct AgentHarnessWatchSlot {
   AgentHarnessEvent Event;
+  // Capacity of the buffer backing a coalesced text delta. Merging appends in
+  // place while it fits; without this, each merge would reallocate at the
+  // exact merged size and abandon the previous buffer, making one coalesced
+  // tail cost O(length^2) of arena.
+  u32 StreamCapacity;
 };
 
 struct AgentHarnessWatch {

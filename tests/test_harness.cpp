@@ -3105,6 +3105,39 @@ void TestHarnessWatchOverflow() {
     CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
   }
 
+  // A consumer that stops draining entirely must not be able to grow the ring's
+  // arena without bound. Coalescing used to reallocate at the exact merged size
+  // on every delta, so a tail built from N deltas cost O(N^2) arena: 20k
+  // one-byte deltas consumed ~200 MB, and a longer stall reached the arena
+  // reservation and trapped the process instead of degrading.
+  {
+    AgentHarnessSnapshot snapshot = {};
+    AgentHarnessWatch watch = {};
+    CHECK(SessionResult_IsOk(
+        AgentHarness_Watch(&arena, &harness, 8, &snapshot, &watch)));
+
+    for (u32 i = 0; i < 20000; i++) {
+      StreamEvent delta = {};
+      delta.Kind = StreamEventKind::TextDelta;
+      delta.ContentIndex = 0;
+      delta.Delta = SVL("z");
+      AgentHarness_PublishStream(&harness, &delta);
+    }
+    // Geometric growth keeps the total a small multiple of the text, and the
+    // coalesce limit caps each tail, so this stays in the low hundreds of KB.
+    CHECK_ALL(!watch.Lagged, watch.Mem.Used < ((usize)4 << 20));
+
+    // The merged text is still intact.
+    AgentHarnessEvent event = {};
+    CHECK(SessionResult_IsOk(AgentHarness_WatchNext(&arena, &watch, &event)));
+    CHECK(event.Kind == AgentHarnessEventKind::TransientStream);
+    bool allZ = true;
+    for (u32 i = 0; i < event.Stream.Delta.Length; i++)
+      if (event.Stream.Delta.Data[i] != 'z') allZ = false;
+    CHECK(allZ);
+    CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
+  }
+
   CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
   ArenaRelease(&arena);
 }
