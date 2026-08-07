@@ -873,12 +873,13 @@ int RunCommandLineLogin(Arena* arena, StrView authPath, const char* providerId,
   }
 
   InteractiveRuntime runtime = {};
-  runtime.Mem = arena;
+  InteractiveRuntime_Init(&runtime, arena);
   runtime.AuthPath = authPath;
   runtime.Spec = spec;
   runtime.AutoOpen = autoOpen;
   AppCommandHandlerResult result = RunOAuthLogin(&runtime, spec, &ux);
   ReportStandaloneCommandResult(&ux, result);
+  InteractiveRuntime_Release(&runtime);
   return result.Status == AppCommandHandlerStatus::Success ? 0 : 1;
 }
 

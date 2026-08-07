@@ -272,6 +272,24 @@ void TestSessionMemoryCompaction(Arena* outer) {
   CHECK(!Tui_SessionMemoryWantsCompaction(&t));
   CHECK(!Tui_CompactSessionMemory(&t, transcript.Data, transcript.Count));
 
+  // ...but once it completes, compaction has to work again. ModalKind used to
+  // stay set forever, so confirming a single picker silently disabled
+  // reclamation for the rest of the process.
+  Feed(&t, "\r");
+  u32 picked = 0;
+  CHECK(Tui_GetModalResult(&t, &picked, nullptr) == TuiModalResult::Confirmed);
+  CHECK(t.ModalKind == TuiModalKind::None);
+  for (u32 turn = 321; turn < 400; turn++) runTurn(turn);
+  CHECK(Tui_CompactSessionMemory(&t, transcript.Data, transcript.Count));
+
+  // Lag recovery runs on the event pump thread while the main thread is holding
+  // StrViews into SessionMem, so it rebuilds without reclaiming.
+  for (u32 turn = 400; turn < 480; turn++) runTurn(turn);
+  usize beforeReplace = t.SessionMem.Used;
+  Tui_ReplaceTranscript(&t, transcript.Data, transcript.Count);
+  CHECK(t.SessionMem.Used >= beforeReplace);
+  CHECK(t.Model.Entries.Count == transcript.Count);
+
   ArenaRelease(&scratch);
   Tui_Stop(&t);
 }

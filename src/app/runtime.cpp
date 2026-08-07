@@ -133,6 +133,17 @@ AppCommandHandlerResult RuntimeOwnedFailure(InteractiveRuntime* rt, StrView mess
                                  StrView_Dup(&rt->CommandMem, message)};
 }
 
+void InteractiveRuntime_Init(InteractiveRuntime* rt, Arena* mem) {
+  *rt = InteractiveRuntime{};
+  rt->Mem = mem;
+  // Sized for one command's report; `/tree` on a large session is the biggest.
+  rt->CommandMem = ArenaCreate((usize)16 << 20);
+}
+
+void InteractiveRuntime_Release(InteractiveRuntime* rt) {
+  ArenaRelease(&rt->CommandMem);
+}
+
 AppCommandDispatchResult RuntimeDispatchCommand(InteractiveRuntime* rt, StrView input,
                                                 const AppCommandHandlers* handlers,
                                                 const AppCommandUx* ux) {

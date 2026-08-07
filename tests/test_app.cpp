@@ -7,6 +7,7 @@
 #include "app/config_paths.h"
 #include "app/runtime.h"
 #include "app/session_switch.h"
+#include "app/session_switch.h"
 #include "base/arena.h"
 #include "check.h"
 #include "session/metadata.h"
@@ -158,9 +159,40 @@ void TestCommandResultMapping() {
 
 }  // namespace
 
+// Command results allocate from CommandMem, which a zero-initialized runtime
+// does not have. `clank --login` built its runtime by hand and skipped it, so
+// the success message trapped in ArenaAlloc after the credentials were already
+// written -- InteractiveRuntime_Init is what makes that unforgettable.
+void TestRuntimeCommandArena() {
+  Arena arena = ArenaCreate();
+  InteractiveRuntime rt = {};
+  InteractiveRuntime_Init(&rt, &arena);
+  CHECK_ALL(rt.Mem == &arena, rt.CommandMem.Reserved > 0);
+
+  AppCommandHandlerResult failure = RuntimeOwnedFailure(&rt, SVL("boom"));
+  CHECK_ALL(failure.Status == AppCommandHandlerStatus::Failed,
+            StrView_EqCStr(failure.Message, "boom"));
+  // The message is owned by CommandMem, not by the caller's string.
+  CHECK(rt.CommandMem.Used > 0);
+
+  // Dispatching recycles it, which is what keeps repeated commands from
+  // accumulating in a process-lifetime arena.
+  AppCommandHandlers handlers = {};
+  handlers.User = &rt;
+  AppCommandUx ux = {};
+  usize afterFirst = rt.CommandMem.Used;
+  RuntimeDispatchCommand(&rt, SVL("not a command"), &handlers, &ux);
+  CHECK_ALL(afterFirst > 0, rt.CommandMem.Used == 0);
+
+  InteractiveRuntime_Release(&rt);
+  CHECK(rt.CommandMem.Base == nullptr);
+  ArenaRelease(&arena);
+}
+
 void TestApp() {
   TestSessionProjectKey();
   TestProjectKeyComparison();
+  TestRuntimeCommandArena();
   TestConfigPaths();
   TestTrustChoiceMenu();
   TestTrimAscii();

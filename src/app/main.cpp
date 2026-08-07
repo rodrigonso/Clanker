@@ -698,9 +698,7 @@ int main(int argc, char** argv) {
   }
 
   InteractiveRuntime runtime = {};
-  runtime.Mem = &arena;
-  // Sized for one command's report; `/tree` on a large session is the biggest.
-  runtime.CommandMem = ArenaCreate((usize)16 << 20);
+  InteractiveRuntime_Init(&runtime, &arena);
   runtime.AuthPath = authPath;
   runtime.SettingsPath = settingsPath;
   runtime.Spec = selected.Spec;

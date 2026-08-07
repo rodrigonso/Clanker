@@ -1424,6 +1424,10 @@ void DragScrollbar(Tui* t, const Key& key) {
 
 void FinishModal(Tui* t, TuiModalResult result) {
   t->ModalResult = result;
+  // The modal is no longer on screen. Leaving Kind set made it look permanently
+  // open, which silently disabled session-memory compaction for the rest of the
+  // process after the first picker the user confirmed.
+  t->ModalKind = TuiModalKind::None;
   Cond_Broadcast(&t->ModalCv);
 }
 
@@ -2581,15 +2585,20 @@ static bool SessionArenaSwapSafeLocked(const Tui* t) {
          t->ModalResult != TuiModalResult::Pending && !t->OperationActive;
 }
 
-// Rebuilds the transcript from `messages`, moving it onto a fresh SessionMem
-// when that is safe. The move is the point: SessionMem is a bump allocator, so
-// entries the scrollback cap has already dropped are only reclaimed by copying
-// the survivors somewhere else and releasing the old arena. When a swap is not
-// safe the rebuild still happens, just without reclaiming.
-static void RebuildTranscriptLocked(Tui* t, const Message* messages, u32 count) {
+// Rebuilds the transcript from `messages`. `allowSwap` moves it onto a fresh
+// SessionMem and releases the old one, which is the only way to reclaim entries
+// the scrollback cap has already dropped -- SessionMem is a bump allocator.
+//
+// Only the compaction path passes true. Lag recovery must not: it runs on the
+// event pump thread, concurrently with a main thread that is holding StrViews
+// into SessionMem (the submitted prompt from LineEdit_Submit, a modal's text
+// result) and has no lock over them. Rebuilding without reclaiming there is
+// exactly the pre-existing behaviour, and compaction reclaims it later anyway.
+static void RebuildTranscriptLocked(Tui* t, const Message* messages, u32 count,
+                                    bool allowSwap) {
   u16 width = t->Model.Width;
   u32 cap = t->Model.Cap;
-  bool swap = SessionArenaSwapSafeLocked(t);
+  bool swap = allowSwap && SessionArenaSwapSafeLocked(t);
 
   Arena next = {};
   TuiSubmission preserved[64] = {};
@@ -2652,7 +2661,7 @@ static void RebuildTranscriptLocked(Tui* t, const Message* messages, u32 count) 
 void Tui_ReplaceTranscript(Tui* t, const Message* messages, u32 count) {
   if (!t || (!messages && count)) return;
   Mutex_Lock(&t->Lock);
-  RebuildTranscriptLocked(t, messages, count);
+  RebuildTranscriptLocked(t, messages, count, false);
   Wake(t);
   Mutex_Unlock(&t->Lock);
 }
@@ -2679,7 +2688,7 @@ bool Tui_CompactSessionMemory(Tui* t, const Message* messages, u32 count) {
     Mutex_Unlock(&t->Lock);
     return false;
   }
-  RebuildTranscriptLocked(t, messages, count);
+  RebuildTranscriptLocked(t, messages, count, true);
   t->Follow = true;
   Wake(t);
   Mutex_Unlock(&t->Lock);

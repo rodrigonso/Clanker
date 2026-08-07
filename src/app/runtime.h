@@ -143,6 +143,12 @@ AppCommandHandlerResult CommandResult(SessionResult result, StrView successMessa
 AppCommandHandlerResult RuntimeOwnedFailure(InteractiveRuntime* rt, StrView message);
 AppCommandHandlerResult ReturnToCommandPalette(InteractiveRuntime* rt);
 
+// Zero-initializes `rt` and creates the arenas it owns. Every InteractiveRuntime
+// must go through this: command results allocate from CommandMem, and an arena
+// that was never created traps on its first allocation rather than failing.
+void InteractiveRuntime_Init(InteractiveRuntime* rt, Arena* mem);
+void InteractiveRuntime_Release(InteractiveRuntime* rt);
+
 // Dispatches one slash command, recycling the previous command's result
 // storage first. Every caller must go through this rather than
 // AppCommand_Dispatch so CommandMem cannot be left to grow.
