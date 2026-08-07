@@ -49,7 +49,7 @@ MemorySession* FindSession(MemoryRepository* repository, StrView projectKey,
   for (u32 i = 0; i < repository->Sessions.Count; i++) {
     MemorySession* session = repository->Sessions.Data[i];
     if (DurableId_Eq(SessionId(session), sessionId) &&
-        StrView_Eq(ProjectKey(session), projectKey))
+        SessionProjectKey_Eq(ProjectKey(session), projectKey))
       return session;
   }
   return nullptr;
@@ -354,7 +354,7 @@ SessionResult List(void* context, Arena* arena,
   for (u32 i = repository->Sessions.Count; i > 0; i--) {
     MemorySession* session = repository->Sessions.Data[i - 1];
     if (options->Scope == SessionListScope::CurrentProject &&
-        !StrView_Eq(ProjectKey(session), options->ProjectKey))
+        !SessionProjectKey_Eq(ProjectKey(session), options->ProjectKey))
       continue;
     SessionInfo info = {};
     SessionResult built = BuildInfo(arena, session, &info);

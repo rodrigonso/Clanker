@@ -130,7 +130,7 @@ SessionResult FindGlobalProject(Arena* arena, JsonlRepository* repository,
 bool ClaimMatches(const JsonlWriterClaim* claim, StrView projectKey,
                   DurableId sessionId) {
   return claim->Active && DurableId_Eq(claim->SessionId, sessionId) &&
-         StrView_Eq(claim->ProjectKey, projectKey);
+         SessionProjectKey_Eq(claim->ProjectKey, projectKey);
 }
 
 SessionResult AcquireClaim(JsonlRepository* repository, StrView projectKey,
@@ -797,7 +797,7 @@ SessionResult Open(void* context, Arena* arena, const SessionOpenOptions* option
     ArenaRelease(&scratch);
     return initialized;
   }
-  if (!StrView_Eq(outInfo->ProjectKey, options->ProjectKey)) {
+  if (!SessionProjectKey_Eq(outInfo->ProjectKey, options->ProjectKey)) {
     DestroyHandle(handle, false);
     ArenaRelease(&scratch);
     return SessionResult_Error(
@@ -851,7 +851,7 @@ SessionResult AppendProjectItems(JsonlRepository* repository, Arena* arena,
       ArenaRelease(&fileArena);
       continue;
     }
-    if (!StrView_Eq(info.ProjectKey, projectKey)) {
+    if (!SessionProjectKey_Eq(info.ProjectKey, projectKey)) {
       if (skippedCount) (*skippedCount)++;
       ArenaRelease(&fileArena);
       continue;
@@ -885,7 +885,7 @@ SessionResult Resolve(void* context, Arena* arena, DurableId sessionId,
                        SessionBusy(repository, foundProject, sessionId),
                        outInfo);
   if (SessionResult_IsOk(loaded) &&
-      !StrView_Eq(outInfo->ProjectKey, foundProject))
+      !SessionProjectKey_Eq(outInfo->ProjectKey, foundProject))
     loaded = SessionResult_Error(
         SessionStatus::Corrupt,
         SVL("session project does not match its storage directory"));

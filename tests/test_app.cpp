@@ -9,6 +9,7 @@
 #include "app/session_switch.h"
 #include "base/arena.h"
 #include "check.h"
+#include "session/metadata.h"
 
 namespace {
 
@@ -40,25 +41,38 @@ void TestSessionProjectKey() {
   CHECK(rooted.Length > 0);
 
 #if defined(_WIN32)
-  // The hash half of the key normalizes separators and case, but the readable
-  // basename prefix does not, so the two spellings of one directory still
-  // produce different keys. Asserting the behaviour that actually ships rather
-  // than the one the hash normalization implies; see the note in the commit
-  // that split this out of main.cpp.
-  StrView upper = SessionProjectKey(&arena, SVL("C:\\Work\\Clank"));
-  StrView lower = SessionProjectKey(&arena, SVL("c:/work/clank"));
-  CHECK(!StrView_Eq(upper, lower));
-  // They do agree on the hash suffix, which is what the normalization buys.
-  CHECK_ALL(upper.Length > 17, lower.Length > 17,
-            memcmp(upper.Data + upper.Length - 17,
-                   lower.Data + lower.Length - 17, 17) == 0);
+  // Windows paths are compared case-insensitively with normalized separators,
+  // so one directory spelled two ways resolves to a single session rather than
+  // silently forking into two session directories.
+  CHECK(StrView_Eq(SessionProjectKey(&arena, SVL("C:\\Work\\Clank")),
+                   SessionProjectKey(&arena, SVL("c:/work/clank"))));
+  // Distinct directories that differ only by case of a *parent* component still
+  // agree, because the whole path feeds the hash.
+  CHECK(StrView_Eq(SessionProjectKey(&arena, SVL("C:\\A\\proj")),
+                   SessionProjectKey(&arena, SVL("c:\\a\\proj"))));
+  // But genuinely different directories must not collide.
+  CHECK(!StrView_Eq(SessionProjectKey(&arena, SVL("C:\\a\\proj")),
+                    SessionProjectKey(&arena, SVL("C:\\b\\proj"))));
 #endif
 
   ArenaRelease(&arena);
 }
 
-void TestConfigPaths() {
-  Arena arena = ArenaCreate();
+// A key recorded before the basename was case-folded still has to open, since
+// on Windows it names the very same storage directory.
+void TestProjectKeyComparison() {
+  CHECK(SessionProjectKey_Eq(SVL("clank-abc"), SVL("clank-abc")));
+  CHECK(!SessionProjectKey_Eq(SVL("clank-abc"), SVL("clank-abd")));
+  CHECK(!SessionProjectKey_Eq(SVL("clank-abc"), SVL("clank-ab")));
+#if defined(_WIN32)
+  CHECK(SessionProjectKey_Eq(SVL("Clank-abc"), SVL("clank-abc")));
+  CHECK(SessionProjectKey_Eq(SVL("MyProj-0011"), SVL("myproj-0011")));
+#else
+  CHECK(!SessionProjectKey_Eq(SVL("Clank-abc"), SVL("clank-abc")));
+#endif
+}
+
+void TestConfigPaths() {  Arena arena = ArenaCreate();
 
   // Every per-user file hangs off one root, and the root is a prefix of each.
   StrView root = ClankDataRoot(&arena);
@@ -146,6 +160,7 @@ void TestCommandResultMapping() {
 
 void TestApp() {
   TestSessionProjectKey();
+  TestProjectKeyComparison();
   TestConfigPaths();
   TestTrustChoiceMenu();
   TestTrimAscii();

@@ -703,6 +703,13 @@ StrView SessionProjectKey(Arena* arena, StrView workingDirectory) {
   StrBuf key = StrBuf_Make(arena, base.Length + 18);
   for (u32 i = 0; i < base.Length; i++) {
     char c = base.Data[i];
+#if defined(_WIN32)
+    // The hash half of the key already folds case, so the readable half has to
+    // fold it too. Otherwise one directory reached as C:\Work\Clank and as
+    // c:/work/clank hashes identically but yields two different keys, and the
+    // same project gets two session directories.
+    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+#endif
     bool valid = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
                  (c >= '0' && c <= '9') || c == '-' || c == '_' ||
                  c == '.';

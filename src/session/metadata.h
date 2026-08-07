@@ -4,6 +4,27 @@
 
 constexpr u32 SESSION_DISPLAY_TITLE_MAX_BYTES = 96;
 
+// A project key doubles as the storage directory name, so two keys that name
+// the same directory have to compare equal. Windows filesystems are
+// case-insensitive, and the key generator folds case there for exactly that
+// reason; a session recorded before that folding existed still has to match the
+// folded key it is now looked up by.
+inline bool SessionProjectKey_Eq(StrView a, StrView b) {
+#if defined(_WIN32)
+  if (a.Length != b.Length) return false;
+  for (u32 i = 0; i < a.Length; i++) {
+    char x = a.Data[i];
+    char y = b.Data[i];
+    if (x >= 'A' && x <= 'Z') x = (char)(x - 'A' + 'a');
+    if (y >= 'A' && y <= 'Z') y = (char)(y - 'A' + 'a');
+    if (x != y) return false;
+  }
+  return true;
+#else
+  return StrView_Eq(a, b);
+#endif
+}
+
 // Derived, read-only view of a session for listing/display purposes. Every
 // field here is recomputed from the record log (or supplied by the caller
 // for the transient Busy/NowMs signal); v2 has no durable operation/recovery
