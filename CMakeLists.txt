@@ -155,6 +155,8 @@ target_link_libraries(clank_ui PUBLIC clank_base clank_term)
 # ---- tui (Clank-specific full-screen application) ------------------------
 add_library(clank_tui STATIC
   src/tui/markdown.cpp
+  src/tui/session.cpp
+  src/tui/status.cpp
   src/tui/stream_reveal.cpp
   src/tui/linemodel.cpp
   src/tui/toolview.cpp
