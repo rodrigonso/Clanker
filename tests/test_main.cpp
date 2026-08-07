@@ -20,6 +20,7 @@
 #include "base/thread.h"
 #include "json/json.h"
 #include "tests.h"
+#include "tools/fs.h"
 
 int g_checks = 0;
 int g_failures = 0;
@@ -111,17 +112,23 @@ void PrintList() {
 }
 
 // Reserved subcommand: the process file lock test re-execs this binary to
-// verify a second process observes the lock as busy. Must run before any
-// suite selection so it never gets treated as a suite name.
+// verify a second process observes the lock as busy, and that the read-only
+// probe agrees without disturbing the sentinel. Must run before any suite
+// selection so it never gets treated as a suite name.
 int RunLockProbe(const char* path) {
   Arena arena = ArenaCreate();
+  // Cross-process is the only place the probe can be checked against a live
+  // holder: POSIX F_GETLK reports conflicting owners only, so a self-held lock
+  // reads as free in the owning process.
+  bool held = ProcessFileLock_IsHeld(&arena, SV(path));
+  bool survived = Fs_Exists(SV(path));
   ProcessFileLock lock = {};
   ProcessFileLockStatus status =
       ProcessFileLock_TryAcquire(&arena, SV(path), &lock);
   if (status == ProcessFileLockStatus::Acquired)
     ProcessFileLock_Release(&lock, SV(path));
   ArenaRelease(&arena);
-  return status == ProcessFileLockStatus::Busy ? 0 : 1;
+  return status == ProcessFileLockStatus::Busy && held && survived ? 0 : 1;
 }
 
 bool HasArg(int argc, char** argv, const char* expected) {

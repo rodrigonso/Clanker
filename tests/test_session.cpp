@@ -915,6 +915,22 @@ static bool ChildSeesLockBusy(Arena* arena, StrView lockPath) {
   return system(StrBuf_CStr(&command)) == 0;
 }
 
+// Gives a freshly created session the user message that makes it durable. A
+// session with no user content is deliberately never written to disk, so any
+// fixture that must survive a close -- or be visible to listing, resolution,
+// or another process -- has to say something first.
+static void PersistWithUserMessage(Arena* arena, SessionLog* log,
+                                   DurableId entryId) {
+  Array<SessionRecord> records = {};
+  CHECK(SessionResult_IsOk(SessionLog_ReadAll(log, arena, &records)));
+  SessionRecord message = {};
+  message.EntryId = entryId;
+  message.Kind = SessionRecordKind::Message;
+  message.MessageEntry.ParentId = records.Data[0].EntryId;
+  message.MessageEntry.Value = UserMessage(arena, "persisted");
+  CHECK(SessionResult_IsOk(SessionLog_Append(log, &message)));
+}
+
 static void TestJsonlRepository(Arena* arena) {
   StrView root = SVL("clank_jsonl_test");
   StrView contractProject = SVL("clank-jsonl-contract");
@@ -923,6 +939,7 @@ static void TestJsonlRepository(Arena* arena) {
   StrView harnessProject = SVL("clank-jsonl-harness");
   StrView scopeProjectA = SVL("clank-jsonl-scope-a");
   StrView scopeProjectB = SVL("clank-jsonl-scope-b");
+  StrView deferProject = SVL("clank-jsonl-defer");
   DurableId contractId = TestId(120);
   DurableId forkId = TestId(130);
   DurableId repairId = TestId(140);
@@ -931,6 +948,10 @@ static void TestJsonlRepository(Arena* arena) {
   DurableId harnessForkId = TestId(170);
   DurableId scopeIdA = TestId(180);
   DurableId scopeIdB = TestId(190);
+  DurableId abandonedId = TestId(200);
+  DurableId deferredId = TestId(210);
+  DurableId forkSourceId = TestId(220);
+  DurableId forkTargetId = TestId(230);
   RemoveJsonlArtifacts(arena, root, contractProject, contractId);
   RemoveJsonlArtifacts(arena, root, contractProject, forkId);
   RemoveJsonlArtifacts(arena, root, repairProject, repairId);
@@ -939,6 +960,10 @@ static void TestJsonlRepository(Arena* arena) {
   RemoveJsonlArtifacts(arena, root, harnessProject, harnessForkId);
   RemoveJsonlArtifacts(arena, root, scopeProjectA, scopeIdA);
   RemoveJsonlArtifacts(arena, root, scopeProjectB, scopeIdB);
+  RemoveJsonlArtifacts(arena, root, deferProject, abandonedId);
+  RemoveJsonlArtifacts(arena, root, deferProject, deferredId);
+  RemoveJsonlArtifacts(arena, root, deferProject, forkSourceId);
+  RemoveJsonlArtifacts(arena, root, deferProject, forkTargetId);
 
   JsonlRepository jsonl = {};
   JsonlRepository_Init(&jsonl, root);
@@ -982,6 +1007,8 @@ static void TestJsonlRepository(Arena* arena) {
             .Status == SessionStatus::Conflict);
   CHECK(SessionResult_IsOk(
       RepositoryCreate(&repository, arena, scopeIdB, scopeProjectB, &scopeLogB, &scopeInfoB)));
+  PersistWithUserMessage(arena, &scopeLogA, TestId(181));
+  PersistWithUserMessage(arena, &scopeLogB, TestId(191));
   SessionLog_Close(&scopeLogA);
   SessionLog_Close(&scopeLogB);
   SessionListOptions allProjects = {};
@@ -992,6 +1019,127 @@ static void TestJsonlRepository(Arena* arena) {
   SessionInfo scopeResolved = {};
   CHECK(SessionResult_IsOk(repository.Resolve(repository.Ctx, arena, scopeIdB, &scopeResolved)));
   CHECK(StrView_Eq(scopeResolved.ProjectKey, scopeProjectB));
+
+  // A session the user never speaks to must not leave a log behind: that is
+  // what put one orphan file per launch beside every project's transcripts.
+  SessionLog abandoned = {};
+  SessionInfo abandonedInfo = {};
+  CHECK(SessionResult_IsOk(RepositoryCreate(&repository, arena, abandonedId,
+                                            deferProject, &abandoned,
+                                            &abandonedInfo)));
+  StrView abandonedPath =
+      JsonlArtifactPath(arena, root, deferProject, abandonedId, ".jsonl");
+  StrView abandonedLock =
+      JsonlArtifactPath(arena, root, deferProject, abandonedId, ".lock");
+  CHECK(!Fs_Exists(abandonedPath));
+  Array<SessionRecord> abandonedRoot = {};
+  CHECK(SessionResult_IsOk(SessionLog_ReadAll(&abandoned, arena, &abandonedRoot)));
+  // The harness records the selected model at startup. That is bookkeeping
+  // rather than user intent, so it must not author the file on its own.
+  SessionRecord startupModel = {};
+  startupModel.EntryId = TestId(201);
+  startupModel.Kind = SessionRecordKind::Model;
+  startupModel.ModelEntry.ParentId = abandonedRoot.Data[0].EntryId;
+  startupModel.ModelEntry.Provider = SVL("anthropic");
+  startupModel.ModelEntry.Model = SVL("claude-sonnet-4-6");
+  CHECK(SessionResult_IsOk(SessionLog_Append(&abandoned, &startupModel)));
+  CHECK(!Fs_Exists(abandonedPath));
+  // Buffered does not mean unowned: the id is still claimed, so a second
+  // writer is turned away as busy rather than told the session is missing.
+  SessionOpenOptions abandonedOpen = {};
+  abandonedOpen.SessionId = abandonedId;
+  abandonedOpen.ProjectKey = deferProject;
+  abandonedOpen.Writable = true;
+  SessionLog abandonedSecond = {};
+  SessionInfo abandonedSecondInfo = {};
+  CHECK(repository
+            .Open(repository.Ctx, arena, &abandonedOpen, &abandonedSecond,
+                  &abandonedSecondInfo)
+            .Status == SessionStatus::Busy);
+  SessionLog_Close(&abandoned);
+  CHECK_ALL(!Fs_Exists(abandonedPath), !Fs_Exists(abandonedLock));
+  // Once released the id really is gone, so the same open now reports missing.
+  CHECK(repository
+            .Open(repository.Ctx, arena, &abandonedOpen, &abandonedSecond,
+                  &abandonedSecondInfo)
+            .Status == SessionStatus::NotFound);
+
+  // The append that trips the trigger carries the whole buffer with it, so
+  // records written before the first user message are not lost.
+  SessionLog deferred = {};
+  SessionInfo deferredInfo = {};
+  CHECK(SessionResult_IsOk(RepositoryCreate(&repository, arena, deferredId,
+                                            deferProject, &deferred,
+                                            &deferredInfo)));
+  StrView deferredPath =
+      JsonlArtifactPath(arena, root, deferProject, deferredId, ".jsonl");
+  Array<SessionRecord> deferredRoot = {};
+  CHECK(SessionResult_IsOk(SessionLog_ReadAll(&deferred, arena, &deferredRoot)));
+  SessionRecord deferredModel = {};
+  deferredModel.EntryId = TestId(211);
+  deferredModel.Kind = SessionRecordKind::Model;
+  deferredModel.ModelEntry.ParentId = deferredRoot.Data[0].EntryId;
+  deferredModel.ModelEntry.Provider = SVL("anthropic");
+  deferredModel.ModelEntry.Model = SVL("claude-sonnet-4-6");
+  CHECK(SessionResult_IsOk(SessionLog_Append(&deferred, &deferredModel)));
+  CHECK(!Fs_Exists(deferredPath));
+  SessionRecord deferredUser = {};
+  deferredUser.EntryId = TestId(212);
+  deferredUser.Kind = SessionRecordKind::Message;
+  deferredUser.MessageEntry.ParentId = deferredModel.EntryId;
+  deferredUser.MessageEntry.Value = UserMessage(arena, "first words");
+  CHECK(SessionResult_IsOk(SessionLog_Append(&deferred, &deferredUser)));
+  CHECK(Fs_Exists(deferredPath));
+  SessionLog_Close(&deferred);
+
+  SessionLog reopened = {};
+  SessionInfo reopenedInfo = {};
+  SessionOpenOptions deferredOpen = {};
+  deferredOpen.SessionId = deferredId;
+  deferredOpen.ProjectKey = deferProject;
+  deferredOpen.Writable = true;
+  CHECK(SessionResult_IsOk(repository.Open(repository.Ctx, arena, &deferredOpen,
+                                           &reopened, &reopenedInfo)));
+  Array<SessionRecord> deferredRecords = {};
+  CHECK(SessionResult_IsOk(SessionLog_ReadAll(&reopened, arena, &deferredRecords)));
+  CHECK_ALL(deferredRecords.Count == 3,
+            deferredRecords.Data[0].Kind == SessionRecordKind::SessionStarted,
+            deferredRecords.Data[1].Kind == SessionRecordKind::Model,
+            deferredRecords.Data[2].Kind == SessionRecordKind::Message,
+            deferredRecords.Data[2].Seq == 3);
+  SessionLog_Close(&reopened);
+
+  // Forking a source that has not yet earned a file must read it from the live
+  // writer instead of reporting the session missing.
+  SessionLog bufferedSource = {};
+  SessionInfo bufferedSourceInfo = {};
+  CHECK(SessionResult_IsOk(RepositoryCreate(&repository, arena, forkSourceId,
+                                            deferProject, &bufferedSource,
+                                            &bufferedSourceInfo)));
+  StrView forkSourcePath =
+      JsonlArtifactPath(arena, root, deferProject, forkSourceId, ".jsonl");
+  Array<SessionRecord> bufferedRoot = {};
+  CHECK(SessionResult_IsOk(SessionLog_ReadAll(&bufferedSource, arena, &bufferedRoot)));
+  CHECK(!Fs_Exists(forkSourcePath));
+  SessionForkOptions forkBuffered = {};
+  forkBuffered.SourceSessionId = forkSourceId;
+  forkBuffered.SourceHeadId = bufferedRoot.Data[0].EntryId;
+  forkBuffered.RequestedTargetId = forkTargetId;
+  forkBuffered.ProjectKey = deferProject;
+  forkBuffered.WorkingDirectory = SVL("C:\\work\\clank");
+  forkBuffered.Label = SVL("buffered fork");
+  SessionLog forkedLog = {};
+  SessionInfo forkedInfo = {};
+  CHECK(SessionResult_IsOk(repository.Fork(repository.Ctx, arena, &forkBuffered,
+                                           &forkedLog, &forkedInfo)));
+  Array<SessionRecord> forkedRecords = {};
+  CHECK(SessionResult_IsOk(SessionLog_ReadAll(&forkedLog, arena, &forkedRecords)));
+  CHECK_ALL(forkedRecords.Count == 1,
+            forkedRecords.Data[0].Kind == SessionRecordKind::SessionStarted,
+            DurableId_Eq(forkedRecords.Data[0].SessionStarted.ForkedFromSessionId,
+                         forkSourceId));
+  SessionLog_Close(&forkedLog);
+  SessionLog_Close(&bufferedSource);
 
   // Forking through the harness derives the source session/head/project from
   // the harness's own maintained state -- no ReadAll is issued to build it.
@@ -1065,6 +1213,9 @@ static void TestJsonlRepository(Arena* arena) {
 
   CHECK(SessionResult_IsOk(
       RepositoryCreate(&repository, arena, corruptId, corruptProject, &writer, &info)));
+  // The fixture is a valid log with a corrupt line appended, so the session
+  // has to be given content before it exists on disk to be corrupted.
+  PersistWithUserMessage(arena, &writer, TestId(151));
   SessionLog_Close(&writer);
   StrView corruptPath = JsonlArtifactPath(arena, root, corruptProject, corruptId, ".jsonl");
   AppendRaw(arena, corruptPath, "not-json\n");
@@ -1095,12 +1246,17 @@ static void TestJsonlRepository(Arena* arena) {
   RemoveJsonlArtifacts(arena, root, harnessProject, harnessForkId);
   RemoveJsonlArtifacts(arena, root, scopeProjectA, scopeIdA);
   RemoveJsonlArtifacts(arena, root, scopeProjectB, scopeIdB);
+  RemoveJsonlArtifacts(arena, root, deferProject, abandonedId);
+  RemoveJsonlArtifacts(arena, root, deferProject, deferredId);
+  RemoveJsonlArtifacts(arena, root, deferProject, forkSourceId);
+  RemoveJsonlArtifacts(arena, root, deferProject, forkTargetId);
   RemoveJsonlDirectories(arena, root, contractProject);
   RemoveJsonlDirectories(arena, root, repairProject);
   RemoveJsonlDirectories(arena, root, corruptProject);
   RemoveJsonlDirectories(arena, root, harnessProject);
   RemoveJsonlDirectories(arena, root, scopeProjectA);
   RemoveJsonlDirectories(arena, root, scopeProjectB);
+  RemoveJsonlDirectories(arena, root, deferProject);
   StrView sessions = Fs_Join(arena, root, SVL("sessions"));
   StrView version = Fs_Join(arena, sessions, SVL("v2"));
   StrBuf versionNative = StrBuf_Make(arena, version.Length + 1);

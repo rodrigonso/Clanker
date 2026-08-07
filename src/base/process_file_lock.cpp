@@ -47,6 +47,34 @@ void ProcessFileLock_Release(ProcessFileLock* lock, StrView path) {
   *lock = ProcessFileLock{};
 }
 
+bool ProcessFileLock_IsHeld(Arena* scratch, StrView path) {
+  if (!scratch || path.Length == 0) return false;
+  StrBuf native = StrBuf_Make(scratch, path.Length + 1);
+  StrBuf_Append(&native, path);
+  // GENERIC_READ is required: an access-free or FILE_READ_ATTRIBUTES open
+  // bypasses the sharing check entirely and reports a held lock as free.
+  // Requesting read access means this open is refused while a holder -- which
+  // opened the sentinel with no sharing at all -- still owns it.
+  //
+  // The permissive share flags do not make the probe invisible, because
+  // Windows checks sharing in both directions: for as long as this handle is
+  // open it denies an acquirer's dwShareMode of 0. That only matters for a
+  // sentinel left behind by a power loss (a crash is cleaned up by
+  // FILE_FLAG_DELETE_ON_CLOSE), where an acquirer racing this handful of
+  // instructions can see a spurious Busy and retry.
+  HANDLE handle =
+      CreateFileA(StrBuf_CStr(&native), GENERIC_READ,
+                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                  nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (handle == INVALID_HANDLE_VALUE) {
+    DWORD error = GetLastError();
+    return error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION ||
+           error == ERROR_ACCESS_DENIED || error == ERROR_DELETE_PENDING;
+  }
+  CloseHandle(handle);
+  return false;
+}
+
 #else
 #include <errno.h>
 #include <fcntl.h>
@@ -133,5 +161,25 @@ void ProcessFileLock_Release(ProcessFileLock* lock, StrView path) {
   if (NativePath(path, native, (u32)sizeof(native))) unlink(native);
   close(fd);
   *lock = ProcessFileLock{};
+}
+
+bool ProcessFileLock_IsHeld(Arena* scratch, StrView path) {
+  (void)scratch;  // The POSIX probe needs no arena-backed copy.
+  char native[4096];
+  if (!NativePath(path, native, (u32)sizeof(native))) return false;
+  // O_RDONLY without O_CREAT: a missing sentinel means nobody holds the lock,
+  // and probing must never author one.
+  int fd = open(native, O_RDONLY);
+  if (fd < 0) return false;
+  struct flock probe = {};
+  probe.l_type = F_WRLCK;
+  probe.l_whence = SEEK_SET;
+  probe.l_start = 0;
+  probe.l_len = 0;
+  // F_GETLK only reports a conflicting owner, so a sentinel left behind by a
+  // holder that died without unlinking correctly reads as free.
+  bool held = fcntl(fd, F_GETLK, &probe) == 0 && probe.l_type != F_UNLCK;
+  close(fd);
+  return held;
 }
 #endif

@@ -1,4 +1,7 @@
+#include <stdio.h>
+
 #include "base/arena.h"
+#include "base/process_file_lock.h"
 #include "base/str.h"
 #include "check.h"
 #include "tools/diff.h"
@@ -80,6 +83,25 @@ static void TestFileLock() {
   CHECK(true);  // reached here without deadlock
 }
 
+static void TestProcessFileLockProbe(Arena* a) {
+  StrView path = SVL("clank_lock_probe.tmp");
+  remove("clank_lock_probe.tmp");
+  // Asking whether a lock is held must never author the sentinel. Session
+  // listings ask this once per session, so a probe that created the file would
+  // write one lock beside every log it merely displayed.
+  CHECK_ALL(!ProcessFileLock_IsHeld(a, path), !Fs_Exists(path));
+
+  ProcessFileLock lock = {};
+  CHECK(ProcessFileLock_TryAcquire(a, path, &lock) ==
+        ProcessFileLockStatus::Acquired);
+  CHECK(Fs_Exists(path));
+  ProcessFileLock_Release(&lock, path);
+  // Release removes the sentinel, and probing the now-free lock still leaves
+  // the directory exactly as it found it.
+  CHECK_ALL(!Fs_Exists(path), !ProcessFileLock_IsHeld(a, path),
+            !Fs_Exists(path));
+}
+
 void TestInfra() {
   Arena a = ArenaCreate();
   TestGlob();
@@ -87,5 +109,6 @@ void TestInfra() {
   TestTruncate(&a);
   TestFsPaths(&a);
   TestFileLock();
+  TestProcessFileLockProbe(&a);
   ArenaRelease(&a);
 }

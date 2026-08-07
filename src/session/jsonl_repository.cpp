@@ -32,6 +32,9 @@ struct JsonlLogHandle {
   FILE* AppendFile;
   Mutex AppendLock;
   bool Writable;
+  // False while a newly created session is still buffered in memory and its
+  // file does not exist yet. See RecordsWarrantPersist.
+  bool Flushed;
   bool Faulted;
   bool Closed;
 };
@@ -143,6 +146,7 @@ SessionResult AcquireClaim(JsonlRepository* repository, StrView projectKey,
       repository->Claims.Data[i].SessionId = sessionId;
       repository->Claims.Data[i].ProjectKey =
           StrView_Dup(&repository->Mem, projectKey);
+      repository->Claims.Data[i].Handle = nullptr;
       repository->Claims.Data[i].Active = true;
       *outIndex = i;
       return SessionResult_Ok();
@@ -151,6 +155,7 @@ SessionResult AcquireClaim(JsonlRepository* repository, StrView projectKey,
   JsonlWriterClaim claim = {};
   claim.SessionId = sessionId;
   claim.ProjectKey = StrView_Dup(&repository->Mem, projectKey);
+  claim.Handle = nullptr;
   claim.Active = true;
   Array_Push(&repository->Claims, claim);
   *outIndex = repository->Claims.Count - 1;
@@ -159,7 +164,18 @@ SessionResult AcquireClaim(JsonlRepository* repository, StrView projectKey,
 
 void ReleaseClaim(JsonlRepository* repository, u32 index) {
   ScopedLock lock(&repository->Lock);
-  if (index < repository->Claims.Count) repository->Claims.Data[index].Active = false;
+  if (index < repository->Claims.Count) {
+    repository->Claims.Data[index].Active = false;
+    repository->Claims.Data[index].Handle = nullptr;
+  }
+}
+
+// Published once the handle exists, since AcquireClaim runs before it is built.
+void AttachClaimHandle(JsonlRepository* repository, u32 index,
+                       JsonlLogHandle* handle) {
+  ScopedLock lock(&repository->Lock);
+  if (index < repository->Claims.Count)
+    repository->Claims.Data[index].Handle = handle;
 }
 
 bool ClaimedInProcess(JsonlRepository* repository, StrView projectKey,
@@ -168,6 +184,58 @@ bool ClaimedInProcess(JsonlRepository* repository, StrView projectKey,
   for (u32 i = 0; i < repository->Claims.Count; i++)
     if (ClaimMatches(&repository->Claims.Data[i], projectKey, sessionId)) return true;
   return false;
+}
+
+// Project-independent variant. A session that is still buffered in memory has
+// no file for FindGlobalProject to find, so an explicitly requested id must be
+// checked against live claims too or two sessions could share it.
+bool ClaimedAnywhere(JsonlRepository* repository, DurableId sessionId) {
+  ScopedLock lock(&repository->Lock);
+  for (u32 i = 0; i < repository->Claims.Count; i++)
+    if (repository->Claims.Data[i].Active &&
+        DurableId_Eq(repository->Claims.Data[i].SessionId, sessionId))
+      return true;
+  return false;
+}
+
+// Copies the records of a session this process holds open into `arena`. A
+// session that has not yet earned a file cannot be read back through the
+// filesystem, so readers that would otherwise fail with NotFound take the
+// authoritative copy from the live writer instead.
+SessionResult CopyLiveRecords(JsonlRepository* repository, Arena* arena,
+                              StrView projectKey, DurableId sessionId,
+                              Array<SessionRecord>* out) {
+  JsonlLogHandle* source = nullptr;
+  {
+    ScopedLock lock(&repository->Lock);
+    for (u32 i = 0; i < repository->Claims.Count; i++) {
+      if (!ClaimMatches(&repository->Claims.Data[i], projectKey, sessionId))
+        continue;
+      source = repository->Claims.Data[i].Handle;
+      break;
+    }
+  }
+  if (!source)
+    return SessionResult_Error(SessionStatus::NotFound,
+                               SVL("session file was not found"));
+  // The repository lock is released first: only the handle's own append lock
+  // is needed to read its records, and taking them in this order matches the
+  // append/destroy path, which holds the append lock across ReleaseClaim.
+  ScopedLock reading(&source->AppendLock);
+  if (source->Closed || source->Records.Count == 0)
+    return SessionResult_Error(SessionStatus::NotFound,
+                               SVL("session file was not found"));
+  Array<SessionRecord> records =
+      Array_Make<SessionRecord>(arena, source->Records.Count);
+  for (u32 i = 0; i < source->Records.Count; i++) {
+    SessionRecord clone = {};
+    SessionResult copied =
+        SessionRecord_Clone(arena, &source->Records.Data[i], &clone);
+    if (!SessionResult_IsOk(copied)) return copied;
+    Array_Push(&records, clone);
+  }
+  *out = records;
+  return SessionResult_Ok(records.Data[records.Count - 1].Seq);
 }
 
 SessionResult AcquireWriter(JsonlRepository* repository, Arena* scratch,
@@ -196,13 +264,9 @@ bool SessionBusy(JsonlRepository* repository, StrView projectKey,
   if (ClaimedInProcess(repository, projectKey, sessionId)) return true;
   Arena scratch = ArenaCreate();
   StrView lockPath = LockPath(&scratch, repository, projectKey, sessionId);
-  ProcessFileLock lock = {};
-  ProcessFileLockStatus status =
-      ProcessFileLock_TryAcquire(&scratch, lockPath, &lock);
-  if (status == ProcessFileLockStatus::Acquired)
-    ProcessFileLock_Release(&lock, lockPath);
+  bool held = ProcessFileLock_IsHeld(&scratch, lockPath);
   ArenaRelease(&scratch);
-  return status == ProcessFileLockStatus::Busy;
+  return held;
 }
 
 bool WriteAll(FILE* file, StrView bytes) {
@@ -213,6 +277,22 @@ bool WriteAll(FILE* file, StrView bytes) {
     written += (u32)n;
   }
   return fflush(file) == 0;
+}
+
+// A session only earns a file once the user actually says something. Launching
+// the agent writes a SessionStarted record and the harness's Model record
+// without any human input, so persisting on creation is what left an orphan
+// log behind for every launch the user abandoned.
+//
+// pi's SessionManager defers on the same principle but keys off the first
+// assistant message; clank keys off the first user message so a prompt that
+// never gets a reply still survives. See docs/PARITY.md.
+bool RecordsWarrantPersist(const SessionRecord* records, u32 count) {
+  for (u32 i = 0; i < count; i++)
+    if (records[i].Kind == SessionRecordKind::Message &&
+        records[i].MessageEntry.Value.Kind == Role::User)
+      return true;
+  return false;
 }
 
 bool TruncateFile(Arena* arena, StrView path, u64 size) {
@@ -314,6 +394,32 @@ SessionResult BuildInfo(Arena* arena, const SessionRecord* records, u32 count,
 
 SessionLog LogInterface(JsonlLogHandle* handle);
 
+// Materializes a session whose file creation was deferred. The directory and
+// the writer lock were established at Create time, and on Windows the open
+// lock handle pins the directory, so this only has to author the file itself.
+// The no-clobber check lives here rather than in Create because this is where
+// the truncating open happens, and a buffered session can sit for a whole
+// conversation between the two.
+SessionResult OpenForFirstWrite(JsonlLogHandle* handle, Arena* scratch) {
+  if (Fs_Exists(handle->Path))
+    return SessionResult_Error(SessionStatus::Conflict,
+                               SVL("session file already exists"));
+  StrBuf native = StrBuf_Make(scratch, handle->Path.Length + 1);
+  StrBuf_Append(&native, handle->Path);
+  FILE* file = fopen(StrBuf_CStr(&native), "wb");
+  if (!file) return IoError("failed to create session file");
+#if !defined(_WIN32)
+  if (chmod(StrBuf_CStr(&native), 0600) != 0) {
+    fclose(file);
+    remove(StrBuf_CStr(&native));
+    return IoError("failed to secure session file");
+  }
+#endif
+  handle->AppendFile = file;
+  handle->Flushed = true;
+  return SessionResult_Ok();
+}
+
 void DestroyHandle(JsonlLogHandle* handle, bool removeData) {
   if (!handle || handle->Closed) return;
   Mutex_Lock(&handle->AppendLock);
@@ -321,6 +427,8 @@ void DestroyHandle(JsonlLogHandle* handle, bool removeData) {
     fclose(handle->AppendFile);
     handle->AppendFile = nullptr;
   }
+  // A session still buffered in memory has no file to remove; `remove` on the
+  // absent path simply fails, which is the intended outcome either way.
   if (removeData) {
     StrBuf native = StrBuf_Make(&handle->State, handle->Path.Length + 1);
     StrBuf_Append(&native, handle->Path);
@@ -360,7 +468,7 @@ SessionResult AppendBatch(void* context, SessionRecord* input, u32 count) {
   ScopedLock lock(&handle->AppendLock);
   if (handle->Closed)
     return SessionResult_Error(SessionStatus::InvalidState, SVL("session log is closed"));
-  if (!handle->Writable || !handle->AppendFile)
+  if (!handle->Writable)
     return SessionResult_Error(SessionStatus::InvalidState,
                                SVL("session log is not writable"));
   if (handle->Faulted)
@@ -390,19 +498,58 @@ SessionResult AppendBatch(void* context, SessionRecord* input, u32 count) {
     Array_Push(&prepared, record);
   }
 
-  StrBuf bytes = StrBuf_Make(&scratch, count * 512);
-  for (u32 i = 0; i < prepared.Count; i++) {
-    SessionResult encoded = SessionRecord_Encode(&bytes, &prepared.Data[i]);
-    if (!SessionResult_IsOk(encoded)) {
-      ArenaRelease(&scratch);
-      return encoded;
+  // Until the first user message arrives the session lives only in memory, so
+  // this batch is retained below without touching the disk. The batch that
+  // trips the trigger carries every buffered record with it.
+  if (handle->Flushed ||
+      RecordsWarrantPersist(prepared.Data, prepared.Count)) {
+    u32 leading = handle->Flushed ? 0 : handle->Records.Count;
+    StrBuf bytes = StrBuf_Make(&scratch, (leading + count) * 512);
+    for (u32 i = 0; i < leading; i++) {
+      SessionResult encoded =
+          SessionRecord_Encode(&bytes, &handle->Records.Data[i]);
+      if (!SessionResult_IsOk(encoded)) {
+        ArenaRelease(&scratch);
+        return encoded;
+      }
+      StrBuf_AppendChar(&bytes, '\n');
     }
-    StrBuf_AppendChar(&bytes, '\n');
-  }
-  if (!WriteAll(handle->AppendFile, StrBuf_View(&bytes))) {
-    handle->Faulted = true;
-    ArenaRelease(&scratch);
-    return IoError("failed to append session records");
+    for (u32 i = 0; i < prepared.Count; i++) {
+      SessionResult encoded = SessionRecord_Encode(&bytes, &prepared.Data[i]);
+      if (!SessionResult_IsOk(encoded)) {
+        ArenaRelease(&scratch);
+        return encoded;
+      }
+      StrBuf_AppendChar(&bytes, '\n');
+    }
+    // Opened only after every record encodes, so an encoding failure leaves no
+    // empty file behind and the session stays buffered for a later attempt.
+    bool authored = !handle->Flushed;
+    if (authored) {
+      SessionResult opened = OpenForFirstWrite(handle, &scratch);
+      if (!SessionResult_IsOk(opened)) {
+        ArenaRelease(&scratch);
+        return opened;
+      }
+    }
+    if (!WriteAll(handle->AppendFile, StrBuf_View(&bytes))) {
+      if (authored) {
+        // Undo the file this call just created. Leaving a zero-length log
+        // behind would be a permanently unreadable session that every listing
+        // reports as skipped -- the same orphan the deferral exists to avoid.
+        // Dropping back to buffered also keeps the append retryable.
+        fclose(handle->AppendFile);
+        handle->AppendFile = nullptr;
+        handle->Flushed = false;
+        StrBuf native = StrBuf_Make(&scratch, handle->Path.Length + 1);
+        StrBuf_Append(&native, handle->Path);
+        remove(StrBuf_CStr(&native));
+      } else {
+        handle->Faulted = true;
+      }
+      ArenaRelease(&scratch);
+      return IoError("failed to append session records");
+    }
   }
 
   for (u32 i = 0; i < prepared.Count; i++) {
@@ -471,7 +618,10 @@ SessionResult InitializeHandle(JsonlRepository* repository, Arena* callerArena,
       DestroyHandle(handle, false);
       return IoError("failed to open session file for append");
     }
+    // An opened session already exists on disk, so appends go straight out.
+    handle->Flushed = true;
   }
+  if (writable) AttachClaimHandle(repository, claimIndex, handle);
   const SessionRecord* root = &handle->Records.Data[0];
   bool busy =
       writable ||
@@ -515,6 +665,11 @@ SessionResult Create(void* context, Arena* arena, const SessionCreateOptions* op
       ArenaRelease(&scratch);
       return existing;
     }
+    if (ClaimedAnywhere(repository, sessionId)) {
+      ArenaRelease(&scratch);
+      return SessionResult_Error(SessionStatus::Conflict,
+                                 SVL("session ID already exists"));
+    }
   }
   StrView projectDir = ProjectDir(&scratch, repository, options->ProjectKey);
   if (!Fs_MkdirP(&scratch, projectDir)) {
@@ -539,13 +694,6 @@ SessionResult Create(void* context, Arena* arena, const SessionCreateOptions* op
     ArenaRelease(&scratch);
     return acquired;
   }
-  if (Fs_Exists(path)) {
-    ProcessFileLock_Release(&writerLock, lockPath);
-    ReleaseClaim(repository, claimIndex);
-    ArenaRelease(&scratch);
-    return SessionResult_Error(SessionStatus::Conflict,
-                               SVL("session file already exists"));
-  }
 
   SessionRecord started = {};
   started.SchemaVersion = SESSION_SCHEMA_VERSION;
@@ -560,25 +708,9 @@ SessionResult Create(void* context, Arena* arena, const SessionCreateOptions* op
   started.SessionStarted.ForkedFromSessionId = options->ForkedFromSessionId;
   started.SessionStarted.ForkedFromEntryId = options->ForkedFromEntryId;
 
-  StrBuf record = StrBuf_Make(&scratch, 512);
-  SessionResult encoded = SessionRecord_Encode(&record, &started);
-  StrBuf_AppendChar(&record, '\n');
-  StrBuf native = StrBuf_Make(&scratch, path.Length + 1);
-  StrBuf_Append(&native, path);
-  FILE* file = SessionResult_IsOk(encoded) ? fopen(StrBuf_CStr(&native), "wb") : nullptr;
-  bool written = file && WriteAll(file, StrBuf_View(&record));
-#if !defined(_WIN32)
-  if (written && chmod(StrBuf_CStr(&native), 0600) != 0) written = false;
-#endif
-  if (!written) {
-    if (file) fclose(file);
-    remove(StrBuf_CStr(&native));
-    ProcessFileLock_Release(&writerLock, lockPath);
-    ReleaseClaim(repository, claimIndex);
-    ArenaRelease(&scratch);
-    return IoError("failed to create session file");
-  }
-
+  // Deliberately no file write here: the session starts life in memory and is
+  // materialized by the first append that warrants persisting. The writer lock
+  // already reserves the id, so nothing else can claim it meanwhile.
   JsonlLogHandle* handle = ArenaPushStruct(&repository->Mem, JsonlLogHandle);
   *handle = JsonlLogHandle{};
   handle->Repository = repository;
@@ -592,8 +724,6 @@ SessionResult Create(void* context, Arena* arena, const SessionCreateOptions* op
   SessionResult copied =
       SessionRecord_Clone(&handle->State, &started, &persistent);
   if (!SessionResult_IsOk(copied)) {
-    fclose(file);
-    remove(StrBuf_CStr(&native));
     ProcessFileLock_Release(&writerLock, lockPath);
     ReleaseClaim(repository, claimIndex);
     ArenaRelease(&handle->State);
@@ -603,9 +733,11 @@ SessionResult Create(void* context, Arena* arena, const SessionCreateOptions* op
   Array_Push(&handle->Records, persistent);
   DurableIdIndex_Init(&handle->Reduction.Index, &handle->State, 32);
   SessionReducer_Fold(&handle->Reduction, handle->Records.Data, handle->Records.Count);
-  handle->AppendFile = file;
+  handle->AppendFile = nullptr;
+  handle->Flushed = false;
   handle->Writable = true;
   Mutex_Init(&handle->AppendLock);
+  AttachClaimHandle(repository, claimIndex, handle);
   *outLog = LogInterface(handle);
   SessionResult built =
       BuildInfo(arena, handle->Records.Data, handle->Records.Count, true,
@@ -631,9 +763,16 @@ SessionResult Open(void* context, Arena* arena, const SessionOpenOptions* option
   StrView path =
       SessionPath(&scratch, repository, options->ProjectKey, options->SessionId);
   if (!Fs_Exists(path)) {
+    // A writer holding a session that is still buffered in memory owns an id
+    // with no file yet. Calling that NotFound would describe a taken session
+    // as absent, so the writer's claim is reported instead.
+    bool busy =
+        SessionBusy(repository, options->ProjectKey, options->SessionId);
     ArenaRelease(&scratch);
-    return SessionResult_Error(SessionStatus::NotFound,
-                               SVL("session file was not found"));
+    return SessionResult_Error(
+        busy ? SessionStatus::Busy : SessionStatus::NotFound,
+        busy ? SVL("session already has a process writer")
+             : SVL("session file was not found"));
   }
 
   u32 claimIndex = 0;
@@ -818,6 +957,12 @@ SessionResult Fork(void* context, Arena* arena, const SessionForkOptions* option
   Array<SessionRecord> sourceRecords = {};
   SessionResult loaded =
       LoadRecords(&scratch, sourcePath, false, &sourceRecords);
+  // Forking a session that has not yet earned a file -- /fork before the first
+  // prompt -- must read the source from its live writer rather than report the
+  // session missing.
+  if (loaded.Status == SessionStatus::NotFound)
+    loaded = CopyLiveRecords(repository, &scratch, options->ProjectKey,
+                             options->SourceSessionId, &sourceRecords);
   if (!SessionResult_IsOk(loaded)) {
     ArenaRelease(&scratch);
     return loaded;

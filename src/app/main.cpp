@@ -1590,6 +1590,17 @@ static bool RuntimeRestorePreviousSession(
   open.Writable = true;
   SessionResult restored =
       rt->Sessions->Open(rt->Sessions->Ctx, &scratch, &open, &log, &info);
+  // A session that never received a user message was never written, so closing
+  // it earlier in the switch discarded it for good. It held nothing durable by
+  // definition, so a fresh session restores a usable runtime instead of
+  // leaving the caller with no log at all.
+  if (restored.Status == SessionStatus::NotFound) {
+    SessionCreateOptions create = {};
+    create.ProjectKey = rt->ProjectKey;
+    create.WorkingDirectory = rt->WorkingDirectory;
+    restored =
+        rt->Sessions->Create(rt->Sessions->Ctx, &scratch, &create, &log, &info);
+  }
   if (SessionResult_IsOk(restored)) {
     restored = AgentHarness_Init(rt->Harness, log, config);
   }

@@ -4,9 +4,16 @@
 #include "base/thread.h"
 #include "session/repository.h"
 
+struct JsonlLogHandle;
+
 struct JsonlWriterClaim {
   DurableId SessionId;
   StrView ProjectKey;
+  // The live writer's handle while the claim is active, so a session still
+  // buffered in memory can be read by operations that would otherwise go to
+  // the file that does not exist yet. Null between Acquire and the handle
+  // being constructed.
+  JsonlLogHandle* Handle;
   bool Active;
 };
 
