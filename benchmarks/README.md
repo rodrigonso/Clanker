@@ -1,19 +1,18 @@
 # Benchmarks
 
-Two suites, measuring different things.
+[`agentbench/`](agentbench/) — compares coding-agent CLIs on **memory**: Clank
+against pi, Claude Code and opencode. It launches each tool's real interactive
+TUI and measures process-tree PSS at an idle prompt.
 
-| suite | measures | run it |
-|---|---|---|
-| [`agentbench/`](agentbench/) | **memory** — idle footprint of the real TUI, Clank against pi, Claude Code and opencode | `python3 -m agentbench measure` |
-| [`pi-agent-bench/`](pi-agent-bench/) | **latency** — agent-loop turnaround, Clank against pi's `AgentHarness` | `node run-bench.mjs` |
+```bash
+cd benchmarks
+python3 -m agentbench doctor      # check the setup
+python3 -m agentbench measure     # the numbers
+python3 -m agentbench demo        # side by side in tmux
+```
 
-`agentbench` runs the actual interactive programs and measures what a session
-costs to have open. `pi-agent-bench` drives each harness's agent loop against a
-faux provider and measures what a turn costs to run. Neither substitutes for
-the other.
-
-Both are Linux-friendly; `agentbench` is Linux-only, since PSS has no Windows
-equivalent. On Windows, run it under WSL.
+Linux only (PSS has no Windows analogue); on Windows, run it under WSL.
 
 For Clank's own in-process numbers — agent-loop latency and peak RSS on a
-scripted workload — see `clank_tests --benchmark` from the repository root.
+scripted workload, with no second runtime involved — use `clank_tests
+--benchmark` from the repository root.

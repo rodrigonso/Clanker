@@ -54,8 +54,10 @@ and session rewrite on the comparison date itself.
 
 Two consequences. First, pi's **public** harness contract is mid-flight, so
 "parity with pi's harness" is a moving target aimed at lanes, durable operation
-records, and crash recovery. Second, the latency benchmark below cannot be
-re-run against pi HEAD as written — see that section.
+records, and crash recovery. Second, there is no longer a runnable upstream
+counterpart to benchmark the agent loop against: the fixture that did so
+targeted entry points pi has since removed, and was dropped rather than kept as
+an unreproducible result.
 
 ## Architecture mapping
 
@@ -110,41 +112,6 @@ gate and `AfterTool` override on `AgentToolHooks`. Every entry in pi's
 for. pi's extension layer still adds 33 further event names on top, which
 Clank has no seam for.
 
-## Latency benchmark
-
-⚠️ **These numbers are pinned to pi `74caa2649f10ed71b4378ce69f5d9fbfd2466ca5`
-and cannot be reproduced against pi HEAD.** pi 0.84.0 removed
-`InMemorySessionStorage` and made `AgentHarness.prompt()` reject with
-`HarnessNotImplemented`, so the fixture's entry points no longer exist. Treat
-this as a historical result against the last behavior-complete public harness.
-Re-basing the fixture onto `packages/coding-agent`'s internal runtime, or onto
-the v2 harness once its operational methods land, is outstanding work.
-
-Release measurements on the same Windows machine used Node 24.13.0, 50 warmup
-runs, and 500 measured runs per case. pi was the durable exported
-`AgentHarness` at the pinned ref with `InMemorySessionStorage`; Clank used its
-`AgentHarness` with `MemoryRepository`. Values are median/p95 milliseconds.
-
-| workload | Clank full run | pi full run | Clank tool → provider | pi tool → provider |
-|---|---:|---:|---:|---:|
-| sequential, 5 cycles | 0.169 / 0.203 | 0.542 / 0.825 | 0.015 / 0.019 | 0.023 / 0.037 |
-| sequential, 20 cycles | 0.609 / 0.774 | 1.660 / 2.009 | 0.016 / 0.025 | 0.021 / 0.027 |
-| sequential, 50 cycles | 1.626 / 1.878 | 4.108 / 4.579 | 0.020 / 0.027 | 0.022 / 0.029 |
-| sequential, 100 cycles | 4.003 / 4.317 | 10.362 / 11.058 | 0.026 / 0.042 | 0.029 / 0.044 |
-| parallel, 1 tool | 0.059 / 0.075 | 0.159 / 0.204 | 0.013 / 0.017 | 0.022 / 0.030 |
-| parallel, 2 tools | 0.109 / 0.142 | 0.177 / 0.203 | 0.023 / 0.034 | 0.029 / 0.034 |
-| parallel, 4 tools | 0.158 / 0.193 | 0.204 / 0.223 | 0.026 / 0.035 | 0.041 / 0.048 |
-| parallel, 8 tools | 0.249 / 0.308 | 0.259 / 0.303 | 0.038 / 0.050 | 0.065 / 0.075 |
-| parallel, 16 tools | 0.405 / 0.486 | 0.366 / 0.443 | 0.047 / 0.061 | 0.113 / 0.144 |
-
-Clank was faster at every sequential depth and through four parallel tools,
-with lower tool-to-provider medians throughout. At eight no-op tools its median
-remained lower while p95 differed by 0.005 ms in pi's favor. Native worker
-dispatch remained slower for the synthetic 16-no-op-tool batch (11% median, 10%
-p95), while its tool-to-provider interval was still less than half of pi's.
-Per-cycle cost stayed stable across the tested depths, with no quadratic curve.
-Reproduce with `benchmarks/pi-agent-bench/README.md`.
-
 ## Footprint
 
 Measured on this tree, Release build (`cmake -DCMAKE_BUILD_TYPE=Release`),
@@ -165,7 +132,7 @@ against a specific pi measurement.
 
 Idle footprint for the real interactive TUI, measured as process-tree PSS on
 Linux the way jcode's published table measures it
-(`benchmarks/cli-memory-bench`):
+(`benchmarks/agentbench`):
 
 | tool | 1 session | 10 sessions |
 |---|---:|---:|
@@ -348,8 +315,9 @@ Two items changed character since the previous revision of this document.
 Clank's session layer dropped durable operation records on the reasoning that
 pi had done the same; pi's v4 has since re-introduced them alongside lanes and
 crash recovery, so that is now a real divergence to decide on deliberately.
-And the latency benchmark, while still a valid historical result, no longer has
-a runnable upstream counterpart.
+And the agent-loop latency comparison was retired: pi 0.84.0 removed the entry
+points it drove, so it could not be re-run, and a table nobody can reproduce is
+worse than no table.
 
 ## Refreshing this report
 

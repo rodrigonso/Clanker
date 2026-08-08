@@ -131,5 +131,5 @@ missing.
 - The demo is for the visual; numbers move as each TUI settles. Quote `measure`.
 - One machine, one OS. Directional, not a published claim.
 - Idle footprint only. What an agent costs *while working* is a different
-  measurement — for Clank that is `clank_tests --benchmark`, and
-  `../pi-agent-bench` compares agent-loop latency against pi's harness.
+  measurement; for Clank that is `clank_tests --benchmark`, which reports
+  agent-loop latency and peak RSS on a scripted workload.
