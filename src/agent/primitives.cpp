@@ -278,7 +278,7 @@ AgentProviderAttemptResult AgentProvider_RunAttempt(
   StreamOptions options = input->Options;
   if (input->ResolveAuth) {
     ProviderAuth auth = {};
-    if (input->ResolveAuth(input->AuthUser, input->Arena,
+    if (input->ResolveAuth(input->AuthUser, input->Mem,
                            input->ModelInfo->Provider, options.Abort, &auth))
       options.Auth = auth;
   }
@@ -288,7 +288,7 @@ AgentProviderAttemptResult AgentProvider_RunAttempt(
     return result;
   }
   result.Ok = input->ProviderImpl.Stream(
-      input->ProviderImpl.Ctx, input->Arena, input->ModelInfo, input->Context,
+      input->ProviderImpl.Ctx, input->Mem, input->ModelInfo, input->Context,
       &options, input->Sink, &result.Assistant);
   return result;
 }

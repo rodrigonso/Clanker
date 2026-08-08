@@ -7,7 +7,7 @@
 
 // Result returned by a tool on success.
 struct ToolResult {
-  Array<Content> Content;
+  ContentArray Content;
   bool Terminate;  // hint the agent to stop after this batch
 };
 

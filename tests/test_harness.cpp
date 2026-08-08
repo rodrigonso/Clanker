@@ -3186,7 +3186,7 @@ void TestHarnessStateGrowthRate() {
 }
 
 // harness->Work is reset once per run but allocated into on every turn -- the
-// provider builds each request body from it (driver.cpp: input.Arena) -- so a
+// provider builds each request body from it (driver.cpp: input.Mem) -- so a
 // run of N turns holds N request bodies at once. Reset alone kept that peak
 // committed for the life of the process, which is what put a real session at
 // 62 MB in one arena.

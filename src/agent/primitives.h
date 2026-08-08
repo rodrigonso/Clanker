@@ -8,7 +8,7 @@
 enum class ToolExecution : u8 { Parallel, Sequential };
 
 struct ToolOutcome {
-  Array<Content> Content;
+  ContentArray Content;
   bool IsError;
   bool Terminate;
 };
@@ -27,7 +27,9 @@ typedef bool (*AgentResolveAuthFn)(void* user, Arena* arena, StrView provider,
                                    volatile i32* abort, ProviderAuth* out);
 
 struct AgentProviderAttemptInput {
-  Arena* Arena;
+  // Not named `Arena`: a member whose name matches its own type is rejected by
+  // GCC ([basic.scope.class]), which is what kept this from building on Linux.
+  Arena* Mem;
   Provider ProviderImpl;
   const Model* ModelInfo;
   const LlmContext* Context;
@@ -109,7 +111,7 @@ struct AgentToolCallResult {
   StrView ToolCallId;
   StrView ToolName;
   StrView EffectiveArgumentsJson;
-  Array<Content> Content;
+  ContentArray Content;
   bool IsError;
   bool Terminate;
 };

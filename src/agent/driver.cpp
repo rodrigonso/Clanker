@@ -286,7 +286,7 @@ SessionResult RunAssistantTurn(AgentHarness* harness, AgentTurnKind turnKind, Du
       options.Retry = &providerRetry;
     }
     AgentProviderAttemptInput input = {};
-    input.Arena = &harness->Work;
+    input.Mem = &harness->Work;
     input.ProviderImpl = harness->Config.ProviderImpl;
     input.ModelInfo = &effective.ModelInfo;
     input.Context = &effective.Context;

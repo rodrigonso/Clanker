@@ -31,6 +31,12 @@ struct Content {
   StrView ImageMimeType;  // e.g. "image/png"
 };
 
+// Several structs below carry a `Content` member whose type is also `Content`.
+// MSVC accepts that; GCC rejects it ([basic.scope.class] -- a name must mean
+// one thing throughout a class), so declare those members through this alias
+// and the type name is never re-used as a member name.
+using ContentArray = Array<Content>;
+
 inline Content Content_Text(StrView text) {
   Content c = {};
   c.Kind = ContentKind::Text;
@@ -136,7 +142,7 @@ struct ModelRequestProfile {
 // unused for other roles). Kept flat for clarity; text lives in the blob.
 struct Message {
   Role Kind;
-  Array<Content> Content;
+  ContentArray Content;
 
   // assistant
   StopReason Stop;

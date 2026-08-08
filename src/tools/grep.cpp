@@ -20,7 +20,7 @@ struct GrepMatch {
 };
 
 struct GrepCapture {
-  Arena* Arena;
+  Arena* Mem;
   Array<GrepMatch> Matches;
   StrBuf Pending;
   StrBuf Stderr;
@@ -36,7 +36,7 @@ struct GrepFileCacheEntry {
 };
 
 struct GrepFormatter {
-  Arena* Arena;
+  Arena* Mem;
   StrBuf* Output;
   Array<GrepFileCacheEntry> Cache;
   StrView SearchPath;
@@ -61,9 +61,9 @@ static StrView Grep_Trim(StrView text) {
 
 static bool Grep_ProcessJsonLine(GrepCapture* capture, StrView line) {
   if (line.Length == 0) return true;
-  StrBuf json = StrBuf_Make(capture->Arena, line.Length + 1);
+  StrBuf json = StrBuf_Make(capture->Mem, line.Length + 1);
   StrBuf_Append(&json, line);
-  JsonValue* event = Json_Parse(capture->Arena, StrBuf_View(&json));
+  JsonValue* event = Json_Parse(capture->Mem, StrBuf_View(&json));
   if (!event || !StrView_EqCStr(Json_GetStr(event, "type"), "match")) return true;
 
   JsonValue* data = Json_Get(event, "data");
@@ -132,9 +132,9 @@ static bool Grep_IsParentPath(StrView path) {
 
 static StrView Grep_FormatPath(GrepFormatter* formatter, StrView filePath) {
   if (!formatter->SearchIsDirectory) return Fs_Base(filePath);
-  StrView relative = Fs_Relativize(formatter->Arena, formatter->SearchPath, filePath);
+  StrView relative = Fs_Relativize(formatter->Mem, formatter->SearchPath, filePath);
   if (relative.Length && !Grep_IsParentPath(relative)) return relative;
-  return Fs_ToPosix(formatter->Arena, filePath);
+  return Fs_ToPosix(formatter->Mem, filePath);
 }
 
 static Array<StrView> Grep_NormalizeAndSplit(Arena* arena, StrView content) {
@@ -167,18 +167,18 @@ static GrepFileCacheEntry* Grep_GetFile(GrepFormatter* formatter, StrView path) 
 
   GrepFileCacheEntry entry = {};
   entry.Path = path;
-  StrBuf native = StrBuf_Make(formatter->Arena, path.Length + 1);
+  StrBuf native = StrBuf_Make(formatter->Mem, path.Length + 1);
   StrBuf_Append(&native, path);
   FILE* file = fopen(StrBuf_CStr(&native), "rb");
   if (file) {
-    StrBuf content = StrBuf_Make(formatter->Arena, 8192);
+    StrBuf content = StrBuf_Make(formatter->Mem, 8192);
     char chunk[8192];
     size_t read = 0;
     while ((read = fread(chunk, 1, sizeof(chunk), file)) > 0)
       StrBuf_Append(&content, StrView{chunk, (u32)read});
     entry.ReadOk = ferror(file) == 0;
     if (fclose(file) != 0) entry.ReadOk = false;
-    if (entry.ReadOk) entry.Lines = Grep_NormalizeAndSplit(formatter->Arena, StrBuf_View(&content));
+    if (entry.ReadOk) entry.Lines = Grep_NormalizeAndSplit(formatter->Mem, StrBuf_View(&content));
   }
   Array_Push(&formatter->Cache, entry);
   return &formatter->Cache.Data[formatter->Cache.Count - 1u];
@@ -243,7 +243,7 @@ static void Grep_FormatMatch(GrepFormatter* formatter, const GrepMatch& match) {
   StrView display = Grep_FormatPath(formatter, match.FilePath);
   if (formatter->Context == 0 && match.HasLineText) {
     Grep_AppendLine(formatter, display, match.LineNumber, true,
-                    Grep_SanitizeMatchLine(formatter->Arena, match.LineText));
+                    Grep_SanitizeMatchLine(formatter->Mem, match.LineText));
     return;
   }
 
@@ -344,7 +344,7 @@ static bool GrepExec(void*, Arena* arena, StrView, const ToolArgs* args,
   rgArgs[rgArgCount++] = searchPath;
 
   GrepCapture capture = {};
-  capture.Arena = arena;
+  capture.Mem = arena;
   capture.Matches = Array_Make<GrepMatch>(arena, limit < 32u ? limit : 32u);
   capture.Pending = StrBuf_Make(arena, 4096);
   capture.Stderr = StrBuf_Make(arena, 512);
@@ -383,7 +383,7 @@ static bool GrepExec(void*, Arena* arena, StrView, const ToolArgs* args,
 
   StrBuf rawOutput = StrBuf_Make(arena, 4096);
   GrepFormatter formatter = {};
-  formatter.Arena = arena;
+  formatter.Mem = arena;
   formatter.Output = &rawOutput;
   formatter.Cache = Array_Make<GrepFileCacheEntry>(arena, 8);
   formatter.SearchPath = searchPath;

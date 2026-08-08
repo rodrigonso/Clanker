@@ -32,7 +32,7 @@ static StrView Find_AdjustPattern(Arena* arena, StrView pattern, bool* matchPath
 }
 
 struct FindState {
-  Arena* Arena;
+  Arena* Mem;
   Array<StrView> Results;
   StrView Pattern;
   u32 Limit;
@@ -48,12 +48,12 @@ static bool Find_Visit(void* user, StrView absPath, StrView relPath, const FsEnt
 
   StrView result;
   if (e.IsDir) {
-    StrBuf b = StrBuf_Make(st->Arena, relPath.Length + 2);
+    StrBuf b = StrBuf_Make(st->Mem, relPath.Length + 2);
     StrBuf_Append(&b, relPath);
     StrBuf_AppendChar(&b, '/');
     result = StrBuf_View(&b);
   } else {
-    result = StrView_Dup(st->Arena, relPath);
+    result = StrView_Dup(st->Mem, relPath);
   }
   Array_Push(&st->Results, result);
   if (st->Results.Count >= st->Limit) {
@@ -96,7 +96,7 @@ static bool FindExec(void* ctx, Arena* arena, StrView id,
   StrView effPattern = Find_AdjustPattern(arena, pattern, &matchPath);
 
   FindState st = {};
-  st.Arena = arena;
+  st.Mem = arena;
   st.Results = Array_Make<StrView>(arena, limit < 64u ? limit : 64u);
   st.Pattern = effPattern;
   st.Limit = limit;
