@@ -26,7 +26,30 @@ true of jcode's published RAM table, which this reproduces.
 
 PSS is Linux-only. On Windows, run this under WSL.
 
-## Running it
+## Side-by-side demo
+
+`demo.sh` launches all three agents in tmux panes with a live PSS readout along
+the bottom:
+
+```bash
+./demo.sh              # three agents + monitor
+./demo.sh --monitor    # just the monitor, against whatever is already running
+```
+
+`Ctrl-b d` detaches, `Ctrl-b &` kills it. Binaries come from the same
+`CLANK_BIN` / `PI_BIN` / `JCODE_BIN` variables the benchmark uses.
+
+Two things the script handles that are easy to get wrong by hand: jcode's
+launcher is a shim that execs a versioned binary out of `~/.jcode/builds`, and
+the daemon it spawns is that same binary rather than a child of the client — so
+matching on the launcher path finds neither. It also kills a leftover daemon
+before starting, because otherwise the next run reuses a server nobody paid
+for and jcode looks cheaper than it is.
+
+This is a demo, not the measurement. Numbers on screen move around as each TUI
+settles; use `bench_memory_cli.py` for figures worth quoting.
+
+## Running the benchmark
 
 Build Clank for Linux first (it builds with stock flags; only OpenSSL headers
 are needed, and libcurl is vendored):
