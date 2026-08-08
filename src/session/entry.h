@@ -141,6 +141,10 @@ SessionResult SessionRecord_Decode(Arena* arena, StrView text, SessionRecord* ou
 SessionResult SessionRecord_Clone(Arena* arena, const SessionRecord* source,
                                   SessionRecord* out);
 
+// Deep clone of one message: content array, text, and every string are copied
+// into `arena`, so the result shares nothing with `source`.
+Message Message_Clone(Arena* arena, const Message& source);
+
 // Validates envelope fields and kind-specific required values for a single
 // record in isolation (no history/index required).
 SessionResult SessionRecord_Validate(const SessionRecord* record);

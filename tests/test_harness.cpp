@@ -3190,6 +3190,206 @@ void TestHarnessStateGrowthRate() {
 // run of N turns holds N request bodies at once. Reset alone kept that peak
 // committed for the life of the process, which is what put a real session at
 // 62 MB in one arena.
+// Samples the harness's turn arena from inside a tool call, which is the only
+// place a test can observe it part-way through a run.
+struct WorkPeakProbe {
+  AgentHarness* Harness;
+  usize Peak;
+  u32 Calls;
+};
+
+bool WorkPeakExec(void* context, Arena* arena, StrView id, const ToolArgs* args,
+                  volatile i32* abort, const ToolUpdateSink* updates, ToolResult* out,
+                  StrBuf* error) {
+  (void)id;
+  (void)abort;
+  (void)updates;
+  (void)error;
+  WorkPeakProbe* probe = (WorkPeakProbe*)context;
+  if (probe && probe->Harness) {
+    if (probe->Harness->Work.Committed > probe->Peak) probe->Peak = probe->Harness->Work.Committed;
+    probe->Calls++;
+  }
+  StrBuf text = StrBuf_Make(arena, 32);
+  StrBuf_AppendCStr(&text, "echo:");
+  StrBuf_Append(&text, args->Json);
+  out->Content = Array_Make<Content>(arena, 1);
+  Array_Push(&out->Content, Content_Text(StrBuf_View(&text)));
+  return true;
+}
+
+// What a run costs must track the size of one turn, not the number of turns it
+// takes. Every turn materializes the whole branch and a whole request body into
+// Work; without a per-turn reset those stack up, which is what took a real
+// session's Work arena to 62 MB. Measured from inside the tool call because the
+// peak is gone by the time the run returns.
+usize RunTurnLoopPeak(u32 turns, char* body, u32 bodyLength) {
+  Arena arena = ArenaCreate();
+  MemoryRepository memory = {};
+  MemoryRepository_Init(&memory);
+  SessionRepository repository = MemoryRepository_AsRepository(&memory);
+  SessionLog log = {};
+  CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+
+  WorkPeakProbe probe = {};
+  Tool echo = {};
+  echo.Name = SVL("echo");
+  echo.Description = SVL("echo arguments");
+  echo.ParamsJsonSchema = SVL("{\"type\":\"object\"}");
+  echo.Ctx = &probe;
+  echo.Execute = WorkPeakExec;
+
+  ScriptToolCall call[1] = {ScriptToolCall{SVL("echo"), SVL("c1"), SVL("{\"x\":1}")}};
+  Array<ScriptStep> steps = Array_Make<ScriptStep>(&arena, turns + 1);
+  for (u32 i = 0; i < turns; i++) {
+    ScriptStep step = {};
+    step.Text = StrView{body, bodyLength};
+    step.Tools = call;
+    step.ToolCount = 1;
+    Array_Push(&steps, step);
+  }
+  ScriptStep last = {};
+  last.Text = SVL("done");
+  last.Stop = StopReason::Stop;
+  Array_Push(&steps, last);
+
+  ScriptProvider script = {steps.Data, steps.Count, 0};
+  AgentHarnessConfig config = ScriptConfig(&script, &echo, 1);
+  config.Compaction = {};
+  AgentHarness harness = {};
+  CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+  probe.Harness = &harness;
+
+  CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("go"))));
+  CHECK(probe.Calls == turns);
+  usize peak = probe.Peak;
+
+  CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+  ArenaRelease(&arena);
+  return peak;
+}
+
+// The turn arena is recycled between turns, so a PrepareNextTurn hook that
+// keeps part of the turn it was handed -- the obvious thing for it to do, and
+// what pi's own trimming hooks do -- must end up owning a copy.
+struct OverrideProbe {
+  u32 Prepare;
+  u32 Checks;
+  u32 Corrupt;
+  char Fill;
+  u32 FillLength;
+};
+
+SessionResult OverrideKeepAssistantPrepare(void* context, Arena* arena,
+                                           const AgentTurnContext* turn,
+                                           AgentNextTurnUpdate* out) {
+  OverrideProbe* probe = (OverrideProbe*)context;
+  probe->Prepare++;
+  if (probe->Prepare == 1 && turn->Assistant) {
+    out->HasContext = true;
+    out->Context = Array_Make<Message>(arena, 2);
+    Array_Push(&out->Context, Message_User(arena, SVL("override context")));
+    Array_Push(&out->Context, *turn->Assistant);
+  }
+  return SessionResult_Ok();
+}
+
+SessionResult OverrideKeepAssistantStop(void* context, Arena* arena,
+                                        const AgentTurnContext* turn, bool* outStop) {
+  (void)arena;
+  OverrideProbe* probe = (OverrideProbe*)context;
+  *outStop = false;
+  if (turn->Context.Count < 2) return SessionResult_Ok();
+  probe->Checks++;
+  const Message& kept = turn->Context.Data[1];
+  bool ok = kept.Content.Count > 0;
+  for (u32 i = 0; i < kept.Content.Count; i++) {
+    const Content& content = kept.Content.Data[i];
+    if (content.Kind != ContentKind::Text) continue;
+    if (content.Text.Length != probe->FillLength) {
+      ok = false;
+      break;
+    }
+    for (u32 k = 0; k < content.Text.Length; k++) {
+      if (content.Text.Data[k] != probe->Fill) {
+        ok = false;
+        break;
+      }
+    }
+  }
+  if (!ok) probe->Corrupt++;
+  return SessionResult_Ok();
+}
+
+void TestHarnessOverrideOutlivesTurnArena() {
+  Arena arena = ArenaCreate();
+  MemoryRepository memory = {};
+  MemoryRepository_Init(&memory);
+  SessionRepository repository = MemoryRepository_AsRepository(&memory);
+  SessionLog log = {};
+  CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+
+  // Big enough that a later turn's own context and request body reallocate over
+  // it, so a retained pointer reads something other than the original bytes.
+  static char filled[128 * 1024];
+  for (u32 i = 0; i < sizeof(filled); i++) filled[i] = 'Z';
+
+  u32 executions = 0;
+  Tool echo = {};
+  echo.Name = SVL("echo");
+  echo.Description = SVL("echo arguments");
+  echo.ParamsJsonSchema = SVL("{\"type\":\"object\"}");
+  echo.Ctx = &executions;
+  echo.Execute = EchoExec;
+
+  ScriptToolCall call[1] = {ScriptToolCall{SVL("echo"), SVL("c1"), SVL("{\"x\":1}")}};
+  ScriptStep steps[5] = {};
+  for (u32 i = 0; i < 4; i++) {
+    steps[i].Text = StrView{filled, (u32)sizeof(filled)};
+    steps[i].Tools = call;
+    steps[i].ToolCount = 1;
+  }
+  steps[4].Text = SVL("done");
+  steps[4].Stop = StopReason::Stop;
+
+  OverrideProbe probe = {};
+  probe.Fill = 'Z';
+  probe.FillLength = (u32)sizeof(filled);
+
+  ScriptProvider script = {steps, 5, 0};
+  AgentHarnessConfig config = ScriptConfig(&script, &echo, 1);
+  config.Compaction = {};
+  config.Hooks.User = &probe;
+  config.Hooks.PrepareNextTurn = OverrideKeepAssistantPrepare;
+  config.Hooks.ShouldStopAfterTurn = OverrideKeepAssistantStop;
+
+  AgentHarness harness = {};
+  CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+  CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("go"))));
+
+  // Read back on turns after the one that stored it, once the turn arena has
+  // been recycled underneath.
+  CHECK(probe.Checks >= 2);
+  CHECK(probe.Corrupt == 0);
+
+  CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+  ArenaRelease(&arena);
+}
+
+void TestHarnessWorkArenaPerTurn() {
+  static char body[256 * 1024];
+  for (u32 i = 0; i < sizeof(body); i++) body[i] = 'a' + (char)(i % 26);
+
+  usize few = RunTurnLoopPeak(3, body, (u32)sizeof(body));
+  usize many = RunTurnLoopPeak(24, body, (u32)sizeof(body));
+
+  // Eight times the turns must not cost eight times the memory. The allowance
+  // is for the branch itself getting longer, not for retained per-turn scratch:
+  // without the reset `many` lands at roughly eight times `few`.
+  CHECK(few > 0);
+  CHECK(many <= few * 3);
+}
+
 void TestHarnessWorkArenaTrim() {
   Arena arena = ArenaCreate();
   MemoryRepository memory = {};
@@ -3292,6 +3492,8 @@ void TestHarness() {
   TestHarnessLifecycle();
   TestHarnessWatchers();
   TestHarnessWatchOverflow();
+  TestHarnessOverrideOutlivesTurnArena();
+  TestHarnessWorkArenaPerTurn();
   TestHarnessWorkArenaTrim();
   TestHarnessStateGrowthRate();
   TestHarnessWatchDrainsAfterClose();

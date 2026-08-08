@@ -323,6 +323,8 @@ void CompleteAgentTurnLocked(AgentHarness* harness, AgentTurnKind turn,
   PublishToWatchers(harness, &event);
   ArenaReset(&harness->Work);
   ArenaTrim(&harness->Work, WORK_ARENA_KEEP_BYTES);
+  ArenaReset(&harness->RunMem);
+  ArenaTrim(&harness->RunMem, WORK_ARENA_KEEP_BYTES);
   harness->Running = false;
 }
 
@@ -554,6 +556,7 @@ SessionResult AgentHarness_Init(AgentHarness* harness, SessionLog log,
   harness->State = ArenaCreate();
   harness->Queued = ArenaCreate();
   harness->Work = ArenaCreate();
+  harness->RunMem = ArenaCreate();
   harness->LastResult = ArenaCreate();
   Mutex_Init(&harness->StateLock);
   Mutex_Init(&harness->WatcherLock);
@@ -619,6 +622,7 @@ SessionResult AgentHarness_Close(AgentHarness* harness) {
   ArenaRelease(&harness->State);
   ArenaRelease(&harness->Queued);
   ArenaRelease(&harness->Work);
+  ArenaRelease(&harness->RunMem);
   ArenaRelease(&harness->LastResult);
   *harness = AgentHarness{};
   return SessionResult_Ok();
@@ -895,6 +899,8 @@ SessionResult AgentHarness_Navigate(AgentHarness* harness, DurableId targetEntry
       result.Message = StrView_Dup(&harness->LastResult, result.Message);
     ArenaReset(&harness->Work);
     ArenaTrim(&harness->Work, WORK_ARENA_KEEP_BYTES);
+    ArenaReset(&harness->RunMem);
+    ArenaTrim(&harness->RunMem, WORK_ARENA_KEEP_BYTES);
     harness->Running = false;
   }
   return result;

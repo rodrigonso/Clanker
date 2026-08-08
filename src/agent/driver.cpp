@@ -116,18 +116,25 @@ SessionResult AgentRunState_Apply(Arena* arena, AgentRunState* run,
                                  SVL("prepare-next-turn hook produced an invalid model"));
     run->HasModel = true;
     run->ModelInfo = update->ModelInfo;
+    run->ModelInfo.Id = StrView_Dup(arena, update->ModelInfo.Id);
+    run->ModelInfo.Name = StrView_Dup(arena, update->ModelInfo.Name);
+    run->ModelInfo.Provider = StrView_Dup(arena, update->ModelInfo.Provider);
+    run->ModelInfo.Api = StrView_Dup(arena, update->ModelInfo.Api);
+    run->ModelInfo.BaseUrl = StrView_Dup(arena, update->ModelInfo.BaseUrl);
   }
   if (update->HasProfile) {
     run->HasProfile = true;
     run->Profile = update->Profile;
   }
   if (update->HasContext) {
-    // Copied into an array the harness owns, so later turns can append to it
-    // without depending on how the hook allocated its own.
+    // Deep-copied into `arena`, not just the array: the hook is handed this
+    // turn's context and assistant message, and echoing either back is the
+    // obvious thing for it to do. Both live in the turn arena, which is
+    // recycled before this override is read again on the next turn.
     run->HasContext = true;
     run->Context = Array_Make<Message>(arena, update->Context.Count + 8);
     for (u32 i = 0; i < update->Context.Count; i++)
-      Array_Push(&run->Context, update->Context.Data[i]);
+      Array_Push(&run->Context, Message_Clone(arena, update->Context.Data[i]));
   }
   return SessionResult_Ok();
 }
@@ -595,6 +602,14 @@ SessionResult ContinueRun(AgentHarness* harness, DurableId* ioHead, AgentRunStat
     if (Atomic_LoadI32(&harness->AbortFlag))
       return SessionResult_Error(SessionStatus::Cancelled, SVL("run cancelled"));
 
+    // Nothing this loop allocates from Work survives an iteration: every
+    // message it produces is appended first, and AgentHarness_Append rewrites
+    // each record with a State-owned clone. Without this a run that takes N
+    // turns stacks N materialized contexts and N request bodies, which is what
+    // took one real session's Work arena to 62 MB. Anything that does span
+    // turns lives in RunMem instead.
+    ArenaReset(&harness->Work);
+
     // Automatic compaction runs before the next provider request, at most once
     // per iteration. If it succeeds but the context still exceeds the budget we
     // continue anyway and let the provider decide, rather than loop.
@@ -683,18 +698,23 @@ SessionResult ContinueRun(AgentHarness* harness, DurableId* ioHead, AgentRunStat
     // turn after turn_end and before either steering source is polled.
     if (harness->Config.Hooks.PrepareNextTurn || harness->Config.Hooks.ShouldStopAfterTurn) {
       AgentTurnContext turnContext = {};
-      SessionResult built =
-          BuildTurnContext(harness, *ioHead, &turn.Assistant, toolResults, run, &turnContext);
+      // The appended record's message, not turn.Assistant: Append rewrote it
+      // with a State-owned clone, so a hook that keeps it holds memory that
+      // outlives this turn's arena.
+      SessionResult built = BuildTurnContext(harness, *ioHead, &assistantRecord.MessageEntry.Value,
+                                             toolResults, run, &turnContext);
       if (!SessionResult_IsOk(built)) return built;
 
       if (harness->Config.Hooks.PrepareNextTurn) {
         AgentNextTurnUpdate update = {};
+        // RunMem, not Work: a context override this hook returns is read on
+        // every later turn, and Work is recycled between them.
         SessionResult hooked = AgentHook_Failure(
-            harness->Config.Hooks.PrepareNextTurn(harness->Config.Hooks.User, &harness->Work,
+            harness->Config.Hooks.PrepareNextTurn(harness->Config.Hooks.User, &harness->RunMem,
                                                   &turnContext, &update),
             "prepare-next-turn hook failed");
         if (!SessionResult_IsOk(hooked)) return hooked;
-        SessionResult applied = AgentRunState_Apply(&harness->Work, run, &update);
+        SessionResult applied = AgentRunState_Apply(&harness->RunMem, run, &update);
         if (!SessionResult_IsOk(applied)) return applied;
         // pi hands shouldStopAfterTurn the already-updated context, so a stop
         // decision sees what the next request would actually carry.
@@ -741,7 +761,7 @@ SessionResult AgentDriver_Run(AgentHarness* harness, StrView prompt) {
 
   DurableId head = AgentHarness_ReduceSnapshot(harness).HeadId;
   AgentRunState run = {};
-  run.NewMessages = Array_Make<Message>(&harness->Work, 8);
+  run.NewMessages = Array_Make<Message>(&harness->RunMem, 8);
   u32 nextTurnCount = 0;
   SessionResult result =
       FlushQueueIntoRun(harness, &harness->Queues.NextTurn, &head, &run, &nextTurnCount);

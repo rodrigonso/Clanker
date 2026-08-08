@@ -163,6 +163,20 @@ memory or startup numbers of its own, so no direct like-for-like comparison is
 recorded here. The defensible claim is the order of magnitude, not a ratio
 against a specific pi measurement.
 
+That figure is a single prompt/response. Across a long session the number that
+matters is what a run leaves behind, because arenas commit on demand and
+`ArenaReset` does not decommit — an arena contributes its all-time peak to the
+working set, not its current usage. Two properties hold that in place, both
+covered by `tests/test_harness.cpp`:
+
+- **A run costs one turn, not one turn per turn.** The turn arena is recycled at
+  the top of each turn of a run, so the peak tracks the size of a single
+  request rather than the number of turns. Measured with 256 KB assistant
+  messages: flat at 320 KB for both a 3-turn and a 24-turn run, against
+  832 KB and 6.31 MB respectively when it is not recycled.
+- **A finished run hands its pages back.** `ArenaTrim` decommits above a 1 MiB
+  floor when a run completes, so a session that spikes does not stay spiked.
+
 ## Providers & protocols
 
 | capability | status | notes |

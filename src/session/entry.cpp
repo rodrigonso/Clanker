@@ -802,6 +802,8 @@ SessionResult SessionRecord_Decode(Arena* arena, StrView text, SessionRecord* ou
   return SessionResult_Ok(record.Seq);
 }
 
+Message Message_Clone(Arena* arena, const Message& source) { return CloneMessage(arena, source); }
+
 SessionResult SessionRecord_Clone(Arena* arena, const SessionRecord* source,
                                   SessionRecord* out) {
   if (!arena || !source || !out) return SessionResult_Invalid("clone arguments are invalid");

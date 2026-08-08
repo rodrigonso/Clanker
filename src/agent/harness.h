@@ -42,7 +42,16 @@ struct AgentHarness {
   Arena Runtime;  // tool schemas; lives for the harness lifetime
   Arena State;    // maintained Records + Reduction/index; append-only, never reloaded
   Arena Queued;   // queued message text; recycled whenever all queues drain
-  Arena Work;     // per-run scratch; reset after each Run/Compact/Navigate call
+  // Per-turn scratch: the materialized context, the built request, the
+  // provider's response, and every per-turn hook allocation. Reset at the top
+  // of each turn of a run, which is what keeps a long run's cost proportional
+  // to one turn rather than to the number of turns times the conversation.
+  // Nothing allocated here may outlive the turn that allocated it.
+  Arena Work;
+  // Per-run scratch for the handful of things that genuinely span turns: the
+  // run's accumulated message list and a PrepareNextTurn context override.
+  // Reset with Work at the end of each Run/Compact/Navigate.
+  Arena RunMem;
   // Holds only the returned SessionResult's message, which callers read after
   // Work has been handed back. Separate from State because State is append-only
   // and a run that fails without persisting anything would otherwise leave a
