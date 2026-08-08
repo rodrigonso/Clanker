@@ -1,13 +1,13 @@
 # Interactive CLI memory benchmark
 
-Process-tree PSS for interactive coding-agent CLIs, measured the way
-[jcode](https://github.com/1jehuang/jcode) measures it, with Clank added.
+Process-tree PSS for interactive coding-agent CLIs: Clank against pi and
+Claude Code.
 
-`bench_memory_cli.py` is a port of jcode's own
+The measurement follows [jcode](https://github.com/1jehuang/jcode)'s
 [`scripts/bench_memory_cli.py`](https://github.com/1jehuang/jcode/blob/master/scripts/bench_memory_cli.py)
-(MIT). The measurement is deliberately unchanged so the numbers line up with
-jcode's published table; the differences are listed under
-[Deviations](#deviations-from-the-upstream-script) below.
+(MIT), which `bench_memory_cli.py` began as a port of, so the numbers are
+comparable with the RAM table jcode publishes. Differences are listed under
+[Deviations](#deviations-from-the-upstream-script).
 
 ## What it measures
 
@@ -32,26 +32,22 @@ PSS is Linux-only. On Windows, run this under WSL.
 bottom:
 
 ```bash
-./demo.sh                       # clank, pi and claude (the default three)
-./demo.sh clank pi jcode        # pick your own, any two to four
+./demo.sh                       # clank, pi and claude
+./demo.sh clank claude          # pick your own, any two or three
 ./demo.sh --monitor             # just the monitor, against what is running
 ```
 
-Known tools: `clank`, `pi`, `jcode`, `claude`. `Ctrl-b d` detaches,
-`Ctrl-b &` kills it. Binaries come from `CLANK_BIN` / `PI_BIN` / `JCODE_BIN` /
-`CLAUDE_BIN`.
+Known tools: `clank`, `pi`, `claude`. `Ctrl-b d` detaches, `Ctrl-b &` kills it.
+Binaries come from `CLANK_BIN` / `PI_BIN` / `CLAUDE_BIN`.
 
 The demo uses your real `HOME`, so each tool uses whatever credential it
 already has. It deliberately does *not* set a placeholder API key — a fake key
 is picked up by every tool and makes each request fail.
 
-Three things the script handles that are easy to get wrong by hand: jcode's
-launcher is a shim that execs a versioned binary out of `~/.jcode/builds`, and
-the daemon it spawns is that same binary rather than a child of the client, so
-matching on the launcher path finds neither. It kills a leftover daemon before
-starting, because otherwise the next run reuses a server nobody paid for. And
-Claude Code ships a native ELF binary (named `claude.exe` on every platform),
-so it is matched by path rather than through node the way pi is.
+One detail the monitor has to get right: Claude Code ships a native ELF binary
+(named `claude.exe` on every platform, despite installing from npm), so it is
+matched by resolved path like Clank, while pi is a node script whose argv is
+rewritten and has to be matched through node.
 
 This is a demo, not the measurement. Numbers on screen move around as each TUI
 settles; use `bench_memory_cli.py` for figures worth quoting.
@@ -70,13 +66,14 @@ Then:
 
 ```bash
 python3 bench_memory_cli.py --sessions 1  --repeat 5
-python3 bench_memory_cli.py --sessions 10 --repeat 2 --tools jcode_memory_off
+python3 bench_memory_cli.py --sessions 10 --repeat 2 --tools claude
 ```
 
-Binaries are located via `CLANK_BIN`, `PI_BIN`, and `JCODE_BIN`, defaulting to
+Binaries are located via `CLANK_BIN`, `PI_BIN`, and `CLAUDE_BIN`, defaulting to
 `~/clank-src/build-linux/clank`, `~/.local/npm/bin/pi`, and
-`~/.local/bin/jcode`. `--repeat` reports the median, because a tool sampled
-while still initialising produces a high outlier rather than symmetric noise.
+`~/.local/npm/bin/claude`. `--repeat` reports the median, because a tool
+sampled while still initialising produces a high outlier rather than symmetric
+noise.
 
 ## Results
 
@@ -85,77 +82,55 @@ Medians across repeats.
 
 | tool | 1 session | 10 sessions | per added session |
 |---|---:|---:|---:|
-| **clank** | **3.3 MB** | **13.0 MB** | **~1.1 MB** |
-| jcode (embedding off) | 96.0 MB | 155.3 MB | ~6.6 MB |
-| jcode (default) | 97.3 MB | 291.1 MB | ~21.5 MB |
-| pi | 157.6 MB | 1049.4 MB | ~99.1 MB |
-| Claude Code | 295.3 MB | 1714.3 MB | ~157.7 MB |
+| **clank** | **4.9 MB** | **13.4 MB** | **~0.9 MB** |
+| pi | 154.8 MB | 1049.4 MB | ~99.4 MB |
+| Claude Code | 300.5 MB | 1714.3 MB | ~157.1 MB |
 
-Versions: clank `243fab8`, pi `0.74.2`, jcode `v0.71.1 (dd8755f7e)`,
-Claude Code `2.1.226`.
+Versions: clank `243fab8`, pi `0.74.2`, Claude Code `2.1.226`.
 
-At one session Clank is **29× lighter than jcode's best configuration**, **48×
-lighter than pi**, and **89× lighter than Claude Code**. At ten it is **12×**,
-**81×** and **132×**. Clank is a single process; jcode runs a client plus a
-shared server (11 processes for 10 sessions), which is what makes its
-per-session slope so much flatter than the two Node/native single-process
-agents.
+At one session Clank is **32× lighter than pi** and **61× lighter than Claude
+Code**. At ten it is **78×** and **128×**.
 
-These reproduce jcode's published ordering. Their table reports pi at 144.4 MB
-for one session against 157.6 MB here, and 833.0 MB at ten against 1049.4 MB;
-Claude Code at 386.6 MB against 295.3 MB here — close enough, on a different
-machine and different versions, to trust the port. Their own numbers for jcode
-are lower than these (27.8 MB / 117.0 MB), which is discussed below.
+Clank's 4.9 MB is 1.8 MB of Clank plus 3.1 MB of OpenSSL, which this build
+links from a privately staged copy that nothing else on the machine maps, so
+PSS charges it in full. A distro-packaged build sharing the system libssl
+measures nearer 3.3 MB. The higher figure is the one reported here because it
+is what the documented build produces. It also explains why the per-session
+slope is below the single-session cost: the ten processes share one copy of
+OpenSSL between them.
+
+These reproduce the ordering in jcode's published table. It reports pi at
+144.4 MB for one session against 154.8 MB here, 833.0 MB at ten against
+1049.4 MB, and Claude Code at 386.6 MB against 300.5 MB — close enough, on a
+different machine and different versions, to trust the port.
 
 ## Deviations from the upstream script
 
-Four, each of which makes the comparison *less* favourable to Clank, not more:
+Three, each of which makes the comparison *less* favourable to Clank, not more:
 
 1. **Every tool gets a throwaway `HOME`.** Upstream isolates only jcode, into a
    temporary `JCODE_HOME` with symlinked credentials, and lets every other tool
    inherit the real home directory with whatever sessions and configuration are
-   in it. Isolating all three removes that asymmetry.
+   in it. Isolating all of them removes that asymmetry.
 
-2. **jcode's server is started explicitly, per run, on a private socket.** It
-   outlives its client, so without this the first run pays for the daemon and
-   later runs silently do not. Upstream does the same thing; it is called out
-   here because it is easy to get wrong and it materially changes the number.
-
-3. **jcode gets a placeholder `ANTHROPIC_API_KEY`.** Its server refuses to
-   start without a credential. Clank and pi both reach an input prompt with no
-   credential at all. Nothing is ever sent, so the placeholder only gets jcode
-   to the same starting line the other two reach unaided.
-
-4. **Claude Code's onboarding is pre-answered.** In a fresh `HOME` it opens on
+2. **Claude Code's onboarding is pre-answered.** In a fresh `HOME` it opens on
    a theme picker and then a folder-trust prompt, and sampling there measures a
    wizard rather than an agent session — 235 MB against 295 MB once it reaches
    a real prompt. The script writes a `.claude.json` marking both as answered.
    Without it the tool never echoes the probe, which the summary reports as
    `input-ready 0/N`.
 
-The `jcode_memory_on` settle timings (5 s after the socket opens, 2 s per
-session) are copied from upstream, which gives the embedding build extra time
-to finish initialising before sampling.
-
-## Why these jcode numbers are higher than jcode's own
-
-Their table reports 27.8 MB for one session; this measures 96.0 MB for the same
-configuration. Not reconciled, and worth stating plainly rather than assuming
-the difference favours us. Candidates, in rough order of likelihood: a
-different jcode version (theirs `v0.9.1888-dev`, this `v0.71.1`); WSL2 rather
-than bare-metal Linux, which changes page sharing; and their run reusing a warm
-shared server across tools while this starts a cold one per run. The relative
-ordering is unaffected — Clank is far below every configuration either way —
-but the absolute jcode figures here should not be quoted as refuting theirs.
+3. **pi's tool cache is shared with the real profile.** It downloads `fd` and
+   `ripgrep` into `~/.pi` on first run; the throwaway home symlinks the
+   populated cache so pi is measured warm, as the others are.
 
 ## Caveats
 
-- Not all sessions always reach input-ready within the timeout at 10 sessions
-  (jcode most often). The summary line flags this as `input-ready N/M`. PSS is
-  still summed over every process in the tree, and the totals were stable
-  across a longer settle (`--settle 4 --timeout 40` gave 150.8 MB against
-  155.3 MB), so the figure is not an artefact of sampling early.
-- One machine, one OS, one run of each. Directional, not a published claim.
+- Not all sessions always reach input-ready within the timeout at 10 sessions.
+  The summary line flags this as `input-ready N/M`. PSS is still summed over
+  every process in the tree, and totals were stable across a longer settle, so
+  the figure is not an artefact of sampling early.
+- One machine, one OS. Directional, not a published claim.
 - Idle footprint only. What an agent costs *while working* is a different
   measurement; for Clank that is `clank_tests --benchmark`, which reports peak
   RSS alongside latency.

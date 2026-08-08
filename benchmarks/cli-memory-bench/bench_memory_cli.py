@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Process-tree PSS for interactive coding-agent CLIs.
 
-A port of jcode's scripts/bench_memory_cli.py (from 1jehuang/jcode, MIT) with
-Clank added as a measured tool. The measurement is deliberately unchanged from
-the upstream script so the numbers line up with jcode's published table:
+Measures Clank against pi and Claude Code. The measurement follows jcode's
+scripts/bench_memory_cli.py (1jehuang/jcode, MIT), which this began as a port
+of, so the numbers are comparable with jcode's published RAM table:
 
   * launch the real interactive TUI on a pty, answering the terminal capability
     queries a TUI probes for so it renders as it would for a user;
@@ -16,6 +16,10 @@ the upstream script so the numbers line up with jcode's published table:
 Note what this does *not* do: the probe is typed but never submitted. No prompt
 is ever sent, so this measures idle-at-ready footprint, not the cost of running
 a turn. That is the same thing jcode's published RAM table measures.
+
+Each tool runs under a throwaway HOME, so none is charged for whatever sessions
+happen to be in the real profile, and Claude Code's first-run dialogs are
+pre-answered so it is sampled at a prompt rather than in a wizard.
 
 PSS is Linux-only (/proc/<pid>/smaps_rollup); this does not run on Windows.
 """
@@ -40,7 +44,7 @@ ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x1b\x07]*(?:\x0
 PROBE = "jqx92"
 DEFAULT_TIMEOUT_S = 25.0
 DEFAULT_SETTLE_S = 1.0
-DEFAULT_TOOLS = ["clank", "pi", "claude", "jcode_memory_off", "jcode_memory_on"]
+DEFAULT_TOOLS = ["clank", "pi", "claude"]
 
 
 @dataclass
@@ -79,7 +83,6 @@ def build_specs() -> dict[str, ToolSpec]:
     home = Path.home()
     clank = os.environ.get("CLANK_BIN", str(home / "clank-src/build-linux/clank"))
     pi = os.environ.get("PI_BIN", str(home / ".local/npm/bin/pi"))
-    jcode = os.environ.get("JCODE_BIN", str(home / ".local/bin/jcode"))
     claude = os.environ.get("CLAUDE_BIN", str(home / ".local/npm/bin/claude"))
 
     # pi is a node script with a `/usr/bin/env node` shebang, and node here is a
@@ -88,30 +91,16 @@ def build_specs() -> dict[str, ToolSpec]:
     path = node_bin + os.pathsep + os.environ.get("PATH", "")
 
     # Clank links a locally staged OpenSSL, so the loader needs to find it.
+    ssl_lib = os.environ.get("SSL_LIB", str(home / ".local/ssl/lib"))
     clank_env = {
         "PATH": path,
-        "LD_LIBRARY_PATH": "/tmp/ssl/lib:" + os.environ.get("LD_LIBRARY_PATH", ""),
+        "LD_LIBRARY_PATH": ssl_lib + os.pathsep + os.environ.get("LD_LIBRARY_PATH", ""),
     }
 
     return {
         "clank": ToolSpec("clank", [clank], [clank, "--help"], env=clank_env),
         "pi": ToolSpec("pi", [pi], [pi, "--version"], env={"PATH": path}),
         "claude": ToolSpec("claude", [claude], [claude, "--version"], env={"PATH": path}),
-        # jcode's published table reports these two separately: its headline
-        # figure is the embedding-off configuration, and its default (memory on)
-        # is a different, much larger number.
-        "jcode_memory_off": ToolSpec(
-            "jcode_memory_off",
-            [jcode, "--no-update", "--no-selfdev"],
-            [jcode, "version"],
-            env={"PATH": path, "JCODE_NO_TELEMETRY": "1", "JCODE_MEMORY_ENABLED": "0"},
-        ),
-        "jcode_memory_on": ToolSpec(
-            "jcode_memory_on",
-            [jcode, "--no-update", "--no-selfdev"],
-            [jcode, "version"],
-            env={"PATH": path, "JCODE_NO_TELEMETRY": "1", "JCODE_MEMORY_ENABLED": "1"},
-        ),
     }
 
 
@@ -289,34 +278,14 @@ def version_for(spec: ToolSpec) -> str:
     return lines[0] if lines else f"exit {proc.returncode}"
 
 
-def wait_for_socket(path: str, timeout_s: float) -> bool:
-    import socket as _socket
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        if os.path.exists(path):
-            try:
-                sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-                sock.connect(path)
-                sock.close()
-                return True
-            except OSError:
-                pass
-        time.sleep(0.05)
-    return False
-
-
 def run_tool(spec: ToolSpec, sessions: int, cwd: Path, timeout_s: float, settle_s: float) -> ToolRunResult:
     notes: list[str] = []
     version = version_for(spec)
     launches: list[SessionLaunch] = []
     cleanup_pgids: list[int] = []
-    extra_roots: list[int] = []
-    # Every tool gets a throwaway HOME. jcode's own script isolates only jcode
-    # and lets the others inherit the real home directory; giving all three the
-    # same treatment removes that asymmetry, and it also keeps a tool from being
-    # charged for whatever sessions happen to be sitting in the user's profile.
+    # Every tool gets a throwaway HOME, so none is charged for whatever
+    # sessions and configuration happen to be sitting in the user's profile.
     temp_root = tempfile.mkdtemp(prefix=f"cli-mem-{spec.name}-")
-    argv = list(spec.argv)
     try:
         env = os.environ.copy()
         if spec.env:
@@ -357,47 +326,10 @@ def run_tool(spec: ToolSpec, sessions: int, cwd: Path, timeout_s: float, settle_
             with open(os.path.join(temp_home, ".claude.json"), "w") as f:
                 _json.dump(cfg, f)
 
-        if spec.name.startswith("jcode"):
-            # jcode is client/server: a session connects to a daemon that
-            # survives the client. Start our own on a private socket so the
-            # server's memory is attributed to this run instead of leaking into
-            # (or being hidden by) a daemon left over from an earlier one.
-            env["JCODE_HOME"] = os.path.join(temp_root, "jcode-home")
-            env["JCODE_RUNTIME_DIR"] = os.path.join(temp_root, "run")
-            env["JCODE_TEMP_SERVER"] = "1"
-            env["JCODE_SERVER_OWNER_PID"] = str(os.getpid())
-            # jcode refuses to start its server without a credential; clank and
-            # pi both reach the input prompt without one. Nothing is ever sent
-            # (the probe is typed, never submitted), so a placeholder only gets
-            # jcode to the same starting line the other two reach unaided.
-            env.setdefault("ANTHROPIC_API_KEY", "sk-ant-bench-placeholder-not-a-real-key")
-            os.makedirs(env["JCODE_HOME"], exist_ok=True)
-            os.makedirs(env["JCODE_RUNTIME_DIR"], exist_ok=True)
-            socket_path = os.path.join(env["JCODE_RUNTIME_DIR"], "bench.sock")
-            # --socket is a global flag, so it has to precede the subcommand.
-            server = subprocess.Popen(
-                [spec.argv[0], "--no-update", "--no-selfdev", "--socket", socket_path, "serve"],
-                cwd=str(cwd), env=env,
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                preexec_fn=os.setsid,
-            )
-            extra_roots.append(server.pid)
-            cleanup_pgids.append(server.pid)
-            if not wait_for_socket(socket_path, timeout_s):
-                notes.append("jcode server did not become ready")
-            # Matches upstream: the embedding build does work after the socket
-            # opens, so sampling too early catches it mid-initialisation and
-            # reports a number that is not the steady state.
-            if spec.name == "jcode_memory_on":
-                time.sleep(max(settle_s, 5.0))
-            argv = [spec.argv[0], "--no-update", "--no-selfdev", "--socket", socket_path]
-
-        per_session_settle = max(settle_s, 2.0) if spec.name == "jcode_memory_on" else settle_s
-
         for _ in range(sessions):
-            launches.append(launch_interactive(argv, cwd, env, timeout_s, per_session_settle))
+            launches.append(launch_interactive(spec.argv, cwd, env, timeout_s, settle_s))
             cleanup_pgids.append(launches[-1].pgid)
-        root_pids = extra_roots + [launch.root_pid for launch in launches]
+        root_pids = [launch.root_pid for launch in launches]
 
         for idx, launch in enumerate(launches, start=1):
             if not launch.ready:

@@ -1,22 +1,20 @@
 #!/usr/bin/env bash
 # Launch coding agents side by side with a live memory readout.
 #
-#   ./demo.sh                     clank, pi and claude (the default three)
-#   ./demo.sh clank pi jcode      pick your own, any two to four
+#   ./demo.sh                     clank, pi and claude
+#   ./demo.sh clank claude        pick your own, any two or three
 #   ./demo.sh --monitor [tools]   just the monitor, against what is running
 #
 # Memory is Pss from /proc/<pid>/smaps_rollup, summed per tool over every
-# process belonging to it -- which for jcode includes the background daemon it
-# spawns, since that is part of what a session costs.
+# process belonging to it.
 
 set -uo pipefail
 
 SESSION=agents
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
-CLANK_BIN="${CLANK_BIN:-$HOME/clank-src/build-clean/clank}"
+CLANK_BIN="${CLANK_BIN:-$HOME/clank-src/build-linux/clank}"
 PI_BIN="${PI_BIN:-$HOME/.local/npm/bin/pi}"
-JCODE_BIN="${JCODE_BIN:-$HOME/.local/bin/jcode}"
 CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/npm/bin/claude}"
 SSL_LIB="${SSL_LIB:-$HOME/.local/ssl/lib}"
 NODE_BIN="${NODE_BIN:-$HOME/.local/node/bin}"
@@ -27,7 +25,6 @@ bin_for() {
   case "$1" in
     clank)  echo "$CLANK_BIN" ;;
     pi)     echo "$PI_BIN" ;;
-    jcode)  echo "$JCODE_BIN" ;;
     claude) echo "$CLAUDE_BIN" ;;
     *)      echo "" ;;
   esac
@@ -37,7 +34,6 @@ cmd_for() {
   case "$1" in
     clank)  echo "LD_LIBRARY_PATH='$SSL_LIB' '$CLANK_BIN'" ;;
     pi)     echo "'$PI_BIN'" ;;
-    jcode)  echo "'$JCODE_BIN' --no-update --no-selfdev" ;;
     claude) echo "'$CLAUDE_BIN'" ;;
   esac
 }
@@ -95,12 +91,6 @@ def classify(exe, cmd):
     # platform), so it matches by path like clank does rather than via node.
     if "claude" in TOOLS and exe and exe == REAL["claude"]:
         return "claude"
-    # jcode's launcher is a shim that execs a versioned binary out of
-    # ~/.jcode/builds, and the daemon it spawns is that same binary, so match
-    # the install tree instead of the launcher path.
-    if "jcode" in TOOLS and exe and (exe == REAL["jcode"] or "/.jcode/builds/" in exe
-                                     or os.path.basename(exe).startswith("jcode-")):
-        return "jcode"
     # pi is a node script: exe is node and argv is rewritten to "pi", so
     # neither signal alone is enough.
     if exe and os.path.basename(exe) in ("node", "nodejs"):
@@ -160,7 +150,7 @@ missing=0
 for t in "${TOOLS[@]}"; do
   path="$(bin_for "$t")"
   if [[ -z "$path" ]]; then
-    echo "!! unknown tool '$t' (known: clank pi jcode claude)" >&2
+    echo "!! unknown tool '$t' (known: clank pi claude)" >&2
     missing=1
   elif [[ ! -x "$path" ]]; then
     echo "!! $t not found at $path" >&2
@@ -169,7 +159,7 @@ for t in "${TOOLS[@]}"; do
 done
 if [[ $missing -eq 1 ]]; then
   echo >&2
-  echo "Override with CLANK_BIN / PI_BIN / JCODE_BIN / CLAUDE_BIN, or build clank:" >&2
+  echo "Override with CLANK_BIN / PI_BIN / CLAUDE_BIN, or build clank:" >&2
   echo "  cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release" >&2
   echo "  cmake --build build-linux --target clank" >&2
   exit 1
@@ -180,20 +170,12 @@ if ! command -v tmux >/dev/null 2>&1; then
   exit 1
 fi
 
-# jcode leaves a daemon running that the next launch reuses. Left alone it
-# makes a second demo look cheaper than the first, because the server is
-# already up and nobody pays for it. The launcher is a shim, so kill the
-# versioned binary it execs rather than the shim path.
-kill_jcode() { pkill -f '/\.jcode/builds/.*jcode-' >/dev/null 2>&1; }
-if [[ " ${TOOLS[*]} " == *" jcode "* ]]; then kill_jcode && sleep 1; fi
-
 tmux kill-session -t "$SESSION" 2>/dev/null
 
 WORKDIR="$(mktemp -d /tmp/agent-demo-XXXX)"
 cd "$WORKDIR"
 
 export PATH="$NODE_BIN:$HOME/.local/npm/bin:$HOME/.local/bin:$PATH"
-export JCODE_NO_TELEMETRY=1
 # NOTE: no placeholder ANTHROPIC_API_KEY here. Whatever credential you already
 # have -- an exported key, or each tool's own stored login -- is what gets used.
 # A fake key set here would be picked up by every tool and 401 every request.
@@ -220,6 +202,6 @@ tmux set-option -t "$SESSION" -g pane-border-status top
 tmux set-option -t "$SESSION" -g mouse on
 tmux bind-key '&' kill-session
 
-trap 'tmux kill-session -t "$SESSION" 2>/dev/null; kill_jcode; rm -rf "$WORKDIR"' EXIT
+trap 'tmux kill-session -t "$SESSION" 2>/dev/null; rm -rf "$WORKDIR"' EXIT
 
 tmux attach -t "$SESSION"
