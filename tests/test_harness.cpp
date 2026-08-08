@@ -3331,8 +3331,11 @@ void TestHarnessOverrideOutlivesTurnArena() {
 
   // Big enough that a later turn's own context and request body reallocate over
   // it, so a retained pointer reads something other than the original bytes.
-  static char filled[128 * 1024];
-  for (u32 i = 0; i < sizeof(filled); i++) filled[i] = 'Z';
+  // Arena-allocated rather than static so the test binary does not carry it in
+  // .bss, where it would also skew --benchmark's process memory figures.
+  const u32 filledLength = 128 * 1024;
+  char* filled = ArenaPushArray(&arena, char, filledLength);
+  for (u32 i = 0; i < filledLength; i++) filled[i] = 'Z';
 
   u32 executions = 0;
   Tool echo = {};
@@ -3345,7 +3348,7 @@ void TestHarnessOverrideOutlivesTurnArena() {
   ScriptToolCall call[1] = {ScriptToolCall{SVL("echo"), SVL("c1"), SVL("{\"x\":1}")}};
   ScriptStep steps[5] = {};
   for (u32 i = 0; i < 4; i++) {
-    steps[i].Text = StrView{filled, (u32)sizeof(filled)};
+    steps[i].Text = StrView{filled, filledLength};
     steps[i].Tools = call;
     steps[i].ToolCount = 1;
   }
@@ -3354,7 +3357,7 @@ void TestHarnessOverrideOutlivesTurnArena() {
 
   OverrideProbe probe = {};
   probe.Fill = 'Z';
-  probe.FillLength = (u32)sizeof(filled);
+  probe.FillLength = filledLength;
 
   ScriptProvider script = {steps, 5, 0};
   AgentHarnessConfig config = ScriptConfig(&script, &echo, 1);
@@ -3377,17 +3380,20 @@ void TestHarnessOverrideOutlivesTurnArena() {
 }
 
 void TestHarnessWorkArenaPerTurn() {
-  static char body[256 * 1024];
-  for (u32 i = 0; i < sizeof(body); i++) body[i] = 'a' + (char)(i % 26);
+  Arena scratch = ArenaCreate();
+  const u32 bodyLength = 256 * 1024;
+  char* body = ArenaPushArray(&scratch, char, bodyLength);
+  for (u32 i = 0; i < bodyLength; i++) body[i] = 'a' + (char)(i % 26);
 
-  usize few = RunTurnLoopPeak(3, body, (u32)sizeof(body));
-  usize many = RunTurnLoopPeak(24, body, (u32)sizeof(body));
+  usize few = RunTurnLoopPeak(3, body, bodyLength);
+  usize many = RunTurnLoopPeak(24, body, bodyLength);
 
   // Eight times the turns must not cost eight times the memory. The allowance
   // is for the branch itself getting longer, not for retained per-turn scratch:
   // without the reset `many` lands at roughly eight times `few`.
   CHECK(few > 0);
   CHECK(many <= few * 3);
+  ArenaRelease(&scratch);
 }
 
 void TestHarnessWorkArenaTrim() {
@@ -3402,8 +3408,9 @@ void TestHarnessWorkArenaTrim() {
   // Each turn duplicates its assistant text into Work (the real provider puts a
   // whole request body there), so eight tool-looping turns deposit ~4 MB --
   // several times the floor the trim keeps.
-  static char body[512 * 1024];
-  for (u32 i = 0; i < sizeof(body); i++) body[i] = 'a' + (char)(i % 26);
+  const u32 bodyLength = 512 * 1024;
+  char* body = ArenaPushArray(&arena, char, bodyLength);
+  for (u32 i = 0; i < bodyLength; i++) body[i] = 'a' + (char)(i % 26);
   u32 executions = 0;  // EchoExec increments this through a u32*
   Tool echo = {};
   echo.Name = SVL("echo");
@@ -3415,7 +3422,7 @@ void TestHarnessWorkArenaTrim() {
   ScriptToolCall call[1] = {ScriptToolCall{SVL("echo"), SVL("c1"), SVL("{\"x\":1}")}};
   ScriptStep steps[9] = {};
   for (u32 i = 0; i < 8; i++) {
-    steps[i].Text = StrView{body, (u32)sizeof(body)};
+    steps[i].Text = StrView{body, bodyLength};
     steps[i].Tools = call;
     steps[i].ToolCount = 1;
   }
@@ -3456,7 +3463,7 @@ void TestHarnessWorkArenaTrim() {
   for (u32 i = 0; i < sizeof(errText); i++) errText[i] = 'e';
   ScriptStep failSteps[4] = {};
   for (u32 i = 0; i < 3; i++) {
-    failSteps[i].Text = StrView{body, (u32)sizeof(body)};
+    failSteps[i].Text = StrView{body, bodyLength};
     failSteps[i].Tools = call;
     failSteps[i].ToolCount = 1;
   }

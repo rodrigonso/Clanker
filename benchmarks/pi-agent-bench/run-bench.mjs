@@ -267,6 +267,12 @@ async function main() {
     }
   }
   console.log(JSON.stringify(results, null, 2));
+  // Same figure Clank's --benchmark reports: OS peak working set for this
+  // process, so the two runtimes are compared on the metric a user feels
+  // rather than on each runtime's own idea of "heap".
+  console.log(
+    JSON.stringify({ runtime: "pi", peakRssKb: process.resourceUsage().maxRSS })
+  );
 }
 
 await main();

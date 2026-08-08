@@ -17,10 +17,15 @@ From this directory in PowerShell:
 git clone https://github.com/earendil-works/pi.git .pi-checkout
 git -C .pi-checkout checkout 74caa2649f10ed71b4378ce69f5d9fbfd2466ca5
 npm --prefix .pi-checkout ci
+npm --prefix .pi-checkout run hydrate:model-data
 npm --prefix .pi-checkout run build:offline --workspace=@earendil-works/pi-ai
 npm --prefix .pi-checkout run build --workspace=@earendil-works/pi-agent-core
 npm install
 ```
+
+`hydrate:model-data` is required, not optional: `pi-ai`'s build runs a
+`check:model-data` step first, and the provider data it checks is generated
+rather than committed, so the build fails without it.
 
 Setup requires network access. The package builds and all benchmark runs after
 setup are local.
@@ -55,3 +60,22 @@ build:
 ```
 
 The Clank command emits the same JSON fields as `run-bench.mjs`.
+
+## Memory
+
+Both runners print one extra JSON object after the results array:
+
+```json
+{"runtime":"clank","peakRssKb":5772}
+```
+
+This is the OS peak working set for the benchmark process — Windows
+`PeakWorkingSetSize` on the Clank side, `process.resourceUsage().maxRSS` on the
+Pi side — so the two are compared on the same figure rather than on each
+runtime's own idea of "heap". Because it is a whole-process high-water mark,
+run one workload per process when attributing memory to a specific depth.
+
+Peak working set counts shared pages (the mapped executable, DLLs, the Node
+runtime image). For private commit instead, run each process inside a Windows
+job object and read `PeakProcessMemoryUsed`; that is the more comparable figure
+across runtimes with very different image sizes.

@@ -12,6 +12,7 @@
 
 #include "agent/harness.h"
 #include "base/arena.h"
+#include "base/sysinfo.h"
 #include "base/thread.h"
 #include "script_provider.h"
 #include "session/memory_repository.h"
@@ -495,6 +496,11 @@ int RunAgentBenchmark(int argc, char** argv) {
     printf("}%s\n", i + 1 == caseCount ? "" : ",");
   }
   printf("]\n");
+  // Peak working set for this process, which is what a user sees the agent
+  // loop cost. Reported once at the end rather than per case because the OS
+  // figure is a high-water mark over the whole process.
+  printf("{\"runtime\":\"clank\",\"peakRssKb\":%llu}\n",
+         (unsigned long long)(PeakRssBytes() / 1024));
   ArenaRelease(&arena);
   return 0;
 }
