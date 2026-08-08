@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Process-tree PSS for interactive coding-agent CLIs.
 
-Measures Clank against pi and Claude Code. The measurement follows jcode's
-scripts/bench_memory_cli.py (1jehuang/jcode, MIT), which this began as a port
-of, so the numbers are comparable with jcode's published RAM table:
+Measures Clank against pi, Claude Code and opencode. The measurement follows
+jcode's scripts/bench_memory_cli.py (1jehuang/jcode, MIT), which this began as
+a port of, so the numbers are comparable with jcode's published RAM table:
 
   * launch the real interactive TUI on a pty, answering the terminal capability
     queries a TUI probes for so it renders as it would for a user;
@@ -44,7 +44,7 @@ ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x1b\x07]*(?:\x0
 PROBE = "jqx92"
 DEFAULT_TIMEOUT_S = 25.0
 DEFAULT_SETTLE_S = 1.0
-DEFAULT_TOOLS = ["clank", "pi", "claude"]
+DEFAULT_TOOLS = ["clank", "pi", "claude", "opencode"]
 
 
 @dataclass
@@ -84,6 +84,7 @@ def build_specs() -> dict[str, ToolSpec]:
     clank = os.environ.get("CLANK_BIN", str(home / "clank-src/build-linux/clank"))
     pi = os.environ.get("PI_BIN", str(home / ".local/npm/bin/pi"))
     claude = os.environ.get("CLAUDE_BIN", str(home / ".local/npm/bin/claude"))
+    opencode = os.environ.get("OPENCODE_BIN", str(home / ".local/npm/bin/opencode"))
 
     # pi is a node script with a `/usr/bin/env node` shebang, and node here is a
     # local install rather than a system package.
@@ -101,6 +102,8 @@ def build_specs() -> dict[str, ToolSpec]:
         "clank": ToolSpec("clank", [clank], [clank, "--help"], env=clank_env),
         "pi": ToolSpec("pi", [pi], [pi, "--version"], env={"PATH": path}),
         "claude": ToolSpec("claude", [claude], [claude, "--version"], env={"PATH": path}),
+        "opencode": ToolSpec("opencode", [opencode], [opencode, "--version"],
+                             env={"PATH": path}),
     }
 
 
@@ -123,6 +126,14 @@ def reply_queries(master_fd: int, buffer: bytes) -> bytes:
         (b"\x1b[?2004$p", b"\x1b[?2004;1$y"),
         (b"\x1b[?2026$p", b"\x1b[?2026;1$y"),
     ]
+    # opencode also probes with DCS/APC sequences (XTGETTINCAP, kitty graphics,
+    # iTerm2 capabilities). It waits on some of them, so answer "unsupported"
+    # rather than leaving it blocked at a half-drawn screen.
+    dcs = [
+        (b"\x1bP+q", b"\x1b\\", b"\x1bP0+q\x1b\\"),      # terminfo query -> not found
+        (b"\x1b_G", b"\x1b\\", b"\x1b_Gi=31337;ENOTSUP\x1b\\"),  # kitty graphics
+        (b"\x1b]1337;", b"\x07", b""),                    # iTerm2 caps -> swallow
+    ]
     changed = True
     while changed:
         changed = False
@@ -131,6 +142,17 @@ def reply_queries(master_fd: int, buffer: bytes) -> bytes:
                 os.write(master_fd, response)
                 buffer = buffer.replace(query, b"")
                 changed = True
+        for prefix, terminator, response in dcs:
+            start = buffer.find(prefix)
+            if start < 0:
+                continue
+            end = buffer.find(terminator, start + len(prefix))
+            if end < 0:
+                continue
+            if response:
+                os.write(master_fd, response)
+            buffer = buffer[:start] + buffer[end + len(terminator):]
+            changed = True
     return buffer
 
 
@@ -164,9 +186,9 @@ def launch_interactive(argv, cwd, env, timeout_s, settle_s) -> SessionLaunch:
     buf = b""
     ready = False
     input_ready = False
-    probe_sent = False
     excerpt = None
     visible_at = None
+    next_probe = 0.0
     while time.perf_counter() - start < timeout_s:
         rlist, _, _ = select.select([master_fd], [], [], 0.05)
         if rlist:
@@ -179,19 +201,23 @@ def launch_interactive(argv, cwd, env, timeout_s, settle_s) -> SessionLaunch:
                 buf = reply_queries(master_fd, buf)
                 plain = strip_ansi(buf.decode("utf-8", "replace"))
                 excerpt = first_meaningful_line(plain)
-                if excerpt:
-                    if not ready:
-                        visible_at = time.perf_counter() - start
+                if excerpt and not ready:
                     ready = True
-                    if not probe_sent:
-                        try:
-                            os.write(master_fd, PROBE.encode())
-                            probe_sent = True
-                        except OSError:
-                            break
-                if probe_sent and PROBE in plain:
+                    visible_at = time.perf_counter() - start
+                if PROBE in plain:
                     input_ready = True
                     break
+        # Re-send rather than probing once on first content: a TUI can paint a
+        # screen well before it is listening, and opencode in particular drops
+        # anything typed during startup. Nothing is ever submitted, so the worst
+        # case is the input box holding a few copies of the probe.
+        now = time.perf_counter()
+        if ready and now >= next_probe:
+            try:
+                os.write(master_fd, PROBE.encode())
+            except OSError:
+                break
+            next_probe = now + 2.0
         if proc.poll() is not None:
             break
     if input_ready or ready:

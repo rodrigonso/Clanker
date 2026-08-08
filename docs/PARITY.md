@@ -170,8 +170,9 @@ Linux the way jcode's published table measures it
 | tool | 1 session | 10 sessions |
 |---|---:|---:|
 | **Clank** | **4.9 MB** | **13.4 MB** |
-| pi | 154.8 MB | 1049.4 MB |
-| Claude Code | 300.5 MB | 1714.3 MB |
+| pi | 162.7 MB | 911.9 MB |
+| Claude Code | 297.1 MB | 1710.6 MB |
+| opencode | 799.7 MB | 5576.5 MB |
 
 No prompt is submitted in that benchmark, so it measures what a session costs
 to have open, not what a turn costs to run. See that directory's README for the
