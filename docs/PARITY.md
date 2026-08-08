@@ -163,6 +163,21 @@ memory or startup numbers of its own, so no direct like-for-like comparison is
 recorded here. The defensible claim is the order of magnitude, not a ratio
 against a specific pi measurement.
 
+Idle footprint for the real interactive TUI, measured as process-tree PSS on
+Linux the way jcode's published table measures it
+(`benchmarks/cli-memory-bench`):
+
+| tool | 1 session | 10 sessions |
+|---|---:|---:|
+| **Clank** | **3.3 MB** | **13.0 MB** |
+| jcode (embedding off) | 96.0 MB | 155.3 MB |
+| jcode (default) | 97.3 MB | 291.1 MB |
+| pi | 157.6 MB | 1049.4 MB |
+
+No prompt is submitted in that benchmark, so it measures what a session costs
+to have open, not what a turn costs to run. See that directory's README for the
+methodology and its caveats.
+
 That figure is a single prompt/response. Across a long session the number that
 matters is what a run leaves behind, because arenas commit on demand and
 `ArenaReset` does not decommit — an arena contributes its all-time peak to the
