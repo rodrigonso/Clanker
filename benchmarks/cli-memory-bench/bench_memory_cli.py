@@ -40,7 +40,7 @@ ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x1b\x07]*(?:\x0
 PROBE = "jqx92"
 DEFAULT_TIMEOUT_S = 25.0
 DEFAULT_SETTLE_S = 1.0
-DEFAULT_TOOLS = ["clank", "pi", "jcode_memory_off", "jcode_memory_on"]
+DEFAULT_TOOLS = ["clank", "pi", "claude", "jcode_memory_off", "jcode_memory_on"]
 
 
 @dataclass
@@ -80,6 +80,7 @@ def build_specs() -> dict[str, ToolSpec]:
     clank = os.environ.get("CLANK_BIN", str(home / "clank-src/build-linux/clank"))
     pi = os.environ.get("PI_BIN", str(home / ".local/npm/bin/pi"))
     jcode = os.environ.get("JCODE_BIN", str(home / ".local/bin/jcode"))
+    claude = os.environ.get("CLAUDE_BIN", str(home / ".local/npm/bin/claude"))
 
     # pi is a node script with a `/usr/bin/env node` shebang, and node here is a
     # local install rather than a system package.
@@ -95,6 +96,7 @@ def build_specs() -> dict[str, ToolSpec]:
     return {
         "clank": ToolSpec("clank", [clank], [clank, "--help"], env=clank_env),
         "pi": ToolSpec("pi", [pi], [pi, "--version"], env={"PATH": path}),
+        "claude": ToolSpec("claude", [claude], [claude, "--version"], env={"PATH": path}),
         # jcode's published table reports these two separately: its headline
         # figure is the embedding-off configuration, and its default (memory on)
         # is a different, much larger number.
@@ -331,6 +333,29 @@ def run_tool(spec: ToolSpec, sessions: int, cwd: Path, timeout_s: float, settle_
             if real_agent.exists():
                 os.makedirs(os.path.join(temp_home, ".pi"), exist_ok=True)
                 os.symlink(real_agent, os.path.join(temp_home, ".pi", "agent"))
+
+        if spec.name == "claude":
+            # In a fresh HOME, Claude Code opens on a theme picker and then a
+            # folder-trust prompt. Sampling there measures an onboarding wizard
+            # rather than an agent session, so record both as already answered.
+            import json as _json
+            cfg = {
+                "hasCompletedOnboarding": True,
+                "theme": "dark",
+                "numStartups": 5,
+                "installMethod": "npm",
+                "autoUpdates": False,
+                "projects": {
+                    str(cwd): {
+                        "hasTrustDialogAccepted": True,
+                        "hasCompletedProjectOnboarding": True,
+                        "allowedTools": [],
+                        "history": [],
+                    }
+                },
+            }
+            with open(os.path.join(temp_home, ".claude.json"), "w") as f:
+                _json.dump(cfg, f)
 
         if spec.name.startswith("jcode"):
             # jcode is client/server: a session connects to a daemon that

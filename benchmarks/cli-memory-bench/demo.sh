@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Launch clank, pi and jcode side by side with a live memory readout.
+# Launch coding agents side by side with a live memory readout.
 #
-#   ./demo.sh            three agents in tmux + a PSS monitor along the bottom
-#   ./demo.sh --monitor  just the monitor, against whatever is already running
+#   ./demo.sh                     clank, pi and claude (the default three)
+#   ./demo.sh clank pi jcode      pick your own, any two to four
+#   ./demo.sh --monitor [tools]   just the monitor, against what is running
 #
 # Memory is Pss from /proc/<pid>/smaps_rollup, summed per tool over every
 # process belonging to it -- which for jcode includes the background daemon it
@@ -16,17 +17,45 @@ SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]
 CLANK_BIN="${CLANK_BIN:-$HOME/clank-src/build-clean/clank}"
 PI_BIN="${PI_BIN:-$HOME/.local/npm/bin/pi}"
 JCODE_BIN="${JCODE_BIN:-$HOME/.local/bin/jcode}"
+CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/npm/bin/claude}"
 SSL_LIB="${SSL_LIB:-$HOME/.local/ssl/lib}"
 NODE_BIN="${NODE_BIN:-$HOME/.local/node/bin}"
 
+DEFAULT_TOOLS=(clank pi claude)
+
+bin_for() {
+  case "$1" in
+    clank)  echo "$CLANK_BIN" ;;
+    pi)     echo "$PI_BIN" ;;
+    jcode)  echo "$JCODE_BIN" ;;
+    claude) echo "$CLAUDE_BIN" ;;
+    *)      echo "" ;;
+  esac
+}
+
+cmd_for() {
+  case "$1" in
+    clank)  echo "LD_LIBRARY_PATH='$SSL_LIB' '$CLANK_BIN'" ;;
+    pi)     echo "'$PI_BIN'" ;;
+    jcode)  echo "'$JCODE_BIN' --no-update --no-selfdev" ;;
+    claude) echo "'$CLAUDE_BIN'" ;;
+  esac
+}
+
 # ----------------------------------------------------------------- monitor --
 if [[ "${1:-}" == "--monitor" ]]; then
-  exec python3 - "$CLANK_BIN" "$PI_BIN" "$JCODE_BIN" <<'PY'
+  shift
+  MON_TOOLS=("$@")
+  [[ ${#MON_TOOLS[@]} -eq 0 ]] && MON_TOOLS=("${DEFAULT_TOOLS[@]}")
+  MON_ARGS=()
+  for t in "${MON_TOOLS[@]}"; do MON_ARGS+=("$t=$(bin_for "$t")"); done
+  exec python3 - "${MON_ARGS[@]}" <<'PY'
 import os, sys, time
 
-CLANK, PI, JCODE = sys.argv[1], sys.argv[2], sys.argv[3]
-CLANK_REAL = os.path.realpath(CLANK)
-JCODE_REAL = os.path.realpath(JCODE)
+SPECS = [a.split("=", 1) for a in sys.argv[1:]]
+TOOLS = [name for name, _ in SPECS]
+BIN = {name: path for name, path in SPECS}
+REAL = {name: os.path.realpath(path) for name, path in SPECS}
 ME = os.getpid()
 
 def pss_kb(pid):
@@ -60,24 +89,28 @@ def procs():
 def classify(exe, cmd):
     # Match on the resolved binary rather than a loose name, so the monitor
     # never counts itself or a shell that merely mentions the tool.
-    if exe and exe == CLANK_REAL:
+    if "clank" in TOOLS and exe and exe == REAL["clank"]:
         return "clank"
-    # ~/.local/bin/jcode is a shim that execs a versioned binary out of
+    # Claude Code ships a native ELF binary (named claude.exe on every
+    # platform), so it matches by path like clank does rather than via node.
+    if "claude" in TOOLS and exe and exe == REAL["claude"]:
+        return "claude"
+    # jcode's launcher is a shim that execs a versioned binary out of
     # ~/.jcode/builds, and the daemon it spawns is that same binary, so match
     # the install tree instead of the launcher path.
-    if exe and (exe == JCODE_REAL or "/.jcode/builds/" in exe or
-                os.path.basename(exe).startswith("jcode-")):
+    if "jcode" in TOOLS and exe and (exe == REAL["jcode"] or "/.jcode/builds/" in exe
+                                     or os.path.basename(exe).startswith("jcode-")):
         return "jcode"
-    # pi is a node script: its exe is node and its argv is rewritten to "pi",
-    # so neither alone is enough -- take node processes that say they are pi.
+    # pi is a node script: exe is node and argv is rewritten to "pi", so
+    # neither signal alone is enough.
     if exe and os.path.basename(exe) in ("node", "nodejs"):
-        first = cmd.split()[0] if cmd.split() else ""
-        if os.path.basename(first) == "pi" or "pi-coding-agent" in cmd or PI in cmd:
+        first = os.path.basename(cmd.split()[0]) if cmd.split() else ""
+        if "pi" in TOOLS and (first == "pi" or "pi-coding-agent" in cmd or BIN["pi"] in cmd):
             return "pi"
     return None
 
-TOOLS = ["clank", "pi", "jcode"]
-COLOR = {"clank": "\033[92m", "pi": "\033[93m", "jcode": "\033[96m"}
+PALETTE = ["\033[92m", "\033[93m", "\033[96m", "\033[95m"]
+COLOR = {t: PALETTE[i % len(PALETTE)] for i, t in enumerate(TOOLS)}
 RESET = "\033[0m"
 
 peak = {t: 0.0 for t in TOOLS}
@@ -118,18 +151,25 @@ except KeyboardInterrupt:
 PY
 fi
 
+# --------------------------------------------------------------- tool list --
+TOOLS=("$@")
+[[ ${#TOOLS[@]} -eq 0 ]] && TOOLS=("${DEFAULT_TOOLS[@]}")
+
 # ------------------------------------------------------------------- checks --
 missing=0
-for pair in "clank:$CLANK_BIN" "pi:$PI_BIN" "jcode:$JCODE_BIN"; do
-  name="${pair%%:*}"; path="${pair#*:}"
-  if [[ ! -x "$path" ]]; then
-    echo "!! $name not found at $path" >&2
+for t in "${TOOLS[@]}"; do
+  path="$(bin_for "$t")"
+  if [[ -z "$path" ]]; then
+    echo "!! unknown tool '$t' (known: clank pi jcode claude)" >&2
+    missing=1
+  elif [[ ! -x "$path" ]]; then
+    echo "!! $t not found at $path" >&2
     missing=1
   fi
 done
 if [[ $missing -eq 1 ]]; then
   echo >&2
-  echo "Set CLANK_BIN / PI_BIN / JCODE_BIN, or build clank with:" >&2
+  echo "Override with CLANK_BIN / PI_BIN / JCODE_BIN / CLAUDE_BIN, or build clank:" >&2
   echo "  cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release" >&2
   echo "  cmake --build build-linux --target clank" >&2
   exit 1
@@ -145,18 +185,18 @@ fi
 # already up and nobody pays for it. The launcher is a shim, so kill the
 # versioned binary it execs rather than the shim path.
 kill_jcode() { pkill -f '/\.jcode/builds/.*jcode-' >/dev/null 2>&1; }
-kill_jcode && sleep 1
+if [[ " ${TOOLS[*]} " == *" jcode "* ]]; then kill_jcode && sleep 1; fi
 
 tmux kill-session -t "$SESSION" 2>/dev/null
 
 WORKDIR="$(mktemp -d /tmp/agent-demo-XXXX)"
 cd "$WORKDIR"
 
-export PATH="$NODE_BIN:$HOME/.local/bin:$PATH"
-# jcode will not start its server without a credential; clank and pi both reach
-# a prompt without one. Nothing is ever sent to it.
-export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-sk-ant-demo-placeholder-not-a-real-key}"
+export PATH="$NODE_BIN:$HOME/.local/npm/bin:$HOME/.local/bin:$PATH"
 export JCODE_NO_TELEMETRY=1
+# NOTE: no placeholder ANTHROPIC_API_KEY here. Whatever credential you already
+# have -- an exported key, or each tool's own stored login -- is what gets used.
+# A fake key set here would be picked up by every tool and 401 every request.
 
 # -------------------------------------------------------------------- panes --
 hold() { echo "$1; printf '\n[%s exited - press a key]'; read -rsn1" ; }
@@ -164,19 +204,17 @@ hold() { echo "$1; printf '\n[%s exited - press a key]'; read -rsn1" ; }
 tmux new-session -d -s "$SESSION" -c "$WORKDIR" \
   -x "${COLUMNS:-$(tput cols 2>/dev/null || echo 200)}" \
   -y "${LINES:-$(tput lines 2>/dev/null || echo 50)}" \
-  "$(hold "LD_LIBRARY_PATH='$SSL_LIB' '$CLANK_BIN'" clank)"
+  "$(hold "$(cmd_for "${TOOLS[0]}")" "${TOOLS[0]}")"
 
-tmux split-window -h -t "$SESSION" -c "$WORKDIR" "$(hold "'$PI_BIN'" pi)"
-
-tmux split-window -h -t "$SESSION" -c "$WORKDIR" \
-  "$(hold "'$JCODE_BIN' --no-update --no-selfdev" jcode)"
+for t in "${TOOLS[@]:1}"; do
+  tmux split-window -h -t "$SESSION" -c "$WORKDIR" "$(hold "$(cmd_for "$t")" "$t")"
+done
 
 tmux select-layout -t "$SESSION" even-horizontal
-# Anchor the split to the window rather than "the active pane", which may have
-# already exited (jcode gives up quickly if its server never came up) and taken
-# the layout with it.
-tmux split-window -v -f -l 12 -t "${SESSION}:0.0" -c "$WORKDIR" "'$SELF' --monitor"
-MONITOR_PANE="$(tmux list-panes -t "$SESSION" -F '#{pane_index}' | tail -1)"
+# Anchor the split to pane 0 rather than "the active pane", which may have
+# already exited and taken the layout with it.
+tmux split-window -v -f -l 12 -t "${SESSION}:0.0" -c "$WORKDIR" \
+  "'$SELF' --monitor ${TOOLS[*]}"
 
 tmux set-option -t "$SESSION" -g pane-border-status top
 tmux set-option -t "$SESSION" -g mouse on

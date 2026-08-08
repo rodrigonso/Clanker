@@ -173,6 +173,7 @@ Linux the way jcode's published table measures it
 | jcode (embedding off) | 96.0 MB | 155.3 MB |
 | jcode (default) | 97.3 MB | 291.1 MB |
 | pi | 157.6 MB | 1049.4 MB |
+| Claude Code | 295.3 MB | 1714.3 MB |
 
 No prompt is submitted in that benchmark, so it measures what a session costs
 to have open, not what a turn costs to run. See that directory's README for the

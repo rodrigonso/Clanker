@@ -28,23 +28,30 @@ PSS is Linux-only. On Windows, run this under WSL.
 
 ## Side-by-side demo
 
-`demo.sh` launches all three agents in tmux panes with a live PSS readout along
-the bottom:
+`demo.sh` launches agents in tmux panes with a live PSS readout along the
+bottom:
 
 ```bash
-./demo.sh              # three agents + monitor
-./demo.sh --monitor    # just the monitor, against whatever is already running
+./demo.sh                       # clank, pi and claude (the default three)
+./demo.sh clank pi jcode        # pick your own, any two to four
+./demo.sh --monitor             # just the monitor, against what is running
 ```
 
-`Ctrl-b d` detaches, `Ctrl-b &` kills it. Binaries come from the same
-`CLANK_BIN` / `PI_BIN` / `JCODE_BIN` variables the benchmark uses.
+Known tools: `clank`, `pi`, `jcode`, `claude`. `Ctrl-b d` detaches,
+`Ctrl-b &` kills it. Binaries come from `CLANK_BIN` / `PI_BIN` / `JCODE_BIN` /
+`CLAUDE_BIN`.
 
-Two things the script handles that are easy to get wrong by hand: jcode's
+The demo uses your real `HOME`, so each tool uses whatever credential it
+already has. It deliberately does *not* set a placeholder API key — a fake key
+is picked up by every tool and makes each request fail.
+
+Three things the script handles that are easy to get wrong by hand: jcode's
 launcher is a shim that execs a versioned binary out of `~/.jcode/builds`, and
-the daemon it spawns is that same binary rather than a child of the client — so
-matching on the launcher path finds neither. It also kills a leftover daemon
-before starting, because otherwise the next run reuses a server nobody paid
-for and jcode looks cheaper than it is.
+the daemon it spawns is that same binary rather than a child of the client, so
+matching on the launcher path finds neither. It kills a leftover daemon before
+starting, because otherwise the next run reuses a server nobody paid for. And
+Claude Code ships a native ELF binary (named `claude.exe` on every platform),
+so it is matched by path rather than through node the way pi is.
 
 This is a demo, not the measurement. Numbers on screen move around as each TUI
 settles; use `bench_memory_cli.py` for figures worth quoting.
@@ -82,23 +89,27 @@ Medians across repeats.
 | jcode (embedding off) | 96.0 MB | 155.3 MB | ~6.6 MB |
 | jcode (default) | 97.3 MB | 291.1 MB | ~21.5 MB |
 | pi | 157.6 MB | 1049.4 MB | ~99.1 MB |
+| Claude Code | 295.3 MB | 1714.3 MB | ~157.7 MB |
 
-Versions: clank `243fab8`, pi `0.74.2`, jcode `v0.71.1 (dd8755f7e)`.
+Versions: clank `243fab8`, pi `0.74.2`, jcode `v0.71.1 (dd8755f7e)`,
+Claude Code `2.1.226`.
 
-At one session Clank is **29× lighter than jcode's best configuration** and
-**48× lighter than pi**. At ten it is **12×** and **81×**. Clank is a single
-process; jcode runs a client plus a shared server (11 processes for 10
-sessions), which is what makes its per-session slope so much flatter than pi's.
+At one session Clank is **29× lighter than jcode's best configuration**, **48×
+lighter than pi**, and **89× lighter than Claude Code**. At ten it is **12×**,
+**81×** and **132×**. Clank is a single process; jcode runs a client plus a
+shared server (11 processes for 10 sessions), which is what makes its
+per-session slope so much flatter than the two Node/native single-process
+agents.
 
 These reproduce jcode's published ordering. Their table reports pi at 144.4 MB
-for one session against 157.6 MB here, and 833.0 MB at ten against 1049.4 MB —
-close enough, on a different machine and a different pi version, to trust the
-port. Their own numbers for jcode are lower than these (27.8 MB / 117.0 MB),
-which is discussed below.
+for one session against 157.6 MB here, and 833.0 MB at ten against 1049.4 MB;
+Claude Code at 386.6 MB against 295.3 MB here — close enough, on a different
+machine and different versions, to trust the port. Their own numbers for jcode
+are lower than these (27.8 MB / 117.0 MB), which is discussed below.
 
 ## Deviations from the upstream script
 
-Three, each of which makes the comparison *less* favourable to Clank, not more:
+Four, each of which makes the comparison *less* favourable to Clank, not more:
 
 1. **Every tool gets a throwaway `HOME`.** Upstream isolates only jcode, into a
    temporary `JCODE_HOME` with symlinked credentials, and lets every other tool
@@ -114,6 +125,13 @@ Three, each of which makes the comparison *less* favourable to Clank, not more:
    start without a credential. Clank and pi both reach an input prompt with no
    credential at all. Nothing is ever sent, so the placeholder only gets jcode
    to the same starting line the other two reach unaided.
+
+4. **Claude Code's onboarding is pre-answered.** In a fresh `HOME` it opens on
+   a theme picker and then a folder-trust prompt, and sampling there measures a
+   wizard rather than an agent session — 235 MB against 295 MB once it reaches
+   a real prompt. The script writes a `.claude.json` marking both as answered.
+   Without it the tool never echoes the probe, which the summary reports as
+   `input-ready 0/N`.
 
 The `jcode_memory_on` settle timings (5 s after the socket opens, 2 s per
 session) are copied from upstream, which gives the embedding build extra time
