@@ -14,13 +14,20 @@ struct FakeCommandContext {
   int ReloadCalls;
   int DebugCalls;
   int RoundedCalls;
+  int SkillCalls;
+  int TemplateCalls;
   int Notices;
   int Errors;
   AppCommandHandlerResult LoginResult;
   AppCommandHandlerResult ModelResult;
+  AppCommandHandlerResult SkillResult;
   StrView LastNotice;
   StrView LastError;
   StrView LastArguments;
+  StrView LastSkillName;
+  StrView LastTemplateName;
+  StrView TemplateName;
+  AppCommandHandlerResult TemplateResult;
 };
 
 void Notice(void* user, StrView message) {
@@ -121,8 +128,30 @@ AppCommandHandlerResult Rounded(void* user, const AppCommandUx* ux,
   return {AppCommandHandlerStatus::Success, SVL("rounded corners and bullets off")};
 }
 
+AppCommandHandlerResult Skill(void* user, const AppCommandUx* ux, StrView name,
+                              StrView arguments) {
+  (void)ux;
+  FakeCommandContext* ctx = (FakeCommandContext*)user;
+  ctx->SkillCalls++;
+  ctx->LastSkillName = name;
+  ctx->LastArguments = arguments;
+  return ctx->SkillResult;
+}
+
+bool PromptTemplate(void* user, const AppCommandUx* ux, StrView name,
+                    StrView arguments, AppCommandHandlerResult* out) {
+  (void)ux;
+  FakeCommandContext* ctx = (FakeCommandContext*)user;
+  if (!StrView_Eq(name, ctx->TemplateName)) return false;
+  ctx->TemplateCalls++;
+  ctx->LastTemplateName = name;
+  ctx->LastArguments = arguments;
+  *out = ctx->TemplateResult;
+  return true;
+}
+
 void TestParse() {
-  CHECK_ALL(AppCommandSpec_Count() == 16,
+  CHECK_ALL(AppCommandSpec_Count() == 17,
             AppCommandSpec_At(AppCommandSpec_Count()) == nullptr,
             AppCommandSpec_At(0)->Kind == AppCommandKind::Login,
             StrView_EqCStr(AppCommandSpec_At(0)->Name, "login"),
@@ -135,15 +164,21 @@ void TestParse() {
             StrView_EqCStr(AppCommandSpec_At(14)->Name, "rounded"),
             AppCommandSpec_At(14)->Arguments ==
                 AppCommandArgumentPolicy::Optional,
-            AppCommandSpec_At(15)->Kind == AppCommandKind::Exit,
-            StrView_EqCStr(AppCommandSpec_At(15)->Alias, "quit"),
-            AppCommandSpec_At(15)->Description.Length != 0,
+            AppCommandSpec_At(15)->Kind == AppCommandKind::Skill,
+            StrView_EqCStr(AppCommandSpec_At(15)->Name, "skill"),
+            AppCommandSpec_At(15)->Arguments ==
+                AppCommandArgumentPolicy::Optional,
+            AppCommandSpec_At(16)->Kind == AppCommandKind::Exit,
+            StrView_EqCStr(AppCommandSpec_At(16)->Alias, "quit"),
+            AppCommandSpec_At(16)->Description.Length != 0,
             StrView_EqCStr(AppCommand_Usage(AppCommandKind::Resume),
                            "Usage: /resume [session-id]"),
             StrView_EqCStr(AppCommand_Usage(AppCommandKind::Debug),
                            "Usage: /debug [on|off]"),
             StrView_EqCStr(AppCommand_Usage(AppCommandKind::Rounded),
                            "Usage: /rounded [on|off]"),
+            StrView_EqCStr(AppCommand_Usage(AppCommandKind::Skill),
+                           "Usage: /skill:<name> [instructions]"),
             AppCommand_Usage(AppCommandKind::Unknown).Length == 0);
 
   AppCommand plain = AppCommand_Parse(SVL("  hello  "));
@@ -170,6 +205,7 @@ void TestParse() {
       {SVL("/checkout abc"), AppCommandKind::Checkout},
       {SVL("/fork"), AppCommandKind::Fork},
       {SVL("/compact"), AppCommandKind::Compact},
+      {SVL("/compact keep the parser work"), AppCommandKind::Compact},
       {SVL("/trust"), AppCommandKind::Trust},
       {SVL("/reload"), AppCommandKind::Reload},
       {SVL("/debug"), AppCommandKind::Debug},
@@ -177,6 +213,10 @@ void TestParse() {
       {SVL("/rounded on"), AppCommandKind::Rounded},
       {SVL("/rounded off"), AppCommandKind::Rounded},
       {SVL("/exit"), AppCommandKind::Exit},     {SVL("/quit"), AppCommandKind::Exit},
+      {SVL("/skill"), AppCommandKind::Skill},
+      {SVL("/skill:"), AppCommandKind::Skill},
+      {SVL("/skill:review"), AppCommandKind::Skill},
+      {SVL("/skill:review go hard"), AppCommandKind::Skill},
       {SVL("/LOGIN"), AppCommandKind::Unknown}, {SVL("/"), AppCommandKind::Unknown},
       {SVL("/wat"), AppCommandKind::Unknown},
   };
@@ -187,15 +227,38 @@ void TestParse() {
   }
   CHECK(parsed);
 
+  AppCommand skill = AppCommand_Parse(SVL("  /skill:code-review  be terse \n"));
+  CHECK_ALL(skill.Kind == AppCommandKind::Skill,
+            StrView_EqCStr(skill.SkillName, "code-review"),
+            StrView_EqCStr(skill.Arguments, "be terse"));
+
+  AppCommand bareSkill = AppCommand_Parse(SVL("/skill"));
+  CHECK_ALL(bareSkill.Kind == AppCommandKind::Skill,
+            bareSkill.SkillName.Length == 0);
+
+  AppCommand emptySkillName = AppCommand_Parse(SVL("/skill: do it"));
+  CHECK_ALL(emptySkillName.Kind == AppCommandKind::Skill,
+            emptySkillName.SkillName.Length == 0,
+            StrView_EqCStr(emptySkillName.Arguments, "do it"));
+
   AppCommand args = AppCommand_Parse(SVL(" /model \t claude-test \n"));
   CHECK_ALL(args.Kind == AppCommandKind::Model,
             StrView_EqCStr(args.Arguments, "claude-test"));
+
+  AppCommand compact = AppCommand_Parse(SVL("  /compact  focus on the parser \n"));
+  CHECK_ALL(compact.Kind == AppCommandKind::Compact,
+            StrView_EqCStr(compact.Arguments, "focus on the parser"));
+
+  AppCommand bareCompact = AppCommand_Parse(SVL("/compact"));
+  CHECK_ALL(bareCompact.Kind == AppCommandKind::Compact,
+            bareCompact.Arguments.Length == 0);
 }
 
 void TestDispatch() {
   FakeCommandContext ctx = {};
   ctx.LoginResult = {AppCommandHandlerStatus::Success, SVL("Logged in.")};
   ctx.ModelResult = {AppCommandHandlerStatus::Success, SVL("Model selected.")};
+  ctx.SkillResult = {AppCommandHandlerStatus::Success, StrView{}};
   AppCommandUx ux = {&ctx, Notice, Error};
   AppCommandHandlers handlers = {};
   handlers.User = &ctx;
@@ -209,6 +272,7 @@ void TestDispatch() {
   handlers.Reload = Reload;
   handlers.Debug = Debug;
   handlers.Rounded = Rounded;
+  handlers.Skill = Skill;
 
   AppCommandDispatchResult plain = AppCommand_Dispatch(SVL("ordinary prompt"), &handlers, &ux);
   CHECK_ALL(!plain.Handled, plain.Action == AppLoopAction::Continue);
@@ -296,6 +360,65 @@ void TestDispatch() {
 
   AppCommandDispatchResult unknown = AppCommand_Dispatch(SVL(" /unknown "), &handlers, &ux);
   CHECK_ALL(unknown.Handled && unknown.Action == AppLoopAction::Continue, ctx.Errors == 6,
+            StrView_Contains(ctx.LastError, "Unknown slash command"));
+
+  AppCommandDispatchResult skill =
+      AppCommand_Dispatch(SVL("/skill:code-review be terse"), &handlers, &ux);
+  CHECK_ALL(skill.Handled && skill.Action == AppLoopAction::Continue,
+            ctx.SkillCalls == 1,
+            StrView_EqCStr(ctx.LastSkillName, "code-review"),
+            StrView_EqCStr(ctx.LastArguments, "be terse"), ctx.Errors == 6);
+
+  AppCommandDispatchResult bareSkill =
+      AppCommand_Dispatch(SVL("/skill"), &handlers, &ux);
+  CHECK_ALL(bareSkill.Handled && bareSkill.Action == AppLoopAction::Continue,
+            ctx.SkillCalls == 1, ctx.Errors == 7,
+            StrView_Contains(ctx.LastError, "Usage: /skill:<name>"));
+
+  AppCommand_Dispatch(SVL("/skill: do it"), &handlers, &ux);
+  CHECK_ALL(ctx.SkillCalls == 1, ctx.Errors == 8,
+            StrView_Contains(ctx.LastError, "Usage: /skill:<name>"));
+
+  ctx.SkillResult = {AppCommandHandlerStatus::Failed, SVL("Unknown skill: nope")};
+  AppCommand_Dispatch(SVL("/skill:nope"), &handlers, &ux);
+  CHECK_ALL(ctx.SkillCalls == 2, ctx.Errors == 9,
+            StrView_EqCStr(ctx.LastError, "Unknown skill: nope"));
+
+  AppCommandHandlers noSkill = handlers;
+  noSkill.Skill = nullptr;
+  AppCommand_Dispatch(SVL("/skill:code-review"), &noSkill, &ux);
+  CHECK_ALL(ctx.SkillCalls == 2, ctx.Errors == 10,
+            StrView_Contains(ctx.LastError, "Skills are unavailable"));
+
+  ctx.TemplateName = SVL("ship");
+  ctx.TemplateResult = {AppCommandHandlerStatus::Success, StrView{}};
+  handlers.PromptTemplate = PromptTemplate;
+  AppCommandDispatchResult tmpl =
+      AppCommand_Dispatch(SVL("  /ship  fast  now "), &handlers, &ux);
+  CHECK_ALL(tmpl.Handled && tmpl.Action == AppLoopAction::Continue,
+            ctx.TemplateCalls == 1, ctx.Errors == 10,
+            StrView_EqCStr(ctx.LastTemplateName, "ship"),
+            StrView_EqCStr(ctx.LastArguments, "fast  now"));
+
+  AppCommandDispatchResult declined =
+      AppCommand_Dispatch(SVL("/nosuchthing"), &handlers, &ux);
+  CHECK_ALL(declined.Handled, ctx.TemplateCalls == 1, ctx.Errors == 11,
+            StrView_Contains(ctx.LastError, "Unknown slash command"));
+
+  ctx.TemplateResult = {AppCommandHandlerStatus::Failed, SVL("Template broke.")};
+  AppCommand_Dispatch(SVL("/ship"), &handlers, &ux);
+  CHECK_ALL(ctx.TemplateCalls == 2, ctx.Errors == 12,
+            StrView_EqCStr(ctx.LastError, "Template broke."));
+
+  ctx.TemplateName = SVL("reload");
+  int callsBeforeBuiltin = ctx.TemplateCalls;
+  AppCommand_Dispatch(SVL("/reload"), &handlers, &ux);
+  CHECK_ALL(ctx.TemplateCalls == callsBeforeBuiltin, ctx.ReloadCalls == 2);
+
+  ctx.TemplateName = SVL("");
+  int callsBeforeBare = ctx.TemplateCalls;
+  AppCommand_Dispatch(SVL("/"), &handlers, &ux);
+  CHECK_ALL(ctx.TemplateCalls == callsBeforeBare, ctx.Errors == 13,
             StrView_Contains(ctx.LastError, "Unknown slash command"));
 }
 

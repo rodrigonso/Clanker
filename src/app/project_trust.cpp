@@ -159,6 +159,21 @@ bool ProjectTrust_HasGatedResources(Arena* arena, StrView workingDirectory) {
     FsStat stat = Fs_Stat(Fs_Join(arena, config, names[i]));
     if (stat.Exists && !stat.IsDir) return true;
   }
+  FsStat localSkills = Fs_Stat(Fs_Join(arena, config, SVL("skills")));
+  if (localSkills.Exists && localSkills.IsDir) return true;
+  FsStat localPrompts = Fs_Stat(Fs_Join(arena, config, SVL("prompts")));
+  if (localPrompts.Exists && localPrompts.IsDir) return true;
+
+  StrView current = Fs_RealPath(arena, workingDirectory);
+  while (current.Length) {
+    StrView agents = Fs_Join(arena, current, SVL(".agents"));
+    FsStat skills = Fs_Stat(Fs_Join(arena, agents, SVL("skills")));
+    if (skills.Exists && skills.IsDir) return true;
+    if (Fs_Exists(Fs_Join(arena, current, SVL(".git")))) break;
+    StrView parent = Fs_Parent(current);
+    if (!parent.Length) break;
+    current = StrView_Dup(arena, parent);
+  }
   return false;
 }
 

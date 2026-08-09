@@ -48,6 +48,11 @@ void TestSettings() {
             loaded.Compaction.KeepRecentTokens ==
                 AGENT_COMPACTION_DEFAULT_KEEP_RECENT_TOKENS);
 
+  CHECK_ALL(loaded.Retry.Enabled,
+            loaded.Retry.MaxRetries == AGENT_RETRY_DEFAULT_MAX_RETRIES,
+            loaded.Retry.BaseDelayMs == AGENT_RETRY_DEFAULT_BASE_DELAY_MS,
+            loaded.Retry.MaxDelayMs == AGENT_RETRY_DEFAULT_MAX_DELAY_MS);
+
   // A partial compaction block overrides only the keys it names.
   CHECK(ConfigFile_WriteAtomic(
       &a, SV(path),
@@ -95,6 +100,61 @@ void TestSettings() {
 
   CHECK(ConfigFile_WriteAtomic(
       &a, SV(path),
+      SVL("{\"provider\":\"anthropic\",\"model\":\"legacy\","
+          "\"retry\":{\"maxRetries\":0}}")));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+        AppSettingsLoadResult::Success);
+  CHECK_ALL(loaded.Retry.Enabled, loaded.Retry.MaxRetries == 0,
+            loaded.Retry.BaseDelayMs == AGENT_RETRY_DEFAULT_BASE_DELAY_MS,
+            loaded.Retry.MaxDelayMs == AGENT_RETRY_DEFAULT_MAX_DELAY_MS);
+
+  CHECK(ConfigFile_WriteAtomic(
+      &a, SV(path),
+      SVL("{\"provider\":\"anthropic\",\"model\":\"legacy\","
+          "\"retry\":{\"enabled\":false,\"baseDelayMs\":500,"
+          "\"maxDelayMs\":1500}}")));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+        AppSettingsLoadResult::Success);
+  CHECK_ALL(!loaded.Retry.Enabled,
+            loaded.Retry.MaxRetries == AGENT_RETRY_DEFAULT_MAX_RETRIES,
+            loaded.Retry.BaseDelayMs == 500, loaded.Retry.MaxDelayMs == 1500);
+
+  CHECK(ConfigFile_WriteAtomic(
+      &a, SV(path),
+      SVL("{\"provider\":\"anthropic\",\"model\":\"bad\",\"retry\":true}")));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+        AppSettingsLoadResult::Malformed);
+
+  CHECK(ConfigFile_WriteAtomic(
+      &a, SV(path),
+      SVL("{\"provider\":\"anthropic\",\"model\":\"bad\","
+          "\"retry\":{\"maxRetries\":-1}}")));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+        AppSettingsLoadResult::Malformed);
+
+  CHECK(ConfigFile_WriteAtomic(
+      &a, SV(path),
+      SVL("{\"provider\":\"anthropic\",\"model\":\"bad\","
+          "\"retry\":{\"maxRetries\":1.5}}")));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+        AppSettingsLoadResult::Malformed);
+
+  CHECK(ConfigFile_WriteAtomic(
+      &a, SV(path),
+      SVL("{\"provider\":\"anthropic\",\"model\":\"bad\","
+          "\"retry\":{\"enabled\":\"yes\"}}")));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+        AppSettingsLoadResult::Malformed);
+
+  CHECK(ConfigFile_WriteAtomic(
+      &a, SV(path),
+      SVL("{\"provider\":\"anthropic\",\"model\":\"bad\","
+          "\"retry\":{\"baseDelayMs\":0}}")));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+        AppSettingsLoadResult::Malformed);
+
+  CHECK(ConfigFile_WriteAtomic(
+      &a, SV(path),
       SVL("{\"provider\":\"anthropic\",\"model\":\"bad\","
           "\"contextWindow\":1.5}")));
   CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
@@ -131,6 +191,10 @@ void TestSettings() {
   saved.Compaction.Enabled = true;
   saved.Compaction.ReserveTokens = 4096;
   saved.Compaction.KeepRecentTokens = 8192;
+  saved.Retry.Enabled = true;
+  saved.Retry.MaxRetries = 5;
+  saved.Retry.BaseDelayMs = 250;
+  saved.Retry.MaxDelayMs = 3000;
   CHECK(AppSettings_Save(&a, SV(path), &saved));
   CHECK(AppSettings_Load(&a, SV(path), &loaded) == AppSettingsLoadResult::Success);
   CHECK_ALL(StrView_Eq(loaded.Provider, saved.Provider),
@@ -140,6 +204,8 @@ void TestSettings() {
   loaded.Profile.ContextWindow == 1000000);
   CHECK_ALL(loaded.Compaction.Enabled, loaded.Compaction.ReserveTokens == 4096,
             loaded.Compaction.KeepRecentTokens == 8192, loaded.Rounded);
+  CHECK_ALL(loaded.Retry.Enabled, loaded.Retry.MaxRetries == 5,
+            loaded.Retry.BaseDelayMs == 250, loaded.Retry.MaxDelayMs == 3000);
 
   saved.Rounded = false;
   CHECK(AppSettings_Save(&a, SV(path), &saved));
@@ -158,6 +224,7 @@ void TestSettings() {
   // A zero-initialized policy must still round-trip into a loadable file.
   AppSettings zeroed = saved;
   zeroed.Compaction = AgentCompactionPolicy{};
+  zeroed.Retry = AgentRetryPolicy{};
   CHECK(AppSettings_Save(&a, SV(path), &zeroed));
   CHECK(AppSettings_Load(&a, SV(path), &loaded) == AppSettingsLoadResult::Success);
   CHECK_ALL(!loaded.Compaction.Enabled,
@@ -165,6 +232,9 @@ void TestSettings() {
                 AGENT_COMPACTION_DEFAULT_RESERVE_TOKENS,
             loaded.Compaction.KeepRecentTokens ==
                 AGENT_COMPACTION_DEFAULT_KEEP_RECENT_TOKENS);
+  CHECK_ALL(!loaded.Retry.Enabled, loaded.Retry.MaxRetries == 0,
+            loaded.Retry.BaseDelayMs == AGENT_RETRY_DEFAULT_BASE_DELAY_MS,
+            loaded.Retry.MaxDelayMs == AGENT_RETRY_DEFAULT_MAX_DELAY_MS);
 
 #if !defined(_WIN32)
   struct stat st = {};

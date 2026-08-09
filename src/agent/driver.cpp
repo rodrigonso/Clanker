@@ -454,13 +454,24 @@ struct CompactionTurnResult {
 // lifecycle inside the enclosing run.
 SessionResult PerformCompaction(AgentHarness* harness, DurableId head,
                                 DurableId baseEntryId, DurableId throughEntryId,
+                                StrView instructions,
                                 CompactionTurnResult* out) {
   AgentHarness_PublishTurnStart(harness, AgentTurnKind::Compaction);
 
-  Message summarizePrompt = Message_User(
-      &harness->Work,
+  StrView summarizeText =
       SVL("Summarize the conversation for future continuation. Preserve goals, "
-          "decisions, constraints, unresolved work, and important tool results."));
+          "decisions, constraints, unresolved work, and important tool results.");
+  if (instructions.Length) {
+    // pi's separator, byte for byte, so a summary written against pi's
+    // instructions reads the same here.
+    StrBuf directed =
+        StrBuf_Make(&harness->Work, summarizeText.Length + instructions.Length + 24);
+    StrBuf_Append(&directed, summarizeText);
+    StrBuf_AppendCStr(&directed, "\n\nAdditional focus: ");
+    StrBuf_Append(&directed, instructions);
+    summarizeText = StrBuf_View(&directed);
+  }
+  Message summarizePrompt = Message_User(&harness->Work, summarizeText);
   TurnRunResult turn = {};
   SessionResult result =
       RunAssistantTurn(harness, AgentTurnKind::Compaction, head, &summarizePrompt, nullptr, &turn);
@@ -623,8 +634,11 @@ SessionResult ContinueRun(AgentHarness* harness, DurableId* ioHead, AgentRunStat
         if (!SessionResult_IsOk(hooked)) return hooked;
       }
       CompactionTurnResult compaction = {};
+      // Automatic compaction never inherits `/compact` instructions; pi
+      // discards them after the invocation that supplied them.
       SessionResult compacted = PerformCompaction(harness, *ioHead, cut.BaseEntryId,
-                                                  cut.ThroughEntryId, &compaction);
+                                                  cut.ThroughEntryId, StrView{},
+                                                  &compaction);
       if (!SessionResult_IsOk(compacted)) {
         if (compacted.Status == SessionStatus::Cancelled) return compacted;
         StrBuf message = StrBuf_Make(&harness->Work, compacted.Message.Length + 40);
@@ -813,7 +827,7 @@ SessionResult AgentDriver_Run(AgentHarness* harness, StrView prompt) {
   return result;
 }
 
-SessionResult AgentDriver_Compact(AgentHarness* harness) {
+SessionResult AgentDriver_Compact(AgentHarness* harness, StrView instructions) {
   AgentHarness_PublishAgentStart(harness, AgentTurnKind::Compaction);
   SessionReduction initial = AgentHarness_ReduceSnapshot(harness);
   DurableId head = initial.HeadId;
@@ -834,7 +848,7 @@ SessionResult AgentDriver_Compact(AgentHarness* harness) {
     CompactionTurnResult compaction = {};
     result = PerformCompaction(
         harness, head, initial.RecordCount ? initial.Records[0].EntryId : DurableId{},
-        head, &compaction);
+        head, instructions, &compaction);
     outcome = compaction.Outcome;
     error = compaction.Error;
   } else {

@@ -11,7 +11,9 @@ SessionResult AgentDriver_Run(AgentHarness* harness, StrView prompt);
 
 // Runs one compaction turn: a single provider call summarizing the active
 // branch, then appends one Compaction entry replacing prior context.
-SessionResult AgentDriver_Compact(AgentHarness* harness);
+// `instructions` is appended to the summarization prompt when non-empty and is
+// never persisted, so it applies to this compaction only.
+SessionResult AgentDriver_Compact(AgentHarness* harness, StrView instructions);
 
 // Internal seams shared by harness.cpp and driver.cpp.
 

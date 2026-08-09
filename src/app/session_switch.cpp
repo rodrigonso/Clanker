@@ -353,8 +353,8 @@ SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
     rt->ProjectKey = StrView_Dup(rt->Mem, targetInfo->ProjectKey);
     rt->WorkingDirectory =
         StrView_Dup(rt->Mem, targetInfo->WorkingDirectory);
-    rt->PromptOptions = nextPromptOptions;
-    rt->PromptOptions.WorkingDirectory = rt->WorkingDirectory;
+    nextPromptOptions.WorkingDirectory = rt->WorkingDirectory;
+    RuntimeSetPromptOptions(rt, &nextPromptOptions);
     rt->ProjectTrusted = nextTrusted;
     rt->HasProjectResources = nextHasResources;
     rt->TrustCoversProjectResources =

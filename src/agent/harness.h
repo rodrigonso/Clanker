@@ -111,7 +111,8 @@ SessionResult AgentHarness_WatchClose(AgentHarnessWatch* watch);
 // only until the next accepted Run/Compact/Navigate. Copy it if you need it to
 // outlive that; the run's scratch memory is handed back to the OS on return.
 SessionResult AgentHarness_Run(AgentHarness* harness, StrView prompt);
-SessionResult AgentHarness_Compact(AgentHarness* harness);
+SessionResult AgentHarness_Compact(AgentHarness* harness,
+                                   StrView instructions = StrView{});
 SessionResult AgentHarness_Navigate(AgentHarness* harness, DurableId targetEntryId);
 SessionResult AgentHarness_LabelBranch(AgentHarness* harness, StrView label);
 SessionResult AgentHarness_SetName(AgentHarness* harness, StrView name);

@@ -33,8 +33,8 @@ const AppCommandSpec kCommands[] = {
      SVL("Fork the current or selected entry"), SVL("Usage: /fork [entry-id]"),
      AppCommandArgumentPolicy::Optional},
     {AppCommandKind::Compact, SVL("compact"), {},
-     SVL("Compact the current branch"), SVL("Usage: /compact"),
-     AppCommandArgumentPolicy::None},
+     SVL("Compact the current branch"), SVL("Usage: /compact [instructions]"),
+     AppCommandArgumentPolicy::Optional},
     {AppCommandKind::Trust, SVL("trust"), {},
      SVL("Change saved project trust"), SVL("Usage: /trust"),
      AppCommandArgumentPolicy::None},
@@ -47,22 +47,14 @@ const AppCommandSpec kCommands[] = {
     {AppCommandKind::Rounded, SVL("rounded"), {},
      SVL("Toggle rounded TUI corners and bullets"),
      SVL("Usage: /rounded [on|off]"), AppCommandArgumentPolicy::Optional},
+    {AppCommandKind::Skill, SVL("skill"), {},
+     SVL("Run a loaded skill by name"),
+     SVL("Usage: /skill:<name> [instructions]"),
+     AppCommandArgumentPolicy::Optional},
     {AppCommandKind::Exit, SVL("exit"), SVL("quit"),
      SVL("Exit Clank and return to the shell (alias: /quit)"),
      SVL("Usage: /exit (alias: /quit)"), AppCommandArgumentPolicy::None},
 };
-
-bool IsSpace(char c) {
-  return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
-}
-
-StrView Trim(StrView s) {
-  u32 first = 0;
-  while (first < s.Length && IsSpace(s.Data[first])) first++;
-  u32 last = s.Length;
-  while (last > first && IsSpace(s.Data[last - 1])) last--;
-  return StrView{s.Data ? s.Data + first : nullptr, last - first};
-}
 
 void Notice(const AppCommandUx* ux, StrView message) {
   if (message.Length && ux && ux->Notice) ux->Notice(ux->User, message);
@@ -127,14 +119,24 @@ StrView AppCommand_Usage(AppCommandKind kind) {
 }
 
 AppCommand AppCommand_Parse(StrView input) {
-  StrView line = Trim(input);
+  StrView line = StrView_Trim(input);
   if (!line.Length || line.Data[0] != '/')
-    return AppCommand{AppCommandKind::NotCommand, StrView{}};
+    return AppCommand{AppCommandKind::NotCommand, StrView{}, StrView{},
+                      StrView{}};
 
   u32 nameEnd = 1;
-  while (nameEnd < line.Length && !IsSpace(line.Data[nameEnd])) nameEnd++;
+  while (nameEnd < line.Length && !Ascii_IsSpace(line.Data[nameEnd])) nameEnd++;
   StrView name{line.Data + 1, nameEnd - 1};
-  StrView arguments = Trim(StrView{line.Data + nameEnd, line.Length - nameEnd});
+  StrView arguments =
+      StrView_Trim(StrView{line.Data + nameEnd, line.Length - nameEnd});
+
+  StrView skillPrefix = SVL("skill:");
+  if (name.Length >= skillPrefix.Length &&
+      memcmp(name.Data, skillPrefix.Data, skillPrefix.Length) == 0) {
+    StrView skillName{name.Data + skillPrefix.Length,
+                      name.Length - skillPrefix.Length};
+    return AppCommand{AppCommandKind::Skill, arguments, skillName, name};
+  }
 
   AppCommandKind kind = AppCommandKind::Unknown;
   for (u32 i = 0; i < AppCommandSpec_Count(); i++) {
@@ -146,7 +148,7 @@ AppCommand AppCommand_Parse(StrView input) {
     }
   }
 
-  return AppCommand{kind, arguments};
+  return AppCommand{kind, arguments, StrView{}, name};
 }
 
 AppCommandDispatchResult AppCommand_Dispatch(StrView input, const AppCommandHandlers* handlers,
@@ -156,6 +158,13 @@ AppCommandDispatchResult AppCommand_Dispatch(StrView input, const AppCommandHand
     return AppCommandDispatchResult{false, AppLoopAction::Continue};
 
   if (command.Kind == AppCommandKind::Unknown) {
+    AppCommandTemplateHandlerFn fn = handlers ? handlers->PromptTemplate : nullptr;
+    AppCommandHandlerResult result = {};
+    if (fn && command.Name.Length &&
+        fn(handlers->User, ux, command.Name, command.Arguments, &result)) {
+      ReportHandlerResult(ux, command.Kind, result);
+      return AppCommandDispatchResult{true, AppLoopAction::Continue};
+    }
     Error(ux, SVL("Unknown slash command."));
     return AppCommandDispatchResult{true, AppLoopAction::Continue};
   }
@@ -176,6 +185,21 @@ AppCommandDispatchResult AppCommand_Dispatch(StrView input, const AppCommandHand
     return AppCommandDispatchResult{true, AppLoopAction::ResetSession};
   if (command.Kind == AppCommandKind::Exit)
     return AppCommandDispatchResult{true, AppLoopAction::Exit};
+
+  if (command.Kind == AppCommandKind::Skill) {
+    if (!command.SkillName.Length) {
+      Error(ux, spec->Usage);
+      return AppCommandDispatchResult{true, AppLoopAction::Continue};
+    }
+    AppCommandSkillHandlerFn fn = handlers ? handlers->Skill : nullptr;
+    AppCommandHandlerResult skillResult =
+        fn ? fn(handlers->User, ux, command.SkillName, command.Arguments)
+           : AppCommandHandlerResult{
+                 AppCommandHandlerStatus::Unsupported,
+                 SVL("Skills are unavailable in this mode.")};
+    ReportHandlerResult(ux, command.Kind, skillResult);
+    return AppCommandDispatchResult{true, AppLoopAction::Continue};
+  }
 
   AppCommandHandlerResult result = {};
   if (command.Kind == AppCommandKind::Login ||

@@ -1520,21 +1520,44 @@ void Tui_LoadStartupContext(Tui* t) {
   ArenaRelease(&scratch);
 }
 
+static void SetCommandsUnlocked(Tui* t, const TuiCommandSpec* commands,
+                                u32 count) {
+  ArenaReset(&t->CommandMem);
+  t->Commands = nullptr;
+  t->CommandCount = 0;
+  t->CommandPaletteSelected = 0;
+  t->CommandPaletteFirst = 0;
+  t->CommandPaletteDismissed = false;
+  if (!commands || !count) return;
+  t->Commands = ArenaPushArray(&t->CommandMem, TuiCommandSpec, count);
+  t->CommandCount = count;
+  for (u32 i = 0; i < count; i++) {
+    t->Commands[i].Name = StrView_Dup(&t->CommandMem, commands[i].Name);
+    t->Commands[i].Alias = StrView_Dup(&t->CommandMem, commands[i].Alias);
+    t->Commands[i].Description =
+        StrView_Dup(&t->CommandMem, commands[i].Description);
+  }
+}
+
+void Tui_SetCommands(Tui* t, const TuiCommandSpec* commands, u32 count) {
+  if (!t->CommandMemUp) return;
+  if (t->SyncUp) Mutex_Lock(&t->Lock);
+  SetCommandsUnlocked(t, commands, count);
+  if (t->SyncUp) {
+    Wake(t);
+    Mutex_Unlock(&t->Lock);
+  }
+}
+
 void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts) {
   memset(t, 0, sizeof(*t));
   t->Mem = mem;
   t->Color = opts.Color;
   t->ModelName = StrView_Dup(mem, opts.ModelName);
   t->Profile = opts.Profile;
-  if (opts.Commands && opts.CommandCount) {
-    t->Commands = ArenaPushArray(mem, TuiCommandSpec, opts.CommandCount);
-    t->CommandCount = opts.CommandCount;
-    for (u32 i = 0; i < opts.CommandCount; i++) {
-      t->Commands[i].Name = StrView_Dup(mem, opts.Commands[i].Name);
-      t->Commands[i].Alias = StrView_Dup(mem, opts.Commands[i].Alias);
-      t->Commands[i].Description = StrView_Dup(mem, opts.Commands[i].Description);
-    }
-  }
+  t->CommandMem = ArenaCreate((usize)64 << 20);
+  t->CommandMemUp = true;
+  SetCommandsUnlocked(t, opts.Commands, opts.CommandCount);
   t->ScreenMem = ArenaCreate();
   t->ScreenUp = true;
   Screen_Init(&t->Scr, &t->ScreenMem, nullptr, nullptr);
@@ -1684,6 +1707,10 @@ void Tui_Stop(Tui* t) {
     LineModel_Release(&t->Model);
     ArenaRelease(&t->SessionMem);
     t->SessionUp = false;
+  }
+  if (t->CommandMemUp) {
+    ArenaRelease(&t->CommandMem);
+    t->CommandMemUp = false;
   }
   if (t->ToolUpdateUp) {
     ArenaRelease(&t->ToolUpdateMem);

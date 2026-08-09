@@ -32,6 +32,7 @@
 #include "tui/tui.h"
 #include "term/sanitize.h"
 #include "tools/tools.h"
+#include "tools/tool_select.h"
 #include "tools/fs.h"
 #include "tools/filelock.h"
 #include "session/jsonl_repository.h"
@@ -101,6 +102,16 @@ static void PrintHelp() {
       "                    Append text or file content (repeatable)\n"
       "  -nc, --no-context-files\n"
       "                    Do not load AGENTS.md or CLAUDE.md files\n"
+      "  --skill PATH      Load a skill file or directory (repeatable)\n"
+      "  --no-skills       Do not load skills from the standard directories\n"
+      "  --prompt-template PATH\n"
+      "                    Load a prompt template file or directory (repeatable)\n"
+      "  --no-prompt-templates\n"
+      "                    Do not load prompt templates from the standard directories\n"
+      "  -t, --tools LIST  Comma-separated allowlist of tools to enable\n"
+      "  -xt, --exclude-tools LIST\n"
+      "                    Comma-separated list of tools to disable\n"
+      "  -nt, --no-tools   Disable every tool (read-only conversation)\n"
       "  -a, --approve     Trust project prompt resources for this run\n"
       "  -na, --no-approve Do not trust project prompt resources for this run\n"
       "  --login [prov]    OAuth login in your browser (anthropic or openai)\n"
@@ -111,7 +122,7 @@ static void PrintHelp() {
       "a ChatGPT subscription; alternatively set ANTHROPIC_API_KEY or OPENAI_API_KEY.\n"
       "Interactive commands: /session, /name, /sessions, /resume, /tree,\n"
       "/checkout, /fork, /compact, /trust, /reload, /debug, /login, /model,\n"
-      "/clear, /exit.\n");
+      "/skill:<name>, /clear, /exit.\n");
 }
 
 
@@ -156,6 +167,12 @@ static void RunPlainRepl(InteractiveRuntime* rt) {
     if (command.Handled) {
       if (command.Action == AppLoopAction::Exit) break;
       if (command.Action == AppLoopAction::ResetSession) RuntimeResetSession(rt, &commandUx);
+      if (!rt->PendingPrompt.Length) continue;
+      StrView expanded = rt->PendingPrompt;
+      Atomic_StoreI32(&g_abort, 0);
+      if (!RuntimeCheckAuth(rt, &commandUx, true)) continue;
+      if (Atomic_LoadI32(&g_abort)) continue;
+      ReportHarnessResult(RunHarnessPrompt(rt->Harness, expanded));
       continue;
     }
     Atomic_StoreI32(&g_abort, 0);
@@ -199,14 +216,9 @@ static void RunTuiRepl(InteractiveRuntime* rt) {
   opts.Profile = rt->Harness->Config.Stream.Profile;
   opts.Color = (getenv("NO_COLOR") == nullptr);
   opts.Rounded = rt->Rounded;
-  u32 catalogCount = AppCommandSpec_Count();
-  TuiCommandSpec* commands = ArenaPushArray(rt->Mem, TuiCommandSpec, catalogCount);
-  for (u32 i = 0; i < catalogCount; i++) {
-    const AppCommandSpec* command = AppCommandSpec_At(i);
-    commands[opts.CommandCount++] =
-        TuiCommandSpec{command->Name, command->Alias, command->Description};
-  }
-  opts.Commands = commands;
+  u32 catalogCount = 0;
+  opts.Commands = RuntimeCommandCatalog(rt, rt->Mem, &catalogCount);
+  opts.CommandCount = catalogCount;
 
   Tui tui;
   if (!Tui_Start(&tui, rt->Mem, opts)) {
@@ -256,7 +268,8 @@ static void RunTuiRepl(InteractiveRuntime* rt) {
           RuntimeDispatchCommand(rt, submission.Text, &handlers, &commandUx);
       if (command.Action == AppLoopAction::Exit) break;
       if (command.Action == AppLoopAction::ResetSession) RuntimeResetSession(rt, &commandUx);
-      continue;
+      if (!rt->PendingPrompt.Length) continue;
+      submission.Text = rt->PendingPrompt;
     }
     Tui_BeginOperation(&tui, SVL("Resolving credentials"));
     bool authenticated = RuntimeCheckAuth(rt, &commandUx, true);
@@ -289,6 +302,13 @@ int main(int argc, char** argv) {
   bool noOpen = false;
   bool noSession = false;
   bool noContextFiles = false;
+  bool noSkills = false;
+  Array<StrView> explicitSkills = Array_Make<StrView>(&arena, 4);
+  bool noPromptTemplates = false;
+  Array<StrView> explicitPromptTemplates = Array_Make<StrView>(&arena, 4);
+  Array<StrView> toolAllow = {};
+  Array<StrView> toolExclude = {};
+  bool noTools = false;
   bool continueSession = false;
 
   for (int i = 1; i < argc; i++) {
@@ -338,6 +358,48 @@ int main(int argc, char** argv) {
     } else if (strcmp(argv[i], "-nc") == 0 ||
                strcmp(argv[i], "--no-context-files") == 0) {
       noContextFiles = true;
+    } else if (strcmp(argv[i], "--skill") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "error: --skill requires a path\n");
+        ArenaRelease(&arena);
+        return 1;
+      }
+      Array_Push(&explicitSkills, SV(argv[++i]));
+    } else if (strcmp(argv[i], "--no-skills") == 0) {
+      noSkills = true;
+    } else if (strcmp(argv[i], "--prompt-template") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "error: --prompt-template requires a path\n");
+        ArenaRelease(&arena);
+        return 1;
+      }
+      Array_Push(&explicitPromptTemplates, SV(argv[++i]));
+    } else if (strcmp(argv[i], "--no-prompt-templates") == 0) {
+      noPromptTemplates = true;
+    } else if (strcmp(argv[i], "-t") == 0 ||
+               strcmp(argv[i], "--tools") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "error: --tools requires a comma-separated list\n");
+        ArenaRelease(&arena);
+        return 1;
+      }
+      ToolSelect_SplitNames(&arena, SV(argv[++i]), &toolAllow);
+    } else if (strcmp(argv[i], "-xt") == 0 ||
+               strcmp(argv[i], "--exclude-tools") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr,
+                "error: --exclude-tools requires a comma-separated list\n");
+        ArenaRelease(&arena);
+        return 1;
+      }
+      ToolSelect_SplitNames(&arena, SV(argv[++i]), &toolExclude);
+    } else if (strcmp(argv[i], "-nt") == 0 ||
+               strcmp(argv[i], "--no-tools") == 0 ||
+               strcmp(argv[i], "-nbt") == 0 ||
+               strcmp(argv[i], "--no-builtin-tools") == 0) {
+      // clank has no extension registry, so "no builtin tools" and "no tools"
+      // describe the same empty set. Both spellings are accepted for parity.
+      noTools = true;
     } else if (strcmp(argv[i], "-a") == 0 ||
                strcmp(argv[i], "--approve") == 0) {
       if (trustOverride == ProjectTrustOverride::Untrusted) {
@@ -520,20 +582,56 @@ int main(int argc, char** argv) {
   // always land beside the log they belong to. Stays empty under
   // `--no-session`, which falls the tool back to the OS temp directory.
   ShellToolContext shellContext = {};
-  Tool tools[] = {ReadTool(), WriteTool(), EditTool(),        LsTool(),
-                  FindTool(), GrepTool(), ShellTool(&shellContext)};
+  Tool allTools[] = {ReadTool(), WriteTool(), EditTool(),        LsTool(),
+                     FindTool(), GrepTool(), ShellTool(&shellContext)};
+  constexpr u32 kAllToolCount = sizeof(allTools) / sizeof(allTools[0]);
+
+  ToolSelection toolSelection = {};
+  toolSelection.Allow = toolAllow.Data;
+  toolSelection.AllowCount = toolAllow.Count;
+  toolSelection.Exclude = toolExclude.Data;
+  toolSelection.ExcludeCount = toolExclude.Count;
+  toolSelection.NoTools = noTools;
+  Array<StrView> unknownTools = {};
+  ToolSelect_UnknownNames(&arena, allTools, kAllToolCount, &toolSelection,
+                          &unknownTools);
+  if (unknownTools.Count) {
+    for (u32 i = 0; i < unknownTools.Count; i++)
+      fprintf(stderr, "error: unknown tool '%.*s'\n",
+              (int)unknownTools.Data[i].Length, unknownTools.Data[i].Data);
+    fprintf(stderr, "available tools:");
+    for (u32 i = 0; i < kAllToolCount; i++)
+      fprintf(stderr, " %.*s", (int)allTools[i].Name.Length,
+              allTools[i].Name.Data);
+    fprintf(stderr, "\n");
+    ArenaRelease(&arena);
+    return 1;
+  }
+  Tool tools[kAllToolCount];
+  u32 toolCount =
+      ToolSelect_Apply(allTools, kAllToolCount, &toolSelection, tools);
 
   PromptContextOptions promptOptions = {};
   promptOptions.WorkingDirectory = workingDirectory;
   promptOptions.AgentDirectory = agentDirectory;
   promptOptions.Tools = tools;
-  promptOptions.ToolCount = sizeof(tools) / sizeof(tools[0]);
+  promptOptions.ToolCount = toolCount;
   promptOptions.NoContextFiles = noContextFiles;
+  promptOptions.NoSkills = noSkills;
+  promptOptions.NoPromptTemplates = noPromptTemplates;
   promptOptions.ProjectTrusted = projectTrusted;
   promptOptions.HasExplicitSystemPrompt = hasExplicitSystemPrompt;
   promptOptions.ExplicitSystemPrompt = explicitSystemPrompt;
   promptOptions.ExplicitAppendPrompts = explicitAppendPrompts.Data;
   promptOptions.ExplicitAppendPromptCount = explicitAppendPrompts.Count;
+  promptOptions.SkillPaths = explicitSkills.Data;
+  promptOptions.SkillPathCount = explicitSkills.Count;
+  promptOptions.SettingsSkillPaths = selected.Skills.Data;
+  promptOptions.SettingsSkillPathCount = selected.Skills.Count;
+  promptOptions.PromptTemplatePaths = explicitPromptTemplates.Data;
+  promptOptions.PromptTemplatePathCount = explicitPromptTemplates.Count;
+  promptOptions.SettingsPromptTemplatePaths = selected.PromptTemplates.Data;
+  promptOptions.SettingsPromptTemplatePathCount = selected.PromptTemplates.Count;
   PromptContext promptContext = {};
   StrBuf promptError = StrBuf_Make(&arena, 160);
   if (!PromptContext_Build(&promptOptions, &promptContext, &promptError)) {
@@ -555,11 +653,12 @@ int main(int argc, char** argv) {
   harnessConfig.SystemPrompt = promptContext.SystemPrompt;
   harnessConfig.ModelInfo = model;
   harnessConfig.Tools = tools;
-  harnessConfig.ToolCount = sizeof(tools) / sizeof(tools[0]);
+  harnessConfig.ToolCount = toolCount;
   harnessConfig.ProviderImpl = selected.Spec->CreateProvider(&arena);
   harnessConfig.Stream.Profile = profile;
   harnessConfig.ToolExec = ToolExecution::Parallel;
   harnessConfig.Compaction = selected.Compaction;
+  harnessConfig.Retry = selected.Retry;
   harnessConfig.AuthUser = &appAuth;
   harnessConfig.ResolveAuth = AppResolveAuth;
 
@@ -724,7 +823,7 @@ int main(int argc, char** argv) {
   runtime.DefaultTrust = selected.DefaultTrust;
   runtime.Rounded = selected.Rounded;
   runtime.Prompt = &promptContext;
-  runtime.PromptOptions = promptOptions;
+  RuntimeSetPromptOptions(&runtime, &promptOptions);
   runtime.AutoOpen = !noOpen;
   runtime.Auth = &appAuth;
   // External lifecycle hooks. Started only once the session is durable, so the

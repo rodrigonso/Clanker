@@ -16,7 +16,10 @@ struct RuntimeSelection {
   ModelRequestProfile RequestedProfile;
   DefaultProjectTrust DefaultTrust;
   AgentCompactionPolicy Compaction;
+  AgentRetryPolicy Retry;
   bool Rounded = true;
+  Array<StrView> Skills;
+  Array<StrView> PromptTemplates;
 };
 
 void AppAuth_Invalidate(AppAuth* auth);

@@ -145,6 +145,21 @@ void InteractiveRuntime_Release(InteractiveRuntime* rt) {
   ArenaRelease(&rt->CommandMem);
 }
 
+void RuntimeSetPromptOptions(InteractiveRuntime* rt,
+                             const PromptContextOptions* options) {
+  FFI(!rt || !options);
+  rt->PromptOptions = *options;
+  if (!rt->Prompt) return;
+  rt->PromptOptions.SettingsSkillPaths =
+      rt->Prompt->SettingsSkillPaths.Data;
+  rt->PromptOptions.SettingsSkillPathCount =
+      rt->Prompt->SettingsSkillPaths.Count;
+  rt->PromptOptions.SettingsPromptTemplatePaths =
+      rt->Prompt->SettingsPromptTemplatePaths.Data;
+  rt->PromptOptions.SettingsPromptTemplatePathCount =
+      rt->Prompt->SettingsPromptTemplatePaths.Count;
+}
+
 bool RuntimePersistSettings(InteractiveRuntime* rt) {
   if (!rt || !rt->Harness || !rt->Spec || !rt->CurrentModel.Id.Length)
     return false;
@@ -156,7 +171,12 @@ bool RuntimePersistSettings(InteractiveRuntime* rt) {
   settings.DefaultTrust = rt->DefaultTrust;
   settings.Profile = rt->PreferredProfile;
   settings.Compaction = rt->Harness->Config.Compaction;
+  settings.Retry = rt->Harness->Config.Retry;
   settings.Rounded = rt->Rounded;
+  if (rt->Prompt) {
+    settings.Skills = rt->Prompt->SettingsSkillPaths;
+    settings.PromptTemplates = rt->Prompt->SettingsPromptTemplatePaths;
+  }
   bool saved = AppSettings_Save(&scratch, rt->SettingsPath, &settings);
   ArenaRelease(&scratch);
   return saved;
@@ -168,6 +188,7 @@ AppCommandDispatchResult RuntimeDispatchCommand(InteractiveRuntime* rt, StrView 
   // The previous command's message has already been rendered by the time the
   // next one is submitted, so its storage is free to reuse.
   ArenaReset(&rt->CommandMem);
+  rt->PendingPrompt = StrView{};
   return AppCommand_Dispatch(input, handlers, ux);
 }
 

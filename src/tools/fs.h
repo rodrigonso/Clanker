@@ -39,6 +39,23 @@ struct FsEntry {
 
 Array<FsEntry> Fs_ListDir(Arena* arena, StrView dir, bool* ok);
 
+// One parsed ignore-file rule. `BaseRel` is the ignore file's directory
+// relative to the scan root, so a nested rule only applies below its own
+// directory. Patterns are gitignore-flavored: a leading '/' anchors to
+// `BaseRel`, a trailing '/' restricts the rule to directories.
+struct FsIgnorePattern {
+  StrView BaseRel;
+  StrView Pattern;
+  bool DirOnly;
+  bool Anchored;
+};
+
+// Appends the rules from `<dirAbs>/<fileName>` to `patterns`, tagged with
+// `dirRel`. A missing file is not an error.
+void Fs_LoadIgnoreFile(Arena* arena, Array<FsIgnorePattern>* patterns,
+                       StrView dirAbs, StrView dirRel, StrView fileName);
+bool Fs_IsIgnored(const Array<FsIgnorePattern>* patterns, StrView relPath, bool isDir);
+
 struct FsWalkOptions {
   bool RespectGitignore;
   bool IncludeDirs;

@@ -126,6 +126,7 @@ struct Tui {
   // SessionMem.Used right after the last compaction, i.e. the size of the live
   // transcript. Compaction waits for the arena to double past it.
   usize SessionMemBaseline;
+  Arena CommandMem;
   Arena ToolUpdateMem;
   Arena ScreenMem;
   TuiAgentHooks Agent;
@@ -147,6 +148,7 @@ struct Tui {
   bool RenderThreadUp;
   bool SyncUp;
   bool SessionUp;
+  bool CommandMemUp;
   bool ToolUpdateUp;
   bool ScreenUp;
   bool UiUp;
@@ -298,6 +300,7 @@ void Tui_CommandError(Tui* t, StrView text);
 enum class TuiToggleAction : u8 { Disable, Enable, Toggle };
 bool Tui_UpdateDebugOverlay(Tui* t, TuiToggleAction action);
 bool Tui_UpdateRounded(Tui* t, TuiToggleAction action);
+void Tui_SetCommands(Tui* t, const TuiCommandSpec* commands, u32 count);
 void Tui_SetModelProfile(Tui* t, StrView modelName,
                          ModelRequestProfile profile);
 void Tui_BeginOperation(Tui* t, StrView label);

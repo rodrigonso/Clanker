@@ -22,6 +22,34 @@ bool ReadTokenCount(JsonValue* object, const char* key, u32* io) {
   return true;
 }
 
+bool ReadStringArray(Arena* arena, JsonValue* object, const char* key,
+                     Array<StrView>* out) {
+  *out = {};
+  JsonValue* value = Json_Get(object, key);
+  if (!value) return true;
+  if (!Json_IsArray(value)) return false;
+  if (value->Count) *out = Array_Make<StrView>(arena, value->Count);
+  for (u32 i = 0; i < value->Count; i++) {
+    JsonValue* entry = value->Items[i];
+    if (!Json_IsString(entry) || !entry->Str.Length) return false;
+    Array_Push(out, entry->Str);
+  }
+  return true;
+}
+
+void WriteStringArray(StrBuf* content, const char* key,
+                      const Array<StrView>* values) {
+  if (!values->Count) return;
+  StrBuf_AppendCStr(content, ",\"");
+  StrBuf_AppendCStr(content, key);
+  StrBuf_AppendCStr(content, "\":[");
+  for (u32 i = 0; i < values->Count; i++) {
+    if (i) StrBuf_AppendChar(content, ',');
+    Json_WriteString(content, values->Data[i]);
+  }
+  StrBuf_AppendChar(content, ']');
+}
+
 }  // namespace
 
 StrView AppSettings_DefaultPath(Arena* a) {
@@ -80,6 +108,31 @@ AppSettingsLoadResult AppSettings_Load(Arena* a, StrView path, AppSettings* out)
       return AppSettingsLoadResult::Malformed;
   }
 
+  AgentRetryPolicy retry = AgentRetryPolicy_Default();
+  JsonValue* retryValue = Json_Get(root, "retry");
+  if (retryValue) {
+    if (!Json_IsObject(retryValue)) return AppSettingsLoadResult::Malformed;
+    JsonValue* enabled = Json_Get(retryValue, "enabled");
+    if (enabled) {
+      if (enabled->Kind != JsonKind::Bool) return AppSettingsLoadResult::Malformed;
+      retry.Enabled = enabled->Bool;
+    }
+    // A zero retry count is meaningful here (retry off), unlike the token
+    // counts above, so it is read directly rather than through ReadTokenCount.
+    JsonValue* maxRetries = Json_Get(retryValue, "maxRetries");
+    if (maxRetries) {
+      if (maxRetries->Kind != JsonKind::Number || maxRetries->Number < 0.0 ||
+          maxRetries->Number > 1000.0)
+        return AppSettingsLoadResult::Malformed;
+      retry.MaxRetries = (u32)maxRetries->Number;
+      if ((f64)retry.MaxRetries != maxRetries->Number)
+        return AppSettingsLoadResult::Malformed;
+    }
+    if (!ReadTokenCount(retryValue, "baseDelayMs", &retry.BaseDelayMs) ||
+        !ReadTokenCount(retryValue, "maxDelayMs", &retry.MaxDelayMs))
+      return AppSettingsLoadResult::Malformed;
+  }
+
   bool rounded = true;
   JsonValue* roundedValue = Json_Get(root, "rounded");
   if (roundedValue) {
@@ -88,12 +141,21 @@ AppSettingsLoadResult AppSettings_Load(Arena* a, StrView path, AppSettings* out)
     rounded = roundedValue->Bool;
   }
 
+  Array<StrView> skills = {};
+  Array<StrView> promptTemplates = {};
+  if (!ReadStringArray(a, root, "skills", &skills) ||
+      !ReadStringArray(a, root, "promptTemplates", &promptTemplates))
+    return AppSettingsLoadResult::Malformed;
+
   out->Provider = provider->Str;
   out->Model = model->Str;
   out->DefaultTrust = defaultTrust;
   out->Profile = profile;
   out->Compaction = compaction;
+  out->Retry = retry;
   out->Rounded = rounded;
+  out->Skills = skills;
+  out->PromptTemplates = promptTemplates;
   return AppSettingsLoadResult::Success;
 }
 
@@ -135,8 +197,27 @@ bool AppSettings_Save(Arena* a, StrView path, const AppSettings* settings) {
   StrBuf_AppendCStr(&content, ",\"keepRecentTokens\":");
   StrBuf_AppendU64(&content, keepRecentTokens);
   StrBuf_AppendChar(&content, '}');
+  // Same normalization as compaction: a zero delay would not survive the
+  // strict loader's positive-integer check on the way back in.
+  u32 baseDelayMs = settings->Retry.BaseDelayMs
+                        ? settings->Retry.BaseDelayMs
+                        : AGENT_RETRY_DEFAULT_BASE_DELAY_MS;
+  u32 maxDelayMs = settings->Retry.MaxDelayMs
+                       ? settings->Retry.MaxDelayMs
+                       : AGENT_RETRY_DEFAULT_MAX_DELAY_MS;
+  StrBuf_AppendCStr(&content, ",\"retry\":{\"enabled\":");
+  StrBuf_AppendCStr(&content, settings->Retry.Enabled ? "true" : "false");
+  StrBuf_AppendCStr(&content, ",\"maxRetries\":");
+  StrBuf_AppendU64(&content, settings->Retry.MaxRetries);
+  StrBuf_AppendCStr(&content, ",\"baseDelayMs\":");
+  StrBuf_AppendU64(&content, baseDelayMs);
+  StrBuf_AppendCStr(&content, ",\"maxDelayMs\":");
+  StrBuf_AppendU64(&content, maxDelayMs);
+  StrBuf_AppendChar(&content, '}');
   StrBuf_AppendCStr(&content, ",\"rounded\":");
   StrBuf_AppendCStr(&content, settings->Rounded ? "true" : "false");
+  WriteStringArray(&content, "skills", &settings->Skills);
+  WriteStringArray(&content, "promptTemplates", &settings->PromptTemplates);
   StrBuf_AppendChar(&content, '}');
   return ConfigFile_WriteAtomic(a, path, StrBuf_View(&content));
 }

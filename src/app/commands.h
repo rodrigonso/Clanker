@@ -10,3 +10,6 @@ AppCommandHandlers RuntimeCommandHandlers(InteractiveRuntime* rt);
 // Clears the conversation and starts a fresh session, keeping the process's
 // provider/model selection. Returns false when the reset could not complete.
 bool RuntimeResetSession(InteractiveRuntime* rt, const AppCommandUx* ux);
+
+TuiCommandSpec* RuntimeCommandCatalog(InteractiveRuntime* rt, Arena* arena,
+                                      u32* count);

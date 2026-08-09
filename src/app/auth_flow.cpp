@@ -213,13 +213,17 @@ RuntimeSelection LoadRuntimeSelection(Arena* arena, StrView settingsPath,
   selected.ModelId = defaults->DefaultModel;
   selected.DefaultTrust = DefaultProjectTrust::Ask;
   selected.Compaction = AgentCompactionPolicy_Default();
+  selected.Retry = AgentRetryPolicy_Default();
 
   AppSettings settings = {};
   AppSettingsLoadResult load = AppSettings_Load(arena, settingsPath, &settings);
   if (load == AppSettingsLoadResult::Success) {
     selected.DefaultTrust = settings.DefaultTrust;
     selected.Compaction = settings.Compaction;
+    selected.Retry = settings.Retry;
     selected.Rounded = settings.Rounded;
+    selected.Skills = settings.Skills;
+    selected.PromptTemplates = settings.PromptTemplates;
     const ProviderSpec* configured = ProviderRegistry_Find(settings.Provider);
     if (configured) {
       selected.Spec = configured;

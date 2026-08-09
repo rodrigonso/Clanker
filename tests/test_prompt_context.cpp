@@ -51,6 +51,14 @@ u32 CountContextFilesUnder(const PromptContext* context, const char* marker) {
   return count;
 }
 
+u32 CountSkillsUnder(const PromptContext* context, const char* marker) {
+  u32 count = 0;
+  for (u32 i = 0; i < context->Skills.Skills.Count; i++)
+    if (StrView_Contains(context->Skills.Skills.Data[i].FilePath, marker))
+      count++;
+  return count;
+}
+
 constexpr StrView kReadGuidelines[] = {
     SVL("Use read to examine files instead of cat or sed."),
     SVL("Shared guideline")};
@@ -218,6 +226,67 @@ void TestDiscoveryAndTrust(Arena* scratch, StrView root, StrView cwd,
   PromptContext_Release(&context);
 }
 
+void TestSkillsBlock(Arena* scratch, StrView cwd, StrView agentDirectory) {
+  StrView skillDir =
+      Fs_Join(scratch, Fs_Join(scratch, agentDirectory, SVL("skills")),
+              SVL("placement"));
+  CHECK(Fs_MkdirP(scratch, skillDir));
+  CHECK(ConfigFile_WriteAtomic(
+      scratch, Fs_Join(scratch, skillDir, SVL("SKILL.md")),
+      SVL("---\nname: placement\ndescription: Placement probe skill\n---\n"
+          "Body text")));
+
+  Tool readTool = MakeTool("read", SVL("Read file contents"), nullptr, 0);
+  PromptContextOptions options = {};
+  options.WorkingDirectory = cwd;
+  options.AgentDirectory = agentDirectory;
+  options.Tools = &readTool;
+  options.ToolCount = 1;
+  options.ProjectTrusted = true;
+  PromptContext context = {};
+  StrBuf error = StrBuf_Make(scratch, 128);
+  CHECK(PromptContext_Build(&options, &context, &error));
+
+  i32 projectEnd = FindText(context.SystemPrompt, "</project_context>\n");
+  i32 blockAt = FindText(context.SystemPrompt, "\n\nThe following skills provide");
+  i32 openAt = FindText(context.SystemPrompt, "<available_skills>");
+  i32 closeAt = FindText(context.SystemPrompt, "</available_skills>");
+  i32 cwdAt = FindText(context.SystemPrompt, "\nCurrent working directory: ");
+  CHECK_ALL(projectEnd >= 0, blockAt > projectEnd, openAt > blockAt,
+            closeAt > openAt, cwdAt > closeAt,
+            StrView_Contains(
+                context.SystemPrompt,
+                "\n\nThe following skills provide specialized instructions for "
+                "specific tasks.\nUse the read tool to load a skill's file when "
+                "the task matches its description.\nWhen a skill file "
+                "references a relative path, resolve it against the skill "
+                "directory (parent of SKILL.md / dirname of the path) and use "
+                "that absolute path in tool commands.\n\n<available_skills>\n"),
+            StrView_Contains(context.SystemPrompt,
+                             "  <skill>\n    <name>placement</name>\n"
+                             "    <description>Placement probe skill"
+                             "</description>\n    <location>"),
+            StrView_Contains(context.SystemPrompt,
+                             "</location>\n  </skill>\n</available_skills>"),
+            CountSkillsUnder(&context, "clank_prompt_context_test") == 1);
+  PromptContext_Release(&context);
+
+  Tool shellTool = MakeTool("shell", SVL("Execute shell commands"), nullptr, 0);
+  options.Tools = &shellTool;
+  StrBuf_Clear(&error);
+  CHECK(PromptContext_Build(&options, &context, &error));
+  CHECK_ALL(!StrView_Contains(context.SystemPrompt, "<available_skills>"),
+            CountSkillsUnder(&context, "clank_prompt_context_test") == 1);
+  PromptContext_Release(&context);
+
+  options.Tools = &readTool;
+  options.NoSkills = true;
+  StrBuf_Clear(&error);
+  CHECK(PromptContext_Build(&options, &context, &error));
+  CHECK_ALL(!StrView_Contains(context.SystemPrompt, "<available_skills>"),
+            CountSkillsUnder(&context, "clank_prompt_context_test") == 0);
+  PromptContext_Release(&context);
+}
 }  // namespace
 
 void TestPromptContext() {
@@ -230,6 +299,7 @@ void TestPromptContext() {
 
   TestPromptAssembly(&scratch, root, cwd, agentDirectory);
   TestDiscoveryAndTrust(&scratch, root, cwd, agentDirectory);
+  TestSkillsBlock(&scratch, cwd, agentDirectory);
 
   const char* files[] = {
       "clank_prompt_context_test/global/AGENTS.md",
@@ -240,12 +310,15 @@ void TestPromptContext() {
       "clank_prompt_context_test/work/child/AGENTS.override.md",
       "clank_prompt_context_test/work/child/.clank/SYSTEM.md",
       "clank_prompt_context_test/work/child/.clank/APPEND_SYSTEM.md",
+      "clank_prompt_context_test/global/skills/placement/SKILL.md",
   };
   for (u32 i = 0; i < sizeof(files) / sizeof(files[0]); i++) remove(files[i]);
   RemoveDir("clank_prompt_context_test/work/child/AGENTS.md");
   RemoveDir("clank_prompt_context_test/work/child/.clank");
   RemoveDir("clank_prompt_context_test/work/child");
   RemoveDir("clank_prompt_context_test/work");
+  RemoveDir("clank_prompt_context_test/global/skills/placement");
+  RemoveDir("clank_prompt_context_test/global/skills");
   RemoveDir("clank_prompt_context_test/global");
   RemoveDir("clank_prompt_context_test");
   ArenaRelease(&scratch);

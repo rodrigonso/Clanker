@@ -319,13 +319,6 @@ Array<FsEntry> Fs_ListDir(Arena* arena, StrView dir, bool* ok) {
   return entries;
 }
 
-struct FsIgnorePattern {
-  StrView BaseRel;
-  StrView Pattern;
-  bool DirOnly;
-  bool Anchored;
-};
-
 static bool Fs_HasSlash(StrView s) {
   for (u32 i = 0; i < s.Length; i++)
     if (s.Data[i] == '/') return true;
@@ -429,7 +422,7 @@ static bool Fs_IgnoreMatches(const FsIgnorePattern& p, StrView relPath, bool isD
   return Fs_MatchAnySegment(p.Pattern, rel);
 }
 
-static bool Fs_IsIgnored(const Array<FsIgnorePattern>* patterns, StrView relPath, bool isDir) {
+bool Fs_IsIgnored(const Array<FsIgnorePattern>* patterns, StrView relPath, bool isDir) {
   for (u32 i = 0; i < patterns->Count; i++) {
     if (Fs_IgnoreMatches(patterns->Data[i], relPath, isDir)) return true;
   }
@@ -466,9 +459,10 @@ static StrView Fs_ReadSmallFile(Arena* arena, StrView path) {
   return StrBuf_View(&out);
 }
 
-static void Fs_LoadGitignore(Arena* arena, Array<FsIgnorePattern>* patterns, StrView dirAbs, StrView dirRel) {
-  StrView giPath = Fs_Join(arena, dirAbs, SVL(".gitignore"));
-  StrView content = Fs_ReadSmallFile(arena, giPath);
+void Fs_LoadIgnoreFile(Arena* arena, Array<FsIgnorePattern>* patterns, StrView dirAbs,
+                       StrView dirRel, StrView fileName) {
+  StrView path = Fs_Join(arena, dirAbs, fileName);
+  StrView content = Fs_ReadSmallFile(arena, path);
   if (!content.Data) return;
   u32 start = 0;
   for (u32 i = 0; i <= content.Length; i++) {
@@ -507,7 +501,8 @@ static bool Fs_WalkDir(Arena* arena, StrView absDir, StrView relDir, const FsWal
                        const Array<FsIgnorePattern>* inherited, FsWalkVisitor visit, void* user) {
   Array<FsIgnorePattern> patterns = Array_Make<FsIgnorePattern>(arena, inherited->Count + 4);
   for (u32 i = 0; i < inherited->Count; i++) Array_Push(&patterns, inherited->Data[i]);
-  if (opts.RespectGitignore) Fs_LoadGitignore(arena, &patterns, absDir, relDir);
+  if (opts.RespectGitignore)
+    Fs_LoadIgnoreFile(arena, &patterns, absDir, relDir, SVL(".gitignore"));
 
   bool ok = false;
   Array<FsEntry> entries = Fs_ListDir(arena, absDir, &ok);

@@ -18,6 +18,7 @@ enum class AppCommandKind : u8 {
   Reload,
   Debug,
   Rounded,
+  Skill,
   Exit,
   Unknown,
 };
@@ -44,6 +45,9 @@ StrView AppCommand_Usage(AppCommandKind kind);
 struct AppCommand {
   AppCommandKind Kind;
   StrView Arguments;
+  StrView SkillName;
+  // Raw token after `/`, including unknown template names.
+  StrView Name;
 };
 
 // Parses an input line without allocating. Leading/trailing ASCII whitespace is
@@ -79,6 +83,12 @@ struct AppCommandUx {
 typedef AppCommandHandlerResult (*AppCommandHandlerFn)(void* user, const AppCommandUx* ux);
 typedef AppCommandHandlerResult (*AppCommandArgHandlerFn)(
     void* user, const AppCommandUx* ux, StrView arguments);
+typedef AppCommandHandlerResult (*AppCommandSkillHandlerFn)(
+    void* user, const AppCommandUx* ux, StrView name, StrView arguments);
+// False leaves the command unresolved.
+typedef bool (*AppCommandTemplateHandlerFn)(void* user, const AppCommandUx* ux,
+                                            StrView name, StrView arguments,
+                                            AppCommandHandlerResult* out);
 
 struct AppCommandHandlers {
   void* User;
@@ -96,6 +106,8 @@ struct AppCommandHandlers {
   AppCommandArgHandlerFn Reload;
   AppCommandArgHandlerFn Debug;
   AppCommandArgHandlerFn Rounded;
+  AppCommandSkillHandlerFn Skill;
+  AppCommandTemplateHandlerFn PromptTemplate;
 };
 
 struct AppCommandDispatchResult {

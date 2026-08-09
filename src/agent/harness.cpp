@@ -827,7 +827,7 @@ SessionResult AgentHarness_Run(AgentHarness* harness, StrView prompt) {
   return result;
 }
 
-SessionResult AgentHarness_Compact(AgentHarness* harness) {
+SessionResult AgentHarness_Compact(AgentHarness* harness, StrView instructions) {
   if (!harness || !harness->Initialized) return SessionResult_Invalid("compaction arguments are invalid");
   {
     ScopedLock lock(&harness->StateLock);
@@ -839,7 +839,7 @@ SessionResult AgentHarness_Compact(AgentHarness* harness) {
     Atomic_StoreI32(&harness->AbortFlag, 0);
   }
 
-  SessionResult result = AgentDriver_Compact(harness);
+  SessionResult result = AgentDriver_Compact(harness, instructions);
 
   {
     ScopedLock lock(&harness->StateLock);

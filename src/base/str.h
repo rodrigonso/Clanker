@@ -34,6 +34,32 @@ inline bool StrView_Contains(StrView hay, const char* needle) {
   return false;
 }
 
+inline bool Ascii_IsSpace(char c) {
+  return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' ||
+         c == '\v';
+}
+
+inline StrView StrView_Trim(StrView s) {
+  u32 first = 0;
+  while (first < s.Length && Ascii_IsSpace(s.Data[first])) first++;
+  u32 last = s.Length;
+  while (last > first && Ascii_IsSpace(s.Data[last - 1])) last--;
+  return StrView{s.Data ? s.Data + first : nullptr, last - first};
+}
+
+inline bool StrView_EndsWithInsensitiveAscii(StrView value, StrView suffix) {
+  if (suffix.Length > value.Length) return false;
+  u32 offset = value.Length - suffix.Length;
+  for (u32 i = 0; i < suffix.Length; i++) {
+    char a = value.Data[offset + i];
+    char b = suffix.Data[i];
+    if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+    if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+    if (a != b) return false;
+  }
+  return true;
+}
+
 // Arena-backed growable UTF-8 builder. Always keeps a null terminator at
 // [Length]. Reallocation on growth may move Data, so take a StrView only after
 // building is complete.

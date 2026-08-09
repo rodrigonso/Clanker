@@ -197,6 +197,40 @@ void TestRuntimeCommandArena() {
   ArenaRelease(&arena);
 }
 
+void TestRuntimeSetPromptOptions() {
+  Arena arena = ArenaCreate();
+  InteractiveRuntime rt = {};
+  InteractiveRuntime_Init(&rt, &arena);
+
+  StrView settingsSkills[] = {SVL("/skills/a")};
+  StrView settingsTemplates[] = {SVL("/prompts/a"), SVL("/prompts/b")};
+  PromptContext context = {};
+  context.SettingsSkillPaths.Data = settingsSkills;
+  context.SettingsSkillPaths.Count = 1;
+  context.SettingsPromptTemplatePaths.Data = settingsTemplates;
+  context.SettingsPromptTemplatePaths.Count = 2;
+
+  PromptContextOptions options = {};
+  options.WorkingDirectory = SVL("/work");
+  options.NoSkills = true;
+
+  RuntimeSetPromptOptions(&rt, &options);
+  CHECK_ALL(StrView_EqCStr(rt.PromptOptions.WorkingDirectory, "/work"),
+            rt.PromptOptions.NoSkills,
+            rt.PromptOptions.SettingsSkillPathCount == 0,
+            rt.PromptOptions.SettingsPromptTemplatePathCount == 0);
+
+  rt.Prompt = &context;
+  RuntimeSetPromptOptions(&rt, &options);
+  CHECK_ALL(rt.PromptOptions.SettingsSkillPaths == settingsSkills,
+            rt.PromptOptions.SettingsSkillPathCount == 1,
+            rt.PromptOptions.SettingsPromptTemplatePaths == settingsTemplates,
+            rt.PromptOptions.SettingsPromptTemplatePathCount == 2);
+
+  InteractiveRuntime_Release(&rt);
+  ArenaRelease(&arena);
+}
+
 void TestRuntimePersistSettings() {
   Arena arena = ArenaCreate();
   const char* dir = "clank_runtime_settings_test";
@@ -236,6 +270,7 @@ void TestApp() {
   TestSessionProjectKey();
   TestProjectKeyComparison();
   TestRuntimeCommandArena();
+  TestRuntimeSetPromptOptions();
   TestRuntimePersistSettings();
   TestConfigPaths();
   TestTrustChoiceMenu();

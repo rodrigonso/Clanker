@@ -85,6 +85,10 @@ struct InteractiveRuntime {
   bool Rounded = true;
   PromptContext* Prompt;
   PromptContextOptions PromptOptions;
+  // Set by `/skill:<name>` so the REPL loop submits the expanded skill as an
+  // ordinary prompt. Allocated from CommandMem, so the loop must consume it
+  // before dispatching anything else.
+  StrView PendingPrompt;
   HarnessEventPump* EventPump;
   HarnessEventSink EventSink;
   bool AutoOpen;
@@ -149,6 +153,8 @@ AppCommandHandlerResult ReturnToCommandPalette(InteractiveRuntime* rt);
 // that was never created traps on its first allocation rather than failing.
 void InteractiveRuntime_Init(InteractiveRuntime* rt, Arena* mem);
 void InteractiveRuntime_Release(InteractiveRuntime* rt);
+void RuntimeSetPromptOptions(InteractiveRuntime* rt,
+                             const PromptContextOptions* options);
 bool RuntimePersistSettings(InteractiveRuntime* rt);
 
 // Dispatches one slash command, recycling the previous command's result

@@ -1,5 +1,6 @@
 #include "app/prompt_context.h"
 
+#include "app/skills.h"
 #include "base/config_file.h"
 #include "tools/fs.h"
 
@@ -89,6 +90,10 @@ bool ContextAlreadyLoaded(const PromptContext* context, StrView path) {
 }
 
 void DiscoverContextInDirectory(PromptContext* context, StrView directory) {
+  u64 loadedBytes = 0;
+  for (u32 i = 0; i < context->ContextFiles.Count; i++)
+    loadedBytes += context->ContextFiles.Data[i].Content.Length;
+
   for (u32 i = 0; i < sizeof(kContextCandidates) / sizeof(kContextCandidates[0]);
        i++) {
     StrView path = Fs_Join(&context->Mem, directory, kContextCandidates[i]);
@@ -98,9 +103,6 @@ void DiscoverContextInDirectory(PromptContext* context, StrView directory) {
     StrView canonical = Fs_RealPath(&context->Mem, path);
     if (ContextAlreadyLoaded(context, canonical)) return;
 
-    u64 loadedBytes = 0;
-    for (u32 j = 0; j < context->ContextFiles.Count; j++)
-      loadedBytes += context->ContextFiles.Data[j].Content.Length;
     if (loadedBytes + stat.Size > kMaxSystemPromptBytes) {
       AddDiagnostic(context, PromptDiagnosticSeverity::Warning, path,
                     SVL("combined context files exceed the 16 MiB prompt limit"));
@@ -153,6 +155,47 @@ void DiscoverContextFiles(PromptContext* context,
   }
 }
 
+void DiscoverSkills(PromptContext* context,
+                    const PromptContextOptions* options) {
+  SkillLoadOptions skillOptions = {};
+  skillOptions.AgentDirectory = options->AgentDirectory;
+  skillOptions.WorkingDirectory = options->WorkingDirectory;
+  skillOptions.ProjectTrusted = options->ProjectTrusted;
+  skillOptions.NoSkills = options->NoSkills;
+  skillOptions.SettingsPaths = context->SettingsSkillPaths.Data;
+  skillOptions.SettingsPathCount = context->SettingsSkillPaths.Count;
+  skillOptions.ExplicitPaths = options->SkillPaths;
+  skillOptions.ExplicitPathCount = options->SkillPathCount;
+  Skills_Load(&context->Mem, &skillOptions, &context->Skills);
+  for (u32 i = 0; i < context->Skills.Diagnostics.Count; i++) {
+    const SkillDiagnostic& diagnostic = context->Skills.Diagnostics.Data[i];
+    Array_Push(&context->Diagnostics,
+               PromptDiagnostic{PromptDiagnosticSeverity::Warning,
+                                diagnostic.Path, diagnostic.Message});
+  }
+}
+
+void DiscoverPromptTemplates(PromptContext* context,
+                             const PromptContextOptions* options) {
+  PromptTemplateLoadOptions templateOptions = {};
+  templateOptions.AgentDirectory = options->AgentDirectory;
+  templateOptions.WorkingDirectory = options->WorkingDirectory;
+  templateOptions.ProjectTrusted = options->ProjectTrusted;
+  templateOptions.NoPromptTemplates = options->NoPromptTemplates;
+  templateOptions.SettingsPaths = context->SettingsPromptTemplatePaths.Data;
+  templateOptions.SettingsPathCount = context->SettingsPromptTemplatePaths.Count;
+  templateOptions.ExplicitPaths = options->PromptTemplatePaths;
+  templateOptions.ExplicitPathCount = options->PromptTemplatePathCount;
+  PromptTemplates_Load(&context->Mem, &templateOptions, &context->Templates);
+  for (u32 i = 0; i < context->Templates.Diagnostics.Count; i++) {
+    const PromptTemplateDiagnostic& diagnostic =
+        context->Templates.Diagnostics.Data[i];
+    Array_Push(&context->Diagnostics,
+               PromptDiagnostic{PromptDiagnosticSeverity::Warning,
+                                diagnostic.Path, diagnostic.Message});
+  }
+}
+
 bool ReadRequiredPromptFile(PromptContext* context, StrView path,
                             StrView label, StrView* content, StrBuf* error) {
   PromptFileReadResult read = ReadPromptFile(context, path, content);
@@ -176,6 +219,32 @@ bool ResolveExplicitInput(PromptContext* context, StrView input, StrView label,
   return ReadRequiredPromptFile(context, input, label, content, error);
 }
 
+bool ResolveConfiguredPrompt(PromptContext* context,
+                             const PromptContextOptions* options,
+                             StrView fileName, StrView projectLabel,
+                             StrView globalLabel, StrView* source,
+                             StrView* content, StrBuf* error) {
+  if (options->ProjectTrusted) {
+    StrView projectConfig =
+        Fs_Join(&context->Mem, options->WorkingDirectory, SVL(".clank"));
+    StrView projectPath = Fs_Join(&context->Mem, projectConfig, fileName);
+    FsStat stat = Fs_Stat(projectPath);
+    if (stat.Exists && !stat.IsDir) {
+      *source = Fs_RealPath(&context->Mem, projectPath);
+      return ReadRequiredPromptFile(context, projectPath, projectLabel, content,
+                                    error);
+    }
+  }
+
+  StrView globalPath =
+      Fs_Join(&context->Mem, options->AgentDirectory, fileName);
+  FsStat stat = Fs_Stat(globalPath);
+  if (!stat.Exists || stat.IsDir) return true;
+  *source = Fs_RealPath(&context->Mem, globalPath);
+  return ReadRequiredPromptFile(context, globalPath, globalLabel, content,
+                                error);
+}
+
 bool ResolveSystemPrompt(PromptContext* context,
                          const PromptContextOptions* options,
                          StrView* basePrompt, StrBuf* error) {
@@ -185,30 +254,10 @@ bool ResolveSystemPrompt(PromptContext* context,
                                 SVL("system prompt"), basePrompt, error);
   }
 
-  StrView projectConfig =
-      Fs_Join(&context->Mem, options->WorkingDirectory, SVL(".clank"));
-  StrView projectSystem =
-      Fs_Join(&context->Mem, projectConfig, SVL("SYSTEM.md"));
-  if (options->ProjectTrusted) {
-    FsStat stat = Fs_Stat(projectSystem);
-    if (stat.Exists && !stat.IsDir) {
-      context->SystemPromptSource = Fs_RealPath(&context->Mem, projectSystem);
-      return ReadRequiredPromptFile(context, projectSystem,
-                                    SVL("project system prompt"), basePrompt,
-                                    error);
-    }
-  }
-
-  StrView globalSystem =
-      Fs_Join(&context->Mem, options->AgentDirectory, SVL("SYSTEM.md"));
-  FsStat stat = Fs_Stat(globalSystem);
-  if (stat.Exists && !stat.IsDir) {
-    context->SystemPromptSource = Fs_RealPath(&context->Mem, globalSystem);
-    return ReadRequiredPromptFile(context, globalSystem,
-                                  SVL("global system prompt"), basePrompt,
-                                  error);
-  }
-  return true;
+  return ResolveConfiguredPrompt(
+      context, options, SVL("SYSTEM.md"), SVL("project system prompt"),
+      SVL("global system prompt"), &context->SystemPromptSource, basePrompt,
+      error);
 }
 
 bool ResolveAppendPrompt(PromptContext* context,
@@ -235,30 +284,10 @@ bool ResolveAppendPrompt(PromptContext* context,
     return true;
   }
 
-  StrView projectConfig =
-      Fs_Join(&context->Mem, options->WorkingDirectory, SVL(".clank"));
-  StrView projectAppend =
-      Fs_Join(&context->Mem, projectConfig, SVL("APPEND_SYSTEM.md"));
-  if (options->ProjectTrusted) {
-    FsStat stat = Fs_Stat(projectAppend);
-    if (stat.Exists && !stat.IsDir) {
-      context->AppendPromptSource = Fs_RealPath(&context->Mem, projectAppend);
-      return ReadRequiredPromptFile(context, projectAppend,
-                                    SVL("project append system prompt"),
-                                    appendPrompt, error);
-    }
-  }
-
-  StrView globalAppend =
-      Fs_Join(&context->Mem, options->AgentDirectory, SVL("APPEND_SYSTEM.md"));
-  FsStat stat = Fs_Stat(globalAppend);
-  if (stat.Exists && !stat.IsDir) {
-    context->AppendPromptSource = Fs_RealPath(&context->Mem, globalAppend);
-    return ReadRequiredPromptFile(context, globalAppend,
-                                  SVL("global append system prompt"),
-                                  appendPrompt, error);
-  }
-  return true;
+  return ResolveConfiguredPrompt(
+      context, options, SVL("APPEND_SYSTEM.md"),
+      SVL("project append system prompt"), SVL("global append system prompt"),
+      &context->AppendPromptSource, appendPrompt, error);
 }
 
 bool AppendEscapedAttribute(StrBuf* out, StrView value) {
@@ -389,6 +418,13 @@ bool BuildFinalPrompt(PromptContext* context,
     if (!AppendCStrLimited(&prompt, "</project_context>\n")) goto too_large;
   }
 
+  // pi exposes skills only when the model can read their files.
+  if (HasTool(options, SVL("read"))) {
+    if (!Skills_AppendPromptBlock(&prompt, &context->Skills,
+                                  kMaxSystemPromptBytes))
+      goto too_large;
+  }
+
   {
     StrView cwd = Fs_ToPosix(&context->Mem, options->WorkingDirectory);
     if (!AppendCStrLimited(&prompt, "\nCurrent working directory: ") ||
@@ -409,6 +445,11 @@ bool PromptContext_Build(const PromptContextOptions* options, PromptContext* out
                          StrBuf* error) {
   if (!options || !out || !error || !options->WorkingDirectory.Length ||
       (options->ToolCount && !options->Tools) ||
+      (options->SkillPathCount && !options->SkillPaths) ||
+      (options->SettingsSkillPathCount && !options->SettingsSkillPaths) ||
+      (options->PromptTemplatePathCount && !options->PromptTemplatePaths) ||
+      (options->SettingsPromptTemplatePathCount &&
+       !options->SettingsPromptTemplatePaths) ||
       (options->ExplicitAppendPromptCount &&
        !options->ExplicitAppendPrompts)) {
     if (error) StrBuf_AppendCStr(error, "invalid prompt context options");
@@ -420,8 +461,24 @@ bool PromptContext_Build(const PromptContextOptions* options, PromptContext* out
   out->Initialized = true;
   out->ContextFiles = Array_Make<PromptContextFile>(&out->Mem, 8);
   out->Diagnostics = Array_Make<PromptDiagnostic>(&out->Mem, 4);
+  if (options->SettingsSkillPathCount) {
+    out->SettingsSkillPaths =
+        Array_Make<StrView>(&out->Mem, options->SettingsSkillPathCount);
+    for (u32 i = 0; i < options->SettingsSkillPathCount; i++)
+      Array_Push(&out->SettingsSkillPaths,
+                 StrView_Dup(&out->Mem, options->SettingsSkillPaths[i]));
+  }
+  if (options->SettingsPromptTemplatePathCount) {
+    out->SettingsPromptTemplatePaths =
+        Array_Make<StrView>(&out->Mem, options->SettingsPromptTemplatePathCount);
+    for (u32 i = 0; i < options->SettingsPromptTemplatePathCount; i++)
+      Array_Push(&out->SettingsPromptTemplatePaths,
+                 StrView_Dup(&out->Mem, options->SettingsPromptTemplatePaths[i]));
+  }
 
   DiscoverContextFiles(out, options);
+  DiscoverSkills(out, options);
+  DiscoverPromptTemplates(out, options);
   StrView basePrompt = {};
   StrView appendPrompt = {};
   if (!ResolveSystemPrompt(out, options, &basePrompt, error) ||

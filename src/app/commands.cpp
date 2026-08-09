@@ -9,6 +9,7 @@
 #include "app/plain_select.h"
 #include "app/session_switch.h"
 #include "app/settings.h"
+#include "base/config_file.h"
 #include "base/sysinfo.h"
 #include "session/metadata.h"
 #include "tools/fs.h"
@@ -436,14 +437,11 @@ static AppCommandHandlerResult HandleForkCommand(
 }
 
 static AppCommandHandlerResult HandleCompactCommand(
-    void* user, const AppCommandUx*, StrView) {
+    void* user, const AppCommandUx*, StrView arguments) {
   InteractiveRuntime* rt = (InteractiveRuntime*)user;
-  return CommandResult(AgentHarness_Compact(rt->Harness),
+  return CommandResult(AgentHarness_Compact(rt->Harness, arguments),
                        SVL("session compacted"));
 }
-
-
-
 
 static AppCommandHandlerResult HandleTrustCommand(
     void* user, const AppCommandUx*, StrView) {
@@ -519,6 +517,7 @@ static AppCommandHandlerResult HandleReloadCommand(
   Arena scratch = ArenaCreate((usize)16 << 20);
   DefaultProjectTrust defaultTrust = DefaultProjectTrust::Ask;
   AgentCompactionPolicy compaction = AgentCompactionPolicy_Default();
+  AgentRetryPolicy retry = AgentRetryPolicy_Default();
   bool rounded = rt->Rounded;
   AppSettings settings = {};
   AppSettingsLoadResult settingsResult =
@@ -526,6 +525,7 @@ static AppCommandHandlerResult HandleReloadCommand(
   if (settingsResult == AppSettingsLoadResult::Success) {
     defaultTrust = settings.DefaultTrust;
     compaction = settings.Compaction;
+    retry = settings.Retry;
     rounded = settings.Rounded;
   } else if (settingsResult == AppSettingsLoadResult::Malformed ||
              settingsResult == AppSettingsLoadResult::ReadFailure) {
@@ -552,6 +552,12 @@ static AppCommandHandlerResult HandleReloadCommand(
   }
   PromptContextOptions options = rt->PromptOptions;
   options.ProjectTrusted = trust.Trusted;
+  // Settings strings live in `scratch`, which outlives the build; the context
+  // copies everything it keeps into its own arena.
+  options.SettingsSkillPaths = settings.Skills.Data;
+  options.SettingsSkillPathCount = settings.Skills.Count;
+  options.SettingsPromptTemplatePaths = settings.PromptTemplates.Data;
+  options.SettingsPromptTemplatePathCount = settings.PromptTemplates.Count;
   StrBuf error = StrBuf_Make(&scratch, 160);
   if (!PromptContext_Build(&options, &next, &error)) {
     AppCommandHandlerResult result =
@@ -562,15 +568,22 @@ static AppCommandHandlerResult HandleReloadCommand(
 
   PromptContext previous = *rt->Prompt;
   *rt->Prompt = next;
+  RuntimeSetPromptOptions(rt, &options);
   rt->Harness->Config.SystemPrompt = rt->Prompt->SystemPrompt;
   rt->Harness->Config.Compaction = compaction;
+  rt->Harness->Config.Retry = retry;
   rt->DefaultTrust = defaultTrust;
   rt->ProjectTrusted = trust.Trusted;
   rt->HasProjectResources = hasProjectResources;
   rt->Rounded = rounded;
-  if (rt->TuiView)
+  if (rt->TuiView) {
     Tui_UpdateRounded(rt->TuiView, rounded ? TuiToggleAction::Enable
                                            : TuiToggleAction::Disable);
+    u32 catalogCount = 0;
+    TuiCommandSpec* catalog =
+        RuntimeCommandCatalog(rt, &scratch, &catalogCount);
+    Tui_SetCommands(rt->TuiView, catalog, catalogCount);
+  }
   AppAuth_Invalidate(rt->Auth);
   PromptContext_Release(&previous);
 
@@ -674,11 +687,106 @@ bool RuntimeResetSession(InteractiveRuntime* rt, const AppCommandUx* ux) {
   return true;
 }
 
+// The skill body is read at invocation time rather than held in the prompt
+// context because most are never used.
+static AppCommandHandlerResult HandleSkillCommand(void* user,
+                                                  const AppCommandUx*,
+                                                  StrView name,
+                                                  StrView arguments) {
+  InteractiveRuntime* rt = (InteractiveRuntime*)user;
+  if (!rt->Prompt) {
+    return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
+                                   SVL("No skills are loaded.")};
+  }
+  const Skill* skill = Skills_Find(&rt->Prompt->Skills, name);
+  if (!skill) {
+    StrBuf message = StrBuf_Make(&rt->CommandMem, 128);
+    StrBuf_AppendCStr(&message, "Unknown skill '");
+    StrBuf_Append(&message, name);
+    StrBuf_AppendCStr(&message, "'.");
+    if (rt->Prompt->Skills.Skills.Count) {
+      StrBuf_AppendCStr(&message, " Available:");
+      for (u32 i = 0; i < rt->Prompt->Skills.Skills.Count; i++) {
+        StrBuf_AppendCStr(&message, i ? ", " : " ");
+        StrBuf_Append(&message, rt->Prompt->Skills.Skills.Data[i].Name);
+      }
+    }
+    return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
+                                   StrBuf_View(&message)};
+  }
+
+  StrView content = {};
+  if (ConfigFile_ReadAll(&rt->CommandMem, skill->FilePath, &content) !=
+      ConfigFileReadResult::Success) {
+    return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
+                                   SVL("Skill file could not be read.")};
+  }
+  rt->PendingPrompt = Skills_FormatInvocation(
+      &rt->CommandMem, skill, Skills_ExtractBody(&rt->CommandMem, content),
+      arguments);
+  return AppCommandHandlerResult{AppCommandHandlerStatus::Success, StrView{}};
+}
+
+static bool HandlePromptTemplateCommand(void* user, const AppCommandUx*,
+                                        StrView name, StrView arguments,
+                                        AppCommandHandlerResult* out) {
+  InteractiveRuntime* rt = (InteractiveRuntime*)user;
+  if (!rt->Prompt) return false;
+  const PromptTemplate* tmpl =
+      PromptTemplates_Find(&rt->Prompt->Templates, name);
+  if (!tmpl) return false;
+
+  StrView expanded =
+      PromptTemplates_Expand(&rt->CommandMem, tmpl, arguments);
+  if (!expanded.Length) {
+    *out = AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
+                                   SVL("Prompt template expanded to nothing.")};
+    return true;
+  }
+  rt->PendingPrompt = expanded;
+  *out = AppCommandHandlerResult{AppCommandHandlerStatus::Success, StrView{}};
+  return true;
+}
+
+TuiCommandSpec* RuntimeCommandCatalog(InteractiveRuntime* rt, Arena* arena,
+                                      u32* count) {
+  u32 staticCount = AppCommandSpec_Count();
+  u32 skillCount = rt->Prompt ? rt->Prompt->Skills.Skills.Count : 0;
+  u32 templateCount = rt->Prompt ? rt->Prompt->Templates.Templates.Count : 0;
+  TuiCommandSpec* commands = ArenaPushArray(
+      arena, TuiCommandSpec, staticCount - 1 + skillCount + templateCount);
+  u32 n = 0;
+  for (u32 i = 0; i < staticCount; i++) {
+    const AppCommandSpec* command = AppCommandSpec_At(i);
+    if (command->Kind == AppCommandKind::Skill) continue;
+    commands[n++] =
+        TuiCommandSpec{command->Name, command->Alias, command->Description};
+  }
+  for (u32 i = 0; i < skillCount; i++) {
+    const Skill& skill = rt->Prompt->Skills.Skills.Data[i];
+    StrBuf name = StrBuf_Make(arena, skill.Name.Length + 8);
+    StrBuf_AppendCStr(&name, "skill:");
+    StrBuf_Append(&name, skill.Name);
+    commands[n++] =
+        TuiCommandSpec{StrBuf_View(&name), StrView{}, skill.Description};
+  }
+  for (u32 i = 0; i < templateCount; i++) {
+    const PromptTemplate& tmpl = rt->Prompt->Templates.Templates.Data[i];
+    StrView description =
+        tmpl.Description.Length ? tmpl.Description : tmpl.ArgumentHint;
+    commands[n++] = TuiCommandSpec{tmpl.Name, StrView{}, description};
+  }
+  *count = n;
+  return commands;
+}
+
 AppCommandHandlers RuntimeCommandHandlers(InteractiveRuntime* rt) {
   AppCommandHandlers handlers = {};
   handlers.User = rt;
   handlers.Session = HandleSessionCommand;
   handlers.Name = HandleNameCommand;
+  handlers.Skill = HandleSkillCommand;
+  handlers.PromptTemplate = HandlePromptTemplateCommand;
   handlers.Sessions = HandleSessionsCommand;
   handlers.Resume = HandleResumeCommand;
   handlers.Tree = HandleTreeCommand;

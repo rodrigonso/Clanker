@@ -54,6 +54,20 @@ struct AgentRetryPolicy {
   u32 MaxDelayMs;
 };
 
+// pi enables these agent-level retries; transport retries remain disabled.
+constexpr u32 AGENT_RETRY_DEFAULT_MAX_RETRIES = 3;
+constexpr u32 AGENT_RETRY_DEFAULT_BASE_DELAY_MS = 2000;
+constexpr u32 AGENT_RETRY_DEFAULT_MAX_DELAY_MS = 8000;
+
+inline AgentRetryPolicy AgentRetryPolicy_Default() {
+  AgentRetryPolicy policy = {};
+  policy.Enabled = true;
+  policy.MaxRetries = AGENT_RETRY_DEFAULT_MAX_RETRIES;
+  policy.BaseDelayMs = AGENT_RETRY_DEFAULT_BASE_DELAY_MS;
+  policy.MaxDelayMs = AGENT_RETRY_DEFAULT_MAX_DELAY_MS;
+  return policy;
+}
+
 struct AgentRetryDecision {
   bool Retry;
   u32 DelayMs;
