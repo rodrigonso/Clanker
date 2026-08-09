@@ -286,7 +286,7 @@ bool WriteAll(FILE* file, StrView bytes) {
 //
 // pi's SessionManager defers on the same principle but keys off the first
 // assistant message; clank keys off the first user message so a prompt that
-// never gets a reply still survives. See docs/PARITY.md.
+// never gets a reply still survives.
 bool RecordsWarrantPersist(const SessionRecord* records, u32 count) {
   for (u32 i = 0; i < count; i++)
     if (records[i].Kind == SessionRecordKind::Message &&

@@ -555,9 +555,7 @@ bidirectional protocol.
 
 ## Scope / deferred
 
-This is the small clean core. A running feature-by-feature comparison against
-upstream pi — including what is at parity, what is partial, and what is missing
-— lives in [`docs/PARITY.md`](docs/PARITY.md).
+This is the small clean core.
 
 Deliberately out of scope for now (the structure leaves seams for them):
 

@@ -47,12 +47,6 @@ Never commit anything under `~/.clank` or a session log; those are user data.
 
 ## Behavioral parity with pi
 
-`docs/PARITY.md` is the authority on what is implemented, partial, or absent,
-and it is expected to stay accurate. When a change moves a capability, update
-the matching row in the same commit. When you discover that upstream pi has
-diverged from what a row claims, fix the row rather than leaving a stale
-comparison.
-
 Prompt-visible strings (the default system prompt preamble, tool prompt
 snippets, guideline bullets, and the `<project_context>` framing) are aligned
 byte-for-byte with pi's `buildSystemPrompt`. Do not reword them casually; a
