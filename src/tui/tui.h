@@ -113,6 +113,7 @@ struct TuiOpts {
   StrView ModelName = {};
   ModelRequestProfile Profile = {};
   bool Color = true;
+  bool Rounded = true;
   const TuiCommandSpec* Commands = nullptr;
   u32 CommandCount = 0;
 };
@@ -294,8 +295,9 @@ bool Tui_AcceptPrompt(Tui* t, StrView text);
 // perform network, credential, and other blocking work after the call returns.
 void Tui_CommandNotice(Tui* t, StrView text);
 void Tui_CommandError(Tui* t, StrView text);
-enum class TuiDebugOverlayAction : u8 { Hide, Show, Toggle };
-bool Tui_UpdateDebugOverlay(Tui* t, TuiDebugOverlayAction action);
+enum class TuiToggleAction : u8 { Disable, Enable, Toggle };
+bool Tui_UpdateDebugOverlay(Tui* t, TuiToggleAction action);
+bool Tui_UpdateRounded(Tui* t, TuiToggleAction action);
 void Tui_SetModelProfile(Tui* t, StrView modelName,
                          ModelRequestProfile profile);
 void Tui_BeginOperation(Tui* t, StrView label);

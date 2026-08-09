@@ -519,12 +519,14 @@ static AppCommandHandlerResult HandleReloadCommand(
   Arena scratch = ArenaCreate((usize)16 << 20);
   DefaultProjectTrust defaultTrust = DefaultProjectTrust::Ask;
   AgentCompactionPolicy compaction = AgentCompactionPolicy_Default();
+  bool rounded = rt->Rounded;
   AppSettings settings = {};
   AppSettingsLoadResult settingsResult =
       AppSettings_Load(&scratch, rt->SettingsPath, &settings);
   if (settingsResult == AppSettingsLoadResult::Success) {
     defaultTrust = settings.DefaultTrust;
     compaction = settings.Compaction;
+    rounded = settings.Rounded;
   } else if (settingsResult == AppSettingsLoadResult::Malformed ||
              settingsResult == AppSettingsLoadResult::ReadFailure) {
     StrView message =
@@ -565,6 +567,10 @@ static AppCommandHandlerResult HandleReloadCommand(
   rt->DefaultTrust = defaultTrust;
   rt->ProjectTrusted = trust.Trusted;
   rt->HasProjectResources = hasProjectResources;
+  rt->Rounded = rounded;
+  if (rt->TuiView)
+    Tui_UpdateRounded(rt->TuiView, rounded ? TuiToggleAction::Enable
+                                           : TuiToggleAction::Disable);
   AppAuth_Invalidate(rt->Auth);
   PromptContext_Release(&previous);
 
@@ -576,17 +582,23 @@ static AppCommandHandlerResult HandleReloadCommand(
   return AppCommandHandlerResult{AppCommandHandlerStatus::Success, report};
 }
 
+static bool ParseToggleAction(StrView arguments, TuiToggleAction* action) {
+  if (!arguments.Length)
+    *action = TuiToggleAction::Toggle;
+  else if (StrView_Eq(arguments, SVL("on")))
+    *action = TuiToggleAction::Enable;
+  else if (StrView_Eq(arguments, SVL("off")))
+    *action = TuiToggleAction::Disable;
+  else
+    return false;
+  return true;
+}
+
 static AppCommandHandlerResult HandleDebugCommand(
     void* user, const AppCommandUx*, StrView arguments) {
   InteractiveRuntime* rt = (InteractiveRuntime*)user;
-  TuiDebugOverlayAction action;
-  if (!arguments.Length) {
-    action = TuiDebugOverlayAction::Toggle;
-  } else if (StrView_Eq(arguments, SVL("on"))) {
-    action = TuiDebugOverlayAction::Show;
-  } else if (StrView_Eq(arguments, SVL("off"))) {
-    action = TuiDebugOverlayAction::Hide;
-  } else {
+  TuiToggleAction action;
+  if (!ParseToggleAction(arguments, &action)) {
     return AppCommandHandlerResult{
         AppCommandHandlerStatus::Failed,
         AppCommand_Usage(AppCommandKind::Debug)};
@@ -597,6 +609,32 @@ static AppCommandHandlerResult HandleDebugCommand(
       AppCommandHandlerStatus::Success,
       enable ? SVL("performance overlay on")
              : SVL("performance overlay off")};
+}
+
+static AppCommandHandlerResult HandleRoundedCommand(
+    void* user, const AppCommandUx*, StrView arguments) {
+  InteractiveRuntime* rt = (InteractiveRuntime*)user;
+  TuiToggleAction action;
+  if (!ParseToggleAction(arguments, &action)) {
+    return AppCommandHandlerResult{
+        AppCommandHandlerStatus::Failed,
+        AppCommand_Usage(AppCommandKind::Rounded)};
+  }
+
+  rt->Rounded = Tui_UpdateRounded(rt->TuiView, action);
+  StrView applied = rt->Rounded ? SVL("rounded corners and bullets on")
+                                : SVL("rounded corners and bullets off");
+  if (!RuntimePersistSettings(rt)) {
+    StrBuf message =
+        StrBuf_Make(&rt->CommandMem, applied.Length + rt->SettingsPath.Length + 64);
+    StrBuf_Append(&message, applied);
+    StrBuf_AppendCStr(&message, ", but settings could not be saved to ");
+    StrBuf_Append(&message, rt->SettingsPath);
+    StrBuf_AppendChar(&message, '.');
+    return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
+                                   StrBuf_View(&message)};
+  }
+  return AppCommandHandlerResult{AppCommandHandlerStatus::Success, applied};
 }
 
 bool RuntimeResetSession(InteractiveRuntime* rt, const AppCommandUx* ux) {
@@ -649,6 +687,7 @@ AppCommandHandlers RuntimeCommandHandlers(InteractiveRuntime* rt) {
   handlers.Compact = HandleCompactCommand;
   handlers.Reload = HandleReloadCommand;
   if (rt->TuiView) handlers.Debug = HandleDebugCommand;
+  if (rt->TuiView) handlers.Rounded = HandleRoundedCommand;
   bool selectorsAvailable = rt->TuiView || Term_IsInteractive();
   if (selectorsAvailable) handlers.Trust = HandleTrustCommand;
   if (selectorsAvailable) {

@@ -219,6 +219,7 @@ RuntimeSelection LoadRuntimeSelection(Arena* arena, StrView settingsPath,
   if (load == AppSettingsLoadResult::Success) {
     selected.DefaultTrust = settings.DefaultTrust;
     selected.Compaction = settings.Compaction;
+    selected.Rounded = settings.Rounded;
     const ProviderSpec* configured = ProviderRegistry_Find(settings.Provider);
     if (configured) {
       selected.Spec = configured;
@@ -676,26 +677,17 @@ bool RuntimeCheckAuth(InteractiveRuntime* rt, const AppCommandUx* ux, bool asErr
 }
 
 static bool PersistRuntimeSelection(InteractiveRuntime* rt, const AppCommandUx* ux) {
+  if (RuntimePersistSettings(rt)) return true;
   Arena scratch = ArenaCreate((usize)8 << 20);
-  AppSettings settings = {};
-  settings.Provider = rt->Spec->Id;
-  settings.Model = rt->CurrentModel.Id;
-  settings.DefaultTrust = rt->DefaultTrust;
-  settings.Profile = rt->PreferredProfile;
-  settings.Compaction = rt->Harness->Config.Compaction;
-  if (!AppSettings_Save(&scratch, rt->SettingsPath, &settings)) {
-    StrBuf message = StrBuf_Make(&scratch, rt->SettingsPath.Length + 96);
-    StrBuf_AppendCStr(
-        &message,
-        "The model configuration is active, but settings could not be saved to ");
-    StrBuf_Append(&message, rt->SettingsPath);
-    StrBuf_AppendChar(&message, '.');
-    EmitCommandError(ux, StrBuf_View(&message));
-    ArenaRelease(&scratch);
-    return false;
-  }
+  StrBuf message = StrBuf_Make(&scratch, rt->SettingsPath.Length + 96);
+  StrBuf_AppendCStr(
+      &message,
+      "The model configuration is active, but settings could not be saved to ");
+  StrBuf_Append(&message, rt->SettingsPath);
+  StrBuf_AppendChar(&message, '.');
+  EmitCommandError(ux, StrBuf_View(&message));
   ArenaRelease(&scratch);
-  return true;
+  return false;
 }
 
 bool ActivateRuntimeSelection(InteractiveRuntime* rt, const ProviderSpec* spec,

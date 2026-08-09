@@ -198,6 +198,7 @@ static void RunTuiRepl(InteractiveRuntime* rt) {
   opts.ModelName = rt->CurrentModel.Id;
   opts.Profile = rt->Harness->Config.Stream.Profile;
   opts.Color = (getenv("NO_COLOR") == nullptr);
+  opts.Rounded = rt->Rounded;
   u32 catalogCount = AppCommandSpec_Count();
   TuiCommandSpec* commands = ArenaPushArray(rt->Mem, TuiCommandSpec, catalogCount);
   for (u32 i = 0; i < catalogCount; i++) {
@@ -721,6 +722,7 @@ int main(int argc, char** argv) {
       trustOverride != ProjectTrustOverride::Unspecified;
   runtime.TrustOverride = trustOverride;
   runtime.DefaultTrust = selected.DefaultTrust;
+  runtime.Rounded = selected.Rounded;
   runtime.Prompt = &promptContext;
   runtime.PromptOptions = promptOptions;
   runtime.AutoOpen = !noOpen;

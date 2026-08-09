@@ -29,6 +29,12 @@ enum class UiKeyKind : u8 {
   String,
 };
 
+// Rounded is zero so Ui_Init's memset preserves the default.
+enum class UiBorderCorners : u8 {
+  Rounded,
+  Square,
+};
+
 struct UiKey {
   UiKeyKind Kind;
   u64 Integer;
@@ -216,6 +222,7 @@ struct UiContext {
   bool Building;
   Screen* Target;
   u64 FrameNumber;
+  UiBorderCorners BorderCorners;
 
   Array<UiNode> Nodes;
   UiBuildFrame BuildStack[128];

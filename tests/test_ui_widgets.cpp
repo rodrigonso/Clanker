@@ -89,6 +89,25 @@ void TestUiWidgets() {
   CHECK(Ui_Dispatch(&ui, Ui_EventFromKey(key)));
   CHECK(StrView_Eq(LineEdit_Text(&edit), SVL("x")));
 
+  ui.BorderCorners = UiBorderCorners::Square;
+  Ui_BeginFrame(&ui, &screen);
+  UiLayoutStyle squareRoot = {};
+  squareRoot.Width = Ui_Fill();
+  squareRoot.Height = Ui_Fill();
+  Ui_BeginColumn(&ui, Ui_Key(1), squareRoot);
+  Ui_BeginBorder(&ui, Ui_Key(1), border);
+  Ui_EndContainer(&ui);
+  Ui_EndContainer(&ui);
+  Ui_EndFrame(&ui);
+  Ui_Render(&ui, 20, 10);
+  CHECK_ALL(Screen_BackAt(&screen, 0, 0).Ch == 0x250c,
+            Screen_BackAt(&screen, 19, 0).Ch == 0x2510,
+            Screen_BackAt(&screen, 0, 2).Ch == 0x2514,
+            Screen_BackAt(&screen, 19, 2).Ch == 0x2518,
+            Screen_BackAt(&screen, 1, 0).Ch == 0x2500,
+            Screen_BackAt(&screen, 0, 1).Ch == 0x2502);
+  ui.BorderCorners = UiBorderCorners::Rounded;
+
   Ui_BeginFrame(&ui, &screen);
   root = {};
   root.Width = Ui_Fill();

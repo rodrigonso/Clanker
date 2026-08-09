@@ -1539,11 +1539,13 @@ void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts) {
   t->ScreenUp = true;
   Screen_Init(&t->Scr, &t->ScreenMem, nullptr, nullptr);
   Ui_Init(&t->Ui);
+  t->Ui.BorderCorners =
+      opts.Rounded ? UiBorderCorners::Rounded : UiBorderCorners::Square;
   t->UiUp = true;
   t->SessionMem = ArenaCreate();
   t->ToolUpdateMem = ArenaCreate((usize)4 << 20);
   t->ToolUpdateUp = true;
-  LineModel_Init(&t->Model, &t->SessionMem, 80, 5000, opts.Color);
+  LineModel_Init(&t->Model, &t->SessionMem, 80, 5000, opts.Color, opts.Rounded);
   LineEdit_Init(&t->Edit, &t->SessionMem);
   t->InputUi.Edit = &t->Edit;
   LineEdit_Init(&t->ModalEdit, &t->SessionMem);
@@ -1575,6 +1577,7 @@ bool Tui_ClearSession(Tui* t) {
   t->Ui.Active = 0;
   u16 width = t->Model.Width;
   u32 cap = t->Model.Cap;
+  bool rounded = t->Model.Rounded;
   Arena nextSession = ArenaCreate();
   TuiSubmission preserved[64] = {};
   u32 preservedCount = t->QCount;
@@ -1587,7 +1590,7 @@ bool Tui_ClearSession(Tui* t) {
   LineModel_Release(&t->Model);
   ArenaRelease(&t->SessionMem);
   t->SessionMem = nextSession;
-  LineModel_Init(&t->Model, &t->SessionMem, width, cap, t->Color);
+  LineModel_Init(&t->Model, &t->SessionMem, width, cap, t->Color, rounded);
   LineEdit_Init(&t->Edit, &t->SessionMem);
   t->InputUi = UiTextInputState{&t->Edit, 0, false};
   LineEdit_Init(&t->ModalEdit, &t->SessionMem);
@@ -1741,17 +1744,30 @@ void Tui_CommandError(Tui* t, StrView text) {
   Mutex_Unlock(&t->Lock);
 }
 
-bool Tui_UpdateDebugOverlay(Tui* t, TuiDebugOverlayAction action) {
+bool Tui_UpdateDebugOverlay(Tui* t, TuiToggleAction action) {
   Mutex_Lock(&t->Lock);
   bool wasVisible = t->Perf.Visible;
-  t->Perf.Visible = action == TuiDebugOverlayAction::Toggle
+  t->Perf.Visible = action == TuiToggleAction::Toggle
                         ? !t->Perf.Visible
-                        : action == TuiDebugOverlayAction::Show;
+                        : action == TuiToggleAction::Enable;
   bool visible = t->Perf.Visible;
   if (!wasVisible && visible) t->Perf.LastRssSampleMs = 0;
   Wake(t);
   Mutex_Unlock(&t->Lock);
   return visible;
+}
+
+bool Tui_UpdateRounded(Tui* t, TuiToggleAction action) {
+  Mutex_Lock(&t->Lock);
+  bool rounded = action == TuiToggleAction::Toggle
+                     ? !t->Model.Rounded
+                     : action == TuiToggleAction::Enable;
+  t->Ui.BorderCorners =
+      rounded ? UiBorderCorners::Rounded : UiBorderCorners::Square;
+  LineModel_SetRounded(&t->Model, rounded);
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+  return rounded;
 }
 
 void Tui_SetModelProfile(Tui* t, StrView modelName,

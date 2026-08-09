@@ -40,7 +40,7 @@ void TestSettings() {
         AppSettingsLoadResult::Success);
   CHECK_ALL(loaded.DefaultTrust == DefaultProjectTrust::Ask,
             loaded.Profile.Effort == ModelEffort::None,
-            loaded.Profile.ContextWindow == 0);
+            loaded.Profile.ContextWindow == 0, loaded.Rounded);
   // An absent compaction block leaves the built-in defaults in place.
   CHECK_ALL(loaded.Compaction.Enabled,
             loaded.Compaction.ReserveTokens ==
@@ -107,6 +107,21 @@ void TestSettings() {
   CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
         AppSettingsLoadResult::Malformed);
 
+  CHECK(ConfigFile_WriteAtomic(
+      &a, SV(path),
+      SVL("{\"provider\":\"anthropic\",\"model\":\"bad\","
+          "\"rounded\":\"yes\"}")));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+        AppSettingsLoadResult::Malformed);
+
+  CHECK(ConfigFile_WriteAtomic(
+      &a, SV(path),
+      SVL("{\"provider\":\"anthropic\",\"model\":\"legacy\","
+          "\"rounded\":false}")));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+        AppSettingsLoadResult::Success);
+  CHECK(!loaded.Rounded);
+
   AppSettings saved = {};
   saved.Provider = SVL("anthropic");
   saved.Model = SVL("claude-\"test\"");
@@ -124,7 +139,13 @@ void TestSettings() {
   loaded.Profile.Effort == ModelEffort::High,
   loaded.Profile.ContextWindow == 1000000);
   CHECK_ALL(loaded.Compaction.Enabled, loaded.Compaction.ReserveTokens == 4096,
-            loaded.Compaction.KeepRecentTokens == 8192);
+            loaded.Compaction.KeepRecentTokens == 8192, loaded.Rounded);
+
+  saved.Rounded = false;
+  CHECK(AppSettings_Save(&a, SV(path), &saved));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) == AppSettingsLoadResult::Success);
+  CHECK(!loaded.Rounded);
+  saved.Rounded = true;
 
   // A disabled policy round-trips as disabled rather than reverting to the
   // enabled default.

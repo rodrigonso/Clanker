@@ -13,6 +13,7 @@ struct FakeCommandContext {
   int TrustCalls;
   int ReloadCalls;
   int DebugCalls;
+  int RoundedCalls;
   int Notices;
   int Errors;
   AppCommandHandlerResult LoginResult;
@@ -111,8 +112,17 @@ AppCommandHandlerResult Debug(void* user, const AppCommandUx* ux,
   return {AppCommandHandlerStatus::Success, SVL("overlay toggled")};
 }
 
+AppCommandHandlerResult Rounded(void* user, const AppCommandUx* ux,
+                                StrView arguments) {
+  (void)ux;
+  FakeCommandContext* ctx = (FakeCommandContext*)user;
+  ctx->RoundedCalls++;
+  ctx->LastArguments = arguments;
+  return {AppCommandHandlerStatus::Success, SVL("rounded corners and bullets off")};
+}
+
 void TestParse() {
-  CHECK_ALL(AppCommandSpec_Count() == 15,
+  CHECK_ALL(AppCommandSpec_Count() == 16,
             AppCommandSpec_At(AppCommandSpec_Count()) == nullptr,
             AppCommandSpec_At(0)->Kind == AppCommandKind::Login,
             StrView_EqCStr(AppCommandSpec_At(0)->Name, "login"),
@@ -121,13 +131,19 @@ void TestParse() {
             AppCommandSpec_At(13)->Kind == AppCommandKind::Debug,
             AppCommandSpec_At(13)->Arguments ==
                 AppCommandArgumentPolicy::Optional,
-            AppCommandSpec_At(14)->Kind == AppCommandKind::Exit,
-            StrView_EqCStr(AppCommandSpec_At(14)->Alias, "quit"),
-            AppCommandSpec_At(14)->Description.Length != 0,
+            AppCommandSpec_At(14)->Kind == AppCommandKind::Rounded,
+            StrView_EqCStr(AppCommandSpec_At(14)->Name, "rounded"),
+            AppCommandSpec_At(14)->Arguments ==
+                AppCommandArgumentPolicy::Optional,
+            AppCommandSpec_At(15)->Kind == AppCommandKind::Exit,
+            StrView_EqCStr(AppCommandSpec_At(15)->Alias, "quit"),
+            AppCommandSpec_At(15)->Description.Length != 0,
             StrView_EqCStr(AppCommand_Usage(AppCommandKind::Resume),
                            "Usage: /resume [session-id]"),
             StrView_EqCStr(AppCommand_Usage(AppCommandKind::Debug),
                            "Usage: /debug [on|off]"),
+            StrView_EqCStr(AppCommand_Usage(AppCommandKind::Rounded),
+                           "Usage: /rounded [on|off]"),
             AppCommand_Usage(AppCommandKind::Unknown).Length == 0);
 
   AppCommand plain = AppCommand_Parse(SVL("  hello  "));
@@ -157,6 +173,9 @@ void TestParse() {
       {SVL("/trust"), AppCommandKind::Trust},
       {SVL("/reload"), AppCommandKind::Reload},
       {SVL("/debug"), AppCommandKind::Debug},
+      {SVL("/rounded"), AppCommandKind::Rounded},
+      {SVL("/rounded on"), AppCommandKind::Rounded},
+      {SVL("/rounded off"), AppCommandKind::Rounded},
       {SVL("/exit"), AppCommandKind::Exit},     {SVL("/quit"), AppCommandKind::Exit},
       {SVL("/LOGIN"), AppCommandKind::Unknown}, {SVL("/"), AppCommandKind::Unknown},
       {SVL("/wat"), AppCommandKind::Unknown},
@@ -189,6 +208,7 @@ void TestDispatch() {
   handlers.Trust = Trust;
   handlers.Reload = Reload;
   handlers.Debug = Debug;
+  handlers.Rounded = Rounded;
 
   AppCommandDispatchResult plain = AppCommand_Dispatch(SVL("ordinary prompt"), &handlers, &ux);
   CHECK_ALL(!plain.Handled, plain.Action == AppLoopAction::Continue);
@@ -244,6 +264,12 @@ void TestDispatch() {
   AppCommand_Dispatch(SVL("/debug on"), &handlers, &ux);
   CHECK_ALL(ctx.DebugCalls == 1, StrView_EqCStr(ctx.LastArguments, "on"),
             StrView_EqCStr(ctx.LastNotice, "overlay toggled"));
+
+  AppCommand_Dispatch(SVL("/rounded off"), &handlers, &ux);
+  CHECK_ALL(ctx.RoundedCalls == 1, StrView_EqCStr(ctx.LastArguments, "off"),
+            StrView_EqCStr(ctx.LastNotice, "rounded corners and bullets off"));
+  AppCommand_Dispatch(SVL("/rounded"), &handlers, &ux);
+  CHECK_ALL(ctx.RoundedCalls == 2, ctx.LastArguments.Length == 0);
 
   int calls = ctx.LoginCalls + ctx.ModelCalls;
   AppCommandDispatchResult args = AppCommand_Dispatch(SVL("/login anthropic"), &handlers, &ux);

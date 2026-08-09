@@ -398,6 +398,8 @@ Interactive commands:
 - `/reload` — transactionally reload settings and prompt context while idle.
 - `/debug [on|off]` — toggle the performance overlay described under
   Debug overlay below. TUI only.
+- `/rounded [on|off]` — toggle the rounded corners and bullets described under
+  Rounded style below. TUI only; the choice is saved to `settings.json`.
 - `/clear` — create a fresh session while preserving the provider, model,
   effort, and context selection.
 - `/exit` (or `/quit`) — close Clank and return to the shell.
@@ -411,9 +413,9 @@ choice.
 Commands entered during a TUI turn run afterward; ordinary text still steers the
 active turn.
 
-The selected provider/model, explicit effort/context preferences, and
-`defaultProjectTrust` policy are written atomically to
-`~/.clank/settings.json`.
+The selected provider/model, explicit effort/context preferences,
+`defaultProjectTrust` policy, and the `rounded` UI style are written
+atomically to `~/.clank/settings.json`.
 New sessions use built-in defaults, then settings, then the runtime-only `-m`
 override. Resumed sessions restore their durable provider/model ancestry; `-m`
 adds a new durable model selection. Direct IDs are exact opaque durable IDs.
@@ -448,6 +450,12 @@ hidden, so the window is already full when it is switched on. RSS is queried
 when the panel appears and at most once per second while it remains visible.
 The state is per-run and always starts off — nothing about it is written to
 `settings.json`.
+
+### Rounded style
+
+`/rounded on` uses `╭ ╮ ╰ ╯` borders and `●`/`○` transcript bullets.
+`/rounded off` uses `┌ ┐ └ ┘` and `◼`/`◻`. The choice is stored as `"rounded"`
+in `~/.clank/settings.json`; `/reload` applies edits made to the file.
 
 ## Authentication
 

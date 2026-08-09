@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include "app/plain_select.h"
+#include "app/settings.h"
 #include "base/thread.h"
 
 volatile i32 g_abort = 0;
@@ -142,6 +143,23 @@ void InteractiveRuntime_Init(InteractiveRuntime* rt, Arena* mem) {
 
 void InteractiveRuntime_Release(InteractiveRuntime* rt) {
   ArenaRelease(&rt->CommandMem);
+}
+
+bool RuntimePersistSettings(InteractiveRuntime* rt) {
+  if (!rt || !rt->Harness || !rt->Spec || !rt->CurrentModel.Id.Length)
+    return false;
+
+  Arena scratch = ArenaCreate((usize)8 << 20);
+  AppSettings settings = {};
+  settings.Provider = rt->Spec->Id;
+  settings.Model = rt->CurrentModel.Id;
+  settings.DefaultTrust = rt->DefaultTrust;
+  settings.Profile = rt->PreferredProfile;
+  settings.Compaction = rt->Harness->Config.Compaction;
+  settings.Rounded = rt->Rounded;
+  bool saved = AppSettings_Save(&scratch, rt->SettingsPath, &settings);
+  ArenaRelease(&scratch);
+  return saved;
 }
 
 AppCommandDispatchResult RuntimeDispatchCommand(InteractiveRuntime* rt, StrView input,

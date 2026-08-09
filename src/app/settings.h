@@ -12,6 +12,7 @@ struct AppSettings {
   DefaultProjectTrust DefaultTrust;
   ModelRequestProfile Profile;
   AgentCompactionPolicy Compaction;
+  bool Rounded = true;
 };
 
 enum class AppSettingsLoadResult : u8 {

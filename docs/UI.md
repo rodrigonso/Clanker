@@ -102,6 +102,11 @@ Application-specific rendering can use a custom `UiNodeOps` implementation.
 Custom components receive assigned geometry and a clipped, local-coordinate
 `UiCanvas`; they must not access `Screen` directly.
 
+`UiContext::BorderCorners` controls every border drawn by
+`UiCanvas_DrawBorder`. `Tui_UpdateRounded` updates it together with
+`LineModel::Rounded`, rebuilding retained transcript rows so existing bullets
+change in place.
+
 ## Diagnostics
 
 `Ui_GetMetrics` reports frame node count, hit-region count, and frame-arena

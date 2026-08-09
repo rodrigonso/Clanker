@@ -44,6 +44,9 @@ const AppCommandSpec kCommands[] = {
     {AppCommandKind::Debug, SVL("debug"), {},
      SVL("Toggle the performance overlay"), SVL("Usage: /debug [on|off]"),
      AppCommandArgumentPolicy::Optional},
+    {AppCommandKind::Rounded, SVL("rounded"), {},
+     SVL("Toggle rounded TUI corners and bullets"),
+     SVL("Usage: /rounded [on|off]"), AppCommandArgumentPolicy::Optional},
     {AppCommandKind::Exit, SVL("exit"), SVL("quit"),
      SVL("Exit Clank and return to the shell (alias: /quit)"),
      SVL("Usage: /exit (alias: /quit)"), AppCommandArgumentPolicy::None},
@@ -201,6 +204,7 @@ AppCommandDispatchResult AppCommand_Dispatch(StrView input, const AppCommandHand
         case AppCommandKind::Trust: fn = handlers->Trust; break;
         case AppCommandKind::Reload: fn = handlers->Reload; break;
         case AppCommandKind::Debug: fn = handlers->Debug; break;
+        case AppCommandKind::Rounded: fn = handlers->Rounded; break;
         default: break;
       }
     }

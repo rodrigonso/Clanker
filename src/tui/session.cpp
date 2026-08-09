@@ -96,6 +96,7 @@ void RebuildTranscriptLocked(Tui* t, const Message* messages, u32 count,
                                     bool allowSwap) {
   u16 width = t->Model.Width;
   u32 cap = t->Model.Cap;
+  bool rounded = t->Model.Rounded;
   bool swap = allowSwap && SessionArenaSwapSafeLocked(t);
 
   Arena next = {};
@@ -127,7 +128,7 @@ void RebuildTranscriptLocked(Tui* t, const Message* messages, u32 count,
     t->SessionMem = next;
     ClearSessionScopedStringsLocked(t);
   }
-  LineModel_Init(&t->Model, &t->SessionMem, width, cap, t->Color);
+  LineModel_Init(&t->Model, &t->SessionMem, width, cap, t->Color, rounded);
   if (swap) {
     LineEdit_Init(&t->Edit, &t->SessionMem);
     LineEdit_Init(&t->ModalEdit, &t->SessionMem);

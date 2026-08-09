@@ -421,20 +421,20 @@ void TestTui() {
     LineModel_AddNotice(&tf.Model, EntryKind::Info, SVL("fixture transcript"));
     Feed(&tf, "hello");
     Tui_ComposeFrame(&tf, 20, 12);
-    CHECK(FrameHash(&tf) == 16918476410488148328ull);
+    CHECK(FrameHash(&tf) == 17011884229875471407ull);
 
     LineEdit_Clear(&tf.Edit);
     Feed(&tf, "/");
     Tui_ComposeFrame(&tf, 20, 12);
-    CHECK(FrameHash(&tf) == 8675490699267501349ull);
+    CHECK(FrameHash(&tf) == 12635317618319930390ull);
 
     StrView options[] = {SVL("first"), SVL("second"), SVL("third")};
     CHECK(Tui_BeginSelection(&tf, SVL("Choose"), options, 3, 1));
     Tui_ComposeFrame(&tf, 20, 12);
-    CHECK(FrameHash(&tf) == 10760913336260656319ull);
+    CHECK(FrameHash(&tf) == 14406110976847255100ull);
 
     Tui_ComposeFrame(&tf, 28, 15);
-    CHECK(FrameHash(&tf) == 3776490409679530299ull);
+    CHECK(FrameHash(&tf) == 18067228642383294040ull);
     Tui_Stop(&tf);
     ArenaRelease(&af);
   }
@@ -446,7 +446,7 @@ void TestTui() {
     LineModel_AddNotice(&tf.Model, EntryKind::Info, SVL("fixture transcript"));
     Feed(&tf, "hello");
     Tui_ComposeFrame(&tf, 20, 12);
-    CHECK(FrameHash(&tf) == 15960401383964303925ull);
+    CHECK(FrameHash(&tf) == 8604892137943206150ull);
     Tui_Stop(&tf);
     ArenaRelease(&af);
   }
@@ -489,10 +489,10 @@ void TestTui() {
     u32 regionsHidden = Ui_GetMetrics(&ot.Ui).HitRegionCount;
     CHECK(!ScreenContains(&ot, "debug"));
 
-    CHECK(Tui_UpdateDebugOverlay(&ot, TuiDebugOverlayAction::Toggle));
+    CHECK(Tui_UpdateDebugOverlay(&ot, TuiToggleAction::Toggle));
     SeedPerf(&ot);
     Tui_ComposeFrame(&ot, 60, 24, 1000);
-    CHECK(FrameHash(&ot) == 12789957888453356553ull);
+    CHECK(FrameHash(&ot) == 2102621543496373578ull);
 
     CHECK_ALL(ScreenContains(&ot, "debug"),
               ScreenContains(&ot, "58.8"),     // 1e7 / 17000us, in tenths
@@ -515,13 +515,13 @@ void TestTui() {
     Tui_ComposeFrame(&ot, 60, 24, 2000);
     CHECK_ALL(ot.Perf.RssBytes > 0, ot.Perf.LastRssSampleMs == 2000);
 
-    Tui_UpdateDebugOverlay(&ot, TuiDebugOverlayAction::Hide);
+    Tui_UpdateDebugOverlay(&ot, TuiToggleAction::Disable);
     Tui_ComposeFrame(&ot, 60, 24, 4000);
     CHECK_ALL(FrameHash(&ot) == hidden,
               ot.Ui.Nodes.Count == nodesHidden,
               ot.Perf.LastRssSampleMs == 2000);
 
-    Tui_UpdateDebugOverlay(&ot, TuiDebugOverlayAction::Show);
+    Tui_UpdateDebugOverlay(&ot, TuiToggleAction::Enable);
     CHECK(ot.Perf.LastRssSampleMs == 0);
     Tui_ComposeFrame(&ot, 30, 24, 4001);
     CHECK_ALL(!ScreenContains(&ot, "debug"),
@@ -616,7 +616,7 @@ void TestTui() {
 
   // The transcript captured the unlabeled assistant text and compact tool row.
   CHECK_ALL(!AnyRow(&a, &t, "assistant"), AnyRow(&a, &t, "Hello world"),
-            AnyRow(&a, &t, " \xe2\x97\xbb  Shell ls"),
+            AnyRow(&a, &t, " \xe2\x97\x8b  Shell ls"),
             !AnyRow(&a, &t, "hello-from-shell"), t.State == TuiState::Idle,
             t.Use.Output == 7);
 
@@ -2171,6 +2171,55 @@ void TestTui() {
               StrView_Eq(LineEdit_Text(&startup.Edit), SVL("a")));
     Tui_Stop(&startup);
     ArenaRelease(&as);
+  }
+
+  {
+    Arena ac = ArenaCreate();
+    TuiOpts oc;
+    oc.ModelName = SVL("m");
+    oc.Color = false;
+    Tui tc;
+    Tui_InitModel(&tc, &ac, oc);
+
+    Tui_ComposeFrame(&tc, 24, 12);
+    u16 borderTop = (u16)(ComposerTop(&tc) - 1);
+    LineModel_AddUser(&tc.Model, SVL("hi"), 0);
+    CHECK_ALL(tc.Ui.BorderCorners == UiBorderCorners::Rounded, tc.Model.Rounded,
+              AnyRow(&ac, &tc, " \xe2\x97\x8f  hi"),
+              Screen_BackAt(&tc.Scr, 0, borderTop).Ch == 0x256d,
+              Screen_BackAt(&tc.Scr, 23, borderTop).Ch == 0x256e);
+
+    CHECK(!Tui_UpdateRounded(&tc, TuiToggleAction::Toggle));
+    Tui_ComposeFrame(&tc, 24, 12);
+    CHECK_ALL(Screen_BackAt(&tc.Scr, 0, borderTop).Ch == 0x250c,
+              Screen_BackAt(&tc.Scr, 23, borderTop).Ch == 0x2510,
+              Screen_BackAt(&tc.Scr, 1, borderTop).Ch == 0x2500,
+              !tc.Model.Rounded, AnyRow(&ac, &tc, " \xe2\x97\xbc  hi"),
+              !AnyRow(&ac, &tc, "\xe2\x97\x8f"));
+
+    CHECK(Tui_ClearSession(&tc));
+    CHECK_ALL(tc.Ui.BorderCorners == UiBorderCorners::Square,
+              !tc.Model.Rounded);
+    CHECK(Tui_UpdateRounded(&tc, TuiToggleAction::Toggle));
+    CHECK(!Tui_UpdateRounded(&tc, TuiToggleAction::Disable));
+    CHECK(!Tui_UpdateRounded(&tc, TuiToggleAction::Disable));
+    CHECK(Tui_UpdateRounded(&tc, TuiToggleAction::Enable));
+    Tui_Stop(&tc);
+
+    TuiOpts osq;
+    osq.ModelName = SVL("m");
+    osq.Color = false;
+    osq.Rounded = false;
+    Tui tsq;
+    Tui_InitModel(&tsq, &ac, osq);
+    Tui_ComposeFrame(&tsq, 24, 12);
+    LineModel_AddUser(&tsq.Model, SVL("hi"), 0);
+    CHECK_ALL(tsq.Ui.BorderCorners == UiBorderCorners::Square,
+              !tsq.Model.Rounded, AnyRow(&ac, &tsq, " \xe2\x97\xbc  hi"),
+              Screen_BackAt(&tsq.Scr, 0, (u16)(ComposerTop(&tsq) - 1)).Ch ==
+                  0x250c);
+    Tui_Stop(&tsq);
+    ArenaRelease(&ac);
   }
 
   CHECK(g_displayDrainsOk);

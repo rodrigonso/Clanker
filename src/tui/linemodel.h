@@ -99,12 +99,14 @@ struct LineModel {
   u64 DisplayRevision;
   bool HasAssistant;
   bool Color;
+  bool Rounded;
 };
 
 void LineModel_Init(LineModel* m, Arena* mem, u16 width, u32 cap,
-                    bool color = true);
+                    bool color = true, bool rounded = true);
 void LineModel_Release(LineModel* m);
 void LineModel_SetWidth(LineModel* m, u16 width);  // re-wrap everything
+bool LineModel_SetRounded(LineModel* m, bool rounded);
 u32 LineModel_Count(const LineModel* m);
 // Check whether another width fits within `maxRows` without changing the
 // current rendered rows.

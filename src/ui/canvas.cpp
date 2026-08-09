@@ -76,12 +76,18 @@ void UiCanvas_Fill(UiCanvas* canvas, UiRect rect, Style style) {
 
 void UiCanvas_DrawBorder(UiCanvas* canvas, UiRect rect, Style style) {
   if (!canvas || rect.Width < 2 || rect.Height < 2) return;
+  bool square =
+      canvas->Ui && canvas->Ui->BorderCorners == UiBorderCorners::Square;
+  u32 topLeft = square ? 0x250c : 0x256d;
+  u32 topRight = square ? 0x2510 : 0x256e;
+  u32 bottomLeft = square ? 0x2514 : 0x2570;
+  u32 bottomRight = square ? 0x2518 : 0x256f;
   i32 lastX = rect.X + rect.Width - 1;
   i32 lastY = rect.Y + rect.Height - 1;
-  UiCanvas_PutChar(canvas, rect.X, rect.Y, 0x256d, style);
-  UiCanvas_PutChar(canvas, lastX, rect.Y, 0x256e, style);
-  UiCanvas_PutChar(canvas, rect.X, lastY, 0x2570, style);
-  UiCanvas_PutChar(canvas, lastX, lastY, 0x256f, style);
+  UiCanvas_PutChar(canvas, rect.X, rect.Y, topLeft, style);
+  UiCanvas_PutChar(canvas, lastX, rect.Y, topRight, style);
+  UiCanvas_PutChar(canvas, rect.X, lastY, bottomLeft, style);
+  UiCanvas_PutChar(canvas, lastX, lastY, bottomRight, style);
   for (i32 x = rect.X + 1; x < lastX; x++) {
     UiCanvas_PutChar(canvas, x, rect.Y, 0x2500, style);
     UiCanvas_PutChar(canvas, x, lastY, 0x2500, style);

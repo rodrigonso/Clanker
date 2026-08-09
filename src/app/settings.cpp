@@ -80,11 +80,20 @@ AppSettingsLoadResult AppSettings_Load(Arena* a, StrView path, AppSettings* out)
       return AppSettingsLoadResult::Malformed;
   }
 
+  bool rounded = true;
+  JsonValue* roundedValue = Json_Get(root, "rounded");
+  if (roundedValue) {
+    if (roundedValue->Kind != JsonKind::Bool)
+      return AppSettingsLoadResult::Malformed;
+    rounded = roundedValue->Bool;
+  }
+
   out->Provider = provider->Str;
   out->Model = model->Str;
   out->DefaultTrust = defaultTrust;
   out->Profile = profile;
   out->Compaction = compaction;
+  out->Rounded = rounded;
   return AppSettingsLoadResult::Success;
 }
 
@@ -126,6 +135,8 @@ bool AppSettings_Save(Arena* a, StrView path, const AppSettings* settings) {
   StrBuf_AppendCStr(&content, ",\"keepRecentTokens\":");
   StrBuf_AppendU64(&content, keepRecentTokens);
   StrBuf_AppendChar(&content, '}');
+  StrBuf_AppendCStr(&content, ",\"rounded\":");
+  StrBuf_AppendCStr(&content, settings->Rounded ? "true" : "false");
   StrBuf_AppendChar(&content, '}');
   return ConfigFile_WriteAtomic(a, path, StrBuf_View(&content));
 }

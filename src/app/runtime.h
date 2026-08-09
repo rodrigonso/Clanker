@@ -82,6 +82,7 @@ struct InteractiveRuntime {
   bool TrustCoversProjectResources;
   ProjectTrustOverride TrustOverride;
   DefaultProjectTrust DefaultTrust;
+  bool Rounded = true;
   PromptContext* Prompt;
   PromptContextOptions PromptOptions;
   HarnessEventPump* EventPump;
@@ -148,6 +149,7 @@ AppCommandHandlerResult ReturnToCommandPalette(InteractiveRuntime* rt);
 // that was never created traps on its first allocation rather than failing.
 void InteractiveRuntime_Init(InteractiveRuntime* rt, Arena* mem);
 void InteractiveRuntime_Release(InteractiveRuntime* rt);
+bool RuntimePersistSettings(InteractiveRuntime* rt);
 
 // Dispatches one slash command, recycling the previous command's result
 // storage first. Every caller must go through this rather than

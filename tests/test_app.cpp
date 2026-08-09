@@ -2,12 +2,20 @@
 //
 // Everything here lived inside main.cpp, which has no library target, so none
 // of it could be exercised. The behaviour is unchanged; only its address is.
+#include <stdio.h>
 #include <string.h>
 
+#if defined(_WIN32)
+#include <direct.h>
+#else
+#include <unistd.h>
+#endif
+
 #include "app/config_paths.h"
+#include "app/provider_registry.h"
 #include "app/runtime.h"
 #include "app/session_switch.h"
-#include "app/session_switch.h"
+#include "app/settings.h"
 #include "base/arena.h"
 #include "check.h"
 #include "session/metadata.h"
@@ -189,10 +197,46 @@ void TestRuntimeCommandArena() {
   ArenaRelease(&arena);
 }
 
+void TestRuntimePersistSettings() {
+  Arena arena = ArenaCreate();
+  const char* dir = "clank_runtime_settings_test";
+  const char* path = "clank_runtime_settings_test/settings.json";
+  remove(path);
+
+  InteractiveRuntime rt = {};
+  InteractiveRuntime_Init(&rt, &arena);
+  CHECK(rt.Rounded);
+
+  rt.Spec = ProviderRegistry_At(0);
+  CHECK(rt.Spec != nullptr);
+  AgentHarness harness = {};
+  harness.Config.Compaction = AgentCompactionPolicy_Default();
+  rt.Harness = &harness;
+  rt.CurrentModel.Id = rt.Spec->DefaultModel;
+  rt.SettingsPath = SV(path);
+  rt.Rounded = false;
+  CHECK(RuntimePersistSettings(&rt));
+
+  AppSettings loaded = {};
+  CHECK(AppSettings_Load(&arena, SV(path), &loaded) ==
+        AppSettingsLoadResult::Success);
+  CHECK(!loaded.Rounded);
+
+  InteractiveRuntime_Release(&rt);
+  remove(path);
+#if defined(_WIN32)
+  _rmdir(dir);
+#else
+  rmdir(dir);
+#endif
+  ArenaRelease(&arena);
+}
+
 void TestApp() {
   TestSessionProjectKey();
   TestProjectKeyComparison();
   TestRuntimeCommandArena();
+  TestRuntimePersistSettings();
   TestConfigPaths();
   TestTrustChoiceMenu();
   TestTrimAscii();

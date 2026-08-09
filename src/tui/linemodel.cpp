@@ -11,7 +11,7 @@ namespace {
 
 const usize LINE_ROWS_RESERVE = (usize)64 * 1024 * 1024;
 const u32 ICON_FIELD_CELLS = 2;
-const u32 SQUARE_LEFT_PADDING = 1;
+const u32 MARKER_LEFT_PADDING = 1;
 
 // Bullet color scheme: orange for user messages and white for assistant
 // responses and tool calls. Tool calls use an outlined marker; failed tool
@@ -22,8 +22,12 @@ const u8 ASSISTANT_FG = 255;
 // and reads as "lines removed", not as a failure. Errors still own bold 196.
 const u8 DIFF_ADD_FG = 71;
 const u8 DIFF_DEL_FG = 167;
-StrView FilledSquareMarker() { return SVL("\xe2\x97\xbc"); }
-StrView OutlineSquareMarker() { return SVL("\xe2\x97\xbb"); }
+StrView FilledMarker(const LineModel* m) {
+  return m->Rounded ? SVL("\xe2\x97\x8f") : SVL("\xe2\x97\xbc");
+}
+StrView OutlineMarker(const LineModel* m) {
+  return m->Rounded ? SVL("\xe2\x97\x8b") : SVL("\xe2\x97\xbb");
+}
 
 StrView BufView(const StrBuf& buf) { return StrView{buf.Data, buf.Length}; }
 
@@ -175,8 +179,8 @@ StrView FormatTimestamp(Arena* arena, u64 timestampMs) {
 
 void BuildUser(LineModel* m, const Entry* entry) {
   StrView text = BufView(entry->Text.Content);
-  StrView marker = FilledSquareMarker();
-  StrView indent = IconIndent(&m->RowsMem, marker, SQUARE_LEFT_PADDING);
+  StrView marker = FilledMarker(m);
+  StrView indent = IconIndent(&m->RowsMem, marker, MARKER_LEFT_PADDING);
   u32 i = 0;
   bool firstLine = true;
   while (i <= text.Length) {
@@ -190,7 +194,7 @@ void BuildUser(LineModel* m, const Entry* entry) {
     InitRow(&m->RowsMem, &logical, 3);
     if (firstLine) {
       PushIcon(&m->RowsMem, &logical.Spans, marker,
-               LStyle(m, ACCENT_FG, ATTR_BOLD), SQUARE_LEFT_PADDING);
+               LStyle(m, ACCENT_FG, ATTR_BOLD), MARKER_LEFT_PADDING);
     } else {
       Array_Push(&logical.Spans, Span{indent, StyleDefault(), true});
     }
@@ -211,8 +215,8 @@ void BuildUser(LineModel* m, const Entry* entry) {
 void BuildAssistant(LineModel* m, const Entry* entry) {
   StrView text = BufView(entry->Text.Content);
   if (text.Length == 0) return;
-  StrView marker = FilledSquareMarker();
-  StrView indent = IconIndent(&m->RowsMem, marker, SQUARE_LEFT_PADDING);
+  StrView marker = FilledMarker(m);
+  StrView indent = IconIndent(&m->RowsMem, marker, MARKER_LEFT_PADDING);
 
   Array<SpanLine> logical = Array_Make<SpanLine>(&m->RowsMem, 8);
   Markdown_Render(&m->RowsMem, text, &logical, m->Color);
@@ -221,7 +225,7 @@ void BuildAssistant(LineModel* m, const Entry* entry) {
     InitRow(&m->RowsMem, &prefixed, logical.Data[i].Spans.Count + 2);
     if (i == 0) {
       PushIcon(&m->RowsMem, &prefixed.Spans, marker,
-               LStyle(m, ASSISTANT_FG, ATTR_BOLD), SQUARE_LEFT_PADDING);
+               LStyle(m, ASSISTANT_FG, ATTR_BOLD), MARKER_LEFT_PADDING);
     } else {
       Array_Push(&prefixed.Spans, Span{indent, StyleDefault(), true});
     }
@@ -234,19 +238,19 @@ void BuildAssistant(LineModel* m, const Entry* entry) {
 }
 
 void BuildTool(LineModel* m, const Entry* entry, bool expandPreview) {
-  StrView marker = OutlineSquareMarker();
+  StrView marker = OutlineMarker(m);
   Style markerSt = entry->Tool.Error ? LStyle(m, 196, ATTR_BOLD)
                                      : LStyle(m, ASSISTANT_FG, ATTR_NONE);
   Style label = entry->Tool.Error ? LStyle(m, 196, ATTR_BOLD)
                                   : LStyle(m, 252, ATTR_BOLD);
   Style detail = entry->Tool.Error ? LStyle(m, 196, ATTR_NONE)
                                    : LStyle(m, 252, ATTR_NONE);
-  StrView indent = IconIndent(&m->RowsMem, marker, SQUARE_LEFT_PADDING);
+  StrView indent = IconIndent(&m->RowsMem, marker, MARKER_LEFT_PADDING);
 
   SpanLine logical;
   InitRow(&m->RowsMem, &logical, 7);
   PushIcon(&m->RowsMem, &logical.Spans, marker, markerSt,
-           SQUARE_LEFT_PADDING);
+           MARKER_LEFT_PADDING);
   if (entry->Tool.View.Label.Length) {
     Array_Push(&logical.Spans, Span{entry->Tool.View.Label, label});
     if (entry->Tool.View.Detail.Length) Array_Push(&logical.Spans, Span{SVL(" "), detail});
@@ -338,9 +342,9 @@ void BuildEntryRows(LineModel* m, u32 idx, u32 expandedStart) {
       break;
     }
     case EntryKind::Info:
-      BuildPlainTurn(m, entry, FilledSquareMarker(),
+      BuildPlainTurn(m, entry, FilledMarker(m),
                      LStyle(m, ACCENT_FG, ATTR_BOLD),
-                     LStyle(m, 244, ATTR_NONE), SQUARE_LEFT_PADDING);
+                     LStyle(m, 244, ATTR_NONE), MARKER_LEFT_PADDING);
       break;
     case EntryKind::Error:
       BuildPlainTurn(m, entry, SVL("!"), LStyle(m, 196, ATTR_BOLD),
@@ -390,7 +394,7 @@ u32 PreviewRowCount(LineModel* m, const Entry* entry) {
   usize mark = m->RowsMem.Used;
   Array<SpanLine> rows = Array_Make<SpanLine>(&m->RowsMem, 8);
   StrView indent =
-      IconIndent(&m->RowsMem, OutlineSquareMarker(), SQUARE_LEFT_PADDING);
+      IconIndent(&m->RowsMem, OutlineMarker(m), MARKER_LEFT_PADDING);
   AppendPlainRows(&m->RowsMem, &rows, m->Width, BufView(entry->Tool.Preview),
                   LStyle(m, 244, ATTR_DIM), indent, indent);
   u32 count = rows.Count;
@@ -577,7 +581,7 @@ void WrapSpanLine(Arena* a, const SpanLine* in, u16 width, Array<SpanLine>* out)
 }  // namespace
 
 void LineModel_Init(LineModel* m, Arena* mem, u16 width, u32 cap,
-                    bool color) {
+                    bool color, bool rounded) {
   m->Mem = mem;
   m->RowsMem = ArenaCreate(LINE_ROWS_RESERVE);
   m->Entries = Array_Make<Entry>(mem, 16);
@@ -591,6 +595,7 @@ void LineModel_Init(LineModel* m, Arena* mem, u16 width, u32 cap,
   m->DisplayRevision = 1;
   m->HasAssistant = false;
   m->Color = color;
+  m->Rounded = rounded;
 }
 
 void LineModel_Release(LineModel* m) { ArenaRelease(&m->RowsMem); }
@@ -899,6 +904,14 @@ void LineModel_SetWidth(LineModel* m, u16 width) {
   m->Width = width;
   TrimToCap(m);
   AdvanceDisplayRevision(m);
+}
+
+bool LineModel_SetRounded(LineModel* m, bool rounded) {
+  if (m->Rounded == rounded) return false;
+  m->Rounded = rounded;
+  RebuildAll(m, true);
+  AdvanceDisplayRevision(m);
+  return true;
 }
 
 bool LineModel_ToggleEntry(LineModel* m, u64 entryId) {
