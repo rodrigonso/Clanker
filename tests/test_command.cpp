@@ -12,6 +12,7 @@ struct FakeCommandContext {
   int ResumeCalls;
   int TrustCalls;
   int ReloadCalls;
+  int DebugCalls;
   int Notices;
   int Errors;
   AppCommandHandlerResult LoginResult;
@@ -101,18 +102,32 @@ AppCommandHandlerResult Reload(void* user, const AppCommandUx* ux,
   return {AppCommandHandlerStatus::Success, SVL("Prompt reloaded.")};
 }
 
+AppCommandHandlerResult Debug(void* user, const AppCommandUx* ux,
+                              StrView arguments) {
+  (void)ux;
+  FakeCommandContext* ctx = (FakeCommandContext*)user;
+  ctx->DebugCalls++;
+  ctx->LastArguments = arguments;
+  return {AppCommandHandlerStatus::Success, SVL("overlay toggled")};
+}
+
 void TestParse() {
-  CHECK_ALL(AppCommandSpec_Count() == 14,
+  CHECK_ALL(AppCommandSpec_Count() == 15,
             AppCommandSpec_At(AppCommandSpec_Count()) == nullptr,
             AppCommandSpec_At(0)->Kind == AppCommandKind::Login,
             StrView_EqCStr(AppCommandSpec_At(0)->Name, "login"),
             AppCommandSpec_At(0)->Arguments ==
                 AppCommandArgumentPolicy::None,
-            AppCommandSpec_At(13)->Kind == AppCommandKind::Exit,
-            StrView_EqCStr(AppCommandSpec_At(13)->Alias, "quit"),
-            AppCommandSpec_At(13)->Description.Length != 0,
+            AppCommandSpec_At(13)->Kind == AppCommandKind::Debug,
+            AppCommandSpec_At(13)->Arguments ==
+                AppCommandArgumentPolicy::Optional,
+            AppCommandSpec_At(14)->Kind == AppCommandKind::Exit,
+            StrView_EqCStr(AppCommandSpec_At(14)->Alias, "quit"),
+            AppCommandSpec_At(14)->Description.Length != 0,
             StrView_EqCStr(AppCommand_Usage(AppCommandKind::Resume),
                            "Usage: /resume [session-id]"),
+            StrView_EqCStr(AppCommand_Usage(AppCommandKind::Debug),
+                           "Usage: /debug [on|off]"),
             AppCommand_Usage(AppCommandKind::Unknown).Length == 0);
 
   AppCommand plain = AppCommand_Parse(SVL("  hello  "));
@@ -141,6 +156,7 @@ void TestParse() {
       {SVL("/compact"), AppCommandKind::Compact},
       {SVL("/trust"), AppCommandKind::Trust},
       {SVL("/reload"), AppCommandKind::Reload},
+      {SVL("/debug"), AppCommandKind::Debug},
       {SVL("/exit"), AppCommandKind::Exit},     {SVL("/quit"), AppCommandKind::Exit},
       {SVL("/LOGIN"), AppCommandKind::Unknown}, {SVL("/"), AppCommandKind::Unknown},
       {SVL("/wat"), AppCommandKind::Unknown},
@@ -172,6 +188,7 @@ void TestDispatch() {
   handlers.Resume = Resume;
   handlers.Trust = Trust;
   handlers.Reload = Reload;
+  handlers.Debug = Debug;
 
   AppCommandDispatchResult plain = AppCommand_Dispatch(SVL("ordinary prompt"), &handlers, &ux);
   CHECK_ALL(!plain.Handled, plain.Action == AppLoopAction::Continue);
@@ -223,6 +240,10 @@ void TestDispatch() {
   AppCommand_Dispatch(SVL("/trust"), &handlers, &ux);
   AppCommand_Dispatch(SVL("/reload"), &handlers, &ux);
   CHECK_ALL(ctx.TrustCalls == 1, ctx.ReloadCalls == 1);
+
+  AppCommand_Dispatch(SVL("/debug on"), &handlers, &ux);
+  CHECK_ALL(ctx.DebugCalls == 1, StrView_EqCStr(ctx.LastArguments, "on"),
+            StrView_EqCStr(ctx.LastNotice, "overlay toggled"));
 
   int calls = ctx.LoginCalls + ctx.ModelCalls;
   AppCommandDispatchResult args = AppCommand_Dispatch(SVL("/login anthropic"), &handlers, &ux);

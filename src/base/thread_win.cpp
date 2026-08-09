@@ -60,6 +60,27 @@ void Sleep_Ms(u32 ms) { Sleep(ms); }
 
 u64 MonotonicMillis() { return GetTickCount64(); }
 
+static volatile LONGLONG g_qpcFrequency = 0;
+
+u64 MonotonicMicros() {
+  LONGLONG frequency =
+      InterlockedCompareExchange64(&g_qpcFrequency, 0, 0);
+  if (frequency == 0) {
+    LARGE_INTEGER measured;
+    FFI(!QueryPerformanceFrequency(&measured) || measured.QuadPart <= 0);
+    frequency = measured.QuadPart;
+    LONGLONG previous =
+        InterlockedCompareExchange64(&g_qpcFrequency, frequency, 0);
+    if (previous) frequency = previous;
+  }
+  LARGE_INTEGER ticks;
+  FFI(!QueryPerformanceCounter(&ticks) || ticks.QuadPart < 0);
+  // Split the conversion so a large uptime cannot overflow the multiply.
+  u64 whole = (u64)(ticks.QuadPart / frequency);
+  u64 remainder = (u64)(ticks.QuadPart % frequency);
+  return whole * 1000000ull + remainder * 1000000ull / (u64)frequency;
+}
+
 void Atomic_StoreI32(volatile i32* target, i32 value) {
   InterlockedExchange((volatile LONG*)target, (LONG)value);
 }

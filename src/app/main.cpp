@@ -110,7 +110,7 @@ static void PrintHelp() {
       "Auth: run `--login anthropic` for Claude Pro/Max or `--login openai` for\n"
       "a ChatGPT subscription; alternatively set ANTHROPIC_API_KEY or OPENAI_API_KEY.\n"
       "Interactive commands: /session, /name, /sessions, /resume, /tree,\n"
-      "/checkout, /fork, /compact, /trust, /reload, /login, /model,\n"
+      "/checkout, /fork, /compact, /trust, /reload, /debug, /login, /model,\n"
       "/clear, /exit.\n");
 }
 

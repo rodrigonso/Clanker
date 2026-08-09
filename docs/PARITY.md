@@ -265,7 +265,7 @@ and model-visible state and keeps active turns and queues in memory.
 | TUI core: differential renderer, markdown, multi-line editor, reusable components, status line, scroll, selection, abort, `NO_COLOR` | ✅ core | |
 | TUI modes | 🟡 | Clank is always alt-screen. pi offers `--tui-mode regular` (terminal-owned scrollback) and `fullscreen` |
 | Selectors / dialogs | 🟡 | generic list/text modals power login, model/effort/context, session browsing and naming, tree, and trust. pi additionally has theme, settings, extension, and first-run surfaces |
-| Slash commands | 🟡 | 14 built-ins versus pi's 27, plus pi's dynamic skill, template, and extension commands. Clank lacks `/new`, `/clone`, `/import`, `/export`, `/share`, `/copy`, `/hotkeys`, `/changelog`, `/settings`, `/scoped-models`, `/llama`, `/logout` |
+| Slash commands | 🟡 | 15 built-ins versus pi's 27, plus pi's dynamic skill, template, and extension commands. Clank lacks `/new`, `/clone`, `/import`, `/export`, `/share`, `/copy`, `/hotkeys`, `/changelog`, `/settings`, `/scoped-models`, `/llama`, `/logout`. `/debug`, which toggles a render/agent performance and current-RSS overlay, is Clank-only — pi has no equivalent surface |
 | Editor features | 🟡 | bracketed paste, history, selection, mouse, OSC 52 copy. pi adds `@` fuzzy file search, Tab path completion, `!command` / `!!command` shell input, `Ctrl+G` external editor, undo stack, and kill ring |
 | Images | ❌ | pi renders inline images via Kitty and iTerm2 protocols and accepts image paste |
 | LaTeX rendering · syntax highlighting | ❌ | pi ships `renderLatex` and highlighted output |

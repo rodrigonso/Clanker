@@ -794,6 +794,8 @@ void ComposeAtSize(Tui* t, u16 cols, u16 rows, u64 nowMs) {
 
   BuildStatusComponents(t, statusY, cols);
 
+  BuildDebugOverlayComponent(t, cols, rows, nowMs);
+
   if (commandPalette && paletteH) {
     CommandPaletteComponentData* paletteData =
         (CommandPaletteComponentData*)Ui_FrameAlloc(
@@ -1412,10 +1414,12 @@ void RenderLoop(void* arg) {
     bool writeClipboard = PrepareClipboardOutput(t);
     Mutex_Unlock(&t->Lock);
     Screen_Flush(&t->Scr);
+    u64 frameEndUs = MonotonicMicros();
     if (writeClipboard) Term_Write(t->ClipboardOsc.Data, t->ClipboardOsc.Length);
     u64 lastFrame = MonotonicMillis();
 
     Mutex_Lock(&t->Lock);
+    TuiPerf_FrameRendered(&t->Perf, frameEndUs);
     bool edgeDragging =
         t->TranscriptDragging && t->SelectionEdgeDirection != 0;
     u32 interval = edgeDragging
@@ -1737,6 +1741,19 @@ void Tui_CommandError(Tui* t, StrView text) {
   Mutex_Unlock(&t->Lock);
 }
 
+bool Tui_UpdateDebugOverlay(Tui* t, TuiDebugOverlayAction action) {
+  Mutex_Lock(&t->Lock);
+  bool wasVisible = t->Perf.Visible;
+  t->Perf.Visible = action == TuiDebugOverlayAction::Toggle
+                        ? !t->Perf.Visible
+                        : action == TuiDebugOverlayAction::Show;
+  bool visible = t->Perf.Visible;
+  if (!wasVisible && visible) t->Perf.LastRssSampleMs = 0;
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+  return visible;
+}
+
 void Tui_SetModelProfile(Tui* t, StrView modelName,
                          ModelRequestProfile profile) {
   Mutex_Lock(&t->Lock);
@@ -1819,6 +1836,7 @@ void Tui_TurnStarted(Tui* t) {
   if (!Tui_HasPendingDisplay(t)) t->State = TuiState::Thinking;
   t->Spinner = 0;
   t->SpinnerStartMs = 0;
+  TuiPerf_TurnStarted(&t->Perf, MonotonicMicros());
   Wake(t);
   Mutex_Unlock(&t->Lock);
 }
@@ -1826,6 +1844,8 @@ void Tui_TurnStarted(Tui* t) {
 void Tui_AppendAssistantText(Tui* t, StrView text) {
   Mutex_Lock(&t->Lock);
   QueueText(t, text);
+  // Transcript reveal is rate-limited, so measure TTFT at arrival.
+  TuiPerf_AssistantDelta(&t->Perf, MonotonicMicros());
   Wake(t);
   Mutex_Unlock(&t->Lock);
 }
@@ -1837,6 +1857,7 @@ void Tui_AssistantMessageEnded(Tui* t, StopReason stop, Usage use,
   display->Stop = stop;
   display->Use = use;
   if (errorMessage.Length) SetDisplayPayload(t, display, errorMessage);
+  TuiPerf_TurnMessageEnded(&t->Perf, use, MonotonicMicros());
   Wake(t);
   Mutex_Unlock(&t->Lock);
 }
@@ -1847,6 +1868,7 @@ void Tui_ToolStarted(Tui* t, StrView callId, StrView name, StrView argumentsJson
   display->ToolCallId = StrView_Dup(&t->SessionMem, callId);
   display->ToolName = StrView_Dup(&t->SessionMem, name);
   display->ToolArgsJson = StrView_Dup(&t->SessionMem, argumentsJson);
+  TuiPerf_ToolStarted(&t->Perf, name, MonotonicMicros());
   Wake(t);
   Mutex_Unlock(&t->Lock);
 }
@@ -1880,6 +1902,7 @@ void Tui_ToolEnded(Tui* t, StrView callId, StrView preview, bool isError) {
   Sanitize_Display(&display->Payload, preview);
   display->IsError = isError;
   if (TuiToolUpdateSlot* slot = FindToolUpdate(t, callId)) slot->Active = false;
+  TuiPerf_ToolEnded(&t->Perf, MonotonicMicros());
   Wake(t);
   Mutex_Unlock(&t->Lock);
 }
@@ -1936,6 +1959,7 @@ void Tui_NoticeDroppedEvents(Tui* t, u32 count) {
   StrBuf_AppendU64(&notice, count);
   StrBuf_AppendCStr(&notice, " progress updates to keep up");
   display->Payload = notice;
+  t->Perf.DroppedEvents = AddSaturated(t->Perf.DroppedEvents, count);
   Wake(t);
   Mutex_Unlock(&t->Lock);
 }

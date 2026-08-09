@@ -41,6 +41,9 @@ const AppCommandSpec kCommands[] = {
     {AppCommandKind::Reload, SVL("reload"), {},
      SVL("Reload settings and prompt context"), SVL("Usage: /reload"),
      AppCommandArgumentPolicy::None},
+    {AppCommandKind::Debug, SVL("debug"), {},
+     SVL("Toggle the performance overlay"), SVL("Usage: /debug [on|off]"),
+     AppCommandArgumentPolicy::Optional},
     {AppCommandKind::Exit, SVL("exit"), SVL("quit"),
      SVL("Exit Clank and return to the shell (alias: /quit)"),
      SVL("Usage: /exit (alias: /quit)"), AppCommandArgumentPolicy::None},
@@ -197,6 +200,7 @@ AppCommandDispatchResult AppCommand_Dispatch(StrView input, const AppCommandHand
         case AppCommandKind::Compact: fn = handlers->Compact; break;
         case AppCommandKind::Trust: fn = handlers->Trust; break;
         case AppCommandKind::Reload: fn = handlers->Reload; break;
+        case AppCommandKind::Debug: fn = handlers->Debug; break;
         default: break;
       }
     }

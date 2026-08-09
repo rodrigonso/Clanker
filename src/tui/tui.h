@@ -6,6 +6,7 @@
 #include "ui/lineedit.h"
 #include "tui/linemodel.h"
 #include "term/screen.h"
+#include "tui/perf.h"
 #include "tui/stream_reveal.h"
 #include "term/term.h"
 #include "ui/widgets.h"
@@ -243,6 +244,9 @@ struct Tui {
   Array<TuiDisplayEvent> DisplayEvents;
   u32 DisplayHead;
   TuiToolUpdateSlot ToolUpdates[TUI_TOOL_UPDATE_SLOT_COUNT];
+
+  // Process-level samples survive conversation resets.
+  TuiPerf Perf;
 };
 
 // Enter the alt screen, paint the first frame synchronously, then start input
@@ -290,6 +294,8 @@ bool Tui_AcceptPrompt(Tui* t, StrView text);
 // perform network, credential, and other blocking work after the call returns.
 void Tui_CommandNotice(Tui* t, StrView text);
 void Tui_CommandError(Tui* t, StrView text);
+enum class TuiDebugOverlayAction : u8 { Hide, Show, Toggle };
+bool Tui_UpdateDebugOverlay(Tui* t, TuiDebugOverlayAction action);
 void Tui_SetModelProfile(Tui* t, StrView modelName,
                          ModelRequestProfile profile);
 void Tui_BeginOperation(Tui* t, StrView label);

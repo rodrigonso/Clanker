@@ -16,6 +16,7 @@ enum class AppCommandKind : u8 {
   Compact,
   Trust,
   Reload,
+  Debug,
   Exit,
   Unknown,
 };
@@ -92,6 +93,7 @@ struct AppCommandHandlers {
   AppCommandArgHandlerFn Compact;
   AppCommandArgHandlerFn Trust;
   AppCommandArgHandlerFn Reload;
+  AppCommandArgHandlerFn Debug;
 };
 
 struct AppCommandDispatchResult {

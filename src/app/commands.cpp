@@ -576,6 +576,29 @@ static AppCommandHandlerResult HandleReloadCommand(
   return AppCommandHandlerResult{AppCommandHandlerStatus::Success, report};
 }
 
+static AppCommandHandlerResult HandleDebugCommand(
+    void* user, const AppCommandUx*, StrView arguments) {
+  InteractiveRuntime* rt = (InteractiveRuntime*)user;
+  TuiDebugOverlayAction action;
+  if (!arguments.Length) {
+    action = TuiDebugOverlayAction::Toggle;
+  } else if (StrView_Eq(arguments, SVL("on"))) {
+    action = TuiDebugOverlayAction::Show;
+  } else if (StrView_Eq(arguments, SVL("off"))) {
+    action = TuiDebugOverlayAction::Hide;
+  } else {
+    return AppCommandHandlerResult{
+        AppCommandHandlerStatus::Failed,
+        AppCommand_Usage(AppCommandKind::Debug)};
+  }
+
+  bool enable = Tui_UpdateDebugOverlay(rt->TuiView, action);
+  return AppCommandHandlerResult{
+      AppCommandHandlerStatus::Success,
+      enable ? SVL("performance overlay on")
+             : SVL("performance overlay off")};
+}
+
 bool RuntimeResetSession(InteractiveRuntime* rt, const AppCommandUx* ux) {
   if (!rt->Harness || !rt->Sessions || rt->Harness->Running) {
     EmitCommandError(ux, SVL("Unable to clear the session while the agent is active."));
@@ -625,6 +648,7 @@ AppCommandHandlers RuntimeCommandHandlers(InteractiveRuntime* rt) {
   handlers.Fork = HandleForkCommand;
   handlers.Compact = HandleCompactCommand;
   handlers.Reload = HandleReloadCommand;
+  if (rt->TuiView) handlers.Debug = HandleDebugCommand;
   bool selectorsAvailable = rt->TuiView || Term_IsInteractive();
   if (selectorsAvailable) handlers.Trust = HandleTrustCommand;
   if (selectorsAvailable) {
@@ -633,7 +657,3 @@ AppCommandHandlers RuntimeCommandHandlers(InteractiveRuntime* rt) {
   }
   return handlers;
 }
-
-
-
-

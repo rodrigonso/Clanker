@@ -156,6 +156,7 @@ target_link_libraries(clank_ui PUBLIC clank_base clank_term)
 add_library(clank_tui STATIC
   src/tui/markdown.cpp
   src/tui/modal.cpp
+  src/tui/perf.cpp
   src/tui/selection.cpp
   src/tui/session.cpp
   src/tui/status.cpp

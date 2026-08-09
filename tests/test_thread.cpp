@@ -77,6 +77,30 @@ void TestAtomicFlag() {
   CHECK(Atomic_LoadI32(&waiter.Observed) == 1);
 }
 
+void TestMonotonicMicros() {
+  u64 previous = MonotonicMicros();
+  bool monotonic = true;
+  for (u32 i = 0; i < 2000; i++) {
+    u64 now = MonotonicMicros();
+    monotonic = now >= previous && monotonic;
+    previous = now;
+  }
+  CHECK(monotonic);
+
+  u64 start = MonotonicMicros();
+  Sleep_Ms(20);
+  u64 elapsed = MonotonicMicros() - start;
+  CHECK_ALL(elapsed >= 15000, elapsed < 5000000);
+
+  u64 msStart = MonotonicMillis();
+  u64 usStart = MonotonicMicros();
+  Sleep_Ms(30);
+  u64 msElapsed = MonotonicMillis() - msStart;
+  u64 usElapsed = (MonotonicMicros() - usStart) / 1000;
+  u64 skew = msElapsed > usElapsed ? msElapsed - usElapsed : usElapsed - msElapsed;
+  CHECK(skew <= 25);  // GetTickCount64 can advance on a ~16 ms tick.
+}
+
 }  // namespace
 
 void TestThread() {
@@ -118,4 +142,6 @@ void TestThread() {
   Thread_Join(&p);
   Cond_Destroy(&b.Cv);
   Mutex_Destroy(&b.M);
+
+  TestMonotonicMicros();
 }

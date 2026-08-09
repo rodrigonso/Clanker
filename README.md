@@ -396,6 +396,8 @@ Interactive commands:
   automatically; see Compaction above).
 - `/trust` — save project trust for a future Clank process.
 - `/reload` — transactionally reload settings and prompt context while idle.
+- `/debug [on|off]` — toggle the performance overlay described under
+  Debug overlay below. TUI only.
 - `/clear` — create a fresh session while preserving the provider, model,
   effort, and context selection.
 - `/exit` (or `/quit`) — close Clank and return to the shell.
@@ -430,6 +432,22 @@ mode may start without credentials and blocks prompts with `/login` guidance;
 `-p` remains fail-fast.
 
 Set `CLANK_PRINT_MEM=1` to print peak RSS at exit.
+
+### Debug overlay
+
+`/debug` toggles a performance panel in the top-right corner of the TUI;
+`/debug on` and `/debug off` set it explicitly. It reports the frame rate, the
+mean and worst frame interval over the last 64 frames, and — for the most recent
+turn — time to first token, wall time, token usage, end-to-end output tokens per
+second, and the last tool's duration. It also reports current process resident
+memory (RSS).
+
+The panel only paints. It never takes focus or receives input, and modals and
+the command flyout draw over it. Timing samples accumulate while the panel is
+hidden, so the window is already full when it is switched on. RSS is queried
+when the panel appears and at most once per second while it remains visible.
+The state is per-run and always starts off — nothing about it is written to
+`settings.json`.
 
 ## Authentication
 

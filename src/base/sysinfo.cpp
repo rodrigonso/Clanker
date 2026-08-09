@@ -32,8 +32,18 @@ u64 PeakRssBytes() {
   if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) return (u64)pmc.PeakWorkingSetSize;
   return 0;
 }
+
+u64 CurrentRssBytes() {
+  PROCESS_MEMORY_COUNTERS pmc = {};
+  if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc)))
+    return (u64)pmc.WorkingSetSize;
+  return 0;
+}
 #else
 #include <sys/resource.h>
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#endif
 
 u64 NowMillis() {
   struct timespec ts;
@@ -48,6 +58,30 @@ u64 PeakRssBytes() {
   return (u64)r.ru_maxrss;  // bytes on macOS
 #else
   return (u64)r.ru_maxrss * 1024;  // kilobytes on Linux
+#endif
+}
+
+u64 CurrentRssBytes() {
+#if defined(__APPLE__)
+  mach_task_basic_info_data_t info = {};
+  mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+  kern_return_t result =
+      task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info,
+                &count);
+  return result == KERN_SUCCESS ? (u64)info.resident_size : 0;
+#elif defined(__linux__)
+  FILE* file = fopen("/proc/self/statm", "rb");
+  if (!file) return 0;
+  unsigned long long residentPages = 0;
+  int fields = fscanf(file, "%*llu %llu", &residentPages);
+  fclose(file);
+  long pageSize = sysconf(_SC_PAGESIZE);
+  if (fields != 1 || pageSize <= 0) return 0;
+  u64 pageBytes = (u64)pageSize;
+  if ((u64)residentPages > ~0ull / pageBytes) return 0;
+  return (u64)residentPages * pageBytes;
+#else
+  return 0;
 #endif
 }
 #endif

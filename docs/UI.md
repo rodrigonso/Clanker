@@ -107,6 +107,29 @@ Custom components receive assigned geometry and a clipped, local-coordinate
 `Ui_GetMetrics` reports frame node count, hit-region count, and frame-arena
 bytes.
 
+The `/debug` slash command toggles a performance overlay: a bordered panel in
+the top-right corner, inset one column so it clears the transcript scrollbar. It
+reports frame rate, mean and worst frame interval over the last 64 frames, and
+the last turn's time-to-first-token, wall time, token usage, tool duration, and
+current process resident memory (RSS).
+
+Three properties are deliberate:
+
+- The panel is a leaf node with only a `Paint` op and no `UI_NODE_FOCUSABLE`
+  flag, so it cannot take focus, be hit-tested, or enter Tab traversal. No
+  input path needs to know it exists.
+- It is built after the status row but before the command palette and modal, so
+  those still paint over it.
+- Timing samples run whether or not the panel is visible, which is why the
+  window is already full the moment it is switched on. RSS is queried on reveal
+  and at most once per second while visible.
+
+The frame numbers describe the frame before the one being composed; RSS is
+sampled during compose. The metrics include the panel's own cost: one extra node
+and a fill 34 columns wide, so a frame reads slightly slower with the overlay on
+than with it off. The panel is suppressed entirely, rather than clipped, on a
+terminal too small to hold it, and no RSS query is made in that state.
+
 The `ui`, `ui_widgets`, and `ui_demo` test suites exercise the tree, layout,
 events, widgets, and a standalone screen that does not link application types.
 
@@ -115,4 +138,3 @@ events, widgets, and a standalone screen that does not link application types.
 The library is currently internal. Public ABI stability, external packaging,
 full CSS/Yoga behavior, React compatibility, and accessibility semantics are
 not provided.
-

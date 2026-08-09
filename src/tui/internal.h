@@ -34,8 +34,8 @@ void WakeInput(Tui* t);
 void Put(char* buf, u32 cap, u32* len, const char* s);
 void PutView(char* buf, u32 cap, u32* len, StrView s);
 u32 PutViewCells(char* buf, u32 cap, u32* len, StrView s, u32 maxCells);
-void PutNum(char* buf, u32 cap, u32* len, u32 v);
-void PutScaled(char* buf, u32 cap, u32* len, u32 v);
+void PutNum(char* buf, u32 cap, u32* len, u64 v);
+void PutScaled(char* buf, u32 cap, u32* len, u64 v);
 
 StrView Truncate(StrView s, u32 maxBytes);
 u32 Utf8Count(StrView s);
@@ -47,6 +47,10 @@ void FormatStatus(Tui* t, char* left, u32 leftCap, u32* ll, char* right,
 void BuildStatusComponents(Tui* t, u16 statusY, u16 cols);
 void BuildCwdComponent(Tui* t, u16 cwdY, u16 cols);
 UiLayoutStyle Positioned(u16 x, u16 y, u16 width, u16 height);
+
+// ---- debug overlay -------------------------------------------------------
+
+void BuildDebugOverlayComponent(Tui* t, u16 cols, u16 rows, u64 nowMs);
 
 // ---- copy notice ---------------------------------------------------------
 

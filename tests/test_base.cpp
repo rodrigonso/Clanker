@@ -99,6 +99,10 @@ void TestStr() {
 void TestHostInfo() {
   Arena a = ArenaCreate();
 
+  u64 currentRss = CurrentRssBytes();
+  u64 peakRss = PeakRssBytes();
+  CHECK_ALL(currentRss > 0, peakRss >= currentRss);
+
   // NowMillis must actually be millisecond-resolution wall clock. It used to be
   // time(nullptr)*1000, which only ever landed on exact multiples of 1000 and
   // made sub-second timestamps indistinguishable.

@@ -8,6 +8,9 @@
 // Peak resident set size (working set) of the current process, in bytes.
 u64 PeakRssBytes();
 
+// Current resident set size (working set) of the current process, in bytes.
+u64 CurrentRssBytes();
+
 // Current working directory of the process, copied into `a`, with any trailing
 // separator stripped. Empty if it cannot be determined.
 StrView Sys_CurrentDir(Arena* a);

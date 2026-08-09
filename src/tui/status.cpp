@@ -38,8 +38,8 @@ u32 PutViewCells(char* buf, u32 cap, u32* len, StrView s,
   }
   return cells;
 }
-void PutNum(char* buf, u32 cap, u32* len, u32 v) {
-  char tmp[16];
+void PutNum(char* buf, u32 cap, u32* len, u64 v) {
+  char tmp[20];
   u32 n = 0;
   if (v == 0) tmp[n++] = '0';
   while (v) {
@@ -49,26 +49,24 @@ void PutNum(char* buf, u32 cap, u32* len, u32 v) {
   while (n && *len < cap - 1) buf[(*len)++] = tmp[--n];
 }
 
-// Format a count using best-fit byte-style unit scaling (B/KiB/MiB/GiB,
-// 1024-based). Sub-unit values print one decimal place (e.g. "3.4KiB").
-void PutScaled(char* buf, u32 cap, u32* len, u32 v) {
-  const char* units[4] = {"B", "KiB", "MiB", "GiB"};
+// Format a count using best-fit binary units and one decimal place.
+void PutScaled(char* buf, u32 cap, u32* len, u64 v) {
+  const char* units[] = {"B", "KiB", "MiB", "GiB", "TiB"};
   u32 unit = 0;
-  u64 whole = v;
-  u64 scaled10 = whole * 10;  // one decimal digit while unit == 0 (bytes)
-  while (whole >= 1024 && unit < 3) {
-    scaled10 = (scaled10 + 512) / 1024;  // carry a rounded decimal digit through the shift
-    whole /= 1024;
+  u64 divisor = 1;
+  while (unit + 1 < sizeof(units) / sizeof(units[0]) &&
+         v / divisor >= 1024) {
+    divisor *= 1024;
     unit++;
   }
   if (unit == 0) {
-    PutNum(buf, cap, len, (u32)whole);
+    PutNum(buf, cap, len, v);
   } else {
-    u32 intPart = (u32)(scaled10 / 10);
-    u32 frac = (u32)(scaled10 % 10);
-    PutNum(buf, cap, len, intPart);
+    u64 scaled10 = (v / divisor) * 10;
+    scaled10 += ((v % divisor) * 10 + divisor / 2) / divisor;
+    PutNum(buf, cap, len, scaled10 / 10);
     Put(buf, cap, len, ".");
-    char d[2] = {(char)('0' + frac), 0};
+    char d[2] = {(char)('0' + scaled10 % 10), 0};
     Put(buf, cap, len, d);
   }
   Put(buf, cap, len, units[unit]);

@@ -131,6 +131,95 @@ bool ScreenRowContains(const Tui* t, u16 row, const char* needle) {
 
 u16 ScrollbarColumn(const Tui* t) { return (u16)(t->Scr.Cols - 1); }
 
+bool ScreenContains(const Tui* t, const char* needle) {
+  for (u16 y = 0; y < t->Scr.Rows; y++)
+    if (ScreenRowContains(t, y, needle)) return true;
+  return false;
+}
+
+void SeedPerf(Tui* t) {
+  TuiPerf* p = &t->Perf;
+  TuiPerf_FrameRendered(p, 1000000);
+  TuiPerf_FrameRendered(p, 1016000);
+  TuiPerf_FrameRendered(p, 1033000);
+  TuiPerf_FrameRendered(p, 1051000);
+  p->RssBytes = 5ull << 30;
+  p->LastRssSampleMs = 1000;
+  p->LastTtftUs = 612000;
+  p->LastTurnUs = 8400000;
+  p->LastTokens = {1500, 362, 900, 120};
+  TuiPerf_ToolStarted(p, SVL("grep"), 1000);
+  TuiPerf_ToolEnded(p, 215000);
+  p->DroppedEvents = 2;
+}
+
+void TestPerfSampling() {
+  TuiPerf p = {};
+  CHECK(p.Count == 0);
+
+  u64 nowUs = 1000000;
+  TuiPerf_FrameRendered(&p, nowUs);
+  CHECK(p.Count == 0);
+  nowUs += 20000;
+  TuiPerf_FrameRendered(&p, nowUs);
+  nowUs += 20000;
+  TuiPerf_FrameRendered(&p, nowUs);
+  CHECK_ALL(p.Count == 2, p.Window[0] == 20000, p.Window[1] == 20000);
+
+  nowUs += 900000;
+  TuiPerf_FrameRendered(&p, nowUs);
+  CHECK(p.Window[2] == 900000);
+  for (u32 i = 0; i < TUI_PERF_WINDOW; i++) {
+    nowUs += 16000;
+    TuiPerf_FrameRendered(&p, nowUs);
+  }
+  CHECK(p.Count == TUI_PERF_WINDOW);
+  bool recentOnly = true;
+  for (u32 i = 0; i < TUI_PERF_WINDOW; i++)
+    recentOnly = recentOnly && p.Window[i] == 16000;
+  CHECK(recentOnly);
+
+  TuiPerf turn = {};
+  TuiPerf_AssistantDelta(&turn, 5000);
+  CHECK(turn.LastTtftUs == 0);
+  TuiPerf_TurnStarted(&turn, 1000000);
+  TuiPerf_AssistantDelta(&turn, 1300000);
+  TuiPerf_AssistantDelta(&turn, 1900000);
+  CHECK(turn.LastTtftUs == 300000);
+  Usage use = {};
+  use.Output = 200;
+  TuiPerf_TurnMessageEnded(&turn, use, 3000000);
+  CHECK_ALL(turn.LastTurnUs == 2000000, turn.LastTokens.Output == 200,
+            turn.TurnStartUs == 0);
+  TuiPerf_TurnStarted(&turn, 4000000);
+  CHECK_ALL(turn.LastTtftUs == 0, turn.LastTurnUs == 0,
+            turn.LastTokens.Output == 0);
+  TuiPerf_AssistantDelta(&turn, 4000000);
+  CHECK(turn.LastTtftUs == 1);
+
+  TuiPerf tool = {};
+  char longName[TUI_PERF_TOOL_CAP + 32];
+  for (u32 i = 0; i < sizeof(longName); i++) longName[i] = 'x';
+  TuiPerf_ToolStarted(&tool, StrView{longName, (u32)sizeof(longName)}, 100);
+  CHECK_ALL(tool.LastToolLength == TUI_PERF_TOOL_CAP,
+            tool.LastTool[0] == 'x',
+            tool.LastTool[TUI_PERF_TOOL_CAP - 1] == 'x');
+  TuiPerf_ToolEnded(&tool, 700);
+  CHECK_ALL(tool.LastToolUs == 600, tool.ToolStartUs == 0);
+  TuiPerf_ToolEnded(&tool, 900);
+  CHECK(tool.LastToolUs == 600);
+
+  const u64 base = 1000000;
+  const u64 twoHours = base + 7200ull * 1000000ull;
+  TuiPerf long_ = {};
+  TuiPerf_ToolStarted(&long_, SVL("shell"), base);
+  TuiPerf_ToolEnded(&long_, twoHours);
+  CHECK(long_.LastToolUs == 0xffffffffu);
+  TuiPerf_TurnStarted(&long_, base);
+  TuiPerf_TurnMessageEnded(&long_, use, twoHours);
+  CHECK(long_.LastTurnUs == 0xffffffffu);
+}
+
 u32 ScrollMaxTop(const Tui* t) {
   u32 count = LineModel_Count(&t->Model);
   return count > t->LastPaneH ? count - t->LastPaneH : 0;
@@ -304,6 +393,7 @@ void TestSessionMemoryCompaction(Arena* outer) {
 void TestTui() {
   g_displayDrainsOk = true;
   Arena a = ArenaCreate();
+  TestPerfSampling();
   TestSessionMemoryCompaction(&a);
   TuiOpts o;
   o.ModelName = SVL("test-model");
@@ -383,6 +473,69 @@ void TestTui() {
     CHECK_ALL(spinnerTui.Spinner == 0, spinnerTui.SpinnerStartMs == 0);
     Tui_Stop(&spinnerTui);
     ArenaRelease(&spinnerArena);
+  }
+
+  {
+    Arena overlayArena = ArenaCreate();
+    Tui ot;
+    InitHeadlessTui(&ot, &overlayArena, false);
+    LineModel_AddNotice(&ot.Model, EntryKind::Info, SVL("fixture transcript"));
+    Feed(&ot, "hello");
+
+    CHECK(!ot.Perf.Visible);
+    Tui_ComposeFrame(&ot, 60, 24, 1000);
+    u64 hidden = FrameHash(&ot);
+    u32 nodesHidden = ot.Ui.Nodes.Count;
+    u32 regionsHidden = Ui_GetMetrics(&ot.Ui).HitRegionCount;
+    CHECK(!ScreenContains(&ot, "debug"));
+
+    CHECK(Tui_UpdateDebugOverlay(&ot, TuiDebugOverlayAction::Toggle));
+    SeedPerf(&ot);
+    Tui_ComposeFrame(&ot, 60, 24, 1000);
+    CHECK(FrameHash(&ot) == 12789957888453356553ull);
+
+    CHECK_ALL(ScreenContains(&ot, "debug"),
+              ScreenContains(&ot, "58.8"),     // 1e7 / 17000us, in tenths
+              ScreenContains(&ot, "17.0ms"),   // mean frame interval
+              ScreenContains(&ot, "18.0ms"),   // worst frame interval
+              ScreenContains(&ot, "5.0GiB"),
+              ScreenContains(&ot, "612.0ms"),  // time to first token
+              ScreenContains(&ot, "43.0"),     // 362 output tokens over 8.4s
+              ScreenContains(&ot, "grep"),
+              ScreenContains(&ot, "214.0ms"));
+
+    const UiNode* overlayNode = Ui_GetNode(&ot.Ui, nodesHidden);
+    CHECK_ALL(ot.Ui.Nodes.Count == nodesHidden + 1,
+              Ui_GetMetrics(&ot.Ui).HitRegionCount == regionsHidden,
+              overlayNode && !(overlayNode->Flags & UI_NODE_FOCUSABLE));
+
+    Tui_ComposeFrame(&ot, 60, 24, 1999);
+    CHECK_ALL(ot.Perf.RssBytes == (5ull << 30),
+              ot.Perf.LastRssSampleMs == 1000);
+    Tui_ComposeFrame(&ot, 60, 24, 2000);
+    CHECK_ALL(ot.Perf.RssBytes > 0, ot.Perf.LastRssSampleMs == 2000);
+
+    Tui_UpdateDebugOverlay(&ot, TuiDebugOverlayAction::Hide);
+    Tui_ComposeFrame(&ot, 60, 24, 4000);
+    CHECK_ALL(FrameHash(&ot) == hidden,
+              ot.Ui.Nodes.Count == nodesHidden,
+              ot.Perf.LastRssSampleMs == 2000);
+
+    Tui_UpdateDebugOverlay(&ot, TuiDebugOverlayAction::Show);
+    CHECK(ot.Perf.LastRssSampleMs == 0);
+    Tui_ComposeFrame(&ot, 30, 24, 4001);
+    CHECK_ALL(!ScreenContains(&ot, "debug"),
+              ot.Perf.LastRssSampleMs == 0);
+    Tui_ComposeFrame(&ot, 60, 10, 4001);
+    CHECK_ALL(!ScreenContains(&ot, "debug"),
+              ot.Perf.LastRssSampleMs == 0);
+    Tui_ComposeFrame(&ot, 4, 4, 4001);
+    CHECK(ot.Perf.LastRssSampleMs == 0);
+    Tui_ComposeFrame(&ot, 60, 24, 4001);
+    CHECK_ALL(ot.Perf.RssBytes > 0, ot.Perf.LastRssSampleMs == 4001);
+
+    Tui_Stop(&ot);
+    ArenaRelease(&overlayArena);
   }
 
   Message m = {};

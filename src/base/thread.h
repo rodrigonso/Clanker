@@ -62,6 +62,9 @@ i32 Atomic_LoadI32(const volatile i32* target);
 // Monotonic milliseconds for measuring short intervals.
 u64 MonotonicMillis();
 
+// Monotonic microseconds for high-resolution interval timing.
+u64 MonotonicMicros();
+
 // RAII-free scoped lock helper (no std). Use as: { ScopedLock _l(&m); ... }
 struct ScopedLock {
   Mutex* M;
