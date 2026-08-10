@@ -567,13 +567,15 @@ void TestTui() {
   ev.Stream.Kind = StreamEventKind::TextDelta;
   ev.Stream.Delta = SVL("Hello ");
   TuiBridge_HarnessEvent(&t, &ev);
+  // Text is paced across frames, so the first frame opens the entry with a
+  // prefix rather than the whole delta.
   CHECK(Tui_AdvanceStream(&t, 1000));
   CHECK_ALL(t.Model.Entries.Count == 1,
-            t.Model.Entries.Data[0].Text.Content.Length ==
-                sizeof("Hello ") - 1);
+            t.Model.Entries.Data[0].Text.Content.Length > 0,
+            t.Model.Entries.Data[0].Text.Content.Length < sizeof("Hello ") - 1);
   ev.Stream.Delta = SVL("**world**");
   TuiBridge_HarnessEvent(&t, &ev);
-  CHECK(Tui_AdvanceStream(&t, 1016));
+  DrainDisplay(&t, 1016);
   CHECK_ALL(t.Model.Entries.Data[0].Text.Content.Length ==
                 sizeof("Hello **world**") - 1,
             t.State == TuiState::Streaming);
@@ -1208,6 +1210,59 @@ void TestTui() {
 
     Tui_Stop(&tq);
     ArenaRelease(&aq);
+  }
+
+  // A tool card queued behind a long reveal is applied within the reveal
+  // deadline instead of waiting for the whole reply to animate out.
+  {
+    Arena ab = ArenaCreate();
+    TuiOpts ob;
+    ob.ModelName = SVL("m");
+    ob.Color = true;
+    Tui tb;
+    Tui_InitModel(&tb, &ab, ob);
+
+    const u32 kBodyLength = 16 * 1024;
+    char* body = (char*)ArenaAlloc(&ab, kBodyLength, 1);
+    for (u32 i = 0; i < kBodyLength; i++) body[i] = (char)('a' + (i % 26));
+    StrView bodyView{body, kBodyLength};
+
+    AgentHarnessEvent text = {};
+    text.Kind = AgentHarnessEventKind::TransientStream;
+    text.Stream.Kind = StreamEventKind::TextDelta;
+    text.Stream.Delta = bodyView;
+    TuiBridge_HarnessEvent(&tb, &text);
+    CHECK(Tui_AdvanceStream(&tb, 1000));
+    CHECK(tb.Model.Entries.Data[0].Text.Content.Length < bodyView.Length);
+
+    // The turn's completion and the tool call queue up behind the reveal.
+    Message pacedMessage = {};
+    pacedMessage.Kind = Role::Assistant;
+    pacedMessage.Stop = StopReason::ToolUse;
+    SessionRecord pacedRecord = {};
+    AgentHarnessEvent messageEnd = AssistantRecordEvent(&pacedRecord, &pacedMessage);
+    TuiBridge_HarnessEvent(&tb, &messageEnd);
+
+    AgentHarnessEvent start = {};
+    start.Kind = AgentHarnessEventKind::TransientToolStart;
+    start.Tool.CallId = SVL("paced");
+    start.Tool.Name = SVL("shell");
+    start.Tool.ArgumentsJson = SVL("{\"command\":\"ls\"}");
+    TuiBridge_HarnessEvent(&tb, &start);
+
+    // Step frames only as far as the deadline: the tool entry must have landed
+    // by then, with the assistant text complete rather than truncated.
+    u64 armed = 1016;
+    for (u64 now = armed; now <= armed + kRevealDeadlineMs; now += 16)
+      Tui_AdvanceStream(&tb, now);
+    CHECK_ALL(tb.Model.Entries.Count == 2,
+              tb.Model.Entries.Data[1].Kind == EntryKind::Tool,
+              tb.Model.Entries.Data[0].Text.Content.Length == bodyView.Length,
+              memcmp(tb.Model.Entries.Data[0].Text.Content.Data, bodyView.Data,
+                     bodyView.Length) == 0);
+
+    Tui_Stop(&tb);
+    ArenaRelease(&ab);
   }
 
   // Tool output entering the TUI remains sanitized and capped at 1,500 bytes.

@@ -370,6 +370,9 @@ bool PumpDisplay(Tui* t, u64 nowMs) {
         LineModel_BeginAssistant(&t->Model);
         t->State = TuiState::Streaming;
       }
+      // Anything queued behind the reveal (a tool card, message end, the next
+      // user turn) cannot be applied until the text drains, so bound that wait
+      // instead of letting it scale with the length of the reply.
       StrView next =
           StreamReveal_NextFrame(&t->Reveal, nowMs, HasQueuedDisplayEvents(t));
       if (next.Length) {

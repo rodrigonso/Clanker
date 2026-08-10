@@ -107,6 +107,79 @@ Custom components receive assigned geometry and a clipped, local-coordinate
 `LineModel::Rounded`, rebuilding retained transcript rows so existing bullets
 change in place.
 
+## Stream Reveal
+
+Providers deliver assistant text at wildly different cadences. Anthropic
+coalesces deltas into clumps of tens of characters every ~80-100 ms, so
+revealing each burst the instant it arrives makes the transcript stair-step,
+while OpenAI's token-level deltas already look smooth. `StreamReveal`
+(`src/tui/stream_reveal.{h,cpp}`) decouples *arrival* from *reveal* so both
+read the same way.
+
+`StreamReveal_Push` appends arriving bytes to a pending buffer.
+`StreamReveal_NextFrame` hands the compositor however much of that buffer the
+current frame has earned:
+
+```
+rate = min(BASE_SCALARS_PER_SECOND + backlogBytes * BACKLOG_GAIN_PER_BYTE,
+           MAX_SCALARS_PER_SECOND)
+```
+
+The proportional term is what makes this safe. Text arriving at R scalars per
+second settles at `(R - 180) / 3` bytes behind, so the backlog is bounded by
+the arrival rate rather than by the length of the reply: a 600 cps model runs
+about 140 bytes behind whether the message is 200 bytes or 200 KB. The gain
+term measures the backlog in bytes rather than decoded scalars to keep it
+O(1); multibyte text therefore overestimates the backlog, which only reveals
+faster.
+
+A single budget, carried between frames in milli-scalar fixed point, accrues at
+that rate and is capped at one full step's worth. The cap is what stops idle
+time from banking credit that would later burst, and it bounds any one frame at
+`MAX_STEP_MS x rate`. Elapsed time is likewise clamped to `MAX_STEP_MS`, so a
+stalled render thread cannot claim the whole gap.
+
+Note that *time* is clamped, not scalars per frame. A per-frame scalar cap
+silently becomes a hard ceiling of `cap x frame rate` that no amount of backlog
+can overcome, which is how an earlier pacing attempt (removed in `c95cd8e`)
+throttled long replies to 240 chars/sec. A frame here may emit up to
+`50 ms x 960 cps` at once. The frame always stops on a UTF-8 scalar boundary,
+so a budget edge never splits a character.
+
+(jcode runs a second budget pool at the flat `MAX_SCALARS_PER_SECOND` and emits
+the smaller of the two. With the cap expressed as `MAX_STEP_MS x rate` that pool
+is redundant: since `rate <= MAX_SCALARS_PER_SECOND`, the flat pool is provably
+never the smaller one, so it was dropped rather than carried as dead state.)
+
+`StreamReveal_NextFrame` takes a `blocked` flag that `PumpDisplay` sets whenever
+anything is queued behind the reveal — a tool card, message end, the next user
+turn — because those events cannot be applied until the text drains. Blocking
+arms a completion deadline: everything pending is revealed no later than
+`kRevealDeadlineMs` (120 ms) out, and once that passes a frame drains
+unconditionally. This bounds the wait on any boundary at a constant instead of
+letting it scale with reply length, while still animating short replies rather
+than popping them. Arming is idempotent, so staying blocked cannot push the tail
+out and neither can a late delta. The same flag lets malformed trailing bytes
+through, since nothing more is coming to complete them.
+
+Deadline arming lives inside `NextFrame` rather than in a separate `Finish` call
+precisely because both are driven by the same condition; splitting them would
+let a caller get one without the other.
+
+Pacing is display-only and never gates the agent thread.
+`Tui_AppendAssistantText` takes the lock, queues, wakes the render thread and
+returns; it never waits on the reveal. Time-to-first-token, turn wall time and
+tool-start timestamps are all stamped at arrival, so none of them observes the
+animation. The controller itself costs ~0.02 us per frame.
+
+The real cost of pacing is that it raises the transcript append count, and
+`LineModel_AppendAssistant` re-renders the whole assistant entry on every
+append — roughly 70 us at 2 KB, 240 us at 8 KB and 1 ms at 32 KB. This is not
+new work: at one append per frame the count matches what token-level providers
+already produced before pacing existed. It is the one place where cost scales
+with both message length and frame rate, so it is the first thing to measure if
+streaming ever feels heavy.
+
 ## Diagnostics
 
 `Ui_GetMetrics` reports frame node count, hit-region count, and frame-arena
