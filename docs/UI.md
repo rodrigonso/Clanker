@@ -180,6 +180,81 @@ already produced before pacing existed. It is the one place where cost scales
 with both message length and frame rate, so it is the first thing to measure if
 streaming ever feels heavy.
 
+## Markdown
+
+`Markdown_Render` (`src/tui/markdown.{h,cpp}`) turns an assistant message into
+logical span-lines for the transcript. It is modelled on pi's
+`packages/tui/src/components/markdown.ts`, which lexes with `marked` and
+hand-writes the walk to ANSI; Clank keeps the same visual vocabulary but scans
+lines directly instead of materialising a token tree. That choice is a
+consequence of streaming: `LineModel_AppendAssistant` re-renders the entire
+entry on every delta, so allocation has to stay proportional to output rather
+than to a parse forest. Only blockquotes, list items and table cells recurse.
+
+Supported: ATX and setext headings, fenced (``` and `~~~`) and indented code,
+bullet/ordered/task lists with nesting, blockquotes, horizontal rules, GFM
+tables, HTML passthrough, and paragraphs; inline, the CommonMark set of
+backslash escapes, code spans, emphasis, strikethrough, links, images and
+autolinks.
+
+Visual rules follow pi rather than a generic renderer: h1 is bold and
+underlined with no `#`, h2 is bold with no `#`, h3-h6 keep a styled `### `
+prefix; every bullet normalises to `- `; a code fence prints as three
+backticks plus the info string with the body indented two columns; a rule is
+`─` repeated `min(width, 80)`. A nested list sits on an absolute four-column
+grid, so a child's marker starts at column 4 regardless of how wide the
+parent's marker was.
+
+A soft line break stays a line break. pi's `applyTextWithNewlines` splits on
+`\n` and rejoins on `\n`, so a single newline inside a paragraph is preserved,
+and Clank matches that: agent replies use single newlines deliberately, and
+joining them would reflow text the model laid out. The inline pass still runs
+over the whole paragraph before the spans are cut, so emphasis may span a
+break.
+
+Colours come from a named `MarkdownPalette` rather than literals at use sites.
+`Style` carries a 256-colour palette index, so the entries are the nearest
+xterm cube/ramp approximations of pi's dark theme. `Link` deliberately takes
+110 rather than its true nearest 109, because `mdCode` also rounds to 109 and
+links would otherwise be indistinguishable from inline code.
+
+Two properties are load-bearing:
+
+- **Width is a parameter, never module state.** Rules and tables are sized
+  against it, and `LineModel_FitsAtWidth` re-renders at a trial width. Width
+  changes therefore reflow tables through the existing `LineModel_SetWidth` ->
+  `RebuildAll` path for free.
+- **Rows own their wrap prefix.** Each row carries its own list marker
+  indent, quote bar or code indent in `SpanLine::Continuation`, and
+  `BuildAssistant` *concatenates* the assistant icon indent onto it instead of
+  overwriting it. Without this a wrapped list item snaps back to the margin and
+  a wrapped quote loses its bar. `Continuation` stays a single `Span` only
+  because the markdown palette sets no background colour, which makes the
+  leading indent invisible and lets `indent + "│ "` be one quote-styled span;
+  adding a background would break that.
+
+Streaming needs no incremental parser, matching pi. The one concession is
+`TrimPartialClosingFence`, a port of pi's `trimPartialClosingFences`: while a
+closing fence is being typed, a trailing line of one or two backticks is
+dropped so the block does not visibly shrink and regrow. Blank rows are emitted
+between blocks but never before the first or after the last, so a reply does
+not jump as a trailing blank appears and disappears.
+
+Deliberate divergences from pi:
+
+- **No OSC 8 hyperlinks.** `Screen` stores one scalar per cell and re-emits it
+  verbatim, so an escape sequence cannot live in the grid. Links always use
+  pi's non-hyperlink fallback, `text` styled plus ` (url)` dim.
+- **No syntax highlighting**, which is also pi's behaviour for an unknown
+  language tag, and **no LaTeX**.
+- **No GFM column alignment** (`:---`), which pi does not implement either.
+- A list marker wider than four columns (`- [x] `, `100. `) keeps its nested
+  list under the parent's content rather than pulling it back to the grid,
+  which would place the child to the left of the text it belongs to.
+
+Rendering reaches assistant entries only. User echo, info, error and tool rows
+stay plain text.
+
 ## Diagnostics
 
 `Ui_GetMetrics` reports frame node count, hit-region count, and frame-arena

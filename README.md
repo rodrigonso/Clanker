@@ -491,8 +491,9 @@ the whole story.
 
 Running interactively on a real terminal launches a full-screen TUI: an
 alternate-screen, double-buffered **differential renderer** (own cell grid +
-scrollback), markdown-rendered assistant output, a **sticky working-directory +
-git-branch line** just above the prompt, a minimal status line along the bottom
+scrollback), markdown-rendered assistant output (headings, lists, tables,
+blockquotes, code blocks), a **sticky working-directory + git-branch line**
+just above the prompt, a minimal status line along the bottom
 (spinner and state on the left; model, supported effort/context, and token
 usage right-aligned), and a **multi-line input editor**. The first frame is
 painted synchronously before

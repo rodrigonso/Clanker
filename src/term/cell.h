@@ -12,6 +12,7 @@ enum : u8 {
   ATTR_ITALIC = 1 << 2,
   ATTR_UNDERLINE = 1 << 3,
   ATTR_REVERSE = 1 << 4,
+  ATTR_STRIKE = 1 << 5,
 };
 
 // 256-colour palette index, or COL_DEFAULT (0) for the terminal default. Index 0

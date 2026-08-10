@@ -21,6 +21,7 @@ void EmitSgr(StrBuf* b, Style st) {
   if (st.Attr & ATTR_ITALIC) StrBuf_AppendCStr(b, ";3");
   if (st.Attr & ATTR_UNDERLINE) StrBuf_AppendCStr(b, ";4");
   if (st.Attr & ATTR_REVERSE) StrBuf_AppendCStr(b, ";7");
+  if (st.Attr & ATTR_STRIKE) StrBuf_AppendCStr(b, ";9");
   if (st.Fg != COL_DEFAULT) {
     StrBuf_AppendCStr(b, ";38;5;");
     EmitUint(b, st.Fg);

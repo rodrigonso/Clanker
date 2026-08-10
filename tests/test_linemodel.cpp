@@ -298,6 +298,54 @@ void TestLineModel() {
     LineModel_Release(&reflow);
   }
 
+  // Markdown blocks own their wrap prefix, and the assistant icon indent is
+  // concatenated onto it rather than replacing it. Without this a wrapped list
+  // item would snap back to the margin and a wrapped quote would lose its bar.
+  {
+    LineModel wrapped;
+    LineModel_Init(&wrapped, &a, 20, 5000);
+    LineModel_BeginAssistant(&wrapped);
+    LineModel_AppendAssistant(&wrapped, SVL("- alpha beta gamma delta"));
+    LineModel_EndAssistant(&wrapped);
+
+    const SpanLine* first = LineModel_At(&wrapped, 0);
+    const SpanLine* cont = FindRow(&a, &wrapped, "delta");
+    CHECK(cont != nullptr && cont != first);
+    // 4 columns of icon indent, then the 2-column list marker width.
+    CHECK_ALL(AllRowsFit(&wrapped, 20), RowStartsWith(&a, first, " \xe2\x97\x8f  - "),
+              RowStartsWith(&a, cont, "      "));
+    LineModel_Release(&wrapped);
+  }
+
+  {
+    LineModel quoted;
+    LineModel_Init(&quoted, &a, 20, 5000);
+    LineModel_BeginAssistant(&quoted);
+    LineModel_AppendAssistant(&quoted, SVL("> alpha beta gamma delta"));
+    LineModel_EndAssistant(&quoted);
+
+    const SpanLine* cont = FindRow(&a, &quoted, "delta");
+    CHECK(cont != nullptr);
+    CHECK_ALL(AllRowsFit(&quoted, 20), RowStartsWith(&a, cont, "    \xe2\x94\x82 "));
+    LineModel_Release(&quoted);
+  }
+
+  // A width change re-renders width-dependent blocks: the rule tracks the
+  // content width, and the table reflows instead of overflowing.
+  {
+    LineModel reflowMd;
+    LineModel_Init(&reflowMd, &a, 30, 5000);
+    LineModel_BeginAssistant(&reflowMd);
+    LineModel_AppendAssistant(&reflowMd, SVL("---\n\n| a | b |\n|---|---|\n| 1 | 2 |"));
+    LineModel_EndAssistant(&reflowMd);
+    CHECK(AllRowsFit(&reflowMd, 30));
+    LineModel_SetWidth(&reflowMd, 16);
+    CHECK(AllRowsFit(&reflowMd, 16));
+    LineModel_SetWidth(&reflowMd, 60);
+    CHECK(AllRowsFit(&reflowMd, 60));
+    LineModel_Release(&reflowMd);
+  }
+
   {
     LineModel collapse;
     LineModel_Init(&collapse, &a, 40, 5000);

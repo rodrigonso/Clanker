@@ -217,9 +217,12 @@ void BuildAssistant(LineModel* m, const Entry* entry) {
   if (text.Length == 0) return;
   StrView marker = FilledMarker(m);
   StrView indent = IconIndent(&m->RowsMem, marker, MARKER_LEFT_PADDING);
+  u32 indentWidth = LineTextWidth(indent);
 
   Array<SpanLine> logical = Array_Make<SpanLine>(&m->RowsMem, 8);
-  Markdown_Render(&m->RowsMem, text, &logical, m->Color);
+  u16 contentWidth = m->Width > indentWidth ? (u16)(m->Width - indentWidth) : (u16)1;
+  Markdown_Render(&m->RowsMem, text, &logical,
+                  MarkdownOpts_Make(contentWidth, m->Color));
   for (u32 i = 0; i < logical.Count; i++) {
     SpanLine prefixed;
     InitRow(&m->RowsMem, &prefixed, logical.Data[i].Spans.Count + 2);
@@ -231,7 +234,18 @@ void BuildAssistant(LineModel* m, const Entry* entry) {
     }
     for (u32 j = 0; j < logical.Data[i].Spans.Count; j++)
       Array_Push(&prefixed.Spans, logical.Data[i].Spans.Data[j]);
+    // Markdown owns the inner continuation (list marker width, quote bar, code
+    // indent); the icon indent goes in front of it rather than replacing it.
+    // One Span still suffices because the markdown palette sets no background:
+    // the leading blanks have no visible colour of their own.
     prefixed.Continuation = Span{indent, StyleDefault(), true};
+    const SpanLine& row = logical.Data[i];
+    if (row.HasContinuation && row.Continuation.Text.Length) {
+      StrBuf joined = StrBuf_Make(&m->RowsMem, indent.Length + row.Continuation.Text.Length + 1);
+      StrBuf_Append(&joined, indent);
+      StrBuf_Append(&joined, row.Continuation.Text);
+      prefixed.Continuation = Span{StrBuf_View(&joined), row.Continuation.St, true};
+    }
     prefixed.HasContinuation = true;
     WrapAndAppend(m, &prefixed);
   }
