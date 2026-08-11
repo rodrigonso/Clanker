@@ -13,6 +13,15 @@ python3 -m agentbench demo        # side by side in tmux
 
 Linux only (PSS has no Windows analogue); on Windows, run it under WSL.
 
+[`qualitybench/`](qualitybench/) — compares them on **task success** instead, by
+exposing Clank as an agent to the Pier and Harbor harnesses so it can be run
+against DeepSWE v1.1 with the model held fixed.
+
+```bash
+cd benchmarks/qualitybench
+python3 test_clank_agent.py       # adapter checks, no harness needed
+```
+
 For Clank's own in-process numbers — agent-loop latency and peak RSS on a
 scripted workload, with no second runtime involved — use `clank_tests
 --benchmark` from the repository root.

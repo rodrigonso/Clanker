@@ -10,3 +10,4 @@ out/
 compile_commands.json
 __pycache__/
 *.pyc
+benchmarks/qualitybench/jobs/

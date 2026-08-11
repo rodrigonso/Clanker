@@ -137,15 +137,31 @@ Two honest notes on the jcode figures specifically. In a throwaway `JCODE_HOME`
 its client shows a first-run notice instead of the usual screen; seeding the
 profile's first-run markers so it opens normally moves idle PSS by under 2 MB,
 inside run-to-run spread, so the notice is left alone and the home kept clean.
-And jcode's README publishes 27.8 MB / 167.1 MB for the two configurations
-against the 98.4 MB / 202.1 MB measured here on v0.71.1 — a gap far larger than
-the one seen for the other tools, and one this harness cannot explain, since
-raising the settle to six seconds does not move it and the daemon plus client
-account for the total between them. Treat jcode's absolute figures as the least
-settled in the table and its published ones as measured on a different version.
+And jcode publishes 27.8 MB / 167.1 MB for the two configurations against the
+98.4 MB / 202.1 MB measured here on v0.71.1. That gap is confined to the first
+session: raising the settle to six seconds does not move it, and the daemon plus
+client account for the total between them, so it is a difference in the baseline
+each side starts from rather than in the slope.
 
-For the rest, upstream's table reports pi at 144.4 MB for one session against
-161.0 MB here, Claude Code at 386.6 MB against 296.4 MB, and opencode at
+The slope is the part that can be checked against jcode directly, because the
+figure [jcode.sh](https://jcode.sh) headlines is marginal PSS per *added*
+session rather than an absolute total — the same column as this table's last
+one:
+
+| tool | jcode publishes | measured here |
+|---|---:|---:|
+| jcode | ~10.4 MB | ~6.4 MB |
+| jcode (local embedding off) | ~9.9 MB | ~6.4 MB |
+| pi | ~76.5 MB | ~81.0 MB |
+| Claude Code | ~212.7 MB | ~156.1 MB |
+
+pi lands within 6% of the published number and the ordering matches throughout,
+which is the agreement worth having: two independent harnesses on different
+machines and different versions costing the same architectures the same way.
+Compare the absolute columns only with that caveat attached.
+
+For the rest, upstream's absolute table reports pi at 144.4 MB for one session
+against 161.0 MB here, Claude Code at 386.6 MB against 296.4 MB, and opencode at
 371.5 MB against 867.1 MB — the same ordering on a different machine and
 different versions, though opencode diverges most, so treat its absolute figure
 with the same caution.
