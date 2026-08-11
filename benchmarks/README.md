@@ -1,8 +1,8 @@
 # Benchmarks
 
 [`agentbench/`](agentbench/) — compares coding-agent CLIs on **memory**: Clank
-against pi, Claude Code and opencode. It launches each tool's real interactive
-TUI and measures process-tree PSS at an idle prompt.
+against jcode, pi, Claude Code and opencode. It launches each tool's real
+interactive TUI and measures process-tree PSS at an idle prompt.
 
 ```bash
 cd benchmarks

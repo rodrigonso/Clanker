@@ -8,8 +8,27 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from . import proc
 from .measure import tool_version
 from .tools import registry
+
+
+def _jcode_servers(binary: str) -> list[int]:
+    """Servers already running for this user.
+
+    A leftover jcode server is the likeliest source of a bad number: it holds
+    the shared socket, so the next measurement either attaches to it or fights
+    it for the path.
+    """
+    real = os.path.realpath(binary)
+    found = []
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        if proc.read_exe(pid) == real and "serve" in proc.read_cmdline(pid).split():
+            found.append(pid)
+    return found
 
 
 def main(args) -> int:
@@ -33,17 +52,32 @@ def main(args) -> int:
             problems += 1
 
     print("\n=== tools ===")
+    seen: dict[str, str] = {}
     for name, tool in registry().items():
         if not tool.available():
-            print(f"  {name:<10} MISSING at {tool.binary}")
+            print(f"  {name:<16} MISSING at {tool.binary}")
             problems += 1
             continue
         real = tool.real_binary
-        size_mb = os.path.getsize(real) / (1024 * 1024)
-        print(f"  {name:<10} {tool_version(tool)}")
-        print(f"  {'':<10} {real} ({size_mb:.1f} MB)")
+        if real in seen:
+            # Two variants of one tool: report it once, not twice.
+            print(f"  {name:<16} same image as {seen[real]}")
+        else:
+            seen[real] = name
+            size_mb = os.path.getsize(real) / (1024 * 1024)
+            print(f"  {name:<16} {tool_version(tool)}")
+            print(f"  {'':<16} {real} ({size_mb:.1f} MB)")
         if tool.note:
-            print(f"  {'':<10} note: {tool.note}")
+            print(f"  {'':<16} note: {tool.note}")
+
+    jcode = registry().get("jcode")
+    if jcode and jcode.available():
+        stale = _jcode_servers(jcode.binary)
+        if stale:
+            print(f"\n  !! jcode server already running (pid {', '.join(map(str, stale))}).")
+            print("     Each measurement starts its own on a private socket, but a "
+                  "server\n     left from a real session can still skew a live "
+                  "`watch`. Stop it first.")
 
     print("\n=== memory ===")
     try:
@@ -58,6 +92,8 @@ def main(args) -> int:
         print("\nBuild clank for Linux with:")
         print("  cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release")
         print("  cmake --build build-linux --target clank")
+        print("Install jcode with:")
+        print("  curl -fsSL https://jcode.sh/install | bash")
         print("Install the others with:")
         print("  npm install -g @earendil-works/pi-coding-agent "
               "@anthropic-ai/claude-code opencode-ai")

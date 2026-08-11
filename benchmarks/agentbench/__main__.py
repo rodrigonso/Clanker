@@ -12,7 +12,7 @@ import argparse
 import sys
 
 from . import demo, doctor, measure, watch
-from .tools import DEFAULT_TOOLS, resolve
+from .tools import DEFAULT_TOOLS, LIVE_TOOLS, resolve
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -24,8 +24,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    def add_tools(p):
-        p.add_argument("--tools", nargs="*", default=None, metavar="NAME",
+    def add_tools(p, default=None):
+        p.add_argument("--tools", nargs="*", default=default, metavar="NAME",
                        help="tools to include (default: all)")
 
     m = sub.add_parser("measure", help="run the benchmark and report PSS")
@@ -44,13 +44,13 @@ def build_parser() -> argparse.ArgumentParser:
     m.set_defaults(func=measure.main)
 
     d = sub.add_parser("demo", help="side-by-side tmux panes with a live readout")
-    add_tools(d)
+    add_tools(d, default=LIVE_TOOLS)
     d.add_argument("--detached", action="store_true",
                    help="build the session but do not attach")
     d.set_defaults(func=demo.main)
 
     w = sub.add_parser("watch", help="live PSS readout for running agents")
-    add_tools(w)
+    add_tools(w, default=LIVE_TOOLS)
     w.add_argument("--interval", type=float, default=1.0)
     w.set_defaults(func=watch.main)
 

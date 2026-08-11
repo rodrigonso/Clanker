@@ -17,6 +17,7 @@ def main(args) -> int:
     tools = args.tools
     colour = {t.name: PALETTE[i % len(PALETTE)] for i, t in enumerate(tools)}
     peak = {t.name: 0.0 for t in tools}
+    width = max(len(t.name) for t in tools)
 
     try:
         while True:
@@ -32,13 +33,13 @@ def main(args) -> int:
             for tool in tools:
                 mb, count = stats[tool.name]
                 if not count:
-                    out.append(f"  {tool.name:<9} {'--':>9}    (not running)\n")
+                    out.append(f"  {tool.name:<{width}} {'--':>9}    (not running)\n")
                     continue
-                width = int(BAR_WIDTH * mb / scale) if scale else 0
+                bar = int(BAR_WIDTH * mb / scale) if scale else 0
                 rel = f"{mb / base:.0f}x" if base and mb > base else ""
                 out.append(
-                    f"  {colour[tool.name]}{tool.name:<9}{RESET} {mb:>7.1f} MB  "
-                    f"{colour[tool.name]}{'█' * width}{RESET}{' ' * (BAR_WIDTH - width)} "
+                    f"  {colour[tool.name]}{tool.name:<{width}}{RESET} {mb:>7.1f} MB  "
+                    f"{colour[tool.name]}{'█' * bar}{RESET}{' ' * (BAR_WIDTH - bar)} "
                     f"{count} proc  peak {peak[tool.name]:.1f}  {rel}\n"
                 )
             out.append("\n  Ctrl-b d detaches   Ctrl-b & kills the demo\n")

@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import os
 import signal
+import socket
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from .tools import Tool
+if TYPE_CHECKING:  # importing Tool at runtime would be circular: tools.py
+    from .tools import Tool  # needs terminate_group and wait_for_socket.
 
 
 def pss_kb(pid: int) -> int:
@@ -110,7 +113,42 @@ def read_cmdline(pid: int) -> str:
         return ""
 
 
-def scan(tools: list[Tool], exclude_pid: int | None = None) -> dict[str, tuple[float, int]]:
+def read_environ(pid: int) -> set[str]:
+    """Environment of a running process, as `K=V` entries.
+
+    Two tools can be the same binary and differ only in how they were
+    configured, which neither the exe path nor the cmdline reveals.
+    """
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            raw = f.read().decode("utf-8", "replace")
+    except OSError:
+        return set()
+    return {entry for entry in raw.split("\0") if entry}
+
+
+def wait_for_socket(path: str, timeout_s: float) -> bool:
+    """Wait until a Unix socket is accepting connections.
+
+    Existence is not readiness: the server binds the path before it listens, so
+    a launcher that only waits for the file races the first client.
+    """
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if os.path.exists(path):
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                sock.connect(path)
+                return True
+            except OSError:
+                pass
+            finally:
+                sock.close()
+        time.sleep(0.05)
+    return False
+
+
+def scan(tools: list["Tool"], exclude_pid: int | None = None) -> dict[str, tuple[float, int]]:
     """Attribute every running process to a tool. Returns name -> (MB, count).
 
     Matching is on the resolved binary rather than a name substring, so the
@@ -132,7 +170,7 @@ def scan(tools: list[Tool], exclude_pid: int | None = None) -> dict[str, tuple[f
             continue
         cmd = read_cmdline(pid)
         for tool in tools:
-            if tool.matches(exe, cmd, reals[tool.name]):
+            if tool.matches(pid, exe, cmd, reals[tool.name]):
                 totals[tool.name] += pss_kb(pid) / 1024.0
                 counts[tool.name] += 1
                 break

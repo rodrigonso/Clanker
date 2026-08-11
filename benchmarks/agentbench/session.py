@@ -9,11 +9,14 @@ before anything is sampled.
 
 from __future__ import annotations
 
+import fcntl
 import os
 import pty
 import re
 import select
+import struct
 import subprocess
+import termios
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +27,12 @@ ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x1b\x07]*(?:\x0
 # not a word: it has to be recognisable in a screen dump full of box drawing.
 PROBE = "jqx92"
 PROBE_INTERVAL_S = 2.0
+
+# The pty's window size. Set on the slave via TIOCSWINSZ *and* reported in the
+# reply to CSI 18 t, because TUIs disagree about which to trust: most ask, but
+# an ioctl-based one reads a bare pty as 0x0 and draws nothing at all. The two
+# have to agree or a TUI that consults both lays out against the wrong size.
+ROWS, COLS = 24, 80
 
 # CSI/OSC queries with fixed replies. Values are what a modest xterm answers.
 _QUERIES = [
@@ -36,7 +45,7 @@ _QUERIES = [
     (b"\x1b]4;0;?\x07", b"\x1b]4;0;rgb:0000/0000/0000\x07"),        # palette
     (b"\x1b[14t", b"\x1b[4;600;800t"),                             # window px
     (b"\x1b[16t", b"\x1b[6;16;8t"),                                # cell px
-    (b"\x1b[18t", b"\x1b[8;24;80t"),                               # window chars
+    (b"\x1b[18t", f"\x1b[8;{ROWS};{COLS}t".encode()),              # window chars
     (b"\x1b[?1016$p", b"\x1b[?1016;1$y"),                          # SGR pixel mouse
     (b"\x1b[?2027$p", b"\x1b[?2027;1$y"),                          # grapheme clusters
     (b"\x1b[?2031$p", b"\x1b[?2031;1$y"),                          # colour scheme
@@ -111,6 +120,7 @@ def launch(argv: list[str], cwd: Path, env: dict[str, str],
     startup -- so the probe is re-sent on an interval rather than once.
     """
     master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
     proc = subprocess.Popen(
         argv, cwd=str(cwd), env=env,
         stdin=slave, stdout=slave, stderr=slave,

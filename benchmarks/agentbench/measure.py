@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from . import proc, session
-from .tools import Tool
+from .tools import SetupContext, Tool
 
 
 @dataclass
@@ -46,6 +46,8 @@ def run_once(tool: Tool, sessions: int, cwd: Path,
     version = tool_version(tool)
     launched: list[session.Session] = []
     pgids: list[int] = []
+    daemon_pids: list[int] = []
+    daemon_pgids: list[int] = []
 
     # Every tool gets a throwaway HOME, so none is charged for whatever
     # sessions and configuration happen to be in the real profile.
@@ -59,8 +61,22 @@ def run_once(tool: Tool, sessions: int, cwd: Path,
         if tool.prepare:
             tool.prepare(home, cwd)
 
+        argv = tool.argv
+        settle = settle_s
+        if tool.setup:
+            plan = tool.setup(SetupContext(
+                root=Path(root), home=Path(home), cwd=cwd, env=env,
+                timeout_s=timeout_s, settle_s=settle_s,
+            ))
+            argv = plan.argv
+            daemon_pids = plan.extra_pids
+            daemon_pgids = plan.extra_pgids
+            if plan.settle_s is not None:
+                settle = max(settle_s, plan.settle_s)
+                notes.append(f"settle raised to {settle:.1f}s for this tool")
+
         for _ in range(sessions):
-            s = session.launch(tool.argv, cwd, env, timeout_s, settle_s)
+            s = session.launch(argv, cwd, env, timeout_s, settle)
             launched.append(s)
             pgids.append(s.pgid)
 
@@ -70,7 +86,14 @@ def run_once(tool: Tool, sessions: int, cwd: Path,
             elif s.excerpt:
                 notes.append(f"session {i}: {s.excerpt}")
 
-        pss_mb, count = proc.tree_pss_mb([s.pid for s in launched], pgids)
+        pss_mb, count = proc.tree_pss_mb([s.pid for s in launched] + daemon_pids,
+                                         pgids + daemon_pgids)
+        # The failure this guards against is silent: a daemon that detaches
+        # itself out of both the tree and the process group is simply not
+        # charged, and the tool reports a number that is too good.
+        expected = len(launched) + len(daemon_pids)
+        if count < expected:
+            notes.append(f"counted {count} processes, expected at least {expected}")
         seen = [s.seconds_to_visible for s in launched if s.seconds_to_visible is not None]
 
         return Run(
@@ -90,7 +113,10 @@ def run_once(tool: Tool, sessions: int, cwd: Path,
                 os.close(s.fd)
             except OSError:
                 pass
+        # Clients first, then the daemon they were talking to.
         for pgid in reversed(pgids):
+            proc.terminate_group(pgid)
+        for pgid in reversed(daemon_pgids):
             proc.terminate_group(pgid)
         shutil.rmtree(root, ignore_errors=True)
 
@@ -102,7 +128,7 @@ def summarise(runs: list[Run], sessions: int) -> None:
 
     print(f"\n=== median PSS across repeats, {sessions} "
           f"session{'s' if sessions != 1 else ''} ===")
-    print(f"{'tool':<12} {'PSS MB':>9} {'ready':>7} {'procs':>6} {'to visible':>11}   all runs")
+    print(f"{'tool':<16} {'PSS MB':>9} {'ready':>7} {'procs':>6} {'to visible':>11}   all runs")
     for name, group in by_tool.items():
         values = sorted(r.pss_mb for r in group)
         median = values[len(values) // 2]
@@ -113,7 +139,7 @@ def summarise(runs: list[Run], sessions: int) -> None:
                    if r.median_seconds_to_visible is not None]
         vis = f"{statistics.median(visible):.2f}s" if visible else "-"
         runs_txt = ", ".join(f"{v:.1f}" for v in values)
-        print(f"{name:<12} {median:>9.1f} {ready:>3}/{want:<3} {procs:>6} {vis:>11}   {runs_txt}")
+        print(f"{name:<16} {median:>9.1f} {ready:>3}/{want:<3} {procs:>6} {vis:>11}   {runs_txt}")
     if any(r.input_ready_sessions < r.sessions for r in runs):
         print("\n  'ready' counts sessions that echoed the probe. Below full means a\n"
               "  tool was still starting when sampled; raise --timeout or --settle.")
@@ -125,7 +151,7 @@ def main(args) -> int:
     if unavailable:
         for t in unavailable:
             print(f"!! {t.name} not found at {t.binary}")
-        print("\nSet CLANK_BIN / PI_BIN / CLAUDE_BIN / OPENCODE_BIN, or run "
+        print("\nSet CLANK_BIN / JCODE_BIN / PI_BIN / CLAUDE_BIN / OPENCODE_BIN, or run "
               "`agentbench doctor`.")
         return 1
 
@@ -139,10 +165,20 @@ def main(args) -> int:
             if args.repeat > 1:
                 label += f" run {attempt + 1}/{args.repeat}"
             print(f"=== {label} ===", flush=True)
-            run = run_once(tool, args.sessions, cwd, args.timeout, args.settle)
+            try:
+                run = run_once(tool, args.sessions, cwd, args.timeout, args.settle)
+            except RuntimeError as err:
+                # A tool whose daemon never came up has no number worth
+                # reporting, but the rest of the table is still good.
+                print(f"    !! {err}\n    skipping {tool.name}", flush=True)
+                break
             print(f"    {run.pss_mb:.1f} MB   {run.process_count} proc   "
                   f"ready {run.input_ready_sessions}/{run.sessions}", flush=True)
             runs.append(run)
+
+    if not runs:
+        print("\nno tool produced a measurement")
+        return 1
 
     summarise(runs, args.sessions)
 
