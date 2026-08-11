@@ -30,9 +30,52 @@ struct HookSessionInfo {
   StrView SessionId;
   StrView WorkingDirectory;
   StrView TranscriptPath;
+  // Whether a user is present to answer. Clank's answer to pi's `ctx.hasUI`,
+  // which its own permission-gate example uses to fail closed when headless.
+  bool Interactive;
+};
+
+// Tool-scoped payload fields, meaningful only for the tool events. A
+// zero-initialized value renders none of them, which is what every other event
+// passes.
+struct HookToolInfo {
+  StrView Name;
+  StrView CallId;
+  // Canonical, schema-validated arguments, embedded as a raw JSON object rather
+  // than a string. Valid by construction: it is the same text the tool itself
+  // is about to receive.
+  StrView InputJson;
+  // Set when the arguments were dropped to keep the payload inside the stdin
+  // pipe bound. `tool_input` is then absent entirely rather than truncated, so
+  // a consumer never has to parse half an object.
+  bool InputOmitted;
 };
 
 struct HookRunner;
+
+constexpr u32 HOOK_SESSION_ID_CAPACITY = 128;
+constexpr u32 HOOK_PATH_CAPACITY = 1024;
+
+// Session identity held inline rather than as arena-backed views. A consumer
+// snapshots the whole struct by value under its own lock, so a switch can
+// rewrite it without invalidating a copy already in flight, and a process that
+// switches sessions all day cannot grow one duplicate at a time -- the arena
+// this used to allocate from traps on exhaustion rather than failing softly.
+struct HookSessionStorage {
+  char SessionId[HOOK_SESSION_ID_CAPACITY];
+  u32 SessionIdLength;
+  char WorkingDirectory[HOOK_PATH_CAPACITY];
+  u32 WorkingDirectoryLength;
+  char TranscriptPath[HOOK_PATH_CAPACITY];
+  u32 TranscriptPathLength;
+  bool Interactive;
+};
+
+void HookSession_Store(HookSessionStorage* out, const HookSessionInfo* source);
+
+// Views borrow `storage`, so the caller must keep it alive across the payload
+// build that consumes them.
+HookSessionInfo HookSession_View(const HookSessionStorage* storage);
 
 // Returns nullptr when the config registers no commands, so a build with no
 // hooks configured spawns no thread and costs nothing. `config` must outlive
@@ -65,6 +108,6 @@ void HookRunner_Dispatch(HookRunner* runner, HookEvent event, StrView toolName);
 // event, which is exactly what happens when hooks are slow.
 void HookRunner_Shutdown(HookRunner* runner, HookEvent finalEvent);
 
-// Payload builder, exposed for tests.
+// Payload builder, exposed for tests. `tool` may be null for non-tool events.
 void HookRunner_BuildPayload(StrBuf* out, HookEvent event, const HookSessionInfo* session,
-                             StrView toolName);
+                             const HookToolInfo* tool);

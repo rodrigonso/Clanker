@@ -2,14 +2,6 @@
 
 #include "base/thread.h"
 
-// Bound on a stdin payload handed to a child process. The write happens before
-// the wait loop, so anything larger than the pipe buffer would block past both
-// the timeout and `abort` against a child that never reads its stdin. Windows
-// sizes its pipe to exactly this; POSIX pipe buffers cannot be sized portably,
-// so the value stays under the smallest common default (16 KiB on macOS).
-// Hook payloads are a couple of hundred bytes, so this is never close.
-static constexpr u32 EXEC_INPUT_PIPE_BYTES = 1u << 14;
-
 #if defined(_WIN32)
 #include <windows.h>
 
@@ -83,6 +75,29 @@ static bool Exec_ReadWindowsPipe(HANDLE pipe, ExecChunkFn sink, void* user, bool
     if (!ReadFile(pipe, buf, toRead, &read, nullptr) || read == 0) return true;
     *hadData = true;
     if (sink && !sink(user, StrView{buf, (u32)read})) return false;
+  }
+}
+
+// Non-blocking drain straight into a buffer, for the capturing form of
+// Exec_RunShellInput. `limit` caps what is kept, but draining continues past it
+// so a child that keeps writing still runs to completion instead of wedging on
+// a full pipe. `budget` caps what one call consumes, so a child writing without
+// pause cannot starve the caller's timeout and abort checks. Zero means no
+// bound.
+static void Exec_DrainWindowsPipeToBuf(HANDLE pipe, StrBuf* out, u32 limit, u32 budget) {
+  char buf[4096];
+  for (u32 consumed = 0; !budget || consumed < budget;) {
+    DWORD available = 0;
+    if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr) || available == 0) return;
+    DWORD toRead = available > sizeof(buf) ? (DWORD)sizeof(buf) : available;
+    DWORD read = 0;
+    if (!ReadFile(pipe, buf, toRead, &read, nullptr) || read == 0) return;
+    consumed += read;
+    if (!limit || out->Length < limit) {
+      u32 keep = read;
+      if (limit && out->Length + keep > limit) keep = limit - out->Length;
+      StrBuf_Append(out, StrView{buf, keep});
+    }
   }
 }
 
@@ -305,7 +320,8 @@ ExecResult Exec_RunStreaming(Arena* arena, StrView command, u32 timeoutMs,
 }
 
 ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
-                              u32 timeoutMs, volatile i32* abort) {
+                              u32 timeoutMs, volatile i32* abort, StrBuf* output,
+                              u32 outputLimit) {
   ExecResult res = {};
   res.ExitCode = -1;
   res.Output = StrView{"", 0};
@@ -334,6 +350,18 @@ ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
     return res;
   }
 
+  // Only created when the caller wants stdout; otherwise the child writes to
+  // the null device and there is nothing to drain.
+  HANDLE outRead = nullptr, outWrite = nullptr;
+  if (output && !CreatePipe(&outRead, &outWrite, &sa, 0)) {
+    CloseHandle(nul);
+    CloseHandle(inRead);
+    CloseHandle(inWrite);
+    res.Output = SV("failed to create stdout pipe");
+    return res;
+  }
+  if (outRead) SetHandleInformation(outRead, HANDLE_FLAG_INHERIT, 0);
+
   // Wrapped in an extra pair of quotes: `cmd /c` strips the first and last
   // quote character of what follows, which silently corrupts any command
   // beginning with a quoted path (`"C:\Program Files\hook.exe" --flag` loses
@@ -349,6 +377,8 @@ ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
     CloseHandle(nul);
     CloseHandle(inRead);
     CloseHandle(inWrite);
+    if (outRead) CloseHandle(outRead);
+    if (outWrite) CloseHandle(outWrite);
     res.Output = SV("failed to configure job object");
     return res;
   }
@@ -357,7 +387,7 @@ ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
   si.cb = sizeof(si);
   si.dwFlags = STARTF_USESTDHANDLES;
   si.hStdInput = inRead;
-  si.hStdOutput = nul;
+  si.hStdOutput = outWrite ? outWrite : nul;
   si.hStdError = nul;
 
   PROCESS_INFORMATION pinfo = {};
@@ -365,9 +395,13 @@ ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
                            CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pinfo);
   CloseHandle(inRead);
   CloseHandle(nul);
+  // Dropped as soon as the child owns it, so the read end sees EOF when the
+  // child exits rather than waiting on a handle this process still holds.
+  if (outWrite) CloseHandle(outWrite);
   if (!ok) {
     CloseHandle(job);
     CloseHandle(inWrite);
+    if (outRead) CloseHandle(outRead);
     res.Output = SV("failed to start process");
     return res;
   }
@@ -378,6 +412,7 @@ ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
     CloseHandle(pinfo.hThread);
     CloseHandle(job);
     CloseHandle(inWrite);
+    if (outRead) CloseHandle(outRead);
     res.Output = SV("failed to start process in job object");
     return res;
   }
@@ -395,6 +430,9 @@ ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
 
   DWORD start = GetTickCount();
   for (;;) {
+    // Bounded per pass so a child writing without pause cannot starve the
+    // timeout and abort checks below it.
+    if (outRead) Exec_DrainWindowsPipeToBuf(outRead, output, outputLimit, 1u << 16);
     if (WaitForSingleObject(pinfo.hProcess, 10) == WAIT_OBJECT_0) break;
     if (abort && Atomic_LoadI32(abort)) {
       TerminateJobObject(job, 1);
@@ -408,6 +446,13 @@ ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
   }
 
   WaitForSingleObject(pinfo.hProcess, INFINITE);
+  // Whatever the child wrote before exiting is still buffered in the pipe. The
+  // process is gone, so what remains is finite and needs no per-pass budget.
+  if (outRead) {
+    Exec_DrainWindowsPipeToBuf(outRead, output, outputLimit, 0);
+    CloseHandle(outRead);
+    res.Output = StrBuf_View(output);
+  }
   DWORD code = 0;
   GetExitCodeProcess(pinfo.hProcess, &code);
   res.ExitCode = (i32)code;
@@ -421,16 +466,66 @@ ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
 #include <poll.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+// SIGPIPE's disposition is process-wide, so it is set once and never restored.
+// Saving it and putting the default back around each write would leave a window
+// in which any other thread writing to a closed pipe or socket -- another hook,
+// or an in-flight libcurl transfer -- takes the default action and kills the
+// process. Two threads reach the writes below: the hook worker and the harness
+// coordinator running the PreToolUse gate.
+static pthread_once_t g_execSigPipeOnce = PTHREAD_ONCE_INIT;
+
+static void Exec_SetSigPipeIgnored() { signal(SIGPIPE, SIG_IGN); }
+
+static void Exec_IgnoreSigPipeOnce() {
+  pthread_once(&g_execSigPipeOnce, Exec_SetSigPipeIgnored);
+}
+
+// Signed nanosecond arithmetic on purpose. Subtracting the tv_nsec fields into
+// an unsigned type underflows whenever the nanosecond component wraps, turning
+// a few hundred milliseconds into millennia and firing the timeout at random on
+// any child whose run crosses a second boundary.
+static u64 Exec_ElapsedMillis(const struct timespec* from, const struct timespec* to) {
+  i64 ns = (i64)(to->tv_sec - from->tv_sec) * 1000000000ll +
+           ((i64)to->tv_nsec - (i64)from->tv_nsec);
+  return ns > 0 ? (u64)(ns / 1000000ll) : 0;
+}
 
 static char* Exec_DupPosixArg(Arena* arena, StrView arg) {
   char* result = (char*)ArenaAlloc(arena, arg.Length + 1u, 1);
   if (arg.Length) memcpy(result, arg.Data, arg.Length);
   result[arg.Length] = '\0';
   return result;
+}
+
+// Non-blocking drain straight into a buffer, for the capturing form of
+// Exec_RunShellInput. Does not own the descriptor: the caller closes it once
+// after the final drain. `limit` caps what is kept, but draining continues past
+// it so a child that keeps writing still runs to completion instead of wedging
+// on a full pipe. `budget` caps what one call consumes, so a child writing
+// without pause cannot starve the caller's timeout and abort checks. Zero means
+// no bound.
+static void Exec_DrainPosixPipeToBuf(int fd, StrBuf* out, u32 limit, u32 budget) {
+  char buf[4096];
+  for (u32 consumed = 0; !budget || consumed < budget;) {
+    ssize_t n = read(fd, buf, sizeof(buf));
+    if (n > 0) {
+      consumed += (u32)n;
+      if (!limit || out->Length < limit) {
+        u32 keep = (u32)n;
+        if (limit && out->Length + keep > limit) keep = limit - out->Length;
+        StrBuf_Append(out, StrView{buf, keep});
+      }
+      continue;
+    }
+    if (n < 0 && errno == EINTR) continue;
+    return;
+  }
 }
 
 static bool Exec_ReadPosixPipe(int fd, ExecChunkFn sink, void* user, bool* open) {
@@ -650,7 +745,7 @@ ExecResult Exec_RunStreaming(Arena* arena, StrView command, u32 timeoutMs,
     }
     struct timespec t1;
     clock_gettime(CLOCK_MONOTONIC, &t1);
-    u64 elapsed = (u64)(t1.tv_sec - t0.tv_sec) * 1000 + (u64)(t1.tv_nsec - t0.tv_nsec) / 1000000;
+    u64 elapsed = Exec_ElapsedMillis(&t0, &t1);
     if ((abort && Atomic_LoadI32(abort)) || (timeoutMs && elapsed > timeoutMs)) {
       kill(-pid, SIGKILL);
       res.TimedOut = !(abort && Atomic_LoadI32(abort));
@@ -666,7 +761,8 @@ ExecResult Exec_RunStreaming(Arena* arena, StrView command, u32 timeoutMs,
 }
 
 ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
-                              u32 timeoutMs, volatile i32* abort) {
+                              u32 timeoutMs, volatile i32* abort, StrBuf* output,
+                              u32 outputLimit) {
   ExecResult res = {};
   res.ExitCode = -1;
   res.Output = StrView{"", 0};
@@ -681,6 +777,16 @@ ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
     return res;
   }
 
+  // Only created when the caller wants stdout; otherwise the child writes to
+  // /dev/null and there is nothing to drain.
+  int outFds[2] = {-1, -1};
+  if (output && pipe(outFds) != 0) {
+    close(fds[0]);
+    close(fds[1]);
+    res.Output = SV("pipe failed");
+    return res;
+  }
+
   StrBuf cmd = StrBuf_Make(arena, command.Length + 1);
   StrBuf_Append(&cmd, command);
 
@@ -688,6 +794,10 @@ ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
   if (pid < 0) {
     close(fds[0]);
     close(fds[1]);
+    if (outFds[0] >= 0) {
+      close(outFds[0]);
+      close(outFds[1]);
+    }
     res.Output = SV("fork failed");
     return res;
   }
@@ -696,22 +806,35 @@ ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
     dup2(fds[0], STDIN_FILENO);
     close(fds[0]);
     close(fds[1]);
+    if (outFds[0] >= 0) close(outFds[0]);
     int nul = open("/dev/null", O_WRONLY);
-    if (nul >= 0) {
+    // stderr always goes to the null device, so a hook's diagnostics can never
+    // corrupt the stdout channel a caller is parsing. Redirecting stdout must
+    // not depend on that open succeeding: a capturing caller would otherwise
+    // see EOF while the child wrote over the inherited stdout.
+    if (outFds[1] >= 0) {
+      dup2(outFds[1], STDOUT_FILENO);
+    } else if (nul >= 0) {
       dup2(nul, STDOUT_FILENO);
+    }
+    if (nul >= 0) {
       dup2(nul, STDERR_FILENO);
       close(nul);
     }
+    if (outFds[1] >= 0) close(outFds[1]);
     execl("/bin/sh", "sh", "-c", StrBuf_CStr(&cmd), (char*)nullptr);
     _exit(127);
   }
   close(fds[0]);
+  // Dropped as soon as the child owns it, so the read end sees EOF when the
+  // child exits rather than waiting on a descriptor this process still holds.
+  if (outFds[1] >= 0) close(outFds[1]);
   setpgid(pid, pid);
   res.Spawned = true;
 
   // A hook that never reads stdin would otherwise raise SIGPIPE and take the
   // agent down with it; a short write failure is not worth reporting.
-  void (*previousPipeHandler)(int) = signal(SIGPIPE, SIG_IGN);
+  Exec_IgnoreSigPipeOnce();
   for (u32 written = 0; written < input.Length;) {
     ssize_t n = write(fds[1], input.Data + written, input.Length - written);
     if (n > 0) {
@@ -722,19 +845,26 @@ ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
     break;
   }
   close(fds[1]);
-  signal(SIGPIPE, previousPipeHandler);
+
+  if (outFds[0] >= 0) {
+    int flags = fcntl(outFds[0], F_GETFL, 0);
+    if (flags >= 0) fcntl(outFds[0], F_SETFL, flags | O_NONBLOCK);
+  }
 
   struct timespec t0;
   clock_gettime(CLOCK_MONOTONIC, &t0);
   int status = 0;
   for (;;) {
+    // Bounded per pass so a child writing without pause cannot starve the
+    // timeout and abort checks below it.
+    if (outFds[0] >= 0) Exec_DrainPosixPipeToBuf(outFds[0], output, outputLimit, 1u << 16);
     pid_t done = waitpid(pid, &status, WNOHANG);
     if (done == pid) break;
     if (done < 0 && errno != EINTR) break;
 
     struct timespec t1;
     clock_gettime(CLOCK_MONOTONIC, &t1);
-    u64 elapsed = (u64)(t1.tv_sec - t0.tv_sec) * 1000 + (u64)(t1.tv_nsec - t0.tv_nsec) / 1000000;
+    u64 elapsed = Exec_ElapsedMillis(&t0, &t1);
     if ((abort && Atomic_LoadI32(abort)) || (timeoutMs && elapsed > timeoutMs)) {
       res.TimedOut = !(abort && Atomic_LoadI32(abort));
       kill(-pid, SIGKILL);
@@ -743,6 +873,13 @@ ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
     }
     struct timespec nap = {0, 5 * 1000 * 1000};
     nanosleep(&nap, nullptr);
+  }
+  // Whatever the child wrote before exiting is still buffered in the pipe. The
+  // process is gone, so what remains is finite and needs no per-pass budget.
+  if (outFds[0] >= 0) {
+    Exec_DrainPosixPipeToBuf(outFds[0], output, outputLimit, 0);
+    close(outFds[0]);
+    res.Output = StrBuf_View(output);
   }
   res.ExitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
   return res;

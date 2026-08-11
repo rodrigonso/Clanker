@@ -9,6 +9,7 @@
 volatile i32 g_abort = 0;
 AgentHarness* g_activeHarness = nullptr;
 HookRunner* g_hooks = nullptr;
+HookGate* g_gate = nullptr;
 
 SessionResult RunHarnessPrompt(AgentHarness* harness, StrView prompt) {
   g_activeHarness = harness;

@@ -211,6 +211,19 @@ int RunFakeRipgrep(int argc, char** argv) {
   return 0;
 }
 
+// Appends everything on stdin to `path`, plus a trailing newline so successive
+// runs stay separable. Shared by every child helper that records its payload.
+bool DrainStdinToFile(const char* path) {
+  FILE* out = fopen(path, "ab");
+  if (!out) return false;
+  char buf[1024];
+  size_t n;
+  while ((n = fread(buf, 1, sizeof(buf), stdin)) > 0) fwrite(buf, 1, n, out);
+  fputc('\n', out);
+  fclose(out);
+  return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -219,20 +232,40 @@ int main(int argc, char** argv) {
     fwrite(argv[2], 1, strlen(argv[2]), stdout);
     return 0;
   }
-  // Hook-runner helpers: a child that drains stdin into a file, and one that
-  // ignores stdin and outlives its timeout.
   if (argc == 3 && strcmp(argv[1], "--sink-stdin") == 0) {
-    FILE* out = fopen(argv[2], "ab");
-    if (!out) return 1;
-    char buf[1024];
-    size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), stdin)) > 0) fwrite(buf, 1, n, out);
-    fputc('\n', out);
-    fclose(out);
+    return DrainStdinToFile(argv[2]) ? 0 : 1;
+  }
+  // Gate helpers, one per half of the decision protocol. Each verdict is
+  // emitted by the child rather than passed in so a JSON body never has to
+  // survive shell quoting.
+  if (argc == 3 && strcmp(argv[1], "--deny-stdin") == 0) {
+    if (!DrainStdinToFile(argv[2])) return 1;
+    fputs("denied by policy", stdout);
+    return 3;
+  }
+  // Exits 0 while denying, so a passing exit code cannot be what blocks.
+  if (argc == 3 && strcmp(argv[1], "--deny-json-stdin") == 0) {
+    if (!DrainStdinToFile(argv[2])) return 1;
+    fputs("{\"block\":true,\"reason\":\"structured no\",\"terminate\":true}\n", stdout);
     return 0;
+  }
+  // Exits non-zero while allowing, so the exit code cannot be what allows.
+  if (argc == 3 && strcmp(argv[1], "--allow-json-stdin") == 0) {
+    if (!DrainStdinToFile(argv[2])) return 1;
+    fputs("{\"block\":false}\n", stdout);
+    return 7;
   }
   if (argc == 3 && strcmp(argv[1], "--hang") == 0) {
     Sleep_Ms((u32)atoi(argv[2]));
+    return 0;
+  }
+  // Writes far more than a pipe buffer holds without ever reading stdin: the
+  // shape that deadlocks a capturing parent which writes the payload and only
+  // then starts draining.
+  if (argc == 3 && strcmp(argv[1], "--flood-stdout") == 0) {
+    int lines = atoi(argv[2]);
+    for (int i = 0; i < lines; i++)
+      fputs("0123456789012345678901234567890123456789012345678901234567890123\n", stdout);
     return 0;
   }
   if (argc == 3 && strcmp(argv[1], "--expect-lock-busy") == 0) {

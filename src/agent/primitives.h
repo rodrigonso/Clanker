@@ -79,10 +79,30 @@ AgentRetryDecision AgentProvider_RetryDecision(const AgentRetryPolicy* policy,
                                                const Message* assistant);
 bool AgentProvider_SleepBackoff(u32 delayMs, volatile i32* abort);
 
+// Verdict of the before-tool gate, mirroring pi's `BeforeToolCallResult`.
+// Zero-initialized means "allow". `Reason` becomes the blocked call's tool
+// result verbatim; an empty one falls back to AGENT_TOOL_BLOCKED_FALLBACK.
+// `Terminate` only ends the run when every call in the batch sets it, which is
+// what AgentToolBatchResult::AllTerminate already computes.
+struct AgentToolGateDecision {
+  bool Block;
+  StrView Reason;
+  bool Terminate;
+};
+
+// pi's wording for a block that supplied no reason, byte for byte. Both are
+// model-visible, so neither may be reworded casually.
+constexpr StrView AGENT_TOOL_BLOCKED_FALLBACK = SVL("Tool execution was blocked");
+
 struct AgentToolHooks {
   void* User;
-  bool (*BeforeTool)(void* user, Arena* arena, StrView toolName,
-                     const ToolArgs* args, StrView* outReason);
+  // Runs during preparation, after argument normalization and schema
+  // validation, on the coordinator thread and serially across the batch --
+  // pi's clearance phase. A gate may block on external work; nothing in the
+  // batch has started yet.
+  void (*BeforeTool)(void* user, Arena* arena, StrView toolName,
+                     StrView toolCallId, const ToolArgs* args,
+                     AgentToolGateDecision* out);
   void (*AfterTool)(void* user, Arena* arena, StrView toolName,
                     const ToolArgs* args, ToolOutcome* io);
 };

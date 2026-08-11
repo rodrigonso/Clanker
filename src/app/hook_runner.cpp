@@ -14,27 +14,10 @@ constexpr u32 HOOK_TOOL_NAME_CAPACITY = 64;
 // that a wedged or spammed hook cannot hold the process open.
 constexpr u32 HOOK_SHUTDOWN_DRAIN_MS = 5000;
 
-constexpr u32 HOOK_SESSION_ID_CAPACITY = 128;
-constexpr u32 HOOK_PATH_CAPACITY = 1024;
-
 struct HookQueueItem {
   HookEvent Event;
   char ToolName[HOOK_TOOL_NAME_CAPACITY];
   u32 ToolNameLength;
-};
-
-// Session identity held inline rather than as arena-backed views. The worker
-// snapshots the whole struct by value under the lock, so a switch can rewrite
-// it without invalidating a copy already in flight, and a process that switches
-// sessions all day cannot grow the runner one duplicate at a time -- the arena
-// this used to allocate from traps on exhaustion rather than failing softly.
-struct HookSessionStorage {
-  char SessionId[HOOK_SESSION_ID_CAPACITY];
-  u32 SessionIdLength;
-  char WorkingDirectory[HOOK_PATH_CAPACITY];
-  u32 WorkingDirectoryLength;
-  char TranscriptPath[HOOK_PATH_CAPACITY];
-  u32 TranscriptPathLength;
 };
 
 // A value that does not fit is reported as absent rather than truncated: half a
@@ -48,7 +31,9 @@ void StoreField(char* destination, u32 capacity, u32* outLength, StrView value) 
   *outLength = value.Length;
 }
 
-void StoreSession(HookSessionStorage* out, const HookSessionInfo* source) {
+}  // namespace
+
+void HookSession_Store(HookSessionStorage* out, const HookSessionInfo* source) {
   memset(out, 0, sizeof(*out));
   if (!source) return;
   StoreField(out->SessionId, HOOK_SESSION_ID_CAPACITY, &out->SessionIdLength,
@@ -57,19 +42,17 @@ void StoreSession(HookSessionStorage* out, const HookSessionInfo* source) {
              source->WorkingDirectory);
   StoreField(out->TranscriptPath, HOOK_PATH_CAPACITY, &out->TranscriptPathLength,
              source->TranscriptPath);
+  out->Interactive = source->Interactive;
 }
 
-// Views borrow `storage`, so the caller must keep it alive across the payload
-// build that consumes them.
-HookSessionInfo ViewSession(const HookSessionStorage* storage) {
+HookSessionInfo HookSession_View(const HookSessionStorage* storage) {
   HookSessionInfo out = {};
   out.SessionId = StrView{storage->SessionId, storage->SessionIdLength};
   out.WorkingDirectory = StrView{storage->WorkingDirectory, storage->WorkingDirectoryLength};
   out.TranscriptPath = StrView{storage->TranscriptPath, storage->TranscriptPathLength};
+  out.Interactive = storage->Interactive;
   return out;
 }
-
-}  // namespace
 
 struct HookRunner {
   const HookConfig* Config;
@@ -107,7 +90,7 @@ StrView HookEvent_Name(HookEvent event) {
 }
 
 void HookRunner_BuildPayload(StrBuf* out, HookEvent event, const HookSessionInfo* session,
-                             StrView toolName) {
+                             const HookToolInfo* tool) {
   JsonWriter w;
   JsonWrite_Begin(&w, out);
   JsonWrite_String(&w, "hook_event_name", HookEvent_Name(event));
@@ -118,7 +101,21 @@ void HookRunner_BuildPayload(StrBuf* out, HookEvent event, const HookSessionInfo
     if (session->TranscriptPath.Length)
       JsonWrite_String(&w, "transcript_path", session->TranscriptPath);
   }
-  if (toolName.Length) JsonWrite_String(&w, "tool_name", toolName);
+  if (tool && tool->Name.Length) {
+    JsonWrite_String(&w, "tool_name", tool->Name);
+    if (tool->CallId.Length) JsonWrite_String(&w, "tool_call_id", tool->CallId);
+    // Written through JsonWrite_Key so the arguments land as a nested object
+    // rather than an escaped string; see json.h on opening a value yourself.
+    if (tool->InputJson.Length) {
+      JsonWrite_Key(&w, "tool_input");
+      StrBuf_Append(out, tool->InputJson);
+    }
+    if (tool->InputOmitted) JsonWrite_Bool(&w, "tool_input_omitted", true);
+  }
+  // Only meaningful where a decision is being asked for; a one-way notification
+  // has nobody to prompt.
+  if (session && event == HookEvent::PreToolUse)
+    JsonWrite_Bool(&w, "interactive", session->Interactive);
   JsonWrite_End(&w);
 }
 
@@ -140,11 +137,15 @@ void RunOne(HookRunner* runner, Arena* scratch, const HookQueueItem* item,
   if (!count) return;
 
   StrBuf payload = StrBuf_Make(scratch, 512);
-  HookRunner_BuildPayload(&payload, item->Event, session, toolName);
+  HookToolInfo toolInfo = {};
+  toolInfo.Name = toolName;
+  HookRunner_BuildPayload(&payload, item->Event, session, &toolInfo);
   StrView payloadView = StrBuf_View(&payload);
 
-  // Output and exit code carry no meaning: this is a one-way status report, and
-  // a broken hook must not become an agent failure.
+  // Output and exit code carry no meaning on this path: the queue is a one-way
+  // status report, and a broken hook must not become an agent failure.
+  // PreToolUse is the exception and does not come through here -- it is
+  // evaluated synchronously by the gate, which does read both.
   for (u32 i = 0; i < count; i++) {
     // Checked between commands as well as inside the wait loop: once shutdown
     // has given up, spawning the rest of an unbounded group only to kill each
@@ -175,7 +176,7 @@ void RunHookWorker(void* user) {
     Mutex_Unlock(&runner->Lock);
 
     ArenaReset(&scratch);
-    HookSessionInfo info = ViewSession(&session);
+    HookSessionInfo info = HookSession_View(&session);
     RunOne(runner, &scratch, &item, &info, &runner->Abort);
 
     Mutex_Lock(&runner->Lock);
@@ -197,7 +198,7 @@ HookRunner* HookRunner_Create(Arena* arena, const HookConfig* config,
   // makes the implicit copy-assignment ill-formed, and MSVC crashes on it.
   memset(runner, 0, sizeof(*runner));
   runner->Config = config;
-  StoreSession(&runner->Session, session);
+  HookSession_Store(&runner->Session, session);
   Mutex_Init(&runner->Lock);
   Cond_Init(&runner->Changed);
 
@@ -215,7 +216,7 @@ void HookRunner_SetSession(HookRunner* runner, const HookSessionInfo* session) {
 
   // Copied under the lock so the worker never observes a half-updated identity.
   Mutex_Lock(&runner->Lock);
-  StoreSession(&runner->Session, session);
+  HookSession_Store(&runner->Session, session);
   Mutex_Unlock(&runner->Lock);
 }
 
@@ -268,7 +269,7 @@ void HookRunner_Shutdown(HookRunner* runner, HookEvent finalEvent) {
   runner->Abort = 0;
   HookQueueItem terminal = {};
   terminal.Event = finalEvent;
-  HookSessionInfo info = ViewSession(&runner->Session);
+  HookSessionInfo info = HookSession_View(&runner->Session);
   Arena scratch = ArenaCreate((usize)1 << 20);
   RunOne(runner, &scratch, &terminal, &info, nullptr);
   ArenaRelease(&scratch);

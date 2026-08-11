@@ -2,6 +2,7 @@
 
 #include "agent/harness.h"
 #include "app/command.h"
+#include "app/hook_gate.h"
 #include "app/hook_runner.h"
 #include "app/project_trust.h"
 #include "app/prompt_context.h"
@@ -77,6 +78,9 @@ struct InteractiveRuntime {
   StrView AgentDirectory;
   StrView TrustPath;
   bool NoSession;
+  // Whether a user is present to answer a prompt. Reported to hooks as
+  // `interactive` so a gate can fail closed when nobody could approve.
+  bool Interactive;
   bool ProjectTrusted;
   bool HasProjectResources;
   bool TrustCoversProjectResources;
@@ -107,6 +111,10 @@ struct InteractiveRuntime {
 extern volatile i32 g_abort;
 extern AgentHarness* g_activeHarness;
 extern HookRunner* g_hooks;
+// The PreToolUse gate, or null when no PreToolUse command is configured. Unlike
+// g_hooks it survives `--no-session`: a policy that decides whether a tool may
+// run has nothing to do with whether the transcript is durable.
+extern HookGate* g_gate;
 
 // Runs a prompt with the harness published for the signal handler to cancel.
 SessionResult RunHarnessPrompt(AgentHarness* harness, StrView prompt);

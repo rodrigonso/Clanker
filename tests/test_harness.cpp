@@ -184,6 +184,45 @@ SessionResult FailBeforeTool(void* context, Arena* arena, StrView toolName, StrV
   return SessionResult_Error(SessionStatus::InvalidArgument, SVL("tool hook failed"));
 }
 
+// Drives the before-tool gate from a script rather than a policy: each call is
+// matched by tool name, so one batch can mix blocked and allowed calls.
+struct GateScript {
+  StrView BlockTool;
+  StrView Reason;
+  bool Terminate;
+  // Only this tool terminates, so a batch can be made to disagree.
+  StrView TerminateOnlyTool;
+  u32 Calls;
+  // Copied rather than viewed: what the gate is handed lives in the turn's
+  // scratch arena, which is long gone by the time the test asserts.
+  char LastCallId[64];
+  u32 LastCallIdLength;
+  char LastArgumentsJson[128];
+  u32 LastArgumentsJsonLength;
+};
+
+void GateRecord(char* destination, u32 capacity, u32* outLength, StrView value) {
+  *outLength = value.Length < capacity ? value.Length : capacity;
+  if (*outLength) memcpy(destination, value.Data, *outLength);
+}
+
+void ScriptedToolGate(void* user, Arena* arena, StrView toolName, StrView toolCallId,
+                      const ToolArgs* args, AgentToolGateDecision* out) {
+  (void)arena;
+  GateScript* script = (GateScript*)user;
+  script->Calls++;
+  GateRecord(script->LastCallId, sizeof(script->LastCallId), &script->LastCallIdLength,
+             toolCallId);
+  GateRecord(script->LastArgumentsJson, sizeof(script->LastArgumentsJson),
+             &script->LastArgumentsJsonLength, args ? args->Json : StrView{});
+  if (!StrView_Eq(toolName, script->BlockTool)) return;
+  out->Block = true;
+  out->Reason = script->Reason;
+  out->Terminate = script->Terminate ||
+                   (script->TerminateOnlyTool.Length &&
+                    StrView_Eq(toolName, script->TerminateOnlyTool));
+}
+
 struct BlockingBeforeToolState {
   volatile i32 Entered;
   volatile i32 Release;
@@ -1706,6 +1745,207 @@ static void TestHarnessToolsAndHooks() {
               context.Data[2].Kind == Role::ToolResult, context.Data[2].IsError,
               ContextTextEq(&context, 2, Role::ToolResult, "tool hook failed"),
               AllNonRootAreMessages(&records), records.Count == 4);
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    repository.Close(repository.Ctx);
+    ArenaRelease(&arena);
+  }
+
+  // The before-tool gate, pi's `beforeToolCall`. A block with no reason must
+  // produce pi's exact fallback wording, and the tool effect must not run.
+  {
+    Arena arena = ArenaCreate();
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+    u32 executions = 0;
+    Tool tool = {};
+    tool.Name = SVL("gated");
+    tool.Description = SVL("must not execute");
+    tool.ParamsJsonSchema = SVL("{\"type\":\"object\"}");
+    tool.Ctx = &executions;
+    tool.Execute = CountExec;
+    ScriptStep steps[2] = {};
+    ScriptToolCall gatedCall[1] = {
+        ScriptToolCall{SVL("gated"), SVL("gate-call"), SVL("{\"k\":1}")}};
+    steps[0].Tools = gatedCall;
+    steps[0].ToolCount = 1;
+    steps[1].Text = SVL("after block");
+    steps[1].Stop = StopReason::Stop;
+    ScriptProvider script = {steps, 2, 0};
+
+    GateScript gate = {};
+    gate.BlockTool = SVL("gated");
+    AgentHarness harness = {};
+    AgentHarnessConfig config = ScriptConfig(&script, &tool, 1);
+    config.ToolHooks.User = &gate;
+    config.ToolHooks.BeforeTool = ScriptedToolGate;
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+    // A block is a tool result, not a harness failure: the run continues.
+    CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("gate me"))));
+    SessionReduction snapshot = {};
+    CHECK(SessionResult_IsOk(AgentHarness_Snapshot(&arena, &harness, &snapshot)));
+    Array<Message> context = {};
+    CHECK(SessionResult_IsOk(SessionReducer_Context(&arena, &snapshot, snapshot.HeadId, &context)));
+    CHECK_ALL(gate.Calls == 1, executions == 0, context.Count == 4,
+              context.Data[2].Kind == Role::ToolResult, context.Data[2].IsError,
+              ContextTextEq(&context, 2, Role::ToolResult, "Tool execution was blocked"),
+              ContextTextEq(&context, 3, Role::Assistant, "after block"));
+    // The gate sees the call id and the canonical arguments, which is all a
+    // policy has to decide on.
+    CHECK(StrView_EqCStr(StrView{gate.LastCallId, gate.LastCallIdLength}, "gate-call"));
+    CHECK(StrView_EqCStr(StrView{gate.LastArgumentsJson, gate.LastArgumentsJsonLength},
+                         "{\"k\":1}"));
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    repository.Close(repository.Ctx);
+    ArenaRelease(&arena);
+  }
+
+  // A reason is the tool result verbatim -- no prefix, no decoration -- and a
+  // blocked call does not stop its siblings from running.
+  {
+    Arena arena = ArenaCreate();
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+    u32 executions = 0;
+    Tool tools[2] = {};
+    tools[0].Name = SVL("gated");
+    tools[0].Description = SVL("must not execute");
+    tools[0].ParamsJsonSchema = SVL("{\"type\":\"object\"}");
+    tools[0].Ctx = &executions;
+    tools[0].Execute = CountExec;
+    tools[1].Name = SVL("sibling");
+    tools[1].Description = SVL("must execute");
+    tools[1].ParamsJsonSchema = SVL("{\"type\":\"object\"}");
+    tools[1].Ctx = &executions;
+    tools[1].Execute = CountExec;
+    ScriptStep steps[2] = {};
+    ScriptToolCall batch[2] = {ScriptToolCall{SVL("gated"), SVL("gate-call"), SVL("{}")},
+                               ScriptToolCall{SVL("sibling"), SVL("sibling-call"), SVL("{}")}};
+    steps[0].Tools = batch;
+    steps[0].ToolCount = 2;
+    steps[1].Text = SVL("done");
+    steps[1].Stop = StopReason::Stop;
+    ScriptProvider script = {steps, 2, 0};
+
+    GateScript gate = {};
+    gate.BlockTool = SVL("gated");
+    gate.Reason = SVL("policy says no");
+    AgentHarness harness = {};
+    AgentHarnessConfig config = ScriptConfig(&script, tools, 2);
+    config.ToolHooks.User = &gate;
+    config.ToolHooks.BeforeTool = ScriptedToolGate;
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+    CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("mixed batch"))));
+    SessionReduction snapshot = {};
+    CHECK(SessionResult_IsOk(AgentHarness_Snapshot(&arena, &harness, &snapshot)));
+    Array<Message> context = {};
+    CHECK(SessionResult_IsOk(SessionReducer_Context(&arena, &snapshot, snapshot.HeadId, &context)));
+    // Cleared before any call runs, so both are asked before either acts.
+    CHECK_ALL(gate.Calls == 2, executions == 1,
+              ContextTextEq(&context, 2, Role::ToolResult, "policy says no"),
+              context.Data[2].IsError,
+              ContextTextEq(&context, 3, Role::ToolResult, "ran"),
+              !context.Data[3].IsError);
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    repository.Close(repository.Ctx);
+    ArenaRelease(&arena);
+  }
+
+  // `terminate` ends the run only when every call in the batch sets it. Here
+  // only the blocked one does, so the sibling's result still drives a next turn.
+  {
+    Arena arena = ArenaCreate();
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+    u32 executions = 0;
+    Tool tools[2] = {};
+    tools[0].Name = SVL("gated");
+    tools[0].Description = SVL("blocked with terminate");
+    tools[0].ParamsJsonSchema = SVL("{\"type\":\"object\"}");
+    tools[0].Ctx = &executions;
+    tools[0].Execute = CountExec;
+    tools[1].Name = SVL("sibling");
+    tools[1].Description = SVL("must execute");
+    tools[1].ParamsJsonSchema = SVL("{\"type\":\"object\"}");
+    tools[1].Ctx = &executions;
+    tools[1].Execute = CountExec;
+    ScriptStep steps[2] = {};
+    ScriptToolCall batch[2] = {ScriptToolCall{SVL("gated"), SVL("gate-call"), SVL("{}")},
+                               ScriptToolCall{SVL("sibling"), SVL("sibling-call"), SVL("{}")}};
+    steps[0].Tools = batch;
+    steps[0].ToolCount = 2;
+    steps[1].Text = SVL("kept going");
+    steps[1].Stop = StopReason::Stop;
+    ScriptProvider script = {steps, 2, 0};
+
+    GateScript gate = {};
+    gate.BlockTool = SVL("gated");
+    gate.Reason = SVL("stop this one");
+    gate.TerminateOnlyTool = SVL("gated");
+    AgentHarness harness = {};
+    AgentHarnessConfig config = ScriptConfig(&script, tools, 2);
+    config.ToolHooks.User = &gate;
+    config.ToolHooks.BeforeTool = ScriptedToolGate;
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+    CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("partial terminate"))));
+    SessionReduction snapshot = {};
+    CHECK(SessionResult_IsOk(AgentHarness_Snapshot(&arena, &harness, &snapshot)));
+    Array<Message> context = {};
+    CHECK(SessionResult_IsOk(SessionReducer_Context(&arena, &snapshot, snapshot.HeadId, &context)));
+    CHECK_ALL(executions == 1, context.Count == 5,
+              ContextTextEq(&context, 4, Role::Assistant, "kept going"));
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    repository.Close(repository.Ctx);
+    ArenaRelease(&arena);
+  }
+
+  // ... and when every call terminates, the turn ends without another request.
+  {
+    Arena arena = ArenaCreate();
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+    u32 executions = 0;
+    Tool tool = {};
+    tool.Name = SVL("gated");
+    tool.Description = SVL("blocked with terminate");
+    tool.ParamsJsonSchema = SVL("{\"type\":\"object\"}");
+    tool.Ctx = &executions;
+    tool.Execute = CountExec;
+    ScriptStep steps[2] = {};
+    ScriptToolCall gatedCall[1] = {ScriptToolCall{SVL("gated"), SVL("gate-call"), SVL("{}")}};
+    steps[0].Tools = gatedCall;
+    steps[0].ToolCount = 1;
+    steps[1].Text = SVL("never reached");
+    steps[1].Stop = StopReason::Stop;
+    ScriptProvider script = {steps, 2, 0};
+
+    GateScript gate = {};
+    gate.BlockTool = SVL("gated");
+    gate.Reason = SVL("halt");
+    gate.Terminate = true;
+    AgentHarness harness = {};
+    AgentHarnessConfig config = ScriptConfig(&script, &tool, 1);
+    config.ToolHooks.User = &gate;
+    config.ToolHooks.BeforeTool = ScriptedToolGate;
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+    CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("full terminate"))));
+    SessionReduction snapshot = {};
+    CHECK(SessionResult_IsOk(AgentHarness_Snapshot(&arena, &harness, &snapshot)));
+    Array<Message> context = {};
+    CHECK(SessionResult_IsOk(SessionReducer_Context(&arena, &snapshot, snapshot.HeadId, &context)));
+    CHECK_ALL(executions == 0, context.Count == 3,
+              ContextTextEq(&context, 2, Role::ToolResult, "halt"));
     CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
     repository.Close(repository.Ctx);
     ArenaRelease(&arena);

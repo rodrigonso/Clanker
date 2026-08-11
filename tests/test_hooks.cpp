@@ -8,6 +8,7 @@
 #endif
 
 #include "app/hook_config.h"
+#include "app/hook_gate.h"
 #include "app/hook_runner.h"
 #include "base/arena.h"
 #include "base/config_file.h"
@@ -192,20 +193,45 @@ void TestPayload() {
   session.SessionId = SVL("0123456789abcdefghijkl");
   session.WorkingDirectory = SVL("C:\\work\\repo");
   session.TranscriptPath = SVL("C:\\home\\.clank\\sessions\\v2\\repo-1\\s.jsonl");
+  session.Interactive = true;
+
+  HookToolInfo tool = {};
+  tool.Name = SVL("read");
+  tool.CallId = SVL("call_42");
+  tool.InputJson = SVL("{\"path\":\"a.txt\"}");
 
   StrBuf payload = StrBuf_Make(&a, 256);
-  HookRunner_BuildPayload(&payload, HookEvent::PreToolUse, &session, SVL("read"));
+  HookRunner_BuildPayload(&payload, HookEvent::PreToolUse, &session, &tool);
   StrView text = StrBuf_View(&payload);
   CHECK_ALL(StrView_Contains(text, "\"hook_event_name\":\"PreToolUse\""),
             StrView_Contains(text, "\"session_id\":\"0123456789abcdefghijkl\""),
             StrView_Contains(text, "\"tool_name\":\"read\""),
+            StrView_Contains(text, "\"tool_call_id\":\"call_42\""),
+            // Arguments arrive as a nested object, not an escaped string.
+            StrView_Contains(text, "\"tool_input\":{\"path\":\"a.txt\"}"),
+            StrView_Contains(text, "\"interactive\":true"),
+            !StrView_Contains(text, "tool_input_omitted"),
             // Backslashes must survive as JSON escapes, not raw bytes.
             StrView_Contains(text, "C:\\\\work\\\\repo"),
             StrView_Contains(text, "s.jsonl"));
 
+  // Oversized arguments are dropped whole and flagged, never half-written.
+  HookToolInfo omitted = {};
+  omitted.Name = SVL("write");
+  omitted.InputOmitted = true;
+  StrBuf dropped = StrBuf_Make(&a, 256);
+  HookRunner_BuildPayload(&dropped, HookEvent::PreToolUse, &session, &omitted);
+  CHECK_ALL(StrView_Contains(StrBuf_View(&dropped), "\"tool_input_omitted\":true"),
+            !StrView_Contains(StrBuf_View(&dropped), "\"tool_input\":"));
+
+  // A notification has nobody to prompt, so it carries no interactive flag.
+  StrBuf post = StrBuf_Make(&a, 256);
+  HookRunner_BuildPayload(&post, HookEvent::PostToolUse, &session, &tool);
+  CHECK(!StrView_Contains(StrBuf_View(&post), "interactive"));
+
   // Events with no tool subject omit the key rather than sending an empty one.
   StrBuf sessionStart = StrBuf_Make(&a, 256);
-  HookRunner_BuildPayload(&sessionStart, HookEvent::SessionStart, &session, StrView{"", 0});
+  HookRunner_BuildPayload(&sessionStart, HookEvent::SessionStart, &session, nullptr);
   CHECK_ALL(StrView_Contains(StrBuf_View(&sessionStart),
                              "\"hook_event_name\":\"SessionStart\""),
             !StrView_Contains(StrBuf_View(&sessionStart), "tool_name"));
@@ -213,7 +239,7 @@ void TestPayload() {
   // A session with nothing to report still produces a well-formed object.
   HookSessionInfo empty = {};
   StrBuf bare = StrBuf_Make(&a, 128);
-  HookRunner_BuildPayload(&bare, HookEvent::SessionEnd, &empty, StrView{"", 0});
+  HookRunner_BuildPayload(&bare, HookEvent::SessionEnd, &empty, nullptr);
   CHECK(StrView_Eq(StrBuf_View(&bare),
                    SVL("{\"hook_event_name\":\"SessionEnd\"}")));
 
@@ -379,9 +405,40 @@ void TestExecInputTimeout() {
   ArenaRelease(&a);
 }
 
-// A session switch must be reflected in later payloads, and must not accumulate
-// state. The identity used to be duplicated into a fixed 1 MiB arena on every
-// switch, and ArenaAlloc traps rather than failing softly once that fills.
+// Capturing a hook's stdout means the parent now writes the payload and reads
+// the reply over two pipes at once. A child that floods stdout without ever
+// reading stdin is the case that wedges a naive implementation, and it is not
+// reachable from the gate tests because their children all stay small.
+void TestExecInputCapture() {
+  Arena a = ArenaCreate();
+
+  const int kLines = 4000;  // ~260 KB, several times any default pipe buffer
+  StrView floodCommand = SelfCommand(&a, "--flood-stdout", SVL("4000"));
+  StrBuf captured = StrBuf_Make(&a, 1024);
+  u64 start = MonotonicMillis();
+  ExecResult result = Exec_RunShellInput(&a, floodCommand, SVL("{\"unread\":true}"), 30000,
+                                         nullptr, &captured);
+  u64 elapsed = MonotonicMillis() - start;
+  CHECK_ALL(result.Spawned, !result.TimedOut, result.ExitCode == 0, elapsed < 30000);
+
+  // Counting newlines rather than bytes keeps this exact across the CRLF
+  // translation Windows applies to the child's text-mode stdout.
+  u32 newlines = 0;
+  for (u32 i = 0; i < result.Output.Length; i++)
+    if (result.Output.Data[i] == '\n') newlines++;
+  CHECK(newlines == (u32)kLines);
+
+  // With a limit the capture stops growing but the child still runs to
+  // completion, so a hook that dumps a log file bounds memory instead of
+  // walking the scratch arena into its fastfail.
+  StrBuf clipped = StrBuf_Make(&a, 1024);
+  ExecResult limited = Exec_RunShellInput(&a, floodCommand, SVL("{\"unread\":true}"), 30000,
+                                          nullptr, &clipped, 8192);
+  CHECK_ALL(limited.Spawned, !limited.TimedOut, limited.ExitCode == 0,
+            limited.Output.Length == 8192);
+
+  ArenaRelease(&a);
+}
 void TestRunnerSessionSwitch() {
   Arena a = ArenaCreate();
   const char* sinkPath = "clank_hooks_switch.txt";
@@ -476,6 +533,264 @@ void TestSelectionIsNotCapped() {
   ArenaRelease(&a);
 }
 
+// Builds a hooks document registering `commands` for PreToolUse, optionally
+// narrowed by `matcher`.
+StrView GateDocument(Arena* a, const StrView* commands, u32 count, const char* matcher) {
+  StrBuf out = StrBuf_Make(a, 1024);
+  StrBuf_AppendCStr(&out, "{\"hooks\":{\"PreToolUse\":[{");
+  if (matcher) {
+    StrBuf_AppendCStr(&out, "\"matcher\":");
+    Json_WriteString(&out, SV(matcher));
+    StrBuf_AppendChar(&out, ',');
+  }
+  StrBuf_AppendCStr(&out, "\"hooks\":[");
+  for (u32 i = 0; i < count; i++) {
+    if (i) StrBuf_AppendChar(&out, ',');
+    StrBuf_AppendCStr(&out, "{\"type\":\"command\",\"command\":");
+    Json_WriteString(&out, commands[i]);
+    StrBuf_AppendChar(&out, '}');
+  }
+  StrBuf_AppendCStr(&out, "]}]}}");
+  return StrBuf_View(&out);
+}
+
+HookGate* MakeGate(Arena* a, HookConfig* config, StrView document) {
+  CHECK(HookConfig_Parse(a, document, config) == HookConfigLoadResult::Success);
+  HookSessionInfo session = {};
+  session.SessionId = SVL("gate-session");
+  session.WorkingDirectory = SVL("gate-cwd");
+  session.Interactive = true;
+  return HookGate_Create(a, config, &session, nullptr);
+}
+
+// Keeps each case below a single line now that captured stdout lives on the
+// ExecResult rather than being passed alongside it.
+AgentToolGateDecision Decide(Arena* a, ExecResult result, StrView output) {
+  result.Output = output;
+  AgentToolGateDecision decision = {};
+  HookGate_Decide(a, &result, &decision);
+  return decision;
+}
+
+// The decision protocol on its own, with no process in the way. Every branch
+// here is a security boundary: a wrong answer either runs a tool the user
+// forbade or blocks one they allowed.
+void TestGateDecision() {
+  Arena a = ArenaCreate();
+  AgentToolGateDecision decision = {};
+
+  ExecResult ok = {};
+  ok.Spawned = true;
+  ExecResult failed = ok;
+  failed.ExitCode = 3;
+
+  // Exit 0 with nothing to say is the ordinary allow.
+  decision = Decide(&a, ok, StrView{"", 0});
+  CHECK(!decision.Block);
+
+  // A non-zero exit blocks, and whatever it printed becomes the reason.
+  decision = Decide(&a, failed, SVL("  denied by policy\n"));
+  CHECK_ALL(decision.Block, StrView_EqCStr(decision.Reason, "denied by policy"),
+            !decision.Terminate);
+
+  // A structured verdict outranks the exit code in both directions.
+  decision = Decide(&a, failed, SVL("{\"block\":false}"));
+  CHECK(!decision.Block);
+  decision = Decide(&a, ok, SVL("{\"block\":true,\"reason\":\"no\",\"terminate\":true}"));
+  CHECK_ALL(decision.Block, StrView_EqCStr(decision.Reason, "no"), decision.Terminate);
+
+  // An empty reason stays empty so the agent layer owns pi's wording.
+  decision = Decide(&a, ok, SVL("{\"block\":true}"));
+  CHECK_ALL(decision.Block, decision.Reason.Length == 0);
+
+  // terminate without block is meaningless and must not leak through.
+  decision = Decide(&a, ok, SVL("{\"block\":false,\"terminate\":true}"));
+  CHECK_ALL(!decision.Block, !decision.Terminate);
+
+  // Output that is not an object falls through to the exit code rather than
+  // being taken as consent.
+  decision = Decide(&a, ok, SVL("[1,2,3]"));
+  CHECK(!decision.Block);
+  decision = Decide(&a, failed, SVL("{not json"));
+  CHECK(decision.Block);
+
+  // An object is a verdict only when it carries a boolean `block`. Anything
+  // else is another tool's schema or a hook logging JSON, and must not suppress
+  // the exit code that would otherwise have blocked.
+  decision = Decide(&a, failed, SVL("{\"decision\":\"block\",\"reason\":\"nope\"}"));
+  CHECK(decision.Block);
+  decision = Decide(&a, failed, SVL("{\"block\":\"true\"}"));
+  CHECK(decision.Block);
+  decision = Decide(&a, failed, SVL("{\"hookSpecificOutput\":{\"permissionDecision\":\"deny\"}}"));
+  CHECK(decision.Block);
+  // Still an allow when the hook agrees on both channels.
+  decision = Decide(&a, ok, SVL("{\"unrelated\":1}"));
+  CHECK(!decision.Block);
+
+  // An answer too large to read is not an answer, whatever the exit code says.
+  StrBuf flood = StrBuf_Make(&a, (1u << 16) + 64);
+  StrBuf_AppendCStr(&flood, "{\"block\":true,\"reason\":\"");
+  while (flood.Length < (1u << 16) + 8) StrBuf_AppendChar(&flood, 'x');
+  StrBuf_AppendCStr(&flood, "\"}");
+  decision = Decide(&a, ok, StrBuf_View(&flood));
+  CHECK_ALL(decision.Block, StrView_Contains(decision.Reason, "too much output"));
+
+  // A long but readable reason is kept, and capped rather than dropped.
+  StrBuf chatty = StrBuf_Make(&a, 16384);
+  StrBuf_AppendCStr(&chatty, "{\"block\":true,\"reason\":\"");
+  for (u32 i = 0; i < 9000; i++) StrBuf_AppendChar(&chatty, 'y');
+  StrBuf_AppendCStr(&chatty, "\"}");
+  decision = Decide(&a, ok, StrBuf_View(&chatty));
+  CHECK_ALL(decision.Block, decision.Reason.Length == 4096);
+
+  // Fail closed: nothing that leaves the verdict unknown may allow.
+  ExecResult unspawned = {};
+  unspawned.ExitCode = -1;
+  decision = Decide(&a, unspawned, SVL("failed to start process"));
+  CHECK_ALL(decision.Block, StrView_Contains(decision.Reason, "failed to start process"));
+
+  ExecResult timedOut = ok;
+  timedOut.TimedOut = true;
+  // A timeout that exited 0 is the dangerous case: without an explicit check it
+  // would read as an allow.
+  decision = Decide(&a, timedOut, SVL("{\"block\":false}"));
+  CHECK_ALL(decision.Block, StrView_Contains(decision.Reason, "timed out"));
+
+  HookGate_Decide(&a, nullptr, &decision);
+  CHECK(decision.Block);
+
+  ArenaRelease(&a);
+}
+
+// A spurious timeout in the gate is a spurious *block*, so the wait loop's
+// elapsed-time arithmetic has to be right. The POSIX loop used to subtract
+// timespec nanosecond fields into an unsigned value, which underflowed whenever
+// the nanosecond component wrapped and reported centuries of elapsed time; the
+// odds of tripping it are roughly the child's runtime as a fraction of one
+// second, so this repeats a clearly-under-timeout child rather than trusting a
+// single pass. Keep both the count and the sleep: shortening either trades away
+// most of the detection.
+void TestExecInputTimeoutIsNotSpurious() {
+  Arena a = ArenaCreate();
+
+  StrView briefCommand = SelfCommand(&a, "--hang", SVL("200"));
+  bool everTimedOut = false;
+  bool everFailed = false;
+  for (u32 i = 0; i < 10; i++) {
+    StrBuf captured = StrBuf_Make(&a, 64);
+    ExecResult result =
+        Exec_RunShellInput(&a, briefCommand, SVL("{}"), 60000, nullptr, &captured);
+    if (result.TimedOut) everTimedOut = true;
+    if (!result.Spawned || result.ExitCode != 0) everFailed = true;
+  }
+  CHECK_ALL(!everTimedOut, !everFailed);
+
+  ArenaRelease(&a);
+}
+void TestGateDelivery() {
+  Arena a = ArenaCreate();
+  const char* sinkPath = "clank_gate_live.txt";
+  ToolArgs args = {};
+  args.Json = SVL("{\"path\":\"a.txt\"}");
+  AgentToolGateDecision decision = {};
+
+  // A non-zero exit blocks, and the payload the child saw carries everything a
+  // policy needs.
+  {
+    remove(sinkPath);
+    StrView commands[1] = {SelfCommand(&a, "--deny-stdin", SV(sinkPath))};
+    HookConfig config = {};
+    HookGate* gate = MakeGate(&a, &config, GateDocument(&a, commands, 1, nullptr));
+    CHECK(gate != nullptr);
+    HookGate_BeforeTool(gate, &a, SVL("read"), SVL("call-1"), &args, &decision);
+    StrView seen = Slurp(&a, sinkPath);
+    CHECK_ALL(decision.Block, StrView_EqCStr(decision.Reason, "denied by policy"),
+              StrView_Contains(seen, "\"hook_event_name\":\"PreToolUse\""),
+              StrView_Contains(seen, "\"tool_name\":\"read\""),
+              StrView_Contains(seen, "\"tool_call_id\":\"call-1\""),
+              StrView_Contains(seen, "\"tool_input\":{\"path\":\"a.txt\"}"),
+              StrView_Contains(seen, "\"interactive\":true"));
+  }
+
+  // A structured verdict is honoured even though the child exited 0.
+  {
+    remove(sinkPath);
+    StrView commands[1] = {SelfCommand(&a, "--deny-json-stdin", SV(sinkPath))};
+    HookConfig config = {};
+    HookGate* gate = MakeGate(&a, &config, GateDocument(&a, commands, 1, nullptr));
+    HookGate_BeforeTool(gate, &a, SVL("read"), SVL("call-2"), &args, &decision);
+    CHECK_ALL(decision.Block, StrView_EqCStr(decision.Reason, "structured no"),
+              decision.Terminate);
+  }
+
+  // ... and an allow is honoured even though the child exited non-zero.
+  {
+    remove(sinkPath);
+    StrView commands[1] = {SelfCommand(&a, "--allow-json-stdin", SV(sinkPath))};
+    HookConfig config = {};
+    HookGate* gate = MakeGate(&a, &config, GateDocument(&a, commands, 1, nullptr));
+    HookGate_BeforeTool(gate, &a, SVL("read"), SVL("call-3"), &args, &decision);
+    CHECK(!decision.Block);
+  }
+
+  // The first block short-circuits: the second command must never spawn, so
+  // exactly one payload reaches the sink.
+  {
+    remove(sinkPath);
+    StrView commands[2] = {SelfCommand(&a, "--deny-stdin", SV(sinkPath)),
+                           SelfCommand(&a, "--sink-stdin", SV(sinkPath))};
+    HookConfig config = {};
+    HookGate* gate = MakeGate(&a, &config, GateDocument(&a, commands, 2, nullptr));
+    HookGate_BeforeTool(gate, &a, SVL("read"), SVL("call-4"), &args, &decision);
+    CHECK_ALL(decision.Block, CountLines(Slurp(&a, sinkPath)) == 1);
+  }
+
+  // A matcher narrows the gate by tool name: an unmatched tool spawns nothing.
+  {
+    remove(sinkPath);
+    StrView commands[1] = {SelfCommand(&a, "--deny-stdin", SV(sinkPath))};
+    HookConfig config = {};
+    HookGate* gate = MakeGate(&a, &config, GateDocument(&a, commands, 1, "shell|write"));
+    CHECK(gate != nullptr);
+    HookGate_BeforeTool(gate, &a, SVL("read"), SVL("call-5"), &args, &decision);
+    CHECK_ALL(!decision.Block, CountLines(Slurp(&a, sinkPath)) == 0);
+    HookGate_BeforeTool(gate, &a, SVL("shell"), SVL("call-6"), &args, &decision);
+    CHECK_ALL(decision.Block, CountLines(Slurp(&a, sinkPath)) == 1);
+  }
+
+  // A hook that outlives its timeout blocks rather than being waited out.
+  {
+    HookConfig config = {};
+    StrBuf document = StrBuf_Make(&a, 512);
+    StrBuf_AppendCStr(&document,
+                      "{\"hooks\":{\"PreToolUse\":[{\"hooks\":[{\"type\":\"command\","
+                      "\"timeout\":1,\"command\":");
+    Json_WriteString(&document, SelfCommand(&a, "--hang", SVL("4000")));
+    StrBuf_AppendCStr(&document, "}]}]}}");
+    HookGate* gate = MakeGate(&a, &config, StrBuf_View(&document));
+    HookGate_BeforeTool(gate, &a, SVL("read"), SVL("call-7"), &args, &decision);
+    CHECK_ALL(decision.Block, StrView_Contains(decision.Reason, "timed out"));
+  }
+
+  // No PreToolUse command at all means no gate, so an unconfigured install
+  // spawns nothing and pays nothing.
+  {
+    HookConfig config = {};
+    CHECK(HookConfig_Parse(
+              &a, SVL("{\"hooks\":{\"PostToolUse\":[{\"hooks\":[{\"type\":\"command\","
+                      "\"command\":\"echo\"}]}]}}"),
+              &config) == HookConfigLoadResult::Success);
+    HookSessionInfo session = {};
+    CHECK(HookGate_Create(&a, &config, &session, nullptr) == nullptr);
+    // A null gate is the seam's allow-everything default.
+    HookGate_BeforeTool(nullptr, &a, SVL("read"), SVL("call-8"), &args, &decision);
+    CHECK(!decision.Block);
+  }
+
+  remove(sinkPath);
+  ArenaRelease(&a);
+}
+
 }  // namespace
 
 void TestHooks() {
@@ -490,4 +805,8 @@ void TestHooks() {
   TestSelectionIsNotCapped();
   TestRunnerShutdownIsBounded();
   TestExecInputTimeout();
+  TestExecInputCapture();
+  TestExecInputTimeoutIsNotSpurious();
+  TestGateDecision();
+  TestGateDelivery();
 }

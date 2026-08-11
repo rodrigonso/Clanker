@@ -179,9 +179,9 @@ static void RunHarnessEventPump(void* user) {
     // PostToolUse. Reported for every output mode: hooks describe the agent's
     // lifecycle, not whatever this process happens to be rendering.
     switch (event.Kind) {
-      case AgentHarnessEventKind::TransientToolStart:
-        HookRunner_Dispatch(g_hooks, HookEvent::PreToolUse, event.Tool.Name);
-        break;
+      // PreToolUse is absent deliberately: it is evaluated synchronously by the
+      // gate during clearance, strictly earlier than this, because its verdict
+      // decides whether the tool runs at all.
       case AgentHarnessEventKind::TransientToolEnd:
         HookRunner_Dispatch(g_hooks, HookEvent::PostToolUse, event.Tool.Name);
         break;

@@ -216,6 +216,7 @@ add_library(clank_app STATIC
   src/app/event_pump.cpp
   src/app/frontmatter.cpp
   src/app/hook_config.cpp
+  src/app/hook_gate.cpp
   src/app/hook_runner.cpp
   src/app/plain_select.cpp
   src/app/project_trust.cpp

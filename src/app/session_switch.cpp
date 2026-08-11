@@ -371,15 +371,18 @@ SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
   // The switch replaced the durable session, so later payloads would otherwise
   // keep naming a transcript that is no longer written.
   RuntimeUpdateShellDirectory(rt, targetInfo->ProjectKey, targetInfo->SessionId);
-  if (g_hooks) {
+  if (g_hooks || g_gate) {
     Arena hookScratch = ArenaCreate((usize)1 << 20);
     HookSessionInfo hookSession = {};
     hookSession.SessionId = DurableId_View(&targetInfo->SessionId);
     hookSession.WorkingDirectory = rt->WorkingDirectory;
-    hookSession.TranscriptPath =
-        JsonlRepository_SessionPath(&hookScratch, rt->JsonlSessions,
-                                    targetInfo->ProjectKey, targetInfo->SessionId);
+    hookSession.Interactive = rt->Interactive;
+    if (rt->JsonlSessions)
+      hookSession.TranscriptPath =
+          JsonlRepository_SessionPath(&hookScratch, rt->JsonlSessions,
+                                      targetInfo->ProjectKey, targetInfo->SessionId);
     HookRunner_SetSession(g_hooks, &hookSession);
+    HookGate_SetSession(g_gate, &hookSession);
     ArenaRelease(&hookScratch);
     // Announced as a fresh start so a consumer tracks the new session rather
     // than silently reattributing it to the old one.

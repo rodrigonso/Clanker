@@ -826,29 +826,43 @@ int main(int argc, char** argv) {
   RuntimeSetPromptOptions(&runtime, &promptOptions);
   runtime.AutoOpen = !noOpen;
   runtime.Auth = &appAuth;
-  // External lifecycle hooks. Started only once the session is durable, so the
-  // very first payload can already name the transcript a consumer should read.
-  // `--no-session` has no durable path to report, so it reports nothing at all.
+  runtime.Interactive = trustInteractive;
+  // External lifecycle hooks. The config is read regardless of `--no-session`
+  // because it also carries the PreToolUse gate, and a policy deciding whether
+  // a tool may run must not switch itself off just because the transcript is
+  // not durable.
   HookConfig hookConfig = {};
-  if (!noSession) {
-    StrView hooksPath = HookConfig_DefaultPath(&arena);
-    HookConfigLoadResult hooksLoad = HookConfig_Load(&arena, hooksPath, &hookConfig);
-    // Surfaced the way a malformed settings.json is: a typo must not disable
-    // every hook in silence. Missing is the normal case and stays quiet.
-    if (hooksLoad == HookConfigLoadResult::Malformed ||
-        hooksLoad == HookConfigLoadResult::ReadFailure) {
-      fprintf(stderr, "warning: %s %.*s; hooks are disabled\n",
-              hooksLoad == HookConfigLoadResult::Malformed
-                  ? "hooks file is malformed:"
-                  : "could not read hooks file:",
-              (int)hooksPath.Length, hooksPath.Data);
-    }
+  StrView hooksPath = HookConfig_DefaultPath(&arena);
+  HookConfigLoadResult hooksLoad = HookConfig_Load(&arena, hooksPath, &hookConfig);
+  // Surfaced the way a malformed settings.json is: a typo must not disable
+  // every hook in silence. Missing is the normal case and stays quiet.
+  if (hooksLoad == HookConfigLoadResult::Malformed ||
+      hooksLoad == HookConfigLoadResult::ReadFailure) {
+    fprintf(stderr, "warning: %s %.*s; hooks are disabled\n",
+            hooksLoad == HookConfigLoadResult::Malformed
+                ? "hooks file is malformed:"
+                : "could not read hooks file:",
+            (int)hooksPath.Length, hooksPath.Data);
+  }
 
-    HookSessionInfo hookSession = {};
+  HookSessionInfo hookSession = {};
+  hookSession.WorkingDirectory = workingDirectory;
+  hookSession.Interactive = trustInteractive;
+  // Reported only once the session is durable, so the very first payload can
+  // already name the transcript a consumer should read.
+  if (!noSession) {
     hookSession.SessionId = DurableId_View(&sessionInfo.SessionId);
-    hookSession.WorkingDirectory = workingDirectory;
     hookSession.TranscriptPath = JsonlRepository_SessionPath(
         &arena, &jsonlRepository, sessionInfo.ProjectKey, sessionInfo.SessionId);
+  }
+
+  g_gate = HookGate_Create(&arena, &hookConfig, &hookSession, &harness.AbortFlag);
+  if (g_gate) {
+    harness.Config.ToolHooks.User = g_gate;
+    harness.Config.ToolHooks.BeforeTool = HookGate_BeforeTool;
+  }
+
+  if (!noSession) {
     g_hooks = HookRunner_Create(&arena, &hookConfig, &hookSession);
     HookRunner_Dispatch(g_hooks, HookEvent::SessionStart, StrView{});
   }

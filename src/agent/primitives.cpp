@@ -36,11 +36,12 @@ Array<Content> RelocateContentArray(Arena* arena, const Array<Content>& source) 
 }
 
 void SetPreparedError(Arena* arena, AgentPreparedTool* prepared,
-                      StrView message) {
+                      StrView message, bool terminate = false) {
   prepared->Result = Array_Make<Content>(arena, 1);
   Array_Push(&prepared->Result, Content_Text(StrView_Dup(arena, message)));
   prepared->IsError = true;
   prepared->Runnable = false;
+  prepared->Terminate = terminate;
 }
 
 void PrepareOne(Arena* arena, const ToolRuntime* tools, u32 toolCount,
@@ -112,15 +113,17 @@ void PrepareOne(Arena* arena, const ToolRuntime* tools, u32 toolCount,
   prepared->Args.Json = StrBuf_View(&canonical);
   prepared->EffectiveArgumentsJson = prepared->Args.Json;
 
-  StrView reason = {};
-  if (hooks && hooks->BeforeTool &&
-      !hooks->BeforeTool(hooks->User, arena, call->ToolName,
-                         &prepared->Args, &reason)) {
-    StrBuf error = StrBuf_Make(arena, 64);
-    StrBuf_AppendCStr(&error, reason.Length ? "" : "Tool blocked");
-    StrBuf_Append(&error, reason);
-    SetPreparedError(arena, prepared, StrBuf_View(&error));
-    return;
+  if (hooks && hooks->BeforeTool) {
+    AgentToolGateDecision decision = {};
+    hooks->BeforeTool(hooks->User, arena, call->ToolName, call->ToolId,
+                      &prepared->Args, &decision);
+    if (decision.Block) {
+      SetPreparedError(arena, prepared,
+                       decision.Reason.Length ? decision.Reason
+                                              : AGENT_TOOL_BLOCKED_FALLBACK,
+                       decision.Terminate);
+      return;
+    }
   }
   prepared->Runnable = true;
 }
