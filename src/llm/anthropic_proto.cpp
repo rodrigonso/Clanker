@@ -24,7 +24,7 @@ static const Model ANTHROPIC_FALLBACK_MODELS[] = {
         SVL("anthropic-messages"),
         SVL("https://api.anthropic.com"),
         1000000,
-        8192,
+        64000,
         true,
         MODEL_EFFORT_STANDARD_MASK |
             ModelEffort_Bit(ModelEffort::Max),
@@ -37,7 +37,7 @@ static const Model ANTHROPIC_FALLBACK_MODELS[] = {
         SVL("anthropic-messages"),
         SVL("https://api.anthropic.com"),
         1000000,
-        8192,
+        64000,
         true,
         MODEL_EFFORT_STANDARD_MASK |
             ModelEffort_Bit(ModelEffort::Max),
@@ -50,7 +50,7 @@ static const Model ANTHROPIC_FALLBACK_MODELS[] = {
         SVL("anthropic-messages"),
         SVL("https://api.anthropic.com"),
         200000,
-        8192,
+        64000,
         true,
     },
 };
@@ -116,7 +116,9 @@ Model Anthropic_Model(StrView id) {
   m.Provider = SVL("anthropic");
   m.Api = SVL("anthropic-messages");
   m.BaseUrl = SVL("https://api.anthropic.com");
-  m.MaxTokens = 8192;
+  // Claude 4.x caps output far above the 8192 the API defaults to, and a low
+  // cap truncates long tool calls mid-arguments rather than shortening them.
+  m.MaxTokens = 64000;
   ApplyKnownModelMetadata(&m);
   return m;
 }

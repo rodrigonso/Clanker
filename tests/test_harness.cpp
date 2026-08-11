@@ -633,6 +633,24 @@ bool ImmediateErrorProviderStream(void* context, Arena* arena, const Model* mode
   return false;
 }
 
+// Reproduces an Anthropic response cut off at the output cap: the call itself
+// succeeds, but the tool_use block the model was mid-way through is never
+// closed, so the message carries text and no tool calls at all.
+bool TruncatedLengthProviderStream(void* context, Arena* arena, const Model* model,
+                                   const LlmContext* llm, const StreamOptions* options,
+                                   StreamSink sink, Message* out) {
+  (void)context;
+  (void)llm;
+  (void)options;
+  (void)sink;
+  *out = Message_AssistantEmpty(arena);
+  out->Provider = model->Provider;
+  out->Model = model->Id;
+  out->Stop = StopReason::Length;
+  Array_Push(&out->Content, Content_Text(SVL("Let me create the test file:")));
+  return true;
+}
+
 struct OrphanCaptureState {
   Message Captured[8];
   u32 CapturedCount;
@@ -1119,6 +1137,55 @@ static void TestHarnessLifecycle() {
     }
     CHECK_ALL(sawFailedTurnEnd, StrView_Contains(turnEndError, "immediate failure"),
               sawFailedAgentEnd, StrView_Contains(agentEndError, "immediate failure"));
+
+    CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    repository.Close(repository.Ctx);
+    ArenaRelease(&arena);
+  }
+
+  // A truncated response fails the run. Without the explicit check the empty
+  // tool batch reads as "the model is done" and reports success with the work
+  // half-finished.
+  {
+    Arena arena = ArenaCreate();
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+    AgentHarnessConfig config = {};
+    config.SystemPrompt = SVL("truncated response");
+    config.ModelInfo.Id = SVL("truncating-model");
+    config.ModelInfo.Provider = SVL("test");
+    config.ProviderImpl.Stream = TruncatedLengthProviderStream;
+    AgentHarness harness = {};
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+    AgentHarnessSnapshot initial = {};
+    AgentHarnessWatch* watchPtr = ArenaPushStruct(&arena, AgentHarnessWatch);
+    *watchPtr = AgentHarnessWatch{};
+    AgentHarnessWatch& watch = *watchPtr;
+    CHECK(SessionResult_IsOk(AgentHarness_Watch(&arena, &harness, 32, &initial, &watch)));
+    CHECK(AgentHarness_Run(&harness, SVL("write a large file")).Status ==
+          SessionStatus::ProviderError);
+
+    bool sawFailedTurnEnd = false, sawFailedAgentEnd = false;
+    StrView turnEndError = {};
+    bool finished = false;
+    while (!finished) {
+      AgentHarnessEvent event = {};
+      CHECK(SessionResult_IsOk(AgentHarness_WatchNext(&arena, &watch, &event)));
+      if (event.Kind == AgentHarnessEventKind::TransientTurnEnd &&
+          event.Turn.Outcome == AgentTurnOutcome::Failed) {
+        sawFailedTurnEnd = true;
+        turnEndError = StrView_Dup(&arena, event.Turn.Error);
+      } else if (event.Kind == AgentHarnessEventKind::TransientAgentEnd) {
+        sawFailedAgentEnd = event.Turn.Outcome == AgentTurnOutcome::Failed;
+        finished = true;
+      }
+    }
+    CHECK_ALL(sawFailedTurnEnd, StrView_Contains(turnEndError, "output token limit"),
+              sawFailedAgentEnd);
 
     CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
     CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));

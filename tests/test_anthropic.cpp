@@ -105,7 +105,7 @@ static void TestBuildRequest() {
 static void TestModelCapabilities() {
   Model sonnet = Anthropic_Model(SVL("claude-sonnet-4-6-20260101"));
   CHECK_ALL(sonnet.ContextWindow == 1000000,
-            sonnet.MaxTokens == 8192, sonnet.Reasoning,
+            sonnet.MaxTokens == 64000, sonnet.Reasoning,
             Model_SupportsEffort(&sonnet, ModelEffort::Low),
             Model_SupportsEffort(&sonnet, ModelEffort::Max),
             !Model_SupportsEffort(&sonnet, ModelEffort::XHigh),
@@ -301,7 +301,7 @@ static void TestParseModelsResponse() {
             StrView_EqCStr(page.Models[0].Provider, "anthropic"),
             StrView_EqCStr(page.Models[0].Api, "anthropic-messages"));
   CHECK_ALL(StrView_EqCStr(page.Models[1].Name, "claude-basic"),
-            page.Models[1].ContextWindow == 0, page.Models[1].MaxTokens == 8192,
+            page.Models[1].ContextWindow == 0, page.Models[1].MaxTokens == 64000,
             !page.Models[1].Reasoning);
 
   AnthropicModelPage empty = {};

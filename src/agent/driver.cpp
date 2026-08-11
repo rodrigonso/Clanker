@@ -693,6 +693,17 @@ SessionResult ContinueRun(AgentHarness* harness, DurableId* ioHead, AgentRunStat
                                  turn.Assistant.ErrorMessage);
     }
 
+    // Truncation drops the tool call the model was mid-way through emitting:
+    // the provider never closes that block, so the batch below would see no
+    // tools and end the run as though the model had finished.
+    if (turn.Assistant.Stop == StopReason::Length) {
+      StrView truncated =
+          SVL("assistant response hit the output token limit before completing");
+      AgentHarness_PublishTurnEnd(harness, AgentTurnKind::Run, AgentTurnOutcome::Failed,
+                                 truncated);
+      return SessionResult_Error(SessionStatus::ProviderError, truncated);
+    }
+
     bool anyTool = false;
     bool allTerminate = true;
     Array<Message> toolResults = Array_Make<Message>(&harness->Work, 4);

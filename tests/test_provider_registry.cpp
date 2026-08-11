@@ -207,7 +207,7 @@ void TestProviderRegistry() {
   CHECK_ALL(StrView_Eq(fallback.Id, spec->DefaultModel),
             StrView_EqCStr(fallback.Name, "Claude Sonnet 4.6"),
             fallback.ContextWindow == 1000000,
-            fallback.MaxTokens == 8192,
+            fallback.MaxTokens == 64000,
             Model_SupportsEffort(&fallback, ModelEffort::Medium),
             Model_SupportsEffort(&fallback, ModelEffort::Max));
 
