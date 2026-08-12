@@ -20,6 +20,8 @@ against DeepSWE v1.1 with the model held fixed.
 ```bash
 cd benchmarks/qualitybench
 python3 test_clank_agent.py       # adapter checks, no harness needed
+python3 test_benchmark_flow.py    # safe runner and job-audit checks
+python3 run_benchmark.py canary   # 10-task integration gate
 ```
 
 For Clank's own in-process numbers — agent-loop latency and peak RSS on a

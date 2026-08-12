@@ -55,6 +55,23 @@ BASE_URL_ENV = tuple(url for _, _, urls in PROVIDERS.values() for url in urls)
 FORWARDED_ENV = tuple(key for _, key, _ in PROVIDERS.values()) + BASE_URL_ENV
 
 EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
+DEFAULT_MAX_RETRIES = 8
+DEFAULT_RETRY_MAX_DELAY_MS = 60000
+MAX_U32 = (1 << 32) - 1
+MAX_RETRIES = 1000
+
+
+def _bounded_int(
+    name: str,
+    value: int | str | None,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    parsed = default if value is None else int(value)
+    if parsed < minimum or parsed > maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return parsed
 
 
 class ClankAgent(BaseInstalledAgent):
@@ -98,12 +115,18 @@ class ClankAgent(BaseInstalledAgent):
             )
         self._effort = effort
 
-        # Clank retries 429s three times with 2/4/8 s backoff and ignores
-        # Retry-After, which is thin cover for a long concurrent run against a
-        # rate-limited account. Both are settings.json keys, not flags.
-        self._max_retries = None if max_retries is None else int(max_retries)
-        self._retry_max_delay_ms = (
-            None if retry_max_delay_ms is None else int(retry_max_delay_ms)
+        # A request retry preserves the agent's context and prompt-cache state.
+        # Pier's trial retry deletes the failed trial directory and starts over,
+        # so benchmark runs keep the wider retry budget here instead.
+        self._max_retries = _bounded_int(
+            "max_retries", max_retries, DEFAULT_MAX_RETRIES, 0, MAX_RETRIES
+        )
+        self._retry_max_delay_ms = _bounded_int(
+            "retry_max_delay_ms",
+            retry_max_delay_ms,
+            DEFAULT_RETRY_MAX_DELAY_MS,
+            1,
+            MAX_U32,
         )
 
         # clank has no --version, so the binary's digest is the only honest
@@ -249,12 +272,9 @@ class ClankAgent(BaseInstalledAgent):
         if self._effort:
             settings["effort"] = self._effort
         retry: dict[str, Any] = {}
-        if self._max_retries is not None:
-            retry["maxRetries"] = self._max_retries
-        if self._retry_max_delay_ms is not None:
-            retry["maxDelayMs"] = self._retry_max_delay_ms
-        if retry:
-            settings["retry"] = retry
+        retry["maxRetries"] = self._max_retries
+        retry["maxDelayMs"] = self._retry_max_delay_ms
+        settings["retry"] = retry
         return json.dumps(settings)
 
     @with_prompt_template

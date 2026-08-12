@@ -238,8 +238,11 @@ def main() -> int:
         check("openai provider", openai_settings["provider"], "openai")
         check("openai model", openai_settings["model"], "gpt-5.6-sol")
         check("effort", openai_settings.get("effort"), "xhigh")
-        # Absent unless asked for, so clank keeps its own defaults.
-        check("no retry block by default", "retry" in openai_settings, False)
+        check(
+            "safe retry block by default",
+            openai_settings["retry"],
+            {"maxRetries": 8, "maxDelayMs": 60000},
+        )
 
         # Retry is a settings.json block, not a flag; a long concurrent run
         # needs more than clank's default 3 attempts at 8s to survive 429s.
@@ -266,6 +269,39 @@ def main() -> int:
                 effort="turbo",
             )
             failures.append("bad effort: expected ValueError, got none")
+        except ValueError:
+            pass
+
+        try:
+            ClankAgent(
+                logs_dir=logs,
+                model_name="anthropic/claude-sonnet-4-6",
+                clank_binary=str(binary),
+                max_retries="-1",
+            )
+            failures.append("negative retries: expected ValueError, got none")
+        except ValueError:
+            pass
+
+        try:
+            ClankAgent(
+                logs_dir=logs,
+                model_name="anthropic/claude-sonnet-4-6",
+                clank_binary=str(binary),
+                max_retries="1001",
+            )
+            failures.append("excessive retries: expected ValueError, got none")
+        except ValueError:
+            pass
+
+        try:
+            ClankAgent(
+                logs_dir=logs,
+                model_name="anthropic/claude-sonnet-4-6",
+                clank_binary=str(binary),
+                retry_max_delay_ms="0",
+            )
+            failures.append("zero retry delay: expected ValueError, got none")
         except ValueError:
             pass
 

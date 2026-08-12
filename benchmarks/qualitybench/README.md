@@ -59,18 +59,27 @@ small machine either keep `-n 1` or use `--env modal`.
 
 Three gates before committing to a full sweep. Each buys information the next
 stage depends on; skipping one means finding the problem five hours and a large
-API bill in. Everything below has been exercised at three tasks — gates 1 and 2
-are the parts that have never been run at scale.
+API bill in. `run_benchmark.py` owns the safe defaults for all three:
 
-**Gate 1 — oracle over all 113.** Free: the oracle applies each reference patch
-and makes no model calls. Every task MUST score `reward 1.0`. Anything less is a
-broken harness or an environment problem, not an agent result, and it is far
-cheaper to find here.
+- Clank retries transient provider requests in place (up to eight retries and a
+  60-second delay), preserving the task state and prompt cache.
+- Pier trial retries are fixed at zero. Pier deletes the failed trial directory
+  before retrying, including `clank.stderr`, NDJSON and the exception body.
+- Agent concurrency defaults to four. The oracle, which makes no model calls,
+  defaults to eight.
+- The full sweep refuses to start until its API-cost warning is acknowledged.
 
 ```bash
 cd benchmarks/qualitybench
-pier run -p ~/deep-swe/tasks --agent oracle --env modal -n 8
+python3 run_benchmark.py oracle
 ```
+
+**Gate 1 — oracle over all 113.** Free of model calls: the oracle applies each
+reference patch and runs the verifier. Every task MUST score `reward 1.0`.
+Anything less is a broken harness, task, or environment rather than an agent
+result. Modal currently verifies 112/113: Prometheus's ten IPv6 QueryLog cases
+skip under gVisor with `ip version not supported`, and Pier counts the skips as
+P2P failures. Confirm that one task under Docker before calling the gate clean.
 
 **Gate 2 — concurrency shakeout.** Ten tasks at the concurrency you intend to
 use, on the cheaper model. What matters is not the score but the
@@ -78,35 +87,38 @@ use, on the cheaper model. What matters is not the score but the
 capacity, and it will only get worse at 113.
 
 ```bash
-PYTHONPATH=$PWD pier run \
-  -p ~/deep-swe/tasks \
-  --agent-import-path clank_agent:ClankAgent \
-  --model anthropic/claude-sonnet-4-6 \
-  --ak clank_binary=$CLANK_BIN \
-  --ak effort=high \
-  --env modal --n-tasks 10 --sample-seed 0 -k 1 -n 8
+python3 run_benchmark.py canary
 ```
 
 **Gate 3 — the publishable number.** All 113, matched to a published arm.
 `--agent-timeout-multiplier` reproduces jcode's natural-completion policy;
-without it each task's own 5400 s cap truncates the long trials.
+without it each task's own 5400 s cap truncates the long trials. Based on the
+measured canary and current Opus pricing, budget roughly **$700-$900 in
+Anthropic API credits**, plus Modal compute.
 
 ```bash
-PYTHONPATH=$PWD pier run \
-  -p ~/deep-swe/tasks \
-  --agent-import-path clank_agent:ClankAgent \
-  --model anthropic/claude-opus-4-8 \
-  --ak clank_binary=$CLANK_BIN \
-  --ak effort=high \
-  --agent-timeout-multiplier 4 \
-  --env modal -k 1 -n 8
+python3 run_benchmark.py full --confirm-full-sweep
 ```
 
-`-n` is concurrency, `-k` attempts per task, `--n-tasks` truncates the set
-(omit it for all 113). Swap `--env modal` for `--env docker -n 1` to run
-locally. Results land in `jobs/<timestamp>/`, one directory per trial holding
-`agent/clank.ndjson`, `agent/clank.stderr`, `artifacts/model.patch` and
-`verifier/reward.json`; `pier view jobs` browses them.
+Override the conservative defaults with `--concurrency`, `--environment`,
+`--model`, `--max-retries` or `--retry-max-delay-ms`. Results land in
+`jobs/<timestamp>/`, one directory per trial holding `agent/clank.ndjson`,
+`agent/clank.stderr`, `artifacts/model.patch` and `verifier/reward.json`;
+`pier view jobs` browses them.
+
+Audit every job before reading its score:
+
+```bash
+python3 audit_job.py jobs/<timestamp>
+```
+
+The audit fails on incomplete jobs, exceptions, destructive Pier retries,
+missing patches, missing event logs, and truncated final messages. Empty
+patches are legitimate scored failures and produce warnings. The audit also
+counts Clank's in-place request retries and estimates API cost from the actual
+input, cache-read, cache-write and output tokens. A failed audit means the
+score is not benchmark evidence, even if Pier's final table has zero
+exceptions.
 
 Two things bite only at full scale:
 
@@ -118,25 +130,25 @@ Two things bite only at full scale:
   column. Expect trials far longer than anything seen at three tasks: our
   longest was 22 minutes against a 37.5-minute median and a 188-minute maximum
   in jcode's Opus run.
-- **Rate limits, not Modal, set the concurrency ceiling.** A measured 3-way run
-  sustained ~950k tokens/min; `-n 16` would be roughly 5M/min, past most
-  Anthropic account limits. Clank retries 429s three times with 2/4/8 s
-  exponential backoff and does **not** read `Retry-After`, so ~14 s is all the
-  tolerance there is — beyond that the trial exits non-zero and Pier records a
-  `NonZeroAgentExitCodeError` rather than a score. Start at `-n 8`, watch the
-  exception count, and raise the retry budget if any appear:
-  `--ak max_retries=8 --ak retry_max_delay_ms=60000` widens it to eight attempts
-  backing off to a minute.
+- **Rate limits, not Modal, set the concurrency ceiling.** The measured ten-task
+  canary averaged 8.1M cache-read, 132.6k cache-write and 56.5k output tokens per
+  task. Clank honors provider retry headers and emits `retry_start`/`retry_end`
+  events; the adapter widens its request budget to eight retries capped at one
+  minute. Keep concurrency at four unless a clean canary supports raising it.
+  Never use Pier's `-r`/`--max-retries`: it restarts the whole task and erases
+  the failed attempt.
 
-Budget, extrapolated from a measured 3-task run: **~7.0M input and ~59.5k output
-tokens per task**, so ~790M input (almost entirely cache reads) and ~6.7M output
-for the full 113. Wall time is roughly 5 h at `-n 8`. Job logs run ~1.2 MB per
-trial, so ~140 MB for a full sweep.
+The successful attempts in the ten-task Sonnet canary cost an estimated
+**$37.78**. Extrapolating its usage at current Opus rates puts the 113-task arm
+near $700 before abnormal retries, so the runner states a $700-$900 planning
+range. Provider prices can change; verify them before acknowledging the full
+sweep. Job logs run around 1.2 MB per trial, or roughly 140 MB for all 113.
 
 Adapter checks run with no harness installed:
 
 ```bash
 python3 test_clank_agent.py
+python3 test_benchmark_flow.py
 ```
 
 ## Reading the score
@@ -203,6 +215,14 @@ Three tasks at `--sample-seed 0`, Clank on claude-sonnet-4-6 high, k=1:
 0 on these same three tasks with Opus 4.8, a stronger model than ours — they
 are simply hard for Claude models. (They are not impossible: jcode solves two of
 the three on Sol xhigh.) A real number needs the full 113.
+
+The ten-task concurrency gate on the same Sonnet model completed with F2P
+0.809, P2P 0.989 and reward 0.100 (one task resolved). Its final artifacts were
+healthy, but Pier retried the initial eight-task wave and deleted all eight
+failed attempts. `audit_job.py` therefore rejects that job despite its final
+`Exceptions: 0`. A subsequent eight-way one-turn probe succeeded 8/8 with
+Clank retries disabled, ruling out a persistent eight-request account limit;
+the first-wave error itself is unrecoverable.
 
 Our checkout is `435ee89`, a descendant of jcode's `8cae5984`. The only
 difference across all 113 tasks is `task.toml` and `pre_artifacts.sh` — schema
