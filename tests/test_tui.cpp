@@ -2049,6 +2049,43 @@ void TestTui() {
     result = Tui_GetModalResult(&tm, nullptr, &entered);
     CHECK_ALL(result == TuiModalResult::Confirmed, entered.Length == 0);
 
+    // The breadcrumb defaults to "Commands" so command-invoked modals render
+    // unchanged, and callers that are not commands can say what they are.
+    CHECK(Tui_BeginSelection(&tm, SVL("Choose"), options, 3));
+    CHECK(StrView_Eq(tm.Sess.ModalCategory, SVL("Commands")));
+    Feed(&tm, "\x1b");
+    CHECK(Tui_BeginSelection(&tm, SVL("Pick one"), options, 3, 0,
+                             SVL("Question")));
+    CHECK(StrView_Eq(tm.Sess.ModalCategory, SVL("Question")));
+    Feed(&tm, "\x1b");
+    CHECK(Tui_BeginTextEntry(&tm, SVL("How many?"), SVL("Your answer"),
+                             StrView{}, SVL("Question")));
+    CHECK(StrView_Eq(tm.Sess.ModalCategory, SVL("Question")));
+    Feed(&tm, "\x1b");
+    // Empty is preserved rather than defaulted: it hides the breadcrumb.
+    CHECK(Tui_BeginTextEntry(&tm, SVL("Bare"), SVL("Value"), StrView{},
+                             StrView{}));
+    CHECK(tm.Sess.ModalCategory.Length == 0);
+    Feed(&tm, "\x1b");
+
+    // The answer field is a composer-style bordered box, not a reversed bar:
+    // the caret sits inside a border on an unfilled row.
+    CHECK(Tui_BeginTextEntry(&tm, SVL("How many?"), SVL("Your answer"),
+                             StrView{}, SVL("Question")));
+    Tui_ComposeFrame(&tm, 76, 18);
+    CHECK_ALL(tm.Scr.CursorVisible, tm.Scr.CursorY > 0);
+    Cell caret =
+        tm.Scr.Back[(u32)tm.Scr.CursorY * tm.Scr.Cols + tm.Scr.CursorX];
+    CHECK((caret.St.Attr & ATTR_REVERSE) == 0);
+    bool ruleAboveCaret = false;
+    for (u16 x = 0; x < tm.Scr.Cols; x++)
+      ruleAboveCaret =
+          ruleAboveCaret ||
+          tm.Scr.Back[(u32)(tm.Scr.CursorY - 1) * tm.Scr.Cols + x].Ch == 0x2500;
+    CHECK(ruleAboveCaret);
+    Feed(&tm, "\x1b");
+    Tui_ComposeFrame(&tm, 20, 12);
+
     Tui_OpenCommandPalette(&tm);
     CHECK_ALL(StrView_Eq(LineEdit_Text(&tm.Edit), SVL("/")),
               tm.ModalKind == TuiModalKind::None,

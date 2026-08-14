@@ -1,5 +1,6 @@
 #pragma once
 
+#include "agent/ask.h"
 #include "agent/harness.h"
 #include "app/command.h"
 #include "app/hook_gate.h"
@@ -139,10 +140,18 @@ enum class RuntimeChoiceStatus : u8 { Selected, Back, Cancelled, Failed };
 
 RuntimeInputResult RuntimeSelect(InteractiveRuntime* rt, StrView title,
                                  const StrView* options, u32 optionCount,
-                                 u32* selected, u32 initialSelection = 0);
+                                 u32* selected, u32 initialSelection = 0,
+                                 StrView category = SVL("Commands"));
 RuntimeInputResult RuntimeReadText(InteractiveRuntime* rt, Arena* arena,
                                    StrView title, StrView prompt,
-                                   StrView initial, StrView* out);
+                                   StrView initial, StrView* out,
+                                   StrView category = SVL("Commands"));
+
+// The `ask_user` seam, backed by the two calls above. Safe to invoke from a
+// tool worker thread: under the TUI the modal is served by the TUI's own input
+// thread, and in the plain REPL the main thread is parked inside
+// AgentHarness_Run for the whole run, so nothing else is reading stdin.
+AgentAskUser RuntimeAskUser(InteractiveRuntime* rt);
 
 // Long-running command work reports through these so the TUI can show a
 // cancellable operation and the plain REPL can fall back to printed notices.

@@ -403,6 +403,39 @@ AgentHarnessConfig ScriptConfig(ScriptProvider* script, Tool* tools, u32 toolCou
   return config;
 }
 
+// Scripted answers for the turn-limit question: say Continue a fixed number of
+// times, then Stop. Records what it was asked so the wording stays covered.
+struct LimitPrompter {
+  u32 ContinueTimes;
+  u32 Calls;
+  // The question is arena-backed and that arena is recycled every turn, so it
+  // is copied out rather than kept as a view.
+  char Questions[8][160];
+  u32 LastChoiceCount;
+  bool Unavailable;
+};
+
+bool LimitPrompterAsk(void* user, Arena* arena, const AgentAskRequest* request,
+                      AgentAskResponse* out) {
+  LimitPrompter* prompter = (LimitPrompter*)user;
+  prompter->Calls++;
+  if (prompter->Calls <= 8) {
+    char* slot = prompter->Questions[prompter->Calls - 1];
+    u32 n = request->Question.Length;
+    if (n > 159) n = 159;
+    for (u32 i = 0; i < n; i++) slot[i] = request->Question.Data[i];
+    slot[n] = '\0';
+  }
+  prompter->LastChoiceCount = request->ChoiceCount;
+  if (prompter->Unavailable) return false;
+  bool keepGoing = prompter->Calls <= prompter->ContinueTimes;
+  out->Status = AgentAskStatus::Answered;
+  out->ChoiceIndex = keepGoing ? 0u : 1u;
+  if (request->ChoiceCount > out->ChoiceIndex)
+    out->Answer = StrView_Dup(arena, request->Choices[out->ChoiceIndex]);
+  return true;
+}
+
 u32 CountKind(const Array<SessionRecord>* records, SessionRecordKind kind) {
   u32 count = 0;
   for (u32 i = 0; i < records->Count; i++)
@@ -3801,6 +3834,166 @@ void TestHarnessWorkArenaTrim() {
   ArenaRelease(&arena);
 }
 
+// The turn budget stops a runaway loop, and the ask seam decides whether it is
+// a hard stop or a fresh budget.
+void TestHarnessTurnLimit() {
+  Arena arena = ArenaCreate();
+  MemoryRepository memory = {};
+  MemoryRepository_Init(&memory);
+  SessionRepository repository = MemoryRepository_AsRepository(&memory);
+
+  u32 executions = 0;
+  Tool echo = {};
+  echo.Name = SVL("echo");
+  echo.Description = SVL("echo arguments");
+  echo.ParamsJsonSchema = SVL("{\"type\":\"object\"}");
+  echo.Ctx = &executions;
+  echo.Execute = EchoExec;
+
+  // Every step calls the tool, so nothing but the budget can end this run.
+  ScriptToolCall call[1] = {ScriptToolCall{SVL("echo"), SVL("c1"), SVL("{\"x\":1}")}};
+  ScriptStep steps[64] = {};
+  for (u32 i = 0; i < 64; i++) {
+    steps[i].Text = SVL("working");
+    steps[i].Tools = call;
+    steps[i].ToolCount = 1;
+  }
+
+  // No seam installed: the cap is a hard, graceful stop.
+  {
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+    ScriptProvider script = {steps, 64, 0};
+    AgentHarnessConfig config = ScriptConfig(&script, &echo, 1);
+    config.Compaction = {};
+    config.TurnLimit.Enabled = true;
+    config.TurnLimit.MaxTurns = 3;
+    AgentHarness harness = {};
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+
+    executions = 0;
+    SessionResult result = AgentHarness_Run(&harness, SVL("go"));
+    // Ok, not an error: the branch is intact and a follow-up resumes from here.
+    CHECK(result.Status == SessionStatus::Ok);
+    CHECK(StrView_Contains(result.Message, "stopped after 3 turns"));
+    CHECK(executions == 3);
+
+    // The next prompt starts from a fresh budget rather than stopping instantly.
+    script.Index = 0;
+    executions = 0;
+    SessionResult again = AgentHarness_Run(&harness, SVL("again"));
+    CHECK(again.Status == SessionStatus::Ok);
+    CHECK(executions == 3);
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+  }
+
+  // A seam that says "Continue" twice and then "Stop" grants two more budgets.
+  {
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+    ScriptProvider script = {steps, 64, 0};
+    AgentHarnessConfig config = ScriptConfig(&script, &echo, 1);
+    config.Compaction = {};
+    config.TurnLimit.Enabled = true;
+    config.TurnLimit.MaxTurns = 3;
+    LimitPrompter prompter = {};
+    prompter.ContinueTimes = 2;
+    config.AskUser.User = &prompter;
+    config.AskUser.Ask = LimitPrompterAsk;
+    AgentHarness harness = {};
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+
+    executions = 0;
+    SessionResult result = AgentHarness_Run(&harness, SVL("go"));
+    CHECK(result.Status == SessionStatus::Ok);
+    CHECK_ALL(prompter.Calls == 3, executions == 9);
+    // Each grant buys another MaxTurns, but the count reported to the user is
+    // the true run total -- the third question must not claim only 3 turns.
+    CHECK_ALL(strstr(prompter.Questions[0], "has run 3 turns") != nullptr,
+              strstr(prompter.Questions[1], "has run 6 turns") != nullptr,
+              strstr(prompter.Questions[2], "has run 9 turns") != nullptr);
+    CHECK(prompter.LastChoiceCount == 2);
+    CHECK(StrView_Contains(result.Message, "stopped after 9 turns"));
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+  }
+
+  // Steering mid-run means the loop is no longer unattended, so it refills the
+  // budget. Without that reset this run would stop at turn 2 instead of 5.
+  {
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+    Tool pair[2] = {};
+    pair[0] = echo;
+    pair[1].Name = SVL("steer");
+    pair[1].Description = SVL("queue steering");
+    pair[1].ParamsJsonSchema = SVL("{\"type\":\"object\"}");
+    pair[1].Execute = SteerExec;
+
+    ScriptToolCall steerCall[1] = {
+        ScriptToolCall{SVL("steer"), SVL("s1"), SVL("{}")}};
+    ScriptStep mixed[8] = {};
+    for (u32 i = 0; i < 3; i++) {
+      mixed[i].Tools = steerCall;
+      mixed[i].ToolCount = 1;
+    }
+    for (u32 i = 3; i < 8; i++) {
+      mixed[i].Tools = call;
+      mixed[i].ToolCount = 1;
+    }
+    ScriptProvider script = {mixed, 8, 0};
+
+    AgentHarness harness = {};
+    pair[1].Ctx = &harness;
+    AgentHarnessConfig config = ScriptConfig(&script, pair, 2);
+    config.Compaction = {};
+    config.TurnLimit.Enabled = true;
+    config.TurnLimit.MaxTurns = 2;
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+
+    executions = 0;
+    SessionResult result = AgentHarness_Run(&harness, SVL("go"));
+    CHECK(result.Status == SessionStatus::Ok);
+    // Three steered turns plus two the model drove alone.
+    CHECK(executions == 2);
+    CHECK(StrView_Contains(result.Message, "stopped after 2 turns"));
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+  }
+
+  // A disabled policy, and an enabled one with no cap, both leave the loop
+  // exactly as unbounded as it was before any of this existed.
+  for (u32 variant = 0; variant < 2; variant++) {
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+    ScriptStep bounded[5] = {};
+    for (u32 i = 0; i < 4; i++) {
+      bounded[i].Text = SVL("working");
+      bounded[i].Tools = call;
+      bounded[i].ToolCount = 1;
+    }
+    bounded[4].Text = SVL("done");
+    bounded[4].Stop = StopReason::Stop;
+    ScriptProvider script = {bounded, 5, 0};
+    AgentHarnessConfig config = ScriptConfig(&script, &echo, 1);
+    config.Compaction = {};
+    config.TurnLimit.Enabled = variant == 1;
+    config.TurnLimit.MaxTurns = variant == 1 ? 0 : 2;
+    LimitPrompter prompter = {};
+    config.AskUser.User = &prompter;
+    config.AskUser.Ask = LimitPrompterAsk;
+    AgentHarness harness = {};
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+
+    executions = 0;
+    SessionResult result = AgentHarness_Run(&harness, SVL("go"));
+    CHECK(result.Status == SessionStatus::Ok);
+    CHECK_ALL(prompter.Calls == 0, executions == 4);
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+  }
+
+  MemoryRepository_Destroy(&memory);
+  ArenaRelease(&arena);
+}
+
 void TestHarness() {
   TestHarnessReplayAndIncremental();
   TestHarnessLifecycle();
@@ -3815,4 +4008,5 @@ void TestHarness() {
   TestHarnessPerTurnHooks();
   TestHarnessCancellationAndBranches();
   TestHarnessAutoCompaction();
+  TestHarnessTurnLimit();
 }

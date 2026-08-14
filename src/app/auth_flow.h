@@ -17,6 +17,7 @@ struct RuntimeSelection {
   DefaultProjectTrust DefaultTrust;
   AgentCompactionPolicy Compaction;
   AgentRetryPolicy Retry;
+  AgentTurnLimitPolicy TurnLimit;
   bool Rounded = true;
   Array<StrView> Skills;
   Array<StrView> PromptTemplates;

@@ -266,12 +266,49 @@ void TestRuntimePersistSettings() {
   ArenaRelease(&arena);
 }
 
+// The seam must never block a run that has no user behind it. `-p` and
+// `--mode json` both set Interactive = false, and this is the only thing
+// standing between that and a headless run parked on a modal forever.
+void TestRuntimeAskUserNonInteractive() {
+  Arena arena = ArenaCreate();
+  InteractiveRuntime rt = {};
+  InteractiveRuntime_Init(&rt, &arena);
+  rt.Interactive = false;
+
+  AgentAskUser ask = RuntimeAskUser(&rt);
+  CHECK_ALL(ask.User == &rt, ask.Ask != nullptr);
+
+  StrView choices[] = {SVL("Continue"), SVL("Stop")};
+  AgentAskRequest request = {};
+  request.Question = SVL("Keep going?");
+  request.Choices = choices;
+  request.ChoiceCount = 2;
+  AgentAskResponse response = AgentAskUser_Invoke(&ask, &arena, &request);
+  CHECK(response.Status == AgentAskStatus::Unavailable);
+
+  AgentAskRequest freeText = {};
+  freeText.Question = SVL("Which database?");
+  response = AgentAskUser_Invoke(&ask, &arena, &freeText);
+  CHECK(response.Status == AgentAskStatus::Unavailable);
+
+  // An empty question is refused even with a user present, since there is
+  // nothing to put on screen.
+  rt.Interactive = true;
+  AgentAskRequest empty = {};
+  response = AgentAskUser_Invoke(&ask, &arena, &empty);
+  CHECK(response.Status == AgentAskStatus::Unavailable);
+
+  InteractiveRuntime_Release(&rt);
+  ArenaRelease(&arena);
+}
+
 void TestApp() {
   TestSessionProjectKey();
   TestProjectKeyComparison();
   TestRuntimeCommandArena();
   TestRuntimeSetPromptOptions();
   TestRuntimePersistSettings();
+  TestRuntimeAskUserNonInteractive();
   TestConfigPaths();
   TestTrustChoiceMenu();
   TestTrimAscii();

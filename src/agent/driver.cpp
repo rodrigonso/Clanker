@@ -85,6 +85,15 @@ struct AgentRunState {
   Model ModelInfo;
   bool HasProfile;
   ModelRequestProfile Profile;
+  // Consecutive turns the model drove on its own. Reset whenever the user
+  // supplies steering or follow-up, so the budget bounds runaway loops rather
+  // than long interactive sessions. Lives here, not in Work, because
+  // ContinueRun resets Work on every iteration.
+  u32 AutonomousTurns;
+  // Of those, how many are already covered by budgets the user granted at the
+  // limit prompt. Subtracted out so each grant buys a fresh MaxTurns while
+  // AutonomousTurns stays the true count the notice reports.
+  u32 GrantedTurns;
 };
 
 void AgentRunState_RecordMessages(AgentRunState* run, const Message* messages, u32 count) {
@@ -608,6 +617,31 @@ SessionResult BuildTurnContext(AgentHarness* harness, DurableId head, const Mess
   return SessionResult_Ok();
 }
 
+// The turn budget is spent. Ask whether to keep going, and grant a fresh budget
+// when the user says yes.
+//
+// Deliberately called with no harness lock held: this blocks until the user
+// answers, and blocking under StateLock or WatcherLock would stall every
+// watcher and wedge the process. Allocates from Work, which the caller has just
+// reset, so the question and answer cost one turn's scratch and no more.
+bool AskToContinuePastTurnLimit(AgentHarness* harness, u32 turnsUsed) {
+  StrBuf question = StrBuf_Make(&harness->Work, 160);
+  StrBuf_AppendCStr(&question, "The agent has run ");
+  StrBuf_AppendU64(&question, turnsUsed);
+  StrBuf_AppendCStr(&question,
+                    " turns in a row without input. Keep going?");
+
+  StrView choices[] = {SVL("Continue"), SVL("Stop")};
+  AgentAskRequest request = {};
+  request.Question = StrBuf_View(&question);
+  request.Choices = choices;
+  request.ChoiceCount = 2;
+
+  AgentAskResponse response =
+      AgentAskUser_Invoke(&harness->Config.AskUser, &harness->Work, &request);
+  return response.Status == AgentAskStatus::Answered && response.ChoiceIndex == 0;
+}
+
 SessionResult ContinueRun(AgentHarness* harness, DurableId* ioHead, AgentRunState* run) {
   for (;;) {
     if (Atomic_LoadI32(&harness->AbortFlag))
@@ -620,6 +654,28 @@ SessionResult ContinueRun(AgentHarness* harness, DurableId* ioHead, AgentRunStat
     // took one real session's Work arena to 62 MB. Anything that does span
     // turns lives in RunMem instead.
     ArenaReset(&harness->Work);
+
+    // Runaway guard. Checked here, before anything for this turn is built, so a
+    // turn that would exceed the budget is never started and no provider
+    // request is paid for only to be discarded.
+    if (run && AgentTurnLimit_Reached(&harness->Config.TurnLimit,
+                                      run->AutonomousTurns - run->GrantedTurns)) {
+      u32 spent = run->AutonomousTurns;
+      if (!AskToContinuePastTurnLimit(harness, spent)) {
+        StrBuf notice = StrBuf_Make(&harness->Work, 96);
+        StrBuf_AppendCStr(&notice, "stopped after ");
+        StrBuf_AppendU64(&notice, spent);
+        StrBuf_AppendCStr(&notice, " turns without input");
+        // A graceful stop, not a failure: the branch is intact and an ordinary
+        // follow-up prompt resumes from exactly here. Returning Ok *with* a
+        // message is what carries the reason to the UI --
+        // CompleteAgentTurnLocked publishes agent_end with it and copies it out
+        // of Work first, so nothing here has to publish or own the string.
+        return SessionResult{SessionStatus::Ok, StrBuf_View(&notice), 0};
+      }
+      run->GrantedTurns = spent;
+    }
+    if (run) run->AutonomousTurns++;
 
     // Automatic compaction runs before the next provider request, at most once
     // per iteration. If it succeeds but the context still exceeds the budget we
@@ -765,11 +821,22 @@ SessionResult ContinueRun(AgentHarness* harness, DurableId* ioHead, AgentRunStat
     u32 steerCount = 0;
     SessionResult steered = FlushSteering(harness, ioHead, run, &steerCount);
     if (!SessionResult_IsOk(steered)) return steered;
+    // Steering and follow-up are the only user-driven inputs mid-run, so they
+    // are the only things that refill the budget. Resetting on any appended
+    // message instead would make the cap unreachable, since every turn appends.
+    if (steerCount && run) {
+      run->AutonomousTurns = 0;
+      run->GrantedTurns = 0;
+    }
     if (AgentCheckpoint_ContinueTurn(anyTool, allTerminate, steerCount)) continue;
 
     u32 followUpCount = 0;
     SessionResult followed = FlushFollowUp(harness, ioHead, run, &followUpCount);
     if (!SessionResult_IsOk(followed)) return followed;
+    if (followUpCount && run) {
+      run->AutonomousTurns = 0;
+      run->GrantedTurns = 0;
+    }
     if (AgentCheckpoint_ContinueRun(followUpCount)) continue;
 
     return SessionResult_Ok();

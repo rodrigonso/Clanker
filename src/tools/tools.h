@@ -1,4 +1,5 @@
 #pragma once
+#include "agent/ask.h"
 #include "agent/tool.h"
 
 // Built-in tool factories.
@@ -19,3 +20,13 @@ Tool EditTool();
 Tool LsTool();
 Tool FindTool();
 Tool GrepTool();
+
+// How the `ask_user` tool reaches the user. The owner installs a seam that
+// knows about the renderer; the tool itself never does. A zero-initialized
+// context means nobody is there to ask, and the tool reports that rather than
+// blocking.
+struct AskUserToolContext {
+  AgentAskUser Ask;
+};
+
+Tool AskUserTool(AskUserToolContext* context = nullptr);

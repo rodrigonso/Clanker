@@ -112,6 +112,7 @@ static void PrintHelp() {
       "  -xt, --exclude-tools LIST\n"
       "                    Comma-separated list of tools to disable\n"
       "  -nt, --no-tools   Disable every tool (read-only conversation)\n"
+      "  --max-turns N     Model turns to run before asking to continue (0: unlimited)\n"
       "  -a, --approve     Trust project prompt resources for this run\n"
       "  -na, --no-approve Do not trust project prompt resources for this run\n"
       "  --login [prov]    OAuth login in your browser (anthropic or openai)\n"
@@ -277,8 +278,11 @@ static void RunTuiRepl(InteractiveRuntime* rt) {
     if (!authenticated || cancelled) continue;
     *Tui_Abort(&tui) = 0;
     if (!Tui_AcceptPrompt(&tui, submission.Text)) continue;
-   SessionResult run = RunHarnessPrompt(rt->Harness, submission.Text);
-    if (!SessionResult_IsOk(run)) Tui_CommandError(&tui, run.Message);
+    SessionResult run = RunHarnessPrompt(rt->Harness, submission.Text);
+    if (!SessionResult_IsOk(run))
+      Tui_CommandError(&tui, run.Message);
+    else if (run.Message.Length)
+      Tui_CommandNotice(&tui, run.Message);
   }
   CancelRuntimeAuthWarmup(rt);
   StopHarnessEventPump(&pump);
@@ -310,6 +314,8 @@ int main(int argc, char** argv) {
   Array<StrView> toolExclude = {};
   bool noTools = false;
   bool continueSession = false;
+  bool hasMaxTurnsOverride = false;
+  u32 maxTurnsOverride = 0;
 
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "-m") == 0) {
@@ -326,6 +332,24 @@ int main(int argc, char** argv) {
         return 1;
       }
       onePrompt = argv[++i];
+    } else if (strcmp(argv[i], "--max-turns") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "error: --max-turns requires a count (0 for unlimited)\n");
+        ArenaRelease(&arena);
+        return 1;
+      }
+      const char* value = argv[++i];
+      char* end = nullptr;
+      unsigned long parsed = strtoul(value, &end, 10);
+      if (!*value || !end || *end || parsed > 100000) {
+        fprintf(stderr,
+                "error: --max-turns expects a count from 0 to 100000, got '%s'\n",
+                value);
+        ArenaRelease(&arena);
+        return 1;
+      }
+      hasMaxTurnsOverride = true;
+      maxTurnsOverride = (u32)parsed;
     } else if (strcmp(argv[i], "--mode") == 0) {
       if (i + 1 >= argc) {
         fprintf(stderr, "error: --mode requires text or json\n");
@@ -582,8 +606,12 @@ int main(int argc, char** argv) {
   // always land beside the log they belong to. Stays empty under
   // `--no-session`, which falls the tool back to the OS temp directory.
   ShellToolContext shellContext = {};
-  Tool allTools[] = {ReadTool(), WriteTool(), EditTool(),        LsTool(),
-                     FindTool(), GrepTool(), ShellTool(&shellContext)};
+  // Filled in once the renderer exists; until then the tool reports that no
+  // user is available, which is exactly right for `-p` and for startup.
+  AskUserToolContext askContext = {};
+  Tool allTools[] = {ReadTool(),  WriteTool(), EditTool(),
+                     LsTool(),    FindTool(),  GrepTool(),
+                     ShellTool(&shellContext), AskUserTool(&askContext)};
   constexpr u32 kAllToolCount = sizeof(allTools) / sizeof(allTools[0]);
 
   ToolSelection toolSelection = {};
@@ -659,6 +687,12 @@ int main(int argc, char** argv) {
   harnessConfig.ToolExec = ToolExecution::Parallel;
   harnessConfig.Compaction = selected.Compaction;
   harnessConfig.Retry = selected.Retry;
+  harnessConfig.TurnLimit = selected.TurnLimit;
+  // Overrides whatever settings.json configured. 0 means "never stop to ask".
+  if (hasMaxTurnsOverride) {
+    harnessConfig.TurnLimit.Enabled = maxTurnsOverride != 0;
+    harnessConfig.TurnLimit.MaxTurns = maxTurnsOverride;
+  }
   harnessConfig.AuthUser = &appAuth;
   harnessConfig.ResolveAuth = AppResolveAuth;
 
@@ -827,6 +861,12 @@ int main(int argc, char** argv) {
   runtime.AutoOpen = !noOpen;
   runtime.Auth = &appAuth;
   runtime.Interactive = trustInteractive;
+  // Installed here rather than in harnessConfig because the seam points at the
+  // runtime, which does not exist until now. Both consumers -- the `ask_user`
+  // tool and the turn-limit prompt -- go through the same callback so a
+  // question looks identical whichever one raised it.
+  askContext.Ask = RuntimeAskUser(&runtime);
+  harness.Config.AskUser = askContext.Ask;
   // External lifecycle hooks. The config is read regardless of `--no-session`
   // because it also carries the PreToolUse gate, and a policy deciding whether
   // a tool may run must not switch itself off just because the transcript is
@@ -917,7 +957,12 @@ int main(int argc, char** argv) {
       JsonWrite_Begin(&w, &line);
       JsonWrite_String(&w, "type", SVL("result"));
       JsonWrite_Bool(&w, "ok", SessionResult_IsOk(run));
-      if (!SessionResult_IsOk(run)) JsonWrite_String(&w, "error", run.Message);
+      if (!SessionResult_IsOk(run))
+        JsonWrite_String(&w, "error", run.Message);
+      else if (run.Message.Length)
+        // Present only when an otherwise-successful run ended early, so a
+        // consumer can tell "finished" from "stopped at the turn limit".
+        JsonWrite_String(&w, "message", run.Message);
       JsonWrite_End(&w);
       fwrite(line.Data, 1, line.Length, stdout);
       fputc('\n', stdout);

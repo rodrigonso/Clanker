@@ -464,6 +464,117 @@ static void TestTreeTools(Arena* a) {
   CLANK_RMDIR("clank_tools_it");
 }
 
+// ---- ask_user ------------------------------------------------------------
+
+struct FakeAsk {
+  StrView SeenQuestion;
+  u32 SeenChoiceCount;
+  u32 Calls;
+  AgentAskStatus Reply;
+  u32 ReplyIndex;
+  StrView ReplyText;
+  bool Fail;
+};
+
+static bool FakeAskFn(void* user, Arena* arena, const AgentAskRequest* request,
+                      AgentAskResponse* out) {
+  FakeAsk* fake = (FakeAsk*)user;
+  fake->Calls++;
+  fake->SeenQuestion = StrView_Dup(arena, request->Question);
+  fake->SeenChoiceCount = request->ChoiceCount;
+  if (fake->Fail) return false;
+  out->Status = fake->Reply;
+  out->ChoiceIndex = fake->ReplyIndex;
+  out->Answer = StrView_Dup(
+      arena, request->ChoiceCount && fake->Reply == AgentAskStatus::Answered
+                 ? request->Choices[fake->ReplyIndex]
+                 : fake->ReplyText);
+  return true;
+}
+
+static void TestAskUser(Arena* a) {
+  // No seam installed: the tool must report that nobody can answer rather than
+  // block or fabricate a reply. This is the `-p` and offline-suite path.
+  {
+    Tool tool = AskUserTool(nullptr);
+    ToolResult result = {};
+    StrBuf err = StrBuf_Make(a, 128);
+    CHECK(!RunTool(tool, a, SVL("{\"question\":\"Ship it?\"}"), &result, &err));
+    CHECK(StrView_Contains(StrBuf_View(&err), "no user is available"));
+  }
+
+  FakeAsk fake = {};
+  AskUserToolContext context = {};
+  context.Ask.User = &fake;
+  context.Ask.Ask = FakeAskFn;
+  Tool tool = AskUserTool(&context);
+
+  // Free-text question: the answer comes back verbatim as the tool result.
+  {
+    fake.Reply = AgentAskStatus::Answered;
+    fake.ReplyText = SVL("use postgres");
+    ToolResult result = {};
+    StrBuf err = StrBuf_Make(a, 128);
+    CHECK(RunTool(tool, a, SVL("{\"question\":\"Which database?\"}"), &result, &err));
+    CHECK_ALL(fake.Calls == 1, fake.SeenChoiceCount == 0,
+              StrView_Eq(fake.SeenQuestion, SVL("Which database?")));
+    CHECK(result.Content.Count == 1);
+    CHECK(StrView_Eq(result.Content.Data[0].Text, SVL("use postgres")));
+  }
+
+  // Choices are forwarded in order and the selection is echoed back.
+  {
+    fake = FakeAsk{};
+    fake.Reply = AgentAskStatus::Answered;
+    fake.ReplyIndex = 1;
+    ToolResult result = {};
+    StrBuf err = StrBuf_Make(a, 128);
+    CHECK(RunTool(tool, a,
+                  SVL("{\"question\":\"Pick one\",\"choices\":[\"a\",\"b\"]}"),
+                  &result, &err));
+    CHECK(fake.SeenChoiceCount == 2);
+    CHECK(result.Content.Count == 1);
+    CHECK(StrView_Eq(result.Content.Data[0].Text, SVL("b")));
+  }
+
+  // A dismissal is distinct from an unavailable seam, and both are errors the
+  // model can read rather than a crash.
+  {
+    fake = FakeAsk{};
+    fake.Reply = AgentAskStatus::Declined;
+    ToolResult result = {};
+    StrBuf err = StrBuf_Make(a, 128);
+    CHECK(!RunTool(tool, a, SVL("{\"question\":\"Ship it?\"}"), &result, &err));
+    CHECK(StrView_Contains(StrBuf_View(&err), "dismissed"));
+
+    fake = FakeAsk{};
+    fake.Fail = true;
+    StrBuf failErr = StrBuf_Make(a, 128);
+    CHECK(!RunTool(tool, a, SVL("{\"question\":\"Ship it?\"}"), &result, &failErr));
+    CHECK(StrView_Contains(StrBuf_View(&failErr), "no user is available"));
+  }
+
+  // Malformed arguments are rejected before anyone is disturbed.
+  {
+    fake = FakeAsk{};
+    ToolResult result = {};
+    StrBuf err = StrBuf_Make(a, 128);
+    CHECK(!RunTool(tool, a, SVL("{\"question\":\"\"}"), &result, &err));
+    StrBuf err2 = StrBuf_Make(a, 128);
+    CHECK(!RunTool(tool, a, SVL("{\"question\":\"q\",\"choices\":[\"a\",\"\"]}"),
+                   &result, &err2));
+    StrBuf err3 = StrBuf_Make(a, 128);
+    CHECK(!RunTool(tool, a, SVL("{\"question\":\"q\",\"choices\":\"a\"}"), &result,
+                   &err3));
+    StrBuf err4 = StrBuf_Make(a, 128);
+    CHECK(!RunTool(tool, a, SVL("{\"choices\":[\"a\"]}"), &result, &err4));
+    CHECK(fake.Calls == 0);
+  }
+
+  // A batch must not put two questions on screen at once.
+  CHECK(tool.ExecMode == ToolExecMode::Sequential);
+}
+
 void TestTools() {
   Arena a = ArenaCreate();
   TestRead(&a);
@@ -472,5 +583,6 @@ void TestTools() {
   TestWrite(&a);
   TestEdit(&a);
   TestTreeTools(&a);
+  TestAskUser(&a);
   ArenaRelease(&a);
 }

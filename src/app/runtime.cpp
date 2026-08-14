@@ -62,11 +62,12 @@ StrView TrimAscii(StrView value) {
 
 RuntimeInputResult RuntimeSelect(InteractiveRuntime* rt, StrView title,
                                  const StrView* options, u32 optionCount,
-                                 u32* selected, u32 initialSelection) {
+                                 u32* selected, u32 initialSelection,
+                                 StrView category) {
   if (rt->TuiView) {
     TuiModalResult result =
         Tui_Select(rt->TuiView, title, options, optionCount, selected,
-                   initialSelection);
+                   initialSelection, category);
     if (result == TuiModalResult::Confirmed)
       return RuntimeInputResult::Confirmed;
     if (result == TuiModalResult::Back) return RuntimeInputResult::Back;
@@ -79,11 +80,12 @@ RuntimeInputResult RuntimeSelect(InteractiveRuntime* rt, StrView title,
 
 RuntimeInputResult RuntimeReadText(InteractiveRuntime* rt, Arena* arena,
                                    StrView title, StrView prompt,
-                                   StrView initial, StrView* out) {
+                                   StrView initial, StrView* out,
+                                   StrView category) {
   if (rt->TuiView) {
     StrView value = {};
     TuiModalResult result =
-        Tui_ReadText(rt->TuiView, title, prompt, initial, &value);
+        Tui_ReadText(rt->TuiView, title, prompt, initial, &value, category);
     if (result == TuiModalResult::Back) return RuntimeInputResult::Back;
     if (result != TuiModalResult::Confirmed)
       return RuntimeInputResult::Cancelled;
@@ -93,10 +95,61 @@ RuntimeInputResult RuntimeReadText(InteractiveRuntime* rt, Arena* arena,
 
   char buffer[1024];
   StrView value = {};
+  // Plain_ReadText prints only the prompt, so the title has to be surfaced
+  // here or the context it carries -- the question, the provider -- is lost.
+  if (title.Length && !StrView_Eq(title, prompt))
+    printf("%.*s\n", (int)title.Length, title.Data);
   if (!Plain_ReadText(prompt, buffer, (u32)sizeof(buffer), &value))
     return RuntimeInputResult::Cancelled;
   *out = StrView_Dup(arena, value);
   return RuntimeInputResult::Confirmed;
+}
+
+static bool RuntimeAskUserImpl(void* user, Arena* arena,
+                               const AgentAskRequest* request,
+                               AgentAskResponse* out) {
+  InteractiveRuntime* rt = (InteractiveRuntime*)user;
+  // `false`, not Declined: nobody saw the question, so the caller must be free
+  // to carry on rather than treat it as a refusal.
+  if (!rt || !rt->Interactive || request->Question.Length == 0) return false;
+
+  if (request->ChoiceCount) {
+    u32 selected = 0;
+    RuntimeInputResult result =
+        RuntimeSelect(rt, request->Question, request->Choices,
+                      request->ChoiceCount, &selected, 0, SVL("Question"));
+    if (result != RuntimeInputResult::Confirmed) {
+      out->Status = AgentAskStatus::Declined;
+      return true;
+    }
+    out->Status = AgentAskStatus::Answered;
+    out->ChoiceIndex = selected;
+    out->Answer = StrView_Dup(arena, request->Choices[selected]);
+    return true;
+  }
+
+  StrView answer = {};
+  // Title carries the question; the prompt line is the input hint, so the
+  // question is not rendered twice in the same panel.
+  RuntimeInputResult result =
+      RuntimeReadText(rt, arena, request->Question, SVL("Your answer"), StrView{},
+                      &answer, SVL("Question"));
+  // An empty confirmation is an answer the model cannot use, so it counts as a
+  // dismissal rather than a blank reply.
+  if (result != RuntimeInputResult::Confirmed || TrimAscii(answer).Length == 0) {
+    out->Status = AgentAskStatus::Declined;
+    return true;
+  }
+  out->Status = AgentAskStatus::Answered;
+  out->Answer = answer;
+  return true;
+}
+
+AgentAskUser RuntimeAskUser(InteractiveRuntime* rt) {
+  AgentAskUser ask = {};
+  ask.User = rt;
+  ask.Ask = RuntimeAskUserImpl;
+  return ask;
 }
 
 volatile i32* RuntimeBeginOperation(InteractiveRuntime* rt, const AppCommandUx* ux,
@@ -173,6 +226,7 @@ bool RuntimePersistSettings(InteractiveRuntime* rt) {
   settings.Profile = rt->PreferredProfile;
   settings.Compaction = rt->Harness->Config.Compaction;
   settings.Retry = rt->Harness->Config.Retry;
+  settings.TurnLimit = rt->Harness->Config.TurnLimit;
   settings.Rounded = rt->Rounded;
   if (rt->Prompt) {
     settings.Skills = rt->Prompt->SettingsSkillPaths;

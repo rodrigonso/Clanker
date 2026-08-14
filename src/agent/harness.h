@@ -1,5 +1,6 @@
 #pragma once
 
+#include "agent/ask.h"
 #include "agent/compaction.h"
 #include "agent/harness_event.h"
 #include "agent/hooks.h"
@@ -17,11 +18,18 @@ struct AgentHarnessConfig {
   ToolExecution ToolExec;
   u32 MaxParallelTools;
   AgentRetryPolicy Retry;
+  // Bounds consecutive autonomous turns. Zero-initialized means unlimited, so
+  // an embedding caller keeps pi's behaviour unless it opts in; the CLI enables
+  // it by default.
+  AgentTurnLimitPolicy TurnLimit;
   // Automatic compaction. Zero-initialized means disabled, so a harness only
   // compacts on its own when a caller opts in; the CLI enables it by default.
   AgentCompactionPolicy Compaction;
   AgentToolHooks ToolHooks;
   AgentHarnessHooks Hooks;
+  // How the harness reaches the user mid-run. Null means nobody is there to
+  // ask, which every caller must tolerate.
+  AgentAskUser AskUser;
   void* AuthUser;
   AgentResolveAuthFn ResolveAuth;
 };

@@ -518,6 +518,7 @@ static AppCommandHandlerResult HandleReloadCommand(
   DefaultProjectTrust defaultTrust = DefaultProjectTrust::Ask;
   AgentCompactionPolicy compaction = AgentCompactionPolicy_Default();
   AgentRetryPolicy retry = AgentRetryPolicy_Default();
+  AgentTurnLimitPolicy turnLimit = AgentTurnLimitPolicy_Default();
   bool rounded = rt->Rounded;
   AppSettings settings = {};
   AppSettingsLoadResult settingsResult =
@@ -526,6 +527,7 @@ static AppCommandHandlerResult HandleReloadCommand(
     defaultTrust = settings.DefaultTrust;
     compaction = settings.Compaction;
     retry = settings.Retry;
+    turnLimit = settings.TurnLimit;
     rounded = settings.Rounded;
   } else if (settingsResult == AppSettingsLoadResult::Malformed ||
              settingsResult == AppSettingsLoadResult::ReadFailure) {
@@ -572,6 +574,7 @@ static AppCommandHandlerResult HandleReloadCommand(
   rt->Harness->Config.SystemPrompt = rt->Prompt->SystemPrompt;
   rt->Harness->Config.Compaction = compaction;
   rt->Harness->Config.Retry = retry;
+  rt->Harness->Config.TurnLimit = turnLimit;
   rt->DefaultTrust = defaultTrust;
   rt->ProjectTrusted = trust.Trusted;
   rt->HasProjectResources = hasProjectResources;

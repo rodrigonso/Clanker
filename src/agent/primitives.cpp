@@ -462,3 +462,12 @@ bool AgentCheckpoint_ContinueTurn(bool anyTool, bool allToolsTerminate,
 bool AgentCheckpoint_ContinueRun(u32 followUpCount) {
   return followUpCount > 0;
 }
+
+bool AgentTurnLimitPolicy_IsValid(const AgentTurnLimitPolicy* policy) {
+  return policy && policy->Enabled && policy->MaxTurns > 0;
+}
+
+bool AgentTurnLimit_Reached(const AgentTurnLimitPolicy* policy, u32 turnsUsed) {
+  if (!AgentTurnLimitPolicy_IsValid(policy)) return false;
+  return turnsUsed >= policy->MaxTurns;
+}

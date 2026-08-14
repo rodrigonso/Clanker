@@ -53,6 +53,9 @@ void TestSettings() {
             loaded.Retry.BaseDelayMs == AGENT_RETRY_DEFAULT_BASE_DELAY_MS,
             loaded.Retry.MaxDelayMs == AGENT_RETRY_DEFAULT_MAX_DELAY_MS);
 
+  CHECK_ALL(loaded.TurnLimit.Enabled,
+            loaded.TurnLimit.MaxTurns == AGENT_TURN_LIMIT_DEFAULT_MAX_TURNS);
+
   // A partial compaction block overrides only the keys it names.
   CHECK(ConfigFile_WriteAtomic(
       &a, SV(path),
@@ -153,6 +156,53 @@ void TestSettings() {
   CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
         AppSettingsLoadResult::Malformed);
 
+  // maxTurns 0 means "no cap" and must survive the loader rather than being
+  // rejected the way a zero token count is.
+  CHECK(ConfigFile_WriteAtomic(
+      &a, SV(path),
+      SVL("{\"provider\":\"anthropic\",\"model\":\"legacy\","
+          "\"turnLimit\":{\"maxTurns\":0}}")));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+        AppSettingsLoadResult::Success);
+  CHECK_ALL(loaded.TurnLimit.Enabled, loaded.TurnLimit.MaxTurns == 0,
+            !AgentTurnLimitPolicy_IsValid(&loaded.TurnLimit));
+
+  CHECK(ConfigFile_WriteAtomic(
+      &a, SV(path),
+      SVL("{\"provider\":\"anthropic\",\"model\":\"legacy\","
+          "\"turnLimit\":{\"enabled\":false}}")));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+        AppSettingsLoadResult::Success);
+  CHECK_ALL(!loaded.TurnLimit.Enabled,
+            loaded.TurnLimit.MaxTurns == AGENT_TURN_LIMIT_DEFAULT_MAX_TURNS);
+
+  CHECK(ConfigFile_WriteAtomic(
+      &a, SV(path),
+      SVL("{\"provider\":\"anthropic\",\"model\":\"bad\",\"turnLimit\":7}")));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+        AppSettingsLoadResult::Malformed);
+
+  CHECK(ConfigFile_WriteAtomic(
+      &a, SV(path),
+      SVL("{\"provider\":\"anthropic\",\"model\":\"bad\","
+          "\"turnLimit\":{\"maxTurns\":-1}}")));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+        AppSettingsLoadResult::Malformed);
+
+  CHECK(ConfigFile_WriteAtomic(
+      &a, SV(path),
+      SVL("{\"provider\":\"anthropic\",\"model\":\"bad\","
+          "\"turnLimit\":{\"maxTurns\":2.5}}")));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+        AppSettingsLoadResult::Malformed);
+
+  CHECK(ConfigFile_WriteAtomic(
+      &a, SV(path),
+      SVL("{\"provider\":\"anthropic\",\"model\":\"bad\","
+          "\"turnLimit\":{\"enabled\":1}}")));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+        AppSettingsLoadResult::Malformed);
+
   CHECK(ConfigFile_WriteAtomic(
       &a, SV(path),
       SVL("{\"provider\":\"anthropic\",\"model\":\"bad\","
@@ -195,6 +245,8 @@ void TestSettings() {
   saved.Retry.MaxRetries = 5;
   saved.Retry.BaseDelayMs = 250;
   saved.Retry.MaxDelayMs = 3000;
+  saved.TurnLimit.Enabled = true;
+  saved.TurnLimit.MaxTurns = 42;
   CHECK(AppSettings_Save(&a, SV(path), &saved));
   CHECK(AppSettings_Load(&a, SV(path), &loaded) == AppSettingsLoadResult::Success);
   CHECK_ALL(StrView_Eq(loaded.Provider, saved.Provider),
@@ -206,6 +258,7 @@ void TestSettings() {
             loaded.Compaction.KeepRecentTokens == 8192, loaded.Rounded);
   CHECK_ALL(loaded.Retry.Enabled, loaded.Retry.MaxRetries == 5,
             loaded.Retry.BaseDelayMs == 250, loaded.Retry.MaxDelayMs == 3000);
+  CHECK_ALL(loaded.TurnLimit.Enabled, loaded.TurnLimit.MaxTurns == 42);
 
   saved.Rounded = false;
   CHECK(AppSettings_Save(&a, SV(path), &saved));
@@ -225,6 +278,7 @@ void TestSettings() {
   AppSettings zeroed = saved;
   zeroed.Compaction = AgentCompactionPolicy{};
   zeroed.Retry = AgentRetryPolicy{};
+  zeroed.TurnLimit = AgentTurnLimitPolicy{};
   CHECK(AppSettings_Save(&a, SV(path), &zeroed));
   CHECK(AppSettings_Load(&a, SV(path), &loaded) == AppSettingsLoadResult::Success);
   CHECK_ALL(!loaded.Compaction.Enabled,
@@ -235,6 +289,9 @@ void TestSettings() {
   CHECK_ALL(!loaded.Retry.Enabled, loaded.Retry.MaxRetries == 0,
             loaded.Retry.BaseDelayMs == AGENT_RETRY_DEFAULT_BASE_DELAY_MS,
             loaded.Retry.MaxDelayMs == AGENT_RETRY_DEFAULT_MAX_DELAY_MS);
+  // Unlike the delays, maxTurns has no floor to restore: 0 is a legal value
+  // that means unlimited, so it must come back as written.
+  CHECK_ALL(!loaded.TurnLimit.Enabled, loaded.TurnLimit.MaxTurns == 0);
 
 #if !defined(_WIN32)
   struct stat st = {};

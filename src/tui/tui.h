@@ -103,6 +103,7 @@ struct TuiSessionStrings {
   StrView OperationLabel;   // long-running command banner
   StrView OperationStatus;
   StrView ModalTitle;
+  StrView ModalCategory;    // breadcrumb before the title; empty hides it
   StrView ModalPrompt;
   StrView* ModalOptions;    // array itself is also SessionMem-owned
   u32 ModalOptionCount;
@@ -312,17 +313,21 @@ volatile i32* Tui_OperationAbort(Tui* t);
 // Non-blocking modal entry points are useful to controllers and headless tests.
 // Result remains available until the next modal begins.
 bool Tui_BeginSelection(Tui* t, StrView title, const StrView* options, u32 optionCount,
-                        u32 initialSelection = 0);
-bool Tui_BeginTextEntry(Tui* t, StrView title, StrView prompt, StrView initial = {});
+                        u32 initialSelection = 0,
+                        StrView category = SVL("Commands"));
+bool Tui_BeginTextEntry(Tui* t, StrView title, StrView prompt, StrView initial = {},
+                        StrView category = SVL("Commands"));
 TuiModalResult Tui_GetModalResult(Tui* t, u32* selected, StrView* text);
 
 // Blocking conveniences. Cond_Wait releases the TUI lock, so input and render
 // threads remain active while the caller waits.
 TuiModalResult Tui_Select(Tui* t, StrView title, const StrView* options,
                          u32 optionCount, u32* selected,
-                         u32 initialSelection = 0);
+                         u32 initialSelection = 0,
+                         StrView category = SVL("Commands"));
 TuiModalResult Tui_ReadText(Tui* t, StrView title, StrView prompt,
-                           StrView initial, StrView* out);
+                           StrView initial, StrView* out,
+                           StrView category = SVL("Commands"));
 void Tui_OpenCommandPalette(Tui* t);
 
 // Progress reporting. Each call is what the driver has just observed, in the

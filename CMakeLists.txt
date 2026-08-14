@@ -204,6 +204,7 @@ add_library(clank_tools STATIC
   src/tools/ls.cpp
   src/tools/find.cpp
   src/tools/grep.cpp
+  src/tools/ask_user.cpp
   src/tools/shell.cpp)
 target_link_libraries(clank_tools PUBLIC clank_json clank_agent clank_http)
 

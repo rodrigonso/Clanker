@@ -214,6 +214,7 @@ RuntimeSelection LoadRuntimeSelection(Arena* arena, StrView settingsPath,
   selected.DefaultTrust = DefaultProjectTrust::Ask;
   selected.Compaction = AgentCompactionPolicy_Default();
   selected.Retry = AgentRetryPolicy_Default();
+  selected.TurnLimit = AgentTurnLimitPolicy_Default();
 
   AppSettings settings = {};
   AppSettingsLoadResult load = AppSettings_Load(arena, settingsPath, &settings);
@@ -221,6 +222,7 @@ RuntimeSelection LoadRuntimeSelection(Arena* arena, StrView settingsPath,
     selected.DefaultTrust = settings.DefaultTrust;
     selected.Compaction = settings.Compaction;
     selected.Retry = settings.Retry;
+    selected.TurnLimit = settings.TurnLimit;
     selected.Rounded = settings.Rounded;
     selected.Skills = settings.Skills;
     selected.PromptTemplates = settings.PromptTemplates;

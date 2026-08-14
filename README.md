@@ -20,7 +20,7 @@ a specific upstream measurement — pi publishes no memory numbers.
 
 A runnable Clank agent: the agent loop + native Anthropic Messages and OpenAI
 Responses providers (HTTP/SSE) + `read`, `write`, `edit`, `ls`, `find`, `grep`,
-and `shell` tools + a streaming REPL.
+`shell`, and `ask_user` tools + a streaming REPL.
 
 ```
 src/
@@ -36,8 +36,8 @@ src/
            refresh, resolve)
   session/ append-only v2 message tree, reducer, memory + JSONL repositories
   agent/   incremental AgentHarness, in-memory queues, hooks, events, compaction
-  tools/   read/write/edit/ls/find/grep/shell, direct/shell process exec,
-           ripgrep discovery, fs/glob/diff/truncate/filelock infra
+  tools/   read/write/edit/ls/find/grep/shell/ask_user, direct/shell process
+           exec, ripgrep discovery, fs/glob/diff/truncate/filelock infra
   term/    full-screen TUI: raw-mode terminal, key decoder, differential
            renderer, markdown, transcript model, multi-line editor, controller
   app/     CLI entry + durable session startup + TUI/plain REPL + login flow +
@@ -162,6 +162,7 @@ ctest --preset vs2026-debug
 ./build/clank -t read,ls,grep          # allowlist of tools to enable
 ./build/clank -xt shell                # disable specific tools
 ./build/clank --no-tools               # read-only conversation
+./build/clank --max-turns 25           # ask to continue every 25 turns (0: unlimited)
 ./build/clank --approve                # trust project prompt files for this run
 ```
 
@@ -318,9 +319,9 @@ discovery.
 
 ## Tool selection
 
-All seven tools (`read`, `write`, `edit`, `ls`, `find`, `grep`, `shell`) are
-enabled by default. The active set shapes the system prompt, so disabling a
-tool also removes its snippet and guideline bullets.
+All eight tools (`read`, `write`, `edit`, `ls`, `find`, `grep`, `shell`,
+`ask_user`) are enabled by default. The active set shapes the system prompt, so
+disabling a tool also removes its snippet and guideline bullets.
 
 ```sh
 ./build/clank -t read,ls,grep      # allowlist: only these three
@@ -555,6 +556,50 @@ Setting `maxRetries` to 0 or `enabled` to `false` fails on the first error. The
 HTTP transport underneath does not retry independently, so these numbers are
 the whole story.
 
+## Turn limit
+
+The agent loop keeps taking turns while the model keeps calling tools. A model
+that never stops would otherwise run until the context fills or you cancel it,
+so the loop carries a budget: after 100 consecutive turns with no input from
+you, it stops and asks whether to keep going.
+
+Answering *Continue* grants another full budget. Answering *Stop* — or
+dismissing the question — ends the run cleanly with a notice saying how many
+turns it took; the branch is intact and an ordinary follow-up prompt resumes
+from exactly where it stopped. Steering or a follow-up message you send mid-run
+also resets the budget, since the loop is no longer running unattended.
+
+```json
+{
+  "turnLimit": {
+    "enabled": true,
+    "maxTurns": 100
+  }
+}
+```
+
+```sh
+./build/clank --max-turns 25      # ask every 25 turns
+./build/clank --max-turns 0       # never ask; the loop is unbounded again
+```
+
+When nobody can answer — under `-p`, `--mode json`, or a non-interactive
+terminal — the run stops at the limit rather than blocking. Set `maxTurns` to
+`0` or `enabled` to `false` for the old unbounded behavior.
+
+## Asking the user
+
+The `ask_user` tool lets the agent put a question to you mid-run and wait for
+the answer, either free-form or as a fixed set of choices. It runs on its own,
+never alongside another tool, so two questions can never compete for the
+screen. With no user present it returns an error the model can read and work
+around rather than blocking, which is what keeps `-p` and `--mode json` usable.
+
+It is the same seam the turn limit uses, so a question looks identical
+whichever raised it. In the TUI the modal is labelled `Question`, not
+`Commands` — the breadcrumb reflects what opened the modal, so command-invoked
+pickers like `/model` still read `Commands`.
+
 ## TUI
 
 Running interactively on a real terminal launches a full-screen TUI: an
@@ -779,7 +824,9 @@ Event types: `agent_start`, `agent_end`, `turn_start`, `turn_end`,
 `record` carries a durable session entry verbatim, in the same schema the
 session log stores, so a consumer sees exactly the state that was persisted
 rather than a re-flattened copy. `agent_end` always arrives before `result`,
-and `result.ok` matches the process exit code.
+and `result.ok` matches the process exit code. A failed run adds
+`result.error`; a run that succeeded but stopped early — today only at the turn
+limit — adds `result.message` instead.
 
 `--mode json` requires `-p`; there is no interactive form without a
 bidirectional protocol.

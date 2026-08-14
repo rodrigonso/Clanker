@@ -16,7 +16,7 @@ void PaintModalNode(UiContext*, const UiNode* node, UiCanvas* canvas) {
   u16 desiredH =
       t->ModalKind == TuiModalKind::Select
           ? (u16)((t->Sess.ModalOptionCount < 12 ? t->Sess.ModalOptionCount : 12) + 3)
-          : 6;
+          : 7;
   u16 panelH = desiredH < data->TopBorderY ? desiredH : data->TopBorderY;
   if (panelH < 4) return;
   u16 x0 = 1;
@@ -32,9 +32,13 @@ void PaintModalNode(UiContext*, const UiNode* node, UiCanvas* canvas) {
 
   Style path = panel;
   path.Attr |= ATTR_DIM;
-  u16 titleX = UiCanvas_PutTextClipped(
-      canvas, (u16)(x0 + 2), (u16)(y0 + 1), SVL("Commands  /  "),
-      path, (u16)(x1 - 1));
+  u16 titleX = (u16)(x0 + 2);
+  if (t->Sess.ModalCategory.Length) {
+    titleX = UiCanvas_PutTextClipped(canvas, titleX, (u16)(y0 + 1),
+                                     t->Sess.ModalCategory, path, (u16)(x1 - 1));
+    titleX = UiCanvas_PutTextClipped(canvas, titleX, (u16)(y0 + 1), SVL("  /  "),
+                                     path, (u16)(x1 - 1));
+  }
   Style title = panel;
   title.Attr |= ATTR_BOLD;
   UiCanvas_PutTextClipped(
@@ -75,22 +79,55 @@ void PaintModalNode(UiContext*, const UiNode* node, UiCanvas* canvas) {
 
   Style prompt = panel;
   prompt.Attr |= ATTR_DIM;
-  if (!compactText)
+  // The composer is a bordered box with plain text inside, so the answer field
+  // matches it. That needs three rows; below that fall back to the single
+  // reversed row, which still gives a short terminal a usable field.
+  bool boxed = panelH >= 6;
+  u16 boxTop = (u16)(y1 - 3);
+  if (!compactText && (!boxed || boxTop > (u16)(y0 + 2)))
     UiCanvas_PutTextClipped(canvas, (u16)(x0 + 2), (u16)(y0 + 2),
                             t->Sess.ModalPrompt, prompt, (u16)(x1 - 1));
-  u16 editY = (u16)(y1 - 1);
+
   Style edit = panel;
-  edit.Attr |= ATTR_REVERSE;
-  UiCanvas_Fill(canvas,
-                UiRect{(u16)(x0 + 2), editY, (u16)(x1 - x0 - 3), 1},
-                edit);
+  u16 editY;
+  u16 textX;
+  u16 textEnd;  // exclusive
+  if (boxed) {
+    UiRect box{(u16)(x0 + 2), boxTop, (u16)(x1 - x0 - 3), 3};
+    UiCanvas_Fill(canvas, box, panel);
+    UiCanvas_DrawBorder(canvas, box, TuiSt(t, 250, ATTR_NONE));
+    editY = (u16)(boxTop + 1);
+    textX = (u16)(x0 + 4);
+    textEnd = (u16)(x1 - 3);
+  } else {
+    edit.Attr |= ATTR_REVERSE;
+    editY = (u16)(y1 - 1);
+    UiCanvas_Fill(canvas, UiRect{(u16)(x0 + 2), editY, (u16)(x1 - x0 - 3), 1},
+                  edit);
+    textX = (u16)(x0 + 3);
+    textEnd = (u16)(x1 - 2);
+  }
+
   StrView text = LineEdit_Text(&t->ModalEdit);
-  UiCanvas_PutTextClipped(canvas, (u16)(x0 + 3), editY, text, edit,
-                          (u16)(x1 - 2));
-  u32 cursorW =
-      TextWidth(StrView{text.Data, LineEdit_Cursor(&t->ModalEdit)});
-  u16 cursorX = (u16)(x0 + 3 + cursorW);
-  if (cursorX >= x1 - 2) cursorX = (u16)(x1 - 3);
+  u32 avail = textEnd > textX ? (u32)(textEnd - textX) : 0;
+  u32 cursorW = TextWidth(StrView{text.Data, LineEdit_Cursor(&t->ModalEdit)});
+  // One row, so the field pans horizontally to keep the caret visible rather
+  // than wrapping the way the composer does.
+  u32 skip = 0;
+  u32 offset = 0;
+  if (avail && cursorW >= avail) {
+    u32 want = cursorW - avail + 1;
+    while (offset < text.Length && skip < want)
+      skip += CharCellWidth(Utf8Decode(text, &offset));
+  }
+  UiCanvas_PutTextClipped(canvas, textX, editY,
+                          StrView{text.Data + offset, text.Length - offset},
+                          edit, textEnd);
+  u16 cursorX = (u16)(textX + (cursorW - skip));
+  if (avail == 0)
+    cursorX = textX;
+  else if (cursorX >= textEnd)
+    cursorX = (u16)(textEnd - 1);
   UiCanvas_SetCursor(canvas, node->Id, true, cursorX, editY);
 }
 
@@ -178,7 +215,7 @@ void HandleTextKey(Tui* t, const Key& k) {
 using namespace TuiInternal;
 
 bool Tui_BeginSelection(Tui* t, StrView title, const StrView* options, u32 optionCount,
-                        u32 initialSelection) {
+                        u32 initialSelection, StrView category) {
   if (!options || optionCount == 0) return false;
   Mutex_Lock(&t->Lock);
   if (t->Stop || t->Quit || t->ModalResult == TuiModalResult::Pending) {
@@ -193,6 +230,7 @@ bool Tui_BeginSelection(Tui* t, StrView title, const StrView* options, u32 optio
   t->ModalSelected = initialSelection < optionCount ? initialSelection : optionCount - 1;
   t->ModalFirst = 0;
   t->Sess.ModalTitle = StrView_Dup(&t->SessionMem, title);
+  t->Sess.ModalCategory = StrView_Dup(&t->SessionMem, category);
   t->Sess.ModalPrompt = {};
   t->Sess.ModalTextResult = {};
   t->ModalKind = TuiModalKind::Select;
@@ -202,7 +240,8 @@ bool Tui_BeginSelection(Tui* t, StrView title, const StrView* options, u32 optio
   return true;
 }
 
-bool Tui_BeginTextEntry(Tui* t, StrView title, StrView prompt, StrView initial) {
+bool Tui_BeginTextEntry(Tui* t, StrView title, StrView prompt, StrView initial,
+                        StrView category) {
   Mutex_Lock(&t->Lock);
   if (t->Stop || t->Quit || t->ModalResult == TuiModalResult::Pending) {
     Mutex_Unlock(&t->Lock);
@@ -212,6 +251,7 @@ bool Tui_BeginTextEntry(Tui* t, StrView title, StrView prompt, StrView initial) 
   LineEdit_Clear(&t->ModalEdit);
   LineEdit_InsertText(&t->ModalEdit, initial);
   t->Sess.ModalTitle = StrView_Dup(&t->SessionMem, title);
+  t->Sess.ModalCategory = StrView_Dup(&t->SessionMem, category);
   t->Sess.ModalPrompt = StrView_Dup(&t->SessionMem, prompt);
   t->Sess.ModalOptions = nullptr;
   t->Sess.ModalOptionCount = 0;
@@ -236,8 +276,8 @@ TuiModalResult Tui_GetModalResult(Tui* t, u32* selected, StrView* text) {
 
 TuiModalResult Tui_Select(Tui* t, StrView title, const StrView* options,
                          u32 optionCount, u32* selected,
-                         u32 initialSelection) {
-  if (!Tui_BeginSelection(t, title, options, optionCount, initialSelection))
+                         u32 initialSelection, StrView category) {
+  if (!Tui_BeginSelection(t, title, options, optionCount, initialSelection, category))
     return TuiModalResult::Cancelled;
   Mutex_Lock(&t->Lock);
   while (t->ModalResult == TuiModalResult::Pending && !t->Stop)
@@ -249,8 +289,8 @@ TuiModalResult Tui_Select(Tui* t, StrView title, const StrView* options,
 }
 
 TuiModalResult Tui_ReadText(Tui* t, StrView title, StrView prompt,
-                           StrView initial, StrView* out) {
-  if (!Tui_BeginTextEntry(t, title, prompt, initial))
+                           StrView initial, StrView* out, StrView category) {
+  if (!Tui_BeginTextEntry(t, title, prompt, initial, category))
     return TuiModalResult::Cancelled;
   Mutex_Lock(&t->Lock);
   while (t->ModalResult == TuiModalResult::Pending && !t->Stop)

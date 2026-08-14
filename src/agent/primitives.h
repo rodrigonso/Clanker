@@ -73,6 +73,35 @@ struct AgentRetryDecision {
   u32 DelayMs;
 };
 
+// Bounds how many *consecutive autonomous* turns one run may take. pi has no
+// such cap; this is a deliberate divergence, and a safety valve rather than a
+// task-shaping knob -- the default is far above what any real task reaches.
+//
+// User-supplied steering and follow-up reset the count, so the budget only ever
+// limits turns the model drove on its own. A zero MaxTurns means unlimited,
+// which is the escape hatch for a caller that wants pi's exact behaviour back.
+struct AgentTurnLimitPolicy {
+  bool Enabled;
+  u32 MaxTurns;
+};
+
+constexpr u32 AGENT_TURN_LIMIT_DEFAULT_MAX_TURNS = 100;
+
+inline AgentTurnLimitPolicy AgentTurnLimitPolicy_Default() {
+  AgentTurnLimitPolicy policy = {};
+  policy.Enabled = true;
+  policy.MaxTurns = AGENT_TURN_LIMIT_DEFAULT_MAX_TURNS;
+  return policy;
+}
+
+// A policy only bounds anything when it is enabled and names a positive cap.
+bool AgentTurnLimitPolicy_IsValid(const AgentTurnLimitPolicy* policy);
+
+// True once `turnsUsed` consecutive autonomous turns have already run, meaning
+// the next one would exceed the budget. Kept separate from the
+// AgentCheckpoint_* rules below so pi's continuation logic stays untouched.
+bool AgentTurnLimit_Reached(const AgentTurnLimitPolicy* policy, u32 turnsUsed);
+
 AgentRetryDecision AgentProvider_RetryDecision(const AgentRetryPolicy* policy,
                                                u32 attemptIndex,
                                                bool providerOk,

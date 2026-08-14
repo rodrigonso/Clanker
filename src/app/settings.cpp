@@ -133,6 +133,28 @@ AppSettingsLoadResult AppSettings_Load(Arena* a, StrView path, AppSettings* out)
       return AppSettingsLoadResult::Malformed;
   }
 
+  AgentTurnLimitPolicy turnLimit = AgentTurnLimitPolicy_Default();
+  JsonValue* turnLimitValue = Json_Get(root, "turnLimit");
+  if (turnLimitValue) {
+    if (!Json_IsObject(turnLimitValue)) return AppSettingsLoadResult::Malformed;
+    JsonValue* enabled = Json_Get(turnLimitValue, "enabled");
+    if (enabled) {
+      if (enabled->Kind != JsonKind::Bool) return AppSettingsLoadResult::Malformed;
+      turnLimit.Enabled = enabled->Bool;
+    }
+    // Zero is meaningful (no cap), so this is read directly rather than through
+    // ReadTokenCount's positive-integer check.
+    JsonValue* maxTurns = Json_Get(turnLimitValue, "maxTurns");
+    if (maxTurns) {
+      if (maxTurns->Kind != JsonKind::Number || maxTurns->Number < 0.0 ||
+          maxTurns->Number > 100000.0)
+        return AppSettingsLoadResult::Malformed;
+      turnLimit.MaxTurns = (u32)maxTurns->Number;
+      if ((f64)turnLimit.MaxTurns != maxTurns->Number)
+        return AppSettingsLoadResult::Malformed;
+    }
+  }
+
   bool rounded = true;
   JsonValue* roundedValue = Json_Get(root, "rounded");
   if (roundedValue) {
@@ -153,6 +175,7 @@ AppSettingsLoadResult AppSettings_Load(Arena* a, StrView path, AppSettings* out)
   out->Profile = profile;
   out->Compaction = compaction;
   out->Retry = retry;
+  out->TurnLimit = turnLimit;
   out->Rounded = rounded;
   out->Skills = skills;
   out->PromptTemplates = promptTemplates;
@@ -213,6 +236,11 @@ bool AppSettings_Save(Arena* a, StrView path, const AppSettings* settings) {
   StrBuf_AppendU64(&content, baseDelayMs);
   StrBuf_AppendCStr(&content, ",\"maxDelayMs\":");
   StrBuf_AppendU64(&content, maxDelayMs);
+  StrBuf_AppendChar(&content, '}');
+  StrBuf_AppendCStr(&content, ",\"turnLimit\":{\"enabled\":");
+  StrBuf_AppendCStr(&content, settings->TurnLimit.Enabled ? "true" : "false");
+  StrBuf_AppendCStr(&content, ",\"maxTurns\":");
+  StrBuf_AppendU64(&content, settings->TurnLimit.MaxTurns);
   StrBuf_AppendChar(&content, '}');
   StrBuf_AppendCStr(&content, ",\"rounded\":");
   StrBuf_AppendCStr(&content, settings->Rounded ? "true" : "false");

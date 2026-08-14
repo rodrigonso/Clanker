@@ -15,6 +15,7 @@ struct AppSettings {
   ModelRequestProfile Profile;
   AgentCompactionPolicy Compaction;
   AgentRetryPolicy Retry = AgentRetryPolicy_Default();
+  AgentTurnLimitPolicy TurnLimit = AgentTurnLimitPolicy_Default();
   bool Rounded = true;
   Array<StrView> Skills;
   Array<StrView> PromptTemplates;

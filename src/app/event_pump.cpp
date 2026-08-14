@@ -63,7 +63,15 @@ void ReplSink(void* user, const AgentHarnessEvent* ev) {
 }
 
 void ReportHarnessResult(SessionResult result) {
-  if (SessionResult_IsOk(result)) return;
+  if (SessionResult_IsOk(result)) {
+    // An Ok result normally carries no message. When it does, the run ended
+    // early for a reason the user needs -- the turn limit is the only source
+    // today -- and nothing else surfaces it: agent_end's message is not
+    // rendered by either REPL.
+    if (result.Message.Length)
+      printf("\n%.*s\n", (int)result.Message.Length, result.Message.Data);
+    return;
+  }
   fprintf(stderr, "\nerror: %.*s\n", (int)result.Message.Length,
           result.Message.Data);
 }
