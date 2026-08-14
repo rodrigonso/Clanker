@@ -146,9 +146,8 @@ StrView ToolManager_LocalRipgrepPath(Arena* arena) {
 }
 
 bool ToolManager_WriteFile(Arena* arena, StrView path, StrView content) {
-  StrBuf native = StrBuf_Make(arena, path.Length + 1);
-  StrBuf_Append(&native, path);
-  FILE* file = fopen(StrBuf_CStr(&native), "wb");
+  const char* native = StrView_DupCStr(arena, path);
+  FILE* file = fopen(native, "wb");
   bool ok = file && (content.Length == 0 ||
                      fwrite(content.Data, 1, content.Length, file) == content.Length);
   if (file && fclose(file) != 0) ok = false;
@@ -164,18 +163,16 @@ void ToolManager_RemoveTree(Arena* arena, StrView root) {
       if (entries.Data[i].IsDir)
         ToolManager_RemoveTree(arena, child);
       else {
-        StrBuf path = StrBuf_Make(arena, child.Length + 1);
-        StrBuf_Append(&path, child);
-        remove(StrBuf_CStr(&path));
+        const char* path = StrView_DupCStr(arena, child);
+        remove(path);
       }
     }
   }
-  StrBuf path = StrBuf_Make(arena, root.Length + 1);
-  StrBuf_Append(&path, root);
+  const char* path = StrView_DupCStr(arena, root);
 #if defined(_WIN32)
-  _rmdir(StrBuf_CStr(&path));
+  _rmdir(path);
 #else
-  rmdir(StrBuf_CStr(&path));
+  rmdir(path);
 #endif
 }
 
@@ -310,9 +307,8 @@ StrView ToolManager_DownloadRipgrep(Arena* arena, volatile i32* abort, StrBuf* e
   if (!Fs_MkdirP(arena, extractDir) ||
       !ToolManager_WriteFile(arena, archivePath, archive.Body)) {
     StrBuf_AppendCStr(err, "failed to stage the ripgrep download");
-    StrBuf archiveNative = StrBuf_Make(arena, archivePath.Length + 1);
-    StrBuf_Append(&archiveNative, archivePath);
-    remove(StrBuf_CStr(&archiveNative));
+    const char* archiveNative = StrView_DupCStr(arena, archivePath);
+    remove(archiveNative);
     ToolManager_RemoveTree(arena, extractDir);
     return StrView{};
   }
@@ -371,9 +367,8 @@ StrView ToolManager_DownloadRipgrep(Arena* arena, volatile i32* abort, StrBuf* e
       StrBuf_AppendCStr(err, ": ");
       StrBuf_Append(err, StrBuf_View(&extractStderr));
     }
-    StrBuf archiveNative = StrBuf_Make(arena, archivePath.Length + 1);
-    StrBuf_Append(&archiveNative, archivePath);
-    remove(StrBuf_CStr(&archiveNative));
+    const char* archiveNative = StrView_DupCStr(arena, archivePath);
+    remove(archiveNative);
     ToolManager_RemoveTree(arena, extractDir);
     return StrView{};
   }
@@ -390,28 +385,24 @@ StrView ToolManager_DownloadRipgrep(Arena* arena, volatile i32* abort, StrBuf* e
   StrView destination = ToolManager_LocalRipgrepPath(arena);
   bool installed = false;
   if (found.Path.Length) {
-    StrBuf sourceNative = StrBuf_Make(arena, found.Path.Length + 1);
-    StrBuf_Append(&sourceNative, found.Path);
-    StrBuf destinationNative = StrBuf_Make(arena, destination.Length + 1);
-    StrBuf_Append(&destinationNative, destination);
+    const char* sourceNative = StrView_DupCStr(arena, found.Path);
+    const char* destinationNative = StrView_DupCStr(arena, destination);
 #if defined(_WIN32)
-    installed = MoveFileExA(StrBuf_CStr(&sourceNative), StrBuf_CStr(&destinationNative),
+    installed = MoveFileExA(sourceNative, destinationNative,
                             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
 #else
-    installed = rename(StrBuf_CStr(&sourceNative), StrBuf_CStr(&destinationNative)) == 0 &&
-                chmod(StrBuf_CStr(&destinationNative), 0755) == 0;
+    installed = rename(sourceNative, destinationNative) == 0 &&
+                chmod(destinationNative, 0755) == 0;
 #endif
   }
 
-  StrBuf archiveNative = StrBuf_Make(arena, archivePath.Length + 1);
-  StrBuf_Append(&archiveNative, archivePath);
-  remove(StrBuf_CStr(&archiveNative));
+  const char* archiveNative = StrView_DupCStr(arena, archivePath);
+  remove(archiveNative);
   ToolManager_RemoveTree(arena, extractDir);
 
   if (!installed || !ToolManager_ExecutableWorks(arena, destination, abort)) {
-    StrBuf destinationNative = StrBuf_Make(arena, destination.Length + 1);
-    StrBuf_Append(&destinationNative, destination);
-    remove(StrBuf_CStr(&destinationNative));
+    const char* destinationNative = StrView_DupCStr(arena, destination);
+    remove(destinationNative);
     StrBuf_AppendCStr(err, installed ? "downloaded ripgrep could not be executed"
                                     : "ripgrep binary was not found in the downloaded archive");
     return StrView{};

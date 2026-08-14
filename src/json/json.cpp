@@ -32,24 +32,6 @@ JsonValue* NewVal(P* s, JsonKind k) {
   return v;
 }
 
-void Utf8Encode(StrBuf* b, u32 cp) {
-  if (cp < 0x80) {
-    StrBuf_AppendChar(b, (char)cp);
-  } else if (cp < 0x800) {
-    StrBuf_AppendChar(b, (char)(0xC0 | (cp >> 6)));
-    StrBuf_AppendChar(b, (char)(0x80 | (cp & 0x3F)));
-  } else if (cp < 0x10000) {
-    StrBuf_AppendChar(b, (char)(0xE0 | (cp >> 12)));
-    StrBuf_AppendChar(b, (char)(0x80 | ((cp >> 6) & 0x3F)));
-    StrBuf_AppendChar(b, (char)(0x80 | (cp & 0x3F)));
-  } else {
-    StrBuf_AppendChar(b, (char)(0xF0 | (cp >> 18)));
-    StrBuf_AppendChar(b, (char)(0x80 | ((cp >> 12) & 0x3F)));
-    StrBuf_AppendChar(b, (char)(0x80 | ((cp >> 6) & 0x3F)));
-    StrBuf_AppendChar(b, (char)(0x80 | (cp & 0x3F)));
-  }
-}
-
 StrView ParseString(P* s) {
   s->p++;  // opening quote
   StrBuf b = StrBuf_Make(s->a, 16);
@@ -93,7 +75,7 @@ StrView ParseString(P* s) {
             }
           }
         }
-        Utf8Encode(&b, cp);
+        StrBuf_AppendUtf8(&b, cp);
         break;
       }
       default:
@@ -344,10 +326,61 @@ bool Json_GetBool(const JsonValue* obj, const char* key, bool fallback) {
   return (v && v->Kind == JsonKind::Bool) ? v->Bool : fallback;
 }
 
+// Length of the well-formed UTF-8 sequence at `s.Data[i]`, or 0 when the bytes
+// there are not well-formed. Rejects overlong forms, the surrogate range, and
+// anything above U+10FFFF -- exactly the cases providers reject.
+static u32 Utf8SequenceLength(StrView s, u32 i) {
+  u8 lead = (u8)s.Data[i];
+  u8 minNext = 0x80;
+  u8 maxNext = 0xBF;
+  u32 length;
+  if (lead >= 0xC2 && lead <= 0xDF) {
+    length = 2;
+  } else if (lead >= 0xE0 && lead <= 0xEF) {
+    length = 3;
+    if (lead == 0xE0)
+      minNext = 0xA0;  // reject overlong 3-byte forms
+    else if (lead == 0xED)
+      maxNext = 0x9F;  // reject U+D800..U+DFFF encoded as CESU-8
+  } else if (lead >= 0xF0 && lead <= 0xF4) {
+    length = 4;
+    if (lead == 0xF0)
+      minNext = 0x90;  // reject overlong 4-byte forms
+    else if (lead == 0xF4)
+      maxNext = 0x8F;  // reject above U+10FFFF
+  } else {
+    return 0;  // stray continuation byte, C0/C1 overlong, or F5..FF
+  }
+  if (s.Length - i < length) return 0;
+  u8 next = (u8)s.Data[i + 1];
+  if (next < minNext || next > maxNext) return 0;
+  for (u32 k = 2; k < length; k++) {
+    u8 cont = (u8)s.Data[i + k];
+    if (cont < 0x80 || cont > 0xBF) return 0;
+  }
+  return length;
+}
+
 void Json_WriteString(StrBuf* b, StrView s) {
   StrBuf_AppendChar(b, '"');
   for (u32 i = 0; i < s.Length; i++) {
     char c = s.Data[i];
+    if ((u8)c >= 0x80) {
+      // Every provider rejects a request body that is not well-formed UTF-8.
+      // One bad byte -- a legacy-codepage shell byte, a chopped multi-byte
+      // character, binary file content -- would otherwise fail this request and
+      // every later one, since the poisoned text is replayed from history. This
+      // is the single serialization choke point, so it is the one place that
+      // has to hold the invariant.
+      u32 length = Utf8SequenceLength(s, i);
+      if (length) {
+        StrBuf_Append(b, StrView{s.Data + i, length});
+        i += length - 1;
+      } else {
+        StrBuf_AppendCStr(b, "\xEF\xBF\xBD");
+      }
+      continue;
+    }
     switch (c) {
       case '"': StrBuf_AppendCStr(b, "\\\""); break;
       case '\\': StrBuf_AppendCStr(b, "\\\\"); break;

@@ -28,14 +28,14 @@ bool WriteSkill(Arena* arena, StrView dir, const char* body) {
 }
 
 Skill ParseOne(Arena* arena, const char* path, const char* content,
-               bool* ok, Array<SkillDiagnostic>* warnings) {
+               bool* ok, Array<LoadDiagnostic>* warnings) {
   Skill skill = {};
   *ok = Skills_ParseFile(arena, SV(path), SV(content), &skill, warnings);
   return skill;
 }
 
 void TestFrontmatter(Arena* scratch) {
-  Array<SkillDiagnostic> warnings = Array_Make<SkillDiagnostic>(scratch, 8);
+  Array<LoadDiagnostic> warnings = Array_Make<LoadDiagnostic>(scratch, 8);
   bool ok = false;
 
   Skill basic = ParseOne(scratch, "/root/pdf-tools/SKILL.md",
@@ -92,12 +92,12 @@ void TestFrontmatter(Arena* scratch) {
                           &ok, &warnings);
   CHECK_ALL(ok, hidden.DisableModelInvocation);
 
-  Array<SkillDiagnostic> dropped = Array_Make<SkillDiagnostic>(scratch, 4);
+  Array<LoadDiagnostic> dropped = Array_Make<LoadDiagnostic>(scratch, 4);
   ParseOne(scratch, "/root/d/SKILL.md", "---\nname: no-description\n---\nBody",
            &ok, &dropped);
   CHECK_ALL(!ok, dropped.Count == 1);
 
-  Array<SkillDiagnostic> unterminated = Array_Make<SkillDiagnostic>(scratch, 4);
+  Array<LoadDiagnostic> unterminated = Array_Make<LoadDiagnostic>(scratch, 4);
   ParseOne(scratch, "/root/u/SKILL.md", "---\nname: x\ndescription: y\nBody",
            &ok, &unterminated);
   CHECK(!ok);
@@ -108,7 +108,7 @@ void TestFrontmatter(Arena* scratch) {
                          SVL("---\nname: a\ndescription: b\n---\n\nBody\n")),
       SVL("Body")));
 
-  Array<SkillDiagnostic> named = Array_Make<SkillDiagnostic>(scratch, 8);
+  Array<LoadDiagnostic> named = Array_Make<LoadDiagnostic>(scratch, 8);
   Skill bad = ParseOne(scratch, "/root/b/SKILL.md",
                        "---\nname: -Bad--Name-\ndescription: Warns\n---\nBody",
                        &ok, &named);

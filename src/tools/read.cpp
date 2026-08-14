@@ -7,16 +7,6 @@
 #include "tools/tools.h"
 #include "tools/truncate.h"
 
-static u32 Read_CountLines(StrView content) {
-  if (content.Length == 0) return 0;
-  u32 count = 0;
-  for (u32 i = 0; i < content.Length; i++) {
-    if (content.Data[i] == '\n') count++;
-  }
-  if (content.Data[content.Length - 1] != '\n') count++;
-  return count;
-}
-
 static u32 Read_LineStart(StrView content, u32 line0) {
   if (line0 == 0) return 0;
   u32 line = 0;
@@ -44,14 +34,6 @@ static u32 Read_LineByteLen(StrView content, u32 line0) {
   return end - start;
 }
 
-static void Read_AppendKb(StrBuf* b, u32 bytes) {
-  u32 kbx10 = (bytes * 10u + 512u) / 1024u;
-  StrBuf_AppendU64(b, kbx10 / 10u);
-  StrBuf_AppendChar(b, '.');
-  StrBuf_AppendU64(b, kbx10 % 10u);
-  StrBuf_AppendCStr(b, "KB");
-}
-
 static void Read_AppendNoticePrefix(StrBuf* b) {
   if (b->Length > 0) StrBuf_AppendCStr(b, "\n\n");
 }
@@ -69,9 +51,8 @@ static bool ReadExec(void* ctx, Arena* arena, StrView id, const ToolArgs* args,
     return false;
   }
 
-  StrBuf p = StrBuf_Make(arena, path.Length + 1);
-  StrBuf_Append(&p, path);
-  FILE* f = fopen(StrBuf_CStr(&p), "rb");
+  const char* p = StrView_DupCStr(arena, path);
+  FILE* f = fopen(p, "rb");
   if (!f) {
     StrBuf_AppendCStr(err, "cannot open file: ");
     StrBuf_Append(err, path);
@@ -105,7 +86,7 @@ static bool ReadExec(void* ctx, Arena* arena, StrView id, const ToolArgs* args,
 
   i64 offset = ToolArgs_GetInt(args, "offset", 0);
   i64 limit = ToolArgs_GetInt(args, "limit", 0);
-  u32 totalLines = Read_CountLines(bytes);
+  u32 totalLines = Trunc_CountLines(bytes);
   u32 startLine0 = 0;
   if (offset > 0) {
     if ((u64)(offset - 1) >= (u64)totalLines && totalLines > 0) {
@@ -150,9 +131,9 @@ static bool ReadExec(void* ctx, Arena* arena, StrView id, const ToolArgs* args,
       StrBuf_AppendCStr(&result, "[Line ");
       StrBuf_AppendU64(&result, startLine1);
       StrBuf_AppendCStr(&result, " is ");
-      Read_AppendKb(&result, firstLineBytes);
+      Trunc_AppendKb(&result, firstLineBytes);
       StrBuf_AppendCStr(&result, ", exceeds ");
-      Read_AppendKb(&result, TRUNC_MAX_BYTES);
+      Trunc_AppendKb(&result, TRUNC_MAX_BYTES);
       StrBuf_AppendCStr(&result, " limit. Use shell: sed -n '");
       StrBuf_AppendU64(&result, startLine1);
       StrBuf_AppendCStr(&result, "p' ");
@@ -167,7 +148,7 @@ static bool ReadExec(void* ctx, Arena* arena, StrView id, const ToolArgs* args,
       StrBuf_AppendCStr(&result, " of ");
       StrBuf_AppendU64(&result, totalLines);
       StrBuf_AppendCStr(&result, " (");
-      Read_AppendKb(&result, TRUNC_MAX_BYTES);
+      Trunc_AppendKb(&result, TRUNC_MAX_BYTES);
       StrBuf_AppendCStr(&result, " limit). Use offset=");
       StrBuf_AppendU64(&result, startLine1 + tr.OutputLines);
       StrBuf_AppendCStr(&result, " to continue.]");

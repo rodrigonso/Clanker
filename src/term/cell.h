@@ -42,6 +42,16 @@ inline bool CellEq(Cell a, Cell b) { return a.Ch == b.Ch && StyleEq(a.St, b.St);
 // Display width of a codepoint: 0 (combining/zero-width), 2 (CJK/emoji), else 1.
 u32 CharWidth(u32 cp);
 
+// Cells occupied when rendering a codepoint. Same as CharWidth but never 0, so
+// zero-width scalars still advance the cursor instead of stacking forever.
+inline u32 CharCellWidth(u32 cp) {
+  u32 width = CharWidth(cp);
+  return width < 1 ? 1 : width;
+}
+
+// True for a UTF-8 continuation byte (10xxxxxx), i.e. not a scalar boundary.
+inline bool Utf8IsContinuation(char c) { return ((u8)c & 0xC0) == 0x80; }
+
 // Decode one UTF-8 scalar from `s` at *i (advancing it). Returns 0 at end and
 // 0xFFFD on malformed input.
 u32 Utf8Decode(StrView s, u32* i);

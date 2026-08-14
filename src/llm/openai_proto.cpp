@@ -73,20 +73,18 @@ bool Eq(StrView value, const char* expected) {
   return StrView_EqCStr(value, expected);
 }
 
-bool StartsWith(StrView value, StrView prefix);
-
 bool IsResponsesModelId(StrView id) {
   StrView candidate = id;
   if (candidate.Length > 3 && candidate.Data[0] == 'f' &&
       candidate.Data[1] == 't' && candidate.Data[2] == ':')
     candidate = StrView{candidate.Data + 3, candidate.Length - 3};
   bool supportedFamily =
-      StartsWith(candidate, SVL("gpt-")) ||
-      StartsWith(candidate, SVL("o1")) ||
-      StartsWith(candidate, SVL("o3")) ||
-      StartsWith(candidate, SVL("o4")) ||
-      StartsWith(candidate, SVL("codex-")) ||
-      StartsWith(candidate, SVL("computer-use-"));
+      StrView_StartsWith(candidate, SVL("gpt-")) ||
+      StrView_StartsWith(candidate, SVL("o1")) ||
+      StrView_StartsWith(candidate, SVL("o3")) ||
+      StrView_StartsWith(candidate, SVL("o4")) ||
+      StrView_StartsWith(candidate, SVL("codex-")) ||
+      StrView_StartsWith(candidate, SVL("computer-use-"));
   if (!supportedFamily) return false;
   const char* incompatible[] = {
       "audio",      "embedding", "image", "moderation",
@@ -98,15 +96,10 @@ bool IsResponsesModelId(StrView id) {
   return true;
 }
 
-bool StartsWith(StrView value, StrView prefix) {
-  return value.Length >= prefix.Length &&
-         memcmp(value.Data, prefix.Data, prefix.Length) == 0;
-}
-
 void ApplyKnownModelMetadata(Model* model) {
   for (u32 i = 0; i < OpenAI_FallbackModelCount(); i++) {
     const Model* fallback = &OPENAI_FALLBACK_MODELS[i];
-    if (!StartsWith(model->Id, fallback->Id)) continue;
+    if (!StrView_StartsWith(model->Id, fallback->Id)) continue;
     model->ContextWindow = fallback->ContextWindow;
     model->MaxTokens = fallback->MaxTokens;
     model->Reasoning = fallback->Reasoning;
@@ -530,13 +523,13 @@ void HandleData(OpenAIParse* state, StrView data) {
 }
 
 void HandleLine(OpenAIParse* state, StrView line) {
-  if (line.Length < 5 || memcmp(line.Data, "data:", 5) != 0) return;
-  StrView data = {line.Data + 5, line.Length - 5};
-  while (data.Length && (data.Data[0] == ' ' || data.Data[0] == '\t')) {
-    data.Data++;
-    data.Length--;
-  }
-  HandleData(state, data);
+  StrView data = {};
+  if (Sse_DataPayload(line, &data)) HandleData(state, data);
+}
+
+bool OnParseLine(void* user, StrView line) {
+  HandleLine((OpenAIParse*)user, line);
+  return true;
 }
 
 bool JsonBoolOr(JsonValue* object, const char* key, bool fallback) {
@@ -672,30 +665,14 @@ void OpenAIParse_Init(OpenAIParse* state, Arena* arena, Message* message,
 
 void OpenAIParse_Feed(OpenAIParse* state, StrView chunk) {
   StrBuf_Append(&state->Buffer, chunk);
-  StrBuf* buffer = &state->Buffer;
-  u32 start = 0;
-  for (u32 i = 0; i < buffer->Length; i++) {
-    if (buffer->Data[i] != '\n') continue;
-    u32 length = i - start;
-    if (length && buffer->Data[start + length - 1] == '\r') length--;
-    HandleLine(state, StrView{buffer->Data + start, length});
-    start = i + 1;
-  }
-  if (start) {
-    u32 remaining = buffer->Length - start;
-    memmove(buffer->Data, buffer->Data + start, remaining);
-    buffer->Length = remaining;
-    buffer->Data[remaining] = '\0';
-  }
+  StrBuf_DrainLines(&state->Buffer, state, OnParseLine);
 }
 
 bool OpenAI_ParseModelsResponse(Arena* arena, StrView response, bool rich,
                                 ProviderModelList* out) {
   *out = {};
   out->Status = ProviderModelListStatus::Failed;
-  StrBuf input = StrBuf_Make(arena, response.Length + 1);
-  StrBuf_Append(&input, response);
-  JsonValue* root = Json_Parse(arena, StrBuf_View(&input));
+  JsonValue* root = Json_ParseCopy(arena, response);
   if (!Json_IsObject(root)) {
     out->Error = SVL("OpenAI models response is not a JSON object");
     return false;

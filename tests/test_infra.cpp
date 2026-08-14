@@ -58,6 +58,18 @@ static void TestTruncate(Arena* a) {
   TruncResult t = Trunc_Tail(a, SVL("a\nb\nc\nd\ne"), 2, 1000);
   CHECK_ALL(t.Truncated, t.OutputLines == 2, StrView_Contains(t.Content, "e"),
             !StrView_Contains(t.Content, "a"));
+
+  // A byte cut must land on a character boundary. Splitting a multi-byte
+  // character produces invalid UTF-8 that the provider rejects for the whole
+  // request, so the cut moves off the character instead.
+  StrView wide = SVL("\xE4\xB8\xAD\xE4\xB8\xAD\xE4\xB8\xAD");  // 3 chars, 9 bytes
+  TruncResult head = Trunc_Head(a, wide, 100, 4);
+  CHECK_ALL(head.Truncated, head.ByBytes, head.Content.Length == 3,
+            (u8)head.Content.Data[0] == 0xE4);
+
+  TruncResult tail = Trunc_Tail(a, wide, 100, 4);
+  CHECK_ALL(tail.Truncated, tail.ByBytes, tail.Content.Length == 3,
+            (u8)tail.Content.Data[0] == 0xE4);
 }
 
 static void TestFsPaths(Arena* a) {

@@ -11,11 +11,6 @@
 
 static bool EqC(StrView s, const char* c) { return StrView_EqCStr(s, c); }
 
-static bool StartsWith(StrView value, StrView prefix) {
-  return prefix.Length <= value.Length &&
-         memcmp(value.Data, prefix.Data, prefix.Length) == 0;
-}
-
 static const Model ANTHROPIC_FALLBACK_MODELS[] = {
     {
         SVL("claude-sonnet-4-6"),
@@ -75,7 +70,7 @@ static const AnthropicCapabilitySpec ANTHROPIC_CAPABILITIES[] = {
 static void ApplyKnownModelMetadata(Model* model) {
   for (u32 i = 0; i < Anthropic_FallbackModelCount(); i++) {
     const Model* fallback = &ANTHROPIC_FALLBACK_MODELS[i];
-    if (!StartsWith(model->Id, fallback->Id)) continue;
+    if (!StrView_StartsWith(model->Id, fallback->Id)) continue;
     model->ContextWindow = fallback->ContextWindow;
     model->Reasoning = fallback->Reasoning;
     model->EffortMask = fallback->EffortMask;
@@ -89,7 +84,7 @@ static void ApplyKnownModelMetadata(Model* model) {
        i++) {
     const AnthropicCapabilitySpec* capability =
         &ANTHROPIC_CAPABILITIES[i];
-    if (!StartsWith(model->Id, capability->Prefix)) continue;
+    if (!StrView_StartsWith(model->Id, capability->Prefix)) continue;
     model->ContextWindow = capability->ContextWindow;
     model->Reasoning = true;
     model->EffortMask = capability->EffortMask;
@@ -152,9 +147,7 @@ static bool ModelU32(JsonValue* object, const char* key, u32* value, bool* prese
 
 bool Anthropic_ParseModelsResponse(Arena* arena, StrView response, AnthropicModelPage* out) {
   *out = {};
-  StrBuf input = StrBuf_Make(arena, response.Length + 1);
-  StrBuf_Append(&input, response);
-  JsonValue* root = Json_Parse(arena, StrBuf_View(&input));
+  JsonValue* root = Json_ParseCopy(arena, response);
   if (!Json_IsObject(root)) {
     out->Error = SVL("Anthropic models response is not a JSON object");
     return false;
@@ -607,13 +600,13 @@ static void HandleData(AnthropicParse* st, StrView data) {
 }
 
 static void HandleLine(AnthropicParse* st, StrView line) {
-  if (line.Length < 5 || memcmp(line.Data, "data:", 5) != 0) return;
-  StrView data = {line.Data + 5, line.Length - 5};
-  while (data.Length && (data.Data[0] == ' ' || data.Data[0] == '\t')) {
-    data.Data++;
-    data.Length--;
-  }
-  HandleData(st, data);
+  StrView data = {};
+  if (Sse_DataPayload(line, &data)) HandleData(st, data);
+}
+
+static bool OnParseLine(void* user, StrView line) {
+  HandleLine((AnthropicParse*)user, line);
+  return true;
 }
 
 void AnthropicParse_Init(AnthropicParse* st, Arena* arena, Message* msg, StreamSink sink) {
@@ -629,19 +622,5 @@ void AnthropicParse_Init(AnthropicParse* st, Arena* arena, Message* msg, StreamS
 
 void AnthropicParse_Feed(AnthropicParse* st, StrView chunk) {
   StrBuf_Append(&st->Buffer, chunk);
-  StrBuf* b = &st->Buffer;
-  u32 start = 0;
-  for (u32 i = 0; i < b->Length; i++) {
-    if (b->Data[i] != '\n') continue;
-    u32 ll = i - start;
-    if (ll > 0 && b->Data[start + ll - 1] == '\r') ll--;
-    HandleLine(st, StrView{b->Data + start, ll});
-    start = i + 1;
-  }
-  if (start > 0) {
-    u32 rem = b->Length - start;
-    memmove(b->Data, b->Data + start, rem);
-    b->Length = rem;
-    b->Data[rem] = '\0';
-  }
+  StrBuf_DrainLines(&st->Buffer, st, OnParseLine);
 }

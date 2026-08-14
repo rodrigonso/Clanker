@@ -38,28 +38,10 @@ void EmitUtf8(StrBuf* b, u32 cp) {
     StrBuf_AppendChar(b, ' ');
     return;
   }
-  if (cp < 0x80) {
-    StrBuf_AppendChar(b, (char)cp);
-  } else if (cp < 0x800) {
-    StrBuf_AppendChar(b, (char)(0xC0 | (cp >> 6)));
-    StrBuf_AppendChar(b, (char)(0x80 | (cp & 0x3F)));
-  } else if (cp < 0x10000) {
-    StrBuf_AppendChar(b, (char)(0xE0 | (cp >> 12)));
-    StrBuf_AppendChar(b, (char)(0x80 | ((cp >> 6) & 0x3F)));
-    StrBuf_AppendChar(b, (char)(0x80 | (cp & 0x3F)));
-  } else {
-    StrBuf_AppendChar(b, (char)(0xF0 | (cp >> 18)));
-    StrBuf_AppendChar(b, (char)(0x80 | ((cp >> 12) & 0x3F)));
-    StrBuf_AppendChar(b, (char)(0x80 | ((cp >> 6) & 0x3F)));
-    StrBuf_AppendChar(b, (char)(0x80 | (cp & 0x3F)));
-  }
+  StrBuf_AppendUtf8(b, cp);
 }
 
-// Decode one scalar from `s` at *i (advancing it). Returns 0 at end.
-u32 Utf8Next(StrView s, u32* i) { return Utf8Decode(s, i); }
-
 }  // namespace
-
 void Screen_Init(Screen* s, Arena* mem, ScreenWriter w, void* user) {
   memset(s, 0, sizeof(*s));
   s->Mem = mem;
@@ -88,8 +70,7 @@ void Screen_BeginFrame(Screen* s) { memset(s->Back, 0, (u32)s->Cols * s->Rows * 
 
 u32 Screen_PutChar(Screen* s, u16 x, u16 y, u32 cp, Style st) {
   if (x >= s->Cols || y >= s->Rows) return 1;
-  u32 w = CharWidth(cp);
-  if (w < 1) w = 1;
+  u32 w = CharCellWidth(cp);
   u32 idx = (u32)y * s->Cols + x;
   s->Back[idx].Ch = cp;
   s->Back[idx].St = st;
@@ -104,9 +85,8 @@ u16 Screen_PutText(Screen* s, u16 x, u16 y, StrView utf8, Style st, u16 maxXExcl
   if (maxXExclusive > s->Cols) maxXExclusive = s->Cols;
   u32 i = 0;
   while (i < utf8.Length && x < maxXExclusive) {
-    u32 cp = Utf8Next(utf8, &i);
-    u32 w = CharWidth(cp);
-    if (w < 1) w = 1;
+    u32 cp = Utf8Decode(utf8, &i);
+    u32 w = CharCellWidth(cp);
     if ((u32)x + w > maxXExclusive) break;
     Screen_PutChar(s, x, y, cp, st);
     x = (u16)(x + w);

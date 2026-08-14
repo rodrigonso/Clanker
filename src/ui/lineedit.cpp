@@ -27,20 +27,20 @@ void TextDelete(StrBuf* b, u32 at, u32 n) {
 u32 PrevCharStart(StrView t, u32 off) {
   if (off == 0) return 0;
   u32 i = off - 1;
-  while (i > 0 && ((unsigned char)t.Data[i] & 0xC0) == 0x80) i--;
+  while (i > 0 && Utf8IsContinuation(t.Data[i])) i--;
   return i;
 }
 
 u32 NextCharEnd(StrView t, u32 off) {
   if (off >= t.Length) return t.Length;
   u32 i = off + 1;
-  while (i < t.Length && ((unsigned char)t.Data[i] & 0xC0) == 0x80) i++;
+  while (i < t.Length && Utf8IsContinuation(t.Data[i])) i++;
   return i;
 }
 
 u32 ClampCharBoundary(StrView t, u32 off) {
   if (off > t.Length) off = t.Length;
-  while (off > 0 && off < t.Length && ((unsigned char)t.Data[off] & 0xC0) == 0x80) off--;
+  while (off > 0 && off < t.Length && Utf8IsContinuation(t.Data[off])) off--;
   return off;
 }
 
@@ -56,16 +56,11 @@ u32 LineEndOf(StrView t, u32 off) {
   return i;
 }
 
-u32 DisplayCharWidth(u32 cp) {
-  u32 width = CharWidth(cp);
-  return width < 1 ? 1 : width;
-}
-
 u32 ColOfOffset(StrView t, u32 off) {
   u32 ls = LineStartOf(t, off);
   u32 i = ls;
   u32 col = 0;
-  while (i < off) col += DisplayCharWidth(Utf8Decode(t, &i));
+  while (i < off) col += CharCellWidth(Utf8Decode(t, &i));
   return col;
 }
 
@@ -75,7 +70,7 @@ u32 OffsetForColumn(StrView t, u32 start, u32 end, u32 col, bool nearest) {
   while (i < end) {
     u32 next = i;
     u32 cp = Utf8Decode(t, &next);
-    u32 cw = DisplayCharWidth(cp);
+    u32 cw = CharCellWidth(cp);
     if (w + cw > col) return nearest && (col - w) * 2 >= cw ? next : i;
     w += cw;
     i = next;
@@ -188,7 +183,7 @@ void LineEdit_Layout(const LineEdit* e, u16 wrapWidth,
       rowWidth = 0;
       continue;
     }
-    u32 cw = DisplayCharWidth(cp);
+    u32 cw = CharCellWidth(cp);
     if (rowWidth && rowWidth + cw > width) {
       out->Starts[out->Count] = rowStart;
       out->Rows[out->Count++] =

@@ -1,18 +1,5 @@
 #include "tools/truncate.h"
 
-// Lines are separated by '\n'. A trailing '\n' terminates the last line but
-// does not create an extra empty final line: "" has 0 lines, "\n" has 1 line.
-static u32 Trunc_CountLines(StrView content) {
-  if (content.Length == 0) return 0;
-
-  u32 count = 0;
-  for (u32 i = 0; i < content.Length; i++) {
-    if (content.Data[i] == '\n') count++;
-  }
-  if (content.Data[content.Length - 1] != '\n') count++;
-  return count;
-}
-
 static StrView Trunc_Slice(StrView content, u32 start, u32 end) {
   if (end < start) end = start;
   if (start > content.Length) start = content.Length;
@@ -48,6 +35,27 @@ static u32 Trunc_TailLineStart(StrView content, u32 totalLines, u32 maxLines) {
   return content.Length;
 }
 
+static bool Trunc_IsUtf8Continuation(char c) { return ((u8)c & 0xC0) == 0x80; }
+
+// A byte cut that did not land on a newline can fall inside a multi-byte
+// character and leave invalid UTF-8 that the provider rejects outright. These
+// move the cut to the nearest character boundary: back to the lead byte when
+// trimming a head, forward past the orphaned tail when trimming a tail. A
+// character is at most 4 bytes, so walking more than 3 means the input was
+// already invalid -- leave it for the serializer to replace.
+static u32 Trunc_SnapBack(StrView content, u32 offset) {
+  if (offset >= content.Length) return offset;
+  u32 limit = offset > 3 ? offset - 3 : 0;
+  while (offset > limit && Trunc_IsUtf8Continuation(content.Data[offset])) offset--;
+  return offset;
+}
+
+static u32 Trunc_SnapForward(StrView content, u32 offset) {
+  u32 limit = offset + 3 < content.Length ? offset + 3 : content.Length;
+  while (offset < limit && Trunc_IsUtf8Continuation(content.Data[offset])) offset++;
+  return offset;
+}
+
 static u32 Trunc_HeadByteEnd(StrView content, u32 end, u32 maxBytes) {
   if (end <= maxBytes) return end;
   if (maxBytes == 0) return 0;
@@ -56,7 +64,7 @@ static u32 Trunc_HeadByteEnd(StrView content, u32 end, u32 maxBytes) {
   for (u32 i = 0; i < maxBytes; i++) {
     if (content.Data[i] == '\n') result = i + 1;
   }
-  return result ? result : maxBytes;
+  return result ? result : Trunc_SnapBack(content, maxBytes);
 }
 
 static u32 Trunc_TailByteStart(StrView content, u32 start, u32 maxBytes) {
@@ -70,7 +78,7 @@ static u32 Trunc_TailByteStart(StrView content, u32 start, u32 maxBytes) {
   for (u32 i = minStart; i < content.Length; i++) {
     if (content.Data[i] == '\n' && i + 1 < content.Length) return i + 1;
   }
-  return minStart;
+  return Trunc_SnapForward(content, minStart);
 }
 
 static TruncResult Trunc_MakeResult(Arena* arena, StrView content, u32 start, u32 end, bool byBytes) {

@@ -698,8 +698,7 @@ ExecResult Exec_RunStreaming(Arena* arena, StrView command, u32 timeoutMs,
     return res;
   }
 
-  StrBuf cmd = StrBuf_Make(arena, command.Length + 1);
-  StrBuf_Append(&cmd, command);
+  const char* cmd = StrView_DupCStr(arena, command);
 
   pid_t pid = fork();
   if (pid < 0) {
@@ -714,7 +713,7 @@ ExecResult Exec_RunStreaming(Arena* arena, StrView command, u32 timeoutMs,
     dup2(fds[1], STDERR_FILENO);
     close(fds[0]);
     close(fds[1]);
-    execl("/bin/sh", "sh", "-c", StrBuf_CStr(&cmd), (char*)nullptr);
+    execl("/bin/sh", "sh", "-c", cmd, (char*)nullptr);
     _exit(127);
   }
   close(fds[1]);
@@ -787,8 +786,7 @@ ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
     return res;
   }
 
-  StrBuf cmd = StrBuf_Make(arena, command.Length + 1);
-  StrBuf_Append(&cmd, command);
+  const char* cmd = StrView_DupCStr(arena, command);
 
   pid_t pid = fork();
   if (pid < 0) {
@@ -822,7 +820,7 @@ ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
       close(nul);
     }
     if (outFds[1] >= 0) close(outFds[1]);
-    execl("/bin/sh", "sh", "-c", StrBuf_CStr(&cmd), (char*)nullptr);
+    execl("/bin/sh", "sh", "-c", cmd, (char*)nullptr);
     _exit(127);
   }
   close(fds[0]);

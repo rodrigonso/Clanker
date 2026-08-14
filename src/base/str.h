@@ -39,6 +39,10 @@ inline bool Ascii_IsSpace(char c) {
          c == '\v';
 }
 
+inline char Ascii_ToLower(char c) {
+  return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+}
+
 inline StrView StrView_Trim(StrView s) {
   u32 first = 0;
   while (first < s.Length && Ascii_IsSpace(s.Data[first])) first++;
@@ -47,15 +51,17 @@ inline StrView StrView_Trim(StrView s) {
   return StrView{s.Data ? s.Data + first : nullptr, last - first};
 }
 
+inline bool StrView_StartsWith(StrView value, StrView prefix) {
+  return prefix.Length <= value.Length &&
+         (prefix.Length == 0 || memcmp(value.Data, prefix.Data, prefix.Length) == 0);
+}
+
 inline bool StrView_EndsWithInsensitiveAscii(StrView value, StrView suffix) {
   if (suffix.Length > value.Length) return false;
   u32 offset = value.Length - suffix.Length;
   for (u32 i = 0; i < suffix.Length; i++) {
-    char a = value.Data[offset + i];
-    char b = suffix.Data[i];
-    if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
-    if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
-    if (a != b) return false;
+    if (Ascii_ToLower(value.Data[offset + i]) != Ascii_ToLower(suffix.Data[i]))
+      return false;
   }
   return true;
 }
@@ -133,6 +139,28 @@ inline void StrBuf_AppendI64(StrBuf* b, i64 v) {
   }
 }
 
+// Append one scalar as UTF-8. Surrogates and out-of-range values have no UTF-8
+// form -- encoding them anyway yields CESU-8 that JSON consumers reject as
+// "surrogates not allowed" -- so they become U+FFFD instead.
+inline void StrBuf_AppendUtf8(StrBuf* b, u32 cp) {
+  if ((cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF) cp = 0xFFFD;
+  if (cp < 0x80) {
+    StrBuf_AppendChar(b, (char)cp);
+  } else if (cp < 0x800) {
+    StrBuf_AppendChar(b, (char)(0xC0 | (cp >> 6)));
+    StrBuf_AppendChar(b, (char)(0x80 | (cp & 0x3F)));
+  } else if (cp < 0x10000) {
+    StrBuf_AppendChar(b, (char)(0xE0 | (cp >> 12)));
+    StrBuf_AppendChar(b, (char)(0x80 | ((cp >> 6) & 0x3F)));
+    StrBuf_AppendChar(b, (char)(0x80 | (cp & 0x3F)));
+  } else {
+    StrBuf_AppendChar(b, (char)(0xF0 | (cp >> 18)));
+    StrBuf_AppendChar(b, (char)(0x80 | ((cp >> 12) & 0x3F)));
+    StrBuf_AppendChar(b, (char)(0x80 | ((cp >> 6) & 0x3F)));
+    StrBuf_AppendChar(b, (char)(0x80 | (cp & 0x3F)));
+  }
+}
+
 inline StrView StrBuf_View(StrBuf* b) { return StrView{b->Data, b->Length}; }
 inline const char* StrBuf_CStr(StrBuf* b) { return b->Data; }
 
@@ -141,12 +169,44 @@ inline void StrBuf_Clear(StrBuf* b) {
   b->Data[0] = '\0';
 }
 
+// Framing for byte streams that arrive in arbitrary chunks: hand every complete
+// '\n'-terminated line in `b` to `onLine` (stripping an optional trailing '\r'),
+// then compact the trailing partial line to the front so the next chunk can be
+// appended. Returns false, leaving the buffer untouched, as soon as `onLine`
+// asks to stop.
+inline bool StrBuf_DrainLines(StrBuf* b, void* user, bool (*onLine)(void*, StrView)) {
+  u32 start = 0;
+  for (u32 i = 0; i < b->Length; i++) {
+    if (b->Data[i] != '\n') continue;
+    u32 length = i - start;
+    if (length && b->Data[start + length - 1] == '\r') length--;
+    if (!onLine(user, StrView{b->Data + start, length})) return false;
+    start = i + 1;
+  }
+  if (start) {
+    u32 remaining = b->Length - start;
+    if (remaining) memmove(b->Data, b->Data + start, remaining);
+    b->Length = remaining;
+    b->Data[remaining] = '\0';
+  }
+  return true;
+}
+
 // Copy a view into the arena and return a stable view over the copy.
 inline StrView StrView_Dup(Arena* arena, StrView s) {
   if (s.Length == 0) return StrView{"", 0};
   char* dst = (char*)ArenaAlloc(arena, s.Length, 1);
   memcpy(dst, s.Data, s.Length);
   return StrView{dst, s.Length};
+}
+
+// Arena-owned null-terminated copy, for the C APIs (fopen, opendir, ...) that
+// cannot take a length.
+inline const char* StrView_DupCStr(Arena* arena, StrView s) {
+  char* dst = (char*)ArenaAlloc(arena, s.Length + 1, 1);
+  if (s.Length) memcpy(dst, s.Data, s.Length);
+  dst[s.Length] = '\0';
+  return dst;
 }
 
 // Value of one hex digit, or -1 when `c` is not one.

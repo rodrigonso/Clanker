@@ -843,8 +843,7 @@ void WrapSpansToWidth(Arena* a, const Array<Span>* spans, u16 width,
         while (j < token.Length) {
           u32 next = j;
           u32 cp = Utf8Decode(token, &next);
-          u32 cw = CharWidth(cp);
-          if (cw < 1) cw = 1;
+          u32 cw = CharCellWidth(cp);
           if (segWidth != 0 && col + segWidth + cw > width) break;
           segWidth += cw;
           j = next;

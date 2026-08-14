@@ -39,15 +39,6 @@ StrView AppendRel(Arena* arena, StrView parent, StrView name) {
   return StrBuf_View(&out);
 }
 
-void AddDiagnostic(Arena* arena, Array<SkillDiagnostic>* diagnostics,
-                   StrView path, StrView message) {
-  if (!diagnostics) return;
-  SkillDiagnostic diagnostic = {};
-  diagnostic.Path = StrView_Dup(arena, path);
-  diagnostic.Message = StrView_Dup(arena, message);
-  Array_Push(diagnostics, diagnostic);
-}
-
 // Skills need only these top-level scalars, not a general YAML parser.
 struct Frontmatter {
   StrView Name;
@@ -69,28 +60,28 @@ Frontmatter ParseSkillFrontmatter(Arena* arena, StrView content,
 }
 
 void ValidateName(Arena* arena, StrView path, StrView name,
-                  Array<SkillDiagnostic>* warnings) {
+                  Array<LoadDiagnostic>* warnings) {
   if (!name.Length) return;
   if (name.Length > kMaxSkillNameBytes) {
-    AddDiagnostic(arena, warnings, path,
+    LoadDiagnostic_Add(arena, warnings, path,
                   SVL("skill name exceeds 64 characters"));
   }
   for (u32 i = 0; i < name.Length; i++) {
     char c = name.Data[i];
     bool allowed = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
     if (allowed) continue;
-    AddDiagnostic(arena, warnings, path,
+    LoadDiagnostic_Add(arena, warnings, path,
                   SVL("skill name should use only lowercase letters, digits, "
                       "and hyphens"));
     break;
   }
   if (name.Data[0] == '-' || name.Data[name.Length - 1] == '-') {
-    AddDiagnostic(arena, warnings, path,
+    LoadDiagnostic_Add(arena, warnings, path,
                   SVL("skill name should not start or end with a hyphen"));
   }
   for (u32 i = 1; i < name.Length; i++) {
     if (name.Data[i] != '-' || name.Data[i - 1] != '-') continue;
-    AddDiagnostic(arena, warnings, path,
+    LoadDiagnostic_Add(arena, warnings, path,
                   SVL("skill name should not contain consecutive hyphens"));
     break;
   }
@@ -124,7 +115,7 @@ void LoadSkillFile(LoadContext* ctx, Arena* scratch, StrView path) {
     return;
   }
   if (stat.Size > kMaxSkillFileBytes) {
-    AddDiagnostic(ctx->Mem, &ctx->Out->Diagnostics, canonical,
+    LoadDiagnostic_Add(ctx->Mem, &ctx->Out->Diagnostics, canonical,
                   SVL("skill file exceeds the 1 MiB limit"));
     ArenaRestore(scratch, mark);
     return;
@@ -133,19 +124,19 @@ void LoadSkillFile(LoadContext* ctx, Arena* scratch, StrView path) {
   StrView content = {};
   if (ConfigFile_ReadAll(scratch, canonical, &content) !=
       ConfigFileReadResult::Success) {
-    AddDiagnostic(ctx->Mem, &ctx->Out->Diagnostics, canonical,
+    LoadDiagnostic_Add(ctx->Mem, &ctx->Out->Diagnostics, canonical,
                   SVL("skill file could not be read"));
     ArenaRestore(scratch, mark);
     return;
   }
 
   Skill parsed = {};
-  Array<SkillDiagnostic> diagnostics =
-      Array_Make<SkillDiagnostic>(scratch, 4);
+  Array<LoadDiagnostic> diagnostics =
+      Array_Make<LoadDiagnostic>(scratch, 4);
   bool parsedOk =
       Skills_ParseFile(scratch, canonical, content, &parsed, &diagnostics);
   for (u32 i = 0; i < diagnostics.Count; i++) {
-    AddDiagnostic(ctx->Mem, &ctx->Out->Diagnostics,
+    LoadDiagnostic_Add(ctx->Mem, &ctx->Out->Diagnostics,
                   diagnostics.Data[i].Path, diagnostics.Data[i].Message);
   }
   if (!parsedOk) {
@@ -160,7 +151,7 @@ void LoadSkillFile(LoadContext* ctx, Arena* scratch, StrView path) {
     StrBuf_Append(&message, parsed.Name);
     StrBuf_AppendCStr(&message, "' is already defined by ");
     StrBuf_Append(&message, existing->FilePath);
-    AddDiagnostic(ctx->Mem, &ctx->Out->Diagnostics, canonical,
+    LoadDiagnostic_Add(ctx->Mem, &ctx->Out->Diagnostics, canonical,
                   StrBuf_View(&message));
     ArenaRestore(scratch, mark);
     return;
@@ -235,7 +226,7 @@ void LoadExplicitPath(LoadContext* ctx, Arena* scratch, StrView path) {
   if (!path.Length) return;
   FsStat stat = Fs_Stat(path);
   if (!stat.Exists) {
-    AddDiagnostic(ctx->Mem, &ctx->Out->Diagnostics, path,
+    LoadDiagnostic_Add(ctx->Mem, &ctx->Out->Diagnostics, path,
                   SVL("skill path does not exist"));
     return;
   }
@@ -304,24 +295,24 @@ void AppendEscaped(StrBuf* out, StrView value) {
 }  // namespace
 
 bool Skills_ParseFile(Arena* arena, StrView filePath, StrView content,
-                      Skill* out, Array<SkillDiagnostic>* warnings) {
+                      Skill* out, Array<LoadDiagnostic>* warnings) {
   *out = Skill{};
   Frontmatter meta = ParseSkillFrontmatter(arena, content, nullptr);
 
   StrView name = StrView_Trim(meta.Name);
   if (!name.Length) name = Fs_Base(Fs_Parent(filePath));
   if (!name.Length) {
-    AddDiagnostic(arena, warnings, filePath, SVL("skill has no usable name"));
+    LoadDiagnostic_Add(arena, warnings, filePath, SVL("skill has no usable name"));
     return false;
   }
   StrView description = StrView_Trim(meta.Description);
   if (!description.Length) {
-    AddDiagnostic(arena, warnings, filePath,
+    LoadDiagnostic_Add(arena, warnings, filePath,
                   SVL("skill is missing a frontmatter description"));
     return false;
   }
   if (description.Length > kMaxSkillDescriptionBytes) {
-    AddDiagnostic(arena, warnings, filePath,
+    LoadDiagnostic_Add(arena, warnings, filePath,
                   SVL("skill description exceeds 1024 characters"));
   }
   ValidateName(arena, filePath, name, warnings);
@@ -352,7 +343,7 @@ const Skill* Skills_Find(const SkillSet* skills, StrView name) {
 void Skills_Load(Arena* arena, const SkillLoadOptions* options, SkillSet* out) {
   *out = SkillSet{};
   out->Skills = Array_Make<Skill>(arena, 8);
-  out->Diagnostics = Array_Make<SkillDiagnostic>(arena, 4);
+  out->Diagnostics = Array_Make<LoadDiagnostic>(arena, 4);
   if (!options) return;
 
   LoadContext ctx = {};

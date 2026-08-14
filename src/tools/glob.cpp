@@ -9,15 +9,10 @@ struct GlobSegment {
 static const u32 GLOB_MAX_SEGMENTS = 64;
 static const u32 GLOB_MAX_DEPTH = 2048;
 
-static char Glob_LowerAscii(char c) {
-  if (c >= 'A' && c <= 'Z') return (char)(c + ('a' - 'A'));
-  return c;
-}
-
 static bool Glob_CharEq(char a, char b, bool caseInsensitive) {
   if (caseInsensitive) {
-    a = Glob_LowerAscii(a);
-    b = Glob_LowerAscii(b);
+    a = Ascii_ToLower(a);
+    b = Ascii_ToLower(b);
   }
   return a == b;
 }
@@ -63,9 +58,9 @@ static bool Glob_ClassHasChar(const char* data, u32 start, u32 end, char ch, boo
       char hi = data[i + 2];
       char c = ch;
       if (caseInsensitive) {
-        lo = Glob_LowerAscii(lo);
-        hi = Glob_LowerAscii(hi);
-        c = Glob_LowerAscii(c);
+        lo = Ascii_ToLower(lo);
+        hi = Ascii_ToLower(hi);
+        c = Ascii_ToLower(c);
       }
       if ((lo <= c && c <= hi) || (hi <= c && c <= lo)) return true;
       i += 3;

@@ -11,6 +11,14 @@ struct HttpHeader {
   StrView Value;
 };
 
+// "authorization: Bearer <token>", the shape every provider here uses.
+inline HttpHeader Http_BearerHeader(Arena* arena, StrView token) {
+  StrBuf bearer = StrBuf_Make(arena, token.Length + 8);
+  StrBuf_AppendCStr(&bearer, "Bearer ");
+  StrBuf_Append(&bearer, token);
+  return HttpHeader{SVL("authorization"), StrBuf_View(&bearer)};
+}
+
 struct HttpRequest {
   StrView Method;  // "POST" or "GET"
   StrView Url;

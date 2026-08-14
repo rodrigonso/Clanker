@@ -27,8 +27,7 @@ void UiCanvas_PutChar(UiCanvas* canvas, i32 x, i32 y, u32 cp, Style style) {
   if (!canvas || !canvas->Target) return;
   i32 screenX = canvas->Bounds.X + x;
   i32 screenY = canvas->Bounds.Y + y;
-  u32 width = CharWidth(cp);
-  if (width < 1) width = 1;
+  u32 width = CharCellWidth(cp);
   if (screenX < canvas->Clip.X || screenY < canvas->Clip.Y ||
       screenY >= canvas->Clip.Y + canvas->Clip.Height ||
       screenX + (i32)width > canvas->Clip.X + canvas->Clip.Width ||
@@ -52,8 +51,7 @@ u16 UiCanvas_PutTextClipped(UiCanvas* canvas, i32 x, i32 y, StrView text,
   while (i < text.Length) {
     u32 cp = Utf8Decode(text, &i);
     if (cp == 0) break;
-    u32 width = CharWidth(cp);
-    if (width < 1) width = 1;
+    u32 width = CharCellWidth(cp);
     if (localX + (i32)width > maxXExclusive) break;
     UiCanvas_PutChar(canvas, localX, y, cp, style);
     localX += width;

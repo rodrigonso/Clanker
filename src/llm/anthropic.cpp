@@ -22,10 +22,7 @@ static u32 Anthropic_BuildHeaders(Arena* arena, ProviderAuth auth,
   StrView contextBeta = Anthropic_ContextBeta(model, options);
   bool oauth = Anthropic_UsesOAuth(auth);
   if (oauth) {
-    StrBuf bearer = StrBuf_Make(arena, auth.Token.Length + 8);
-    StrBuf_AppendCStr(&bearer, "Bearer ");
-    StrBuf_Append(&bearer, auth.Token);
-    headers[count++] = HttpHeader{SVL("authorization"), StrBuf_View(&bearer)};
+    headers[count++] = Http_BearerHeader(arena, auth.Token);
     headers[count++] = HttpHeader{SVL("user-agent"), SVL("claude-cli/2.1.75")};
     headers[count++] = HttpHeader{SVL("x-app"), SVL("cli")};
   } else {
@@ -138,14 +135,6 @@ static bool Anthropic_Stream(void* ctx, Arena* arena, const Model* model, const 
   return true;
 }
 
-static ProviderModelList AnthropicModelListError(Arena* arena, ProviderModelListStatus status,
-                                                 StrView error) {
-  ProviderModelList result = {};
-  result.Status = status;
-  result.Error = StrView_Dup(arena, error);
-  return result;
-}
-
 static void AppendQueryValue(StrBuf* url, StrView value) {
   static const char HEX[] = "0123456789ABCDEF";
   for (u32 i = 0; i < value.Length; i++) {
@@ -180,15 +169,15 @@ ProviderModelList Anthropic_ListModelsWithFetch(Arena* arena,
                                                 volatile i32* abort,
                                                 AnthropicModelsFetchFn fetch, void* fetchUser) {
   if (auth.Token.Length == 0) {
-    return AnthropicModelListError(arena, ProviderModelListStatus::Unavailable,
+    return ProviderModelList_Error(arena, ProviderModelListStatus::Unavailable,
                                    SVL("Anthropic credentials are unavailable"));
   }
   if (!fetch) {
-    return AnthropicModelListError(arena, ProviderModelListStatus::Unavailable,
+    return ProviderModelList_Error(arena, ProviderModelListStatus::Unavailable,
                                    SVL("Anthropic model transport is unavailable"));
   }
   if (abort && Atomic_LoadI32(abort)) {
-    return AnthropicModelListError(arena, ProviderModelListStatus::Unavailable,
+    return ProviderModelList_Error(arena, ProviderModelListStatus::Unavailable,
                                    SVL("Anthropic model discovery was aborted"));
   }
 
@@ -216,16 +205,16 @@ ProviderModelList Anthropic_ListModelsWithFetch(Arena* arena,
     HttpResponse response = fetch(fetchUser, arena, &request, abort);
     if (response.Status < 0) {
       StrView error = response.Error.Length ? response.Error : SVL("Anthropic model request failed");
-      return AnthropicModelListError(arena, ProviderModelListStatus::Unavailable, error);
+      return ProviderModelList_Error(arena, ProviderModelListStatus::Unavailable, error);
     }
     if (response.Status < 200 || response.Status >= 300) {
-      return AnthropicModelListError(arena, ProviderModelListStatus::Failed,
+      return ProviderModelList_Error(arena, ProviderModelListStatus::Failed,
                                      HttpStatusError(arena, response.Status));
     }
 
     AnthropicModelPage page = {};
     if (!Anthropic_ParseModelsResponse(arena, response.Body, &page)) {
-      return AnthropicModelListError(arena, ProviderModelListStatus::Failed, page.Error);
+      return ProviderModelList_Error(arena, ProviderModelListStatus::Failed, page.Error);
     }
     for (u32 i = 0; i < page.Count; i++) Array_Push(&models, page.Models[i]);
     if (!page.HasMore) {
@@ -238,7 +227,7 @@ ProviderModelList Anthropic_ListModelsWithFetch(Arena* arena,
 
     for (u32 i = 0; i < cursors.Count; i++) {
       if (StrView_Eq(cursors.Data[i], page.LastId)) {
-        return AnthropicModelListError(arena, ProviderModelListStatus::Failed,
+        return ProviderModelList_Error(arena, ProviderModelListStatus::Failed,
                                        SVL("Anthropic model pagination repeated a cursor"));
       }
     }
@@ -246,7 +235,7 @@ ProviderModelList Anthropic_ListModelsWithFetch(Arena* arena,
     Array_Push(&cursors, afterId);
   }
 
-  return AnthropicModelListError(arena, ProviderModelListStatus::Failed,
+  return ProviderModelList_Error(arena, ProviderModelListStatus::Failed,
                                  SVL("Anthropic model pagination exceeded 100 pages"));
 }
 

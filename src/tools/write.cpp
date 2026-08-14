@@ -20,9 +20,8 @@ static bool Write_DoLocked(Arena* arena, StrView path, StrView content, volatile
     return false;
   }
 
-  StrBuf p = StrBuf_Make(arena, path.Length + 1);
-  StrBuf_Append(&p, path);
-  FILE* f = fopen(StrBuf_CStr(&p), "wb");
+  const char* p = StrView_DupCStr(arena, path);
+  FILE* f = fopen(p, "wb");
   if (!f) {
     StrBuf_AppendCStr(err, "cannot open file for writing: ");
     StrBuf_Append(err, path);

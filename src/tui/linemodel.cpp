@@ -31,15 +31,10 @@ StrView OutlineMarker(const LineModel* m) {
 
 StrView BufView(const StrBuf& buf) { return StrView{buf.Data, buf.Length}; }
 
-u32 LineCellWidth(u32 cp) {
-  u32 width = CharWidth(cp);
-  return width < 1 ? 1 : width;
-}
-
 u32 LineTextWidth(StrView text) {
   u32 width = 0;
   u32 i = 0;
-  while (i < text.Length) width += LineCellWidth(Utf8Decode(text, &i));
+  while (i < text.Length) width += CharCellWidth(Utf8Decode(text, &i));
   return width;
 }
 
@@ -474,7 +469,7 @@ StrView PrefixWithinCells(StrView text, u16 room, u16* width) {
   while (i < text.Length) {
     u32 next = i;
     u32 cp = Utf8Decode(text, &next);
-    u32 charWidth = LineCellWidth(cp);
+    u32 charWidth = CharCellWidth(cp);
     if ((u32)cells + charWidth > room) break;
     cells = (u16)(cells + charWidth);
     i = next;
@@ -496,7 +491,7 @@ u16 SnapDisplayBoundary(const DisplayRowLayout* layout, u16 column, bool towardE
     while (i < run.Text.Length) {
       u32 next = i;
       u32 cp = Utf8Decode(run.Text, &next);
-      u16 width = (u16)LineCellWidth(cp);
+      u16 width = (u16)CharCellWidth(cp);
       u16 end = (u16)(runColumn + width);
       if (column > runColumn && column < end) return towardEnd ? end : runColumn;
       runColumn = end;
@@ -563,7 +558,7 @@ void WrapSpanLine(Arena* a, const SpanLine* in, u16 width, Array<SpanLine>* out)
           while (j < token.Length) {
             u32 next = j;
             u32 cp = Utf8Decode(token, &next);
-            u32 charWidth = LineCellWidth(cp);
+            u32 charWidth = CharCellWidth(cp);
             bool fresh = col == 0 && segmentWidth == 0;
             if (!fresh && (u32)col + segmentWidth + charWidth > limit) {
               if (segmentWidth == 0) {
@@ -770,7 +765,7 @@ void AccumulateDisplayRow(const DisplayRowLayout* layout, DisplayRowRange range,
     while (i < run.Text.Length) {
       u32 start = i;
       u32 cp = Utf8Decode(run.Text, &i);
-      u16 width = (u16)LineCellWidth(cp);
+      u16 width = (u16)CharCellWidth(cp);
       u16 end = (u16)(column + width);
       if (end <= range.Start || end <= outputColumn) {
         column = end;

@@ -15,26 +15,6 @@ const ToolRuntime* FindTool(const ToolRuntime* tools, u32 toolCount,
   return nullptr;
 }
 
-Content RelocateContent(Arena* arena, const Content& source) {
-  Content result = source;
-  result.Text = StrView_Dup(arena, source.Text);
-  result.Signature = StrView_Dup(arena, source.Signature);
-  result.ToolId = StrView_Dup(arena, source.ToolId);
-  result.ToolName = StrView_Dup(arena, source.ToolName);
-  result.ToolArgsJson = StrView_Dup(arena, source.ToolArgsJson);
-  result.ImageData = StrView_Dup(arena, source.ImageData);
-  result.ImageMimeType = StrView_Dup(arena, source.ImageMimeType);
-  return result;
-}
-
-Array<Content> RelocateContentArray(Arena* arena, const Array<Content>& source) {
-  Array<Content> result =
-      Array_Make<Content>(arena, source.Count ? source.Count : 1);
-  for (u32 i = 0; i < source.Count; i++)
-    Array_Push(&result, RelocateContent(arena, source.Data[i]));
-  return result;
-}
-
 void SetPreparedError(Arena* arena, AgentPreparedTool* prepared,
                       StrView message, bool terminate = false) {
   prepared->Result = Array_Make<Content>(arena, 1);
@@ -218,7 +198,7 @@ void FinalizeOne(Arena* arena, AgentPreparedTool* prepared,
                  const AgentToolEventSink* events,
                  AgentToolCallResult* out) {
   Array<Content> content =
-      prepared->HasWorker ? RelocateContentArray(arena, prepared->Result)
+      prepared->HasWorker ? Content_CloneArray(arena, prepared->Result)
                           : prepared->Result;
   ToolOutcome outcome = {};
   outcome.Content = content;

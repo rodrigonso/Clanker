@@ -67,6 +67,41 @@ inline Content Content_Image(StrView data, StrView mimeType) {
   return c;
 }
 
+// Deep-copy every text slice into `arena`, so the result outlives whatever
+// arena the source pointed into.
+inline Content Content_Clone(Arena* arena, const Content& source) {
+  Content result = source;
+  result.Text = StrView_Dup(arena, source.Text);
+  result.Signature = StrView_Dup(arena, source.Signature);
+  result.ToolId = StrView_Dup(arena, source.ToolId);
+  result.ToolName = StrView_Dup(arena, source.ToolName);
+  result.ToolArgsJson = StrView_Dup(arena, source.ToolArgsJson);
+  result.ImageData = StrView_Dup(arena, source.ImageData);
+  result.ImageMimeType = StrView_Dup(arena, source.ImageMimeType);
+  return result;
+}
+
+inline Array<Content> Content_CloneArray(Arena* arena, const Array<Content>& source) {
+  Array<Content> result =
+      Array_Make<Content>(arena, source.Count ? source.Count : 1);
+  for (u32 i = 0; i < source.Count; i++)
+    Array_Push(&result, Content_Clone(arena, source.Data[i]));
+  return result;
+}
+
+// Payload of one SSE "data:" line, with the optional space after the colon
+// removed. `has` is false for any other line (comments, "event:", blanks).
+inline bool Sse_DataPayload(StrView line, StrView* out) {
+  if (line.Length < 5 || memcmp(line.Data, "data:", 5) != 0) return false;
+  StrView data = {line.Data + 5, line.Length - 5};
+  while (data.Length && (data.Data[0] == ' ' || data.Data[0] == '\t')) {
+    data.Data++;
+    data.Length--;
+  }
+  *out = data;
+  return true;
+}
+
 struct Usage {
   u32 Input;
   u32 Output;

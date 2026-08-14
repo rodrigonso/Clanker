@@ -315,12 +315,7 @@ void CompleteAgentTurnLocked(AgentHarness* harness, AgentTurnKind turn,
                 : AgentTurnOutcome::Failed;
   if (result->Message.Length)
     result->Message = StrView_Dup(&harness->LastResult, result->Message);
-  AgentHarnessEvent event = {};
-  event.Kind = AgentHarnessEventKind::TransientAgentEnd;
-  event.Turn.Kind = turn;
-  event.Turn.Outcome = outcome;
-  event.Turn.Error = result->Message;
-  PublishToWatchers(harness, &event);
+  AgentHarness_PublishAgentEnd(harness, turn, outcome, result->Message);
   ArenaReset(&harness->Work);
   ArenaTrim(&harness->Work, WORK_ARENA_KEEP_BYTES);
   ArenaReset(&harness->RunMem);

@@ -18,29 +18,23 @@ const usize TOOL_PARSE_SCRATCH_SCALE = 16;
 
 bool Eq(StrView s, const char* text) { return StrView_EqCStr(s, text); }
 
-char Lower(char c) {
-  if (c >= 'A' && c <= 'Z') return (char)(c + ('a' - 'A'));
-  return c;
-}
-
-bool EndsWithI(StrView s, const char* suffix) {
-  u32 n = (u32)strlen(suffix);
-  if (n > s.Length) return false;
-  u32 start = s.Length - n;
-  for (u32 i = 0; i < n; i++) {
-    if (Lower(s.Data[start + i]) != Lower(suffix[i])) return false;
-  }
-  return true;
-}
-
 StrView ReadMarker(StrView path) {
-  if (EndsWithI(path, ".cpp") || EndsWithI(path, ".cc") || EndsWithI(path, ".cxx")) return SVL("C+");
-  if (EndsWithI(path, ".h") || EndsWithI(path, ".hpp")) return SVL("H");
-  if (EndsWithI(path, ".md")) return SVL("MD");
-  if (EndsWithI(path, ".json")) return SVL("J");
-  if (EndsWithI(path, ".ts") || EndsWithI(path, ".tsx")) return SVL("TS");
-  if (EndsWithI(path, ".js") || EndsWithI(path, ".jsx")) return SVL("JS");
-  if (EndsWithI(path, ".py")) return SVL("PY");
+  if (StrView_EndsWithInsensitiveAscii(path, SVL(".cpp")) ||
+      StrView_EndsWithInsensitiveAscii(path, SVL(".cc")) ||
+      StrView_EndsWithInsensitiveAscii(path, SVL(".cxx")))
+    return SVL("C+");
+  if (StrView_EndsWithInsensitiveAscii(path, SVL(".h")) ||
+      StrView_EndsWithInsensitiveAscii(path, SVL(".hpp")))
+    return SVL("H");
+  if (StrView_EndsWithInsensitiveAscii(path, SVL(".md"))) return SVL("MD");
+  if (StrView_EndsWithInsensitiveAscii(path, SVL(".json"))) return SVL("J");
+  if (StrView_EndsWithInsensitiveAscii(path, SVL(".ts")) ||
+      StrView_EndsWithInsensitiveAscii(path, SVL(".tsx")))
+    return SVL("TS");
+  if (StrView_EndsWithInsensitiveAscii(path, SVL(".js")) ||
+      StrView_EndsWithInsensitiveAscii(path, SVL(".jsx")))
+    return SVL("JS");
+  if (StrView_EndsWithInsensitiveAscii(path, SVL(".py"))) return SVL("PY");
   return SVL("R");
 }
 
@@ -172,7 +166,7 @@ void InitUnknown(Arena* arena, Arena* scratch, ToolView* view, StrView name, Str
   AppendFlat(scratch, &label, name, TOOL_LABEL_MAX_BYTES);
   view->Label = StrView_Dup(arena, StrBuf_View(&label));
   u32 n = args.Length < TOOL_ARGS_PREVIEW_BYTES ? args.Length : TOOL_ARGS_PREVIEW_BYTES;
-  while (n < args.Length && n > 0 && ((u8)args.Data[n] & 0xC0) == 0x80) n--;
+  while (n < args.Length && n > 0 && Utf8IsContinuation(args.Data[n])) n--;
   AppendFlat(scratch, &view->Detail, StrView{args.Data, n}, TOOL_SUMMARY_MAX_BYTES);
   if (n < args.Length) StrBuf_AppendCStr(&view->Detail, "...");
 }

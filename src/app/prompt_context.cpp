@@ -168,7 +168,7 @@ void DiscoverSkills(PromptContext* context,
   skillOptions.ExplicitPathCount = options->SkillPathCount;
   Skills_Load(&context->Mem, &skillOptions, &context->Skills);
   for (u32 i = 0; i < context->Skills.Diagnostics.Count; i++) {
-    const SkillDiagnostic& diagnostic = context->Skills.Diagnostics.Data[i];
+    const LoadDiagnostic& diagnostic = context->Skills.Diagnostics.Data[i];
     Array_Push(&context->Diagnostics,
                PromptDiagnostic{PromptDiagnosticSeverity::Warning,
                                 diagnostic.Path, diagnostic.Message});
@@ -188,7 +188,7 @@ void DiscoverPromptTemplates(PromptContext* context,
   templateOptions.ExplicitPathCount = options->PromptTemplatePathCount;
   PromptTemplates_Load(&context->Mem, &templateOptions, &context->Templates);
   for (u32 i = 0; i < context->Templates.Diagnostics.Count; i++) {
-    const PromptTemplateDiagnostic& diagnostic =
+    const LoadDiagnostic& diagnostic =
         context->Templates.Diagnostics.Data[i];
     Array_Push(&context->Diagnostics,
                PromptDiagnostic{PromptDiagnosticSeverity::Warning,

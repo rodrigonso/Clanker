@@ -29,6 +29,13 @@ struct JsonValue {
 
 // Returns nullptr on parse error.
 JsonValue* Json_Parse(Arena* arena, StrView text);
+
+// Json_Parse needs its input null-terminated; parse a view that may not be.
+inline JsonValue* Json_ParseCopy(Arena* arena, StrView text) {
+  StrBuf input = StrBuf_Make(arena, text.Length + 1);
+  StrBuf_Append(&input, text);
+  return Json_Parse(arena, StrBuf_View(&input));
+}
 JsonValue* Json_Clone(Arena* arena, const JsonValue* value);
 bool Json_Equals(const JsonValue* a, const JsonValue* b);
 

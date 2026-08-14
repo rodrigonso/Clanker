@@ -16,15 +16,6 @@ bool HasMarkdownSuffix(StrView name) {
 
 bool IsDigit(char c) { return c >= '0' && c <= '9'; }
 
-void AddDiagnostic(Arena* arena, Array<PromptTemplateDiagnostic>* diagnostics,
-                   StrView path, StrView message) {
-  if (!diagnostics) return;
-  PromptTemplateDiagnostic diagnostic = {};
-  diagnostic.Path = StrView_Dup(arena, path);
-  diagnostic.Message = StrView_Dup(arena, message);
-  Array_Push(diagnostics, diagnostic);
-}
-
 StrView NameFromPath(StrView filePath) {
   StrView base = Fs_Base(filePath);
   if (HasMarkdownSuffix(base)) base.Length -= 3;
@@ -81,7 +72,7 @@ void LoadTemplateFile(LoadContext* ctx, Arena* scratch, StrView path) {
     return;
   }
   if (stat.Size > kMaxTemplateFileBytes) {
-    AddDiagnostic(ctx->Mem, &ctx->Out->Diagnostics, canonical,
+    LoadDiagnostic_Add(ctx->Mem, &ctx->Out->Diagnostics, canonical,
                   SVL("prompt template exceeds the 1 MiB limit"));
     ArenaRestore(scratch, mark);
     return;
@@ -90,7 +81,7 @@ void LoadTemplateFile(LoadContext* ctx, Arena* scratch, StrView path) {
   StrView content = {};
   if (ConfigFile_ReadAll(scratch, canonical, &content) !=
       ConfigFileReadResult::Success) {
-    AddDiagnostic(ctx->Mem, &ctx->Out->Diagnostics, canonical,
+    LoadDiagnostic_Add(ctx->Mem, &ctx->Out->Diagnostics, canonical,
                   SVL("prompt template could not be read"));
     ArenaRestore(scratch, mark);
     return;
@@ -98,7 +89,7 @@ void LoadTemplateFile(LoadContext* ctx, Arena* scratch, StrView path) {
 
   PromptTemplate parsed = {};
   if (!PromptTemplates_ParseFile(scratch, canonical, content, &parsed)) {
-    AddDiagnostic(ctx->Mem, &ctx->Out->Diagnostics, canonical,
+    LoadDiagnostic_Add(ctx->Mem, &ctx->Out->Diagnostics, canonical,
                   SVL("prompt template has no usable name"));
     ArenaRestore(scratch, mark);
     return;
@@ -111,7 +102,7 @@ void LoadTemplateFile(LoadContext* ctx, Arena* scratch, StrView path) {
     StrBuf_Append(&message, parsed.Name);
     StrBuf_AppendCStr(&message, "' is already defined by ");
     StrBuf_Append(&message, existing->FilePath);
-    AddDiagnostic(ctx->Mem, &ctx->Out->Diagnostics, canonical,
+    LoadDiagnostic_Add(ctx->Mem, &ctx->Out->Diagnostics, canonical,
                   StrBuf_View(&message));
     ArenaRestore(scratch, mark);
     return;
@@ -157,7 +148,7 @@ void LoadExplicitPath(LoadContext* ctx, Arena* scratch, StrView path) {
   if (!path.Length) return;
   FsStat stat = Fs_Stat(path);
   if (!stat.Exists) {
-    AddDiagnostic(ctx->Mem, &ctx->Out->Diagnostics, path,
+    LoadDiagnostic_Add(ctx->Mem, &ctx->Out->Diagnostics, path,
                   SVL("prompt template path does not exist"));
     return;
   }
@@ -389,7 +380,7 @@ void PromptTemplates_Load(Arena* arena, const PromptTemplateLoadOptions* options
                           PromptTemplateSet* out) {
   *out = PromptTemplateSet{};
   out->Templates = Array_Make<PromptTemplate>(arena, 8);
-  out->Diagnostics = Array_Make<PromptTemplateDiagnostic>(arena, 4);
+  out->Diagnostics = Array_Make<LoadDiagnostic>(arena, 4);
   if (!options) return;
 
   LoadContext ctx = {};

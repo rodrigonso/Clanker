@@ -3,6 +3,8 @@
 #include "base/array.h"
 #include "base/str.h"
 
+#include "app/loader.h"
+
 struct Skill {
   StrView Name;
   StrView Description;
@@ -11,14 +13,9 @@ struct Skill {
   bool DisableModelInvocation;
 };
 
-struct SkillDiagnostic {
-  StrView Path;
-  StrView Message;
-};
-
 struct SkillSet {
   Array<Skill> Skills;
-  Array<SkillDiagnostic> Diagnostics;
+  Array<LoadDiagnostic> Diagnostics;
 };
 
 struct SkillLoadOptions {
@@ -36,7 +33,7 @@ struct SkillLoadOptions {
 void Skills_Load(Arena* arena, const SkillLoadOptions* options, SkillSet* out);
 
 bool Skills_ParseFile(Arena* arena, StrView filePath, StrView content,
-                      Skill* out, Array<SkillDiagnostic>* warnings);
+                      Skill* out, Array<LoadDiagnostic>* warnings);
 
 StrView Skills_ExtractBody(Arena* arena, StrView content);
 

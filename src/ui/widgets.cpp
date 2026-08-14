@@ -31,8 +31,7 @@ TextMetrics MeasureSpans(const UiTextSpan* spans, u32 count, u16 maxWidth,
         rows++;
         continue;
       }
-      u32 width = CharWidth(cp);
-      if (width < 1) width = 1;
+      u32 width = CharCellWidth(cp);
       if (wrap && rowWidth && rowWidth + width > maxWidth) {
         if (rowWidth > widest) widest = rowWidth;
         rowWidth = 0;
@@ -69,8 +68,7 @@ void PaintText(UiContext*, const UiNode* node, UiCanvas* canvas) {
         y++;
         continue;
       }
-      u32 cellWidth = CharWidth(cp);
-      if (cellWidth < 1) cellWidth = 1;
+      u32 cellWidth = CharCellWidth(cp);
       if (data->Wrap && x && x + (i32)cellWidth > width) {
         x = 0;
         y++;
@@ -282,15 +280,10 @@ void CancelScrollbar(void* persistent) {
   if (state) state->Dragging = false;
 }
 
-u32 InputWidth(u32 cp) {
-  u32 width = CharWidth(cp);
-  return width < 1 ? 1 : width;
-}
-
 u32 InputTextWidth(StrView text) {
   u32 width = 0;
   u32 offset = 0;
-  while (offset < text.Length) width += InputWidth(Utf8Decode(text, &offset));
+  while (offset < text.Length) width += CharCellWidth(Utf8Decode(text, &offset));
   return width;
 }
 
@@ -363,7 +356,7 @@ void PaintInput(UiContext* ui, const UiNode* node, UiCanvas* canvas) {
               : data->Props.TextStyle;
       UiCanvas_PutChar(canvas, data->Props.InsetLeft + x, screenRow, cp,
                        style);
-      x += InputWidth(cp);
+      x += CharCellWidth(cp);
     }
     u32 lineEnd = lineStart + line.Length;
     if (selected && lineEnd < text.Length && text.Data[lineEnd] == '\n' &&
@@ -574,20 +567,6 @@ u32 Ui_BeginPanel(UiContext* ui, UiKey key, UiBorderProps props) {
   return Ui_BeginBorder(ui, key, props);
 }
 
-u32 Ui_Spinner(UiContext* ui, UiKey key, u32 frame, Style style,
-               UiLayoutStyle layout) {
-  const StrView frames[] = {
-      SVL("\xe2\xa0\x8b"), SVL("\xe2\xa0\x99"), SVL("\xe2\xa0\xb9"),
-      SVL("\xe2\xa0\xb8"), SVL("\xe2\xa0\xbc"), SVL("\xe2\xa0\xb4"),
-      SVL("\xe2\xa0\xa6"), SVL("\xe2\xa0\xa7"), SVL("\xe2\xa0\x87"),
-      SVL("\xe2\xa0\x8f"),
-  };
-  UiTextProps props = {};
-  props.Layout = layout;
-  props.StyleValue = style;
-  return Ui_Text(ui, key, frames[frame % 10], props);
-}
-
 u32 Ui_SelectableList(UiContext* ui, UiKey key, UiListProps props) {
   ListData* data =
       (ListData*)Ui_FrameAlloc(ui, sizeof(ListData), alignof(ListData));
@@ -648,21 +627,4 @@ u32 Ui_TextInput(UiContext* ui, UiKey key, UiTextInputProps props) {
   desc.Flags = UI_NODE_FOCUSABLE;
   desc.Layout = props.Layout;
   return Ui_Leaf(ui, desc);
-}
-
-u32 Ui_BeginOverlay(UiContext* ui, UiKey key, UiLayoutStyle layout) {
-  layout.Width = Ui_Fill();
-  layout.Height = Ui_Fill();
-  UiNodeDesc desc = {};
-  desc.Kind = UiNodeKind::Stack;
-  desc.Key = key;
-  desc.Flags = UI_NODE_FOCUS_SCOPE;
-  desc.Layout = layout;
-  u32 node = Ui_Begin(ui, desc);
-  Ui_ActivateScope(ui, node);
-  return node;
-}
-
-u32 Ui_BeginModalPanel(UiContext* ui, UiKey key, UiBorderProps props) {
-  return Ui_BeginPanel(ui, key, props);
 }

@@ -29,8 +29,7 @@ u32 PutViewCells(char* buf, u32 cap, u32* len, StrView s,
   while (offset < s.Length) {
     u32 start = offset;
     u32 cp = Utf8Decode(s, &offset);
-    u32 width = CharWidth(cp);
-    if (width < 1) width = 1;
+    u32 width = CharCellWidth(cp);
     if (cells + width > maxCells || *len + offset - start >= cap)
       break;
     for (u32 i = start; i < offset; i++) buf[(*len)++] = s.Data[i];

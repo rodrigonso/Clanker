@@ -26,24 +26,15 @@ bool QPop(Tui* t, TuiSubmission* out) {
   return true;
 }
 
-bool IsInputSpace(char c) {
-  return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
-}
-
 bool IsSlashCommand(StrView line) {
   u32 i = 0;
-  while (i < line.Length && IsInputSpace(line.Data[i])) i++;
+  while (i < line.Length && Ascii_IsSpace(line.Data[i])) i++;
   return i < line.Length && line.Data[i] == '/';
 }
 
-bool HasPrefix(StrView text, StrView prefix) {
-  return prefix.Length <= text.Length &&
-         (prefix.Length == 0 || memcmp(text.Data, prefix.Data, prefix.Length) == 0);
-}
-
 bool CommandMatches(const TuiCommandSpec& command, StrView query) {
-  return HasPrefix(command.Name, query) ||
-         (command.Alias.Length && HasPrefix(command.Alias, query));
+  return StrView_StartsWith(command.Name, query) ||
+         (command.Alias.Length && StrView_StartsWith(command.Alias, query));
 }
 
 u32 CommandMatchCount(const Tui* t, StrView query) {
@@ -70,10 +61,10 @@ bool CommandPaletteQuery(const Tui* t, StrView* out) {
   StrView text = LineEdit_Text(&t->Edit);
   if (LineEdit_Cursor(&t->Edit) != text.Length) return false;
   u32 first = 0;
-  while (first < text.Length && IsInputSpace(text.Data[first])) first++;
+  while (first < text.Length && Ascii_IsSpace(text.Data[first])) first++;
   if (first >= text.Length || text.Data[first] != '/') return false;
   for (u32 i = first + 1; i < text.Length; i++)
-    if (IsInputSpace(text.Data[i])) return false;
+    if (Ascii_IsSpace(text.Data[i])) return false;
   *out = StrView{text.Data + first + 1, text.Length - first - 1};
   return true;
 }
@@ -190,7 +181,7 @@ void QueueText(Tui* t, StrView text) {
 StrView Truncate(StrView s, u32 maxBytes) {
   if (s.Length <= maxBytes) return s;
   u32 n = maxBytes;
-  while (n > 0 && ((unsigned char)s.Data[n] & 0xC0) == 0x80) n--;
+  while (n > 0 && Utf8IsContinuation(s.Data[n])) n--;
   return StrView{s.Data, n};
 }
 

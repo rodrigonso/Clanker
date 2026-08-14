@@ -149,18 +149,17 @@ bool Fs_MkdirP(Arena* arena, StrView path) {
 }
 
 StrView Fs_RealPath(Arena* arena, StrView path) {
-  StrBuf in = StrBuf_Make(arena, path.Length + 1);
-  StrBuf_Append(&in, path);
+  const char* in = StrView_DupCStr(arena, path);
 #if defined(_WIN32)
-  DWORD need = GetFullPathNameA(StrBuf_CStr(&in), 0, nullptr, nullptr);
+  DWORD need = GetFullPathNameA(in, 0, nullptr, nullptr);
   if (need) {
     char* out = (char*)ArenaAlloc(arena, (usize)need + 1, 1);
-    DWORD n = GetFullPathNameA(StrBuf_CStr(&in), need + 1, out, nullptr);
+    DWORD n = GetFullPathNameA(in, need + 1, out, nullptr);
     if (n && n < need + 1) return StrView{out, (u32)n};
   }
 #else
   char resolved[4096];
-  if (realpath(StrBuf_CStr(&in), resolved)) return StrView_Dup(arena, SV(resolved));
+  if (realpath(in, resolved)) return StrView_Dup(arena, SV(resolved));
 #endif
   return Fs_NormalizedCopy(arena, path);
 }
@@ -296,9 +295,7 @@ Array<FsEntry> Fs_ListDir(Arena* arena, StrView dir, bool* ok) {
   }
   FindClose(h);
 #else
-  StrBuf dz = StrBuf_Make(arena, dir.Length + 1);
-  StrBuf_Append(&dz, dir);
-  DIR* d = opendir(StrBuf_CStr(&dz));
+  DIR* d = opendir(StrView_DupCStr(arena, dir));
   if (!d) return entries;
   if (ok) *ok = true;
   for (;;) {
@@ -443,9 +440,7 @@ static StrView Fs_TrimLine(StrView s) {
 }
 
 static StrView Fs_ReadSmallFile(Arena* arena, StrView path) {
-  StrBuf p = StrBuf_Make(arena, path.Length + 1);
-  StrBuf_Append(&p, path);
-  FILE* f = fopen(StrBuf_CStr(&p), "rb");
+  FILE* f = fopen(StrView_DupCStr(arena, path), "rb");
   if (!f) return StrView{nullptr, 0};
   StrBuf out = StrBuf_Make(arena, 1024);
   char buf[1024];

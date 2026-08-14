@@ -34,9 +34,6 @@ struct UiBorderProps {
 u32 Ui_BeginBorder(UiContext* ui, UiKey key, UiBorderProps props = {});
 u32 Ui_BeginPanel(UiContext* ui, UiKey key, UiBorderProps props = {});
 
-u32 Ui_Spinner(UiContext* ui, UiKey key, u32 frame, Style style,
-               UiLayoutStyle layout = {});
-
 struct UiListState {
   u32 Selected;
   u32 First;
@@ -90,8 +87,3 @@ struct UiTextInputProps {
 };
 
 u32 Ui_TextInput(UiContext* ui, UiKey key, UiTextInputProps props);
-
-u32 Ui_BeginOverlay(UiContext* ui, UiKey key,
-                    UiLayoutStyle layout = {});
-u32 Ui_BeginModalPanel(UiContext* ui, UiKey key,
-                       UiBorderProps props = {});

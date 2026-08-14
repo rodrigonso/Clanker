@@ -61,9 +61,7 @@ static StrView Grep_Trim(StrView text) {
 
 static bool Grep_ProcessJsonLine(GrepCapture* capture, StrView line) {
   if (line.Length == 0) return true;
-  StrBuf json = StrBuf_Make(capture->Mem, line.Length + 1);
-  StrBuf_Append(&json, line);
-  JsonValue* event = Json_Parse(capture->Mem, StrBuf_View(&json));
+  JsonValue* event = Json_ParseCopy(capture->Mem, line);
   if (!event || !StrView_EqCStr(Json_GetStr(event, "type"), "match")) return true;
 
   JsonValue* data = Json_Get(event, "data");
@@ -92,30 +90,15 @@ static bool Grep_ProcessJsonLine(GrepCapture* capture, StrView line) {
   return true;
 }
 
+static bool Grep_OnJsonLine(void* user, StrView line) {
+  return Grep_ProcessJsonLine((GrepCapture*)user, line);
+}
+
 static bool Grep_OnStdout(void* user, StrView chunk) {
   GrepCapture* capture = (GrepCapture*)user;
   if (capture->LimitHit) return false;
   StrBuf_Append(&capture->Pending, chunk);
-
-  u32 consumed = 0;
-  for (u32 i = 0; i < capture->Pending.Length; i++) {
-    if (capture->Pending.Data[i] != '\n') continue;
-    u32 end = i;
-    if (end > consumed && capture->Pending.Data[end - 1] == '\r') end--;
-    if (!Grep_ProcessJsonLine(
-            capture, StrView{capture->Pending.Data + consumed, end - consumed}))
-      return false;
-    consumed = i + 1u;
-  }
-
-  if (consumed) {
-    u32 remaining = capture->Pending.Length - consumed;
-    if (remaining)
-      memmove(capture->Pending.Data, capture->Pending.Data + consumed, remaining);
-    capture->Pending.Length = remaining;
-    capture->Pending.Data[remaining] = '\0';
-  }
-  return true;
+  return StrBuf_DrainLines(&capture->Pending, capture, Grep_OnJsonLine);
 }
 
 static bool Grep_OnStderr(void* user, StrView chunk) {
@@ -167,9 +150,8 @@ static GrepFileCacheEntry* Grep_GetFile(GrepFormatter* formatter, StrView path) 
 
   GrepFileCacheEntry entry = {};
   entry.Path = path;
-  StrBuf native = StrBuf_Make(formatter->Mem, path.Length + 1);
-  StrBuf_Append(&native, path);
-  FILE* file = fopen(StrBuf_CStr(&native), "rb");
+  const char* native = StrView_DupCStr(formatter->Mem, path);
+  FILE* file = fopen(native, "rb");
   if (file) {
     StrBuf content = StrBuf_Make(formatter->Mem, 8192);
     char chunk[8192];

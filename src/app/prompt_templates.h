@@ -3,6 +3,8 @@
 #include "base/array.h"
 #include "base/str.h"
 
+#include "app/loader.h"
+
 // User-defined slash commands loaded from `.md` files.
 struct PromptTemplate {
   StrView Name;
@@ -12,14 +14,9 @@ struct PromptTemplate {
   StrView Content;
 };
 
-struct PromptTemplateDiagnostic {
-  StrView Path;
-  StrView Message;
-};
-
 struct PromptTemplateSet {
   Array<PromptTemplate> Templates;
-  Array<PromptTemplateDiagnostic> Diagnostics;
+  Array<LoadDiagnostic> Diagnostics;
 };
 
 struct PromptTemplateLoadOptions {

@@ -27,11 +27,7 @@ bool BuildOpenAIHeaders(Arena* arena, ProviderAuth auth, bool streaming,
       HttpHeader{SVL("accept"), streaming ? SVL("text/event-stream")
                                          : SVL("application/json")};
 
-  StrBuf bearer = StrBuf_Make(arena, auth.Token.Length + 8);
-  StrBuf_AppendCStr(&bearer, "Bearer ");
-  StrBuf_Append(&bearer, auth.Token);
-  headers[(*count)++] =
-      HttpHeader{SVL("authorization"), StrBuf_View(&bearer)};
+  headers[(*count)++] = Http_BearerHeader(arena, auth.Token);
 
   if (auth.Kind == ProviderAuthKind::OAuth) {
     StrView accountId = auth.AccountId;
@@ -174,15 +170,6 @@ bool OpenAI_Stream(void*, Arena* arena, const Model* model,
   return true;
 }
 
-ProviderModelList ModelListError(Arena* arena,
-                                 ProviderModelListStatus status,
-                                 StrView error) {
-  ProviderModelList result = {};
-  result.Status = status;
-  result.Error = StrView_Dup(arena, error);
-  return result;
-}
-
 HttpResponse OpenAIHttpFetch(void*, Arena* arena,
                              const HttpRequest* request,
                              volatile i32* abort) {
@@ -201,13 +188,13 @@ ProviderModelList OpenAI_ListModelsWithFetch(
     Arena* arena, ProviderAuth auth, volatile i32* abort,
     OpenAIModelsFetchFn fetch, void* fetchUser) {
   if (!auth.Token.Length)
-    return ModelListError(arena, ProviderModelListStatus::Unavailable,
+    return ProviderModelList_Error(arena, ProviderModelListStatus::Unavailable,
                           SVL("OpenAI credentials are unavailable"));
   if (!fetch)
-    return ModelListError(arena, ProviderModelListStatus::Unavailable,
+    return ProviderModelList_Error(arena, ProviderModelListStatus::Unavailable,
                           SVL("OpenAI model transport is unavailable"));
   if (abort && Atomic_LoadI32(abort))
-    return ModelListError(arena, ProviderModelListStatus::Unavailable,
+    return ProviderModelList_Error(arena, ProviderModelListStatus::Unavailable,
                           SVL("OpenAI model discovery was aborted"));
 
   HttpHeader headers[OPENAI_HEADER_CAPACITY];
@@ -215,7 +202,7 @@ ProviderModelList OpenAI_ListModelsWithFetch(
   StrView headerError = {};
   if (!BuildOpenAIHeaders(arena, auth, false, headers, &headerCount,
                           &headerError)) {
-    return ModelListError(arena, ProviderModelListStatus::Failed,
+    return ProviderModelList_Error(arena, ProviderModelListStatus::Failed,
                           headerError);
   }
   HttpRequest request = {};
@@ -226,7 +213,7 @@ ProviderModelList OpenAI_ListModelsWithFetch(
 
   HttpResponse response = fetch(fetchUser, arena, &request, abort);
   if (response.Status < 0) {
-    return ModelListError(
+    return ProviderModelList_Error(
         arena, ProviderModelListStatus::Unavailable,
         response.Error.Length ? response.Error
                               : SVL("OpenAI model request failed"));
@@ -236,7 +223,7 @@ ProviderModelList OpenAI_ListModelsWithFetch(
     StrBuf_AppendCStr(&error,
                      "OpenAI models request failed with HTTP ");
     StrBuf_AppendI64(&error, response.Status);
-    return ModelListError(arena, ProviderModelListStatus::Failed,
+    return ProviderModelList_Error(arena, ProviderModelListStatus::Failed,
                           StrBuf_View(&error));
   }
 

@@ -35,6 +35,37 @@ struct SessionForkOptions {
   StrView Label;
 };
 
+inline SessionCreateOptions SessionCreateOptions_ForFork(
+    const SessionForkOptions* options) {
+  SessionCreateOptions create = {};
+  create.RequestedId = options->RequestedTargetId;
+  create.ProjectKey = options->ProjectKey;
+  create.WorkingDirectory = options->WorkingDirectory;
+  create.Label = options->Label;
+  create.ForkedFromSessionId = options->SourceSessionId;
+  create.ForkedFromEntryId = options->SourceHeadId;
+  return create;
+}
+
+// The root record every session opens with. Views are borrowed from `options`;
+// backends that outlive the caller clone it before storing.
+inline SessionRecord SessionRecord_MakeStarted(DurableId sessionId,
+                                               const SessionCreateOptions* options) {
+  SessionRecord started = {};
+  started.SchemaVersion = SESSION_SCHEMA_VERSION;
+  started.SessionId = sessionId;
+  started.Seq = 1;
+  started.EntryId = DurableId_Generate();
+  started.Kind = SessionRecordKind::SessionStarted;
+  started.CreatedAt = NowMillis();
+  started.SessionStarted.WorkingDirectory = options->WorkingDirectory;
+  started.SessionStarted.ProjectKey = options->ProjectKey;
+  started.SessionStarted.Label = options->Label;
+  started.SessionStarted.ForkedFromSessionId = options->ForkedFromSessionId;
+  started.SessionStarted.ForkedFromEntryId = options->ForkedFromEntryId;
+  return started;
+}
+
 struct SessionLog {
   void* Ctx;
   bool Writable;

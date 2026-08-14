@@ -227,18 +227,7 @@ MemorySession* CreateSessionLocked(MemoryRepository* repository,
   DurableId sessionId = DurableId_IsSet(options->RequestedId)
                             ? options->RequestedId
                             : DurableId_Generate();
-  SessionRecord started = {};
-  started.SchemaVersion = SESSION_SCHEMA_VERSION;
-  started.SessionId = sessionId;
-  started.Seq = 1;
-  started.EntryId = DurableId_Generate();
-  started.Kind = SessionRecordKind::SessionStarted;
-  started.CreatedAt = NowMillis();
-  started.SessionStarted.WorkingDirectory = options->WorkingDirectory;
-  started.SessionStarted.ProjectKey = options->ProjectKey;
-  started.SessionStarted.Label = options->Label;
-  started.SessionStarted.ForkedFromSessionId = options->ForkedFromSessionId;
-  started.SessionStarted.ForkedFromEntryId = options->ForkedFromEntryId;
+  SessionRecord started = SessionRecord_MakeStarted(sessionId, options);
 
   SessionRecord persistent = {};
   SessionResult copied = SessionRecord_Clone(&repository->Mem, &started, &persistent);
@@ -394,13 +383,7 @@ SessionResult Fork(void* context, Arena* arena, const SessionForkOptions* option
     return ancestry;
   }
 
-  SessionCreateOptions create = {};
-  create.RequestedId = options->RequestedTargetId;
-  create.ProjectKey = options->ProjectKey;
-  create.WorkingDirectory = options->WorkingDirectory;
-  create.Label = options->Label;
-  create.ForkedFromSessionId = options->SourceSessionId;
-  create.ForkedFromEntryId = options->SourceHeadId;
+  SessionCreateOptions create = SessionCreateOptions_ForFork(options);
   MemorySession* target = CreateSessionLocked(repository, &create);
   if (!target) {
     ArenaRelease(&scratch);

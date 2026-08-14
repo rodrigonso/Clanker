@@ -70,9 +70,8 @@ static StrView Edit_PrependBom(Arena* arena, StrView s) {
 }
 
 static bool Edit_ReadFile(Arena* arena, StrView path, StrView* out) {
-  StrBuf p = StrBuf_Make(arena, path.Length + 1);
-  StrBuf_Append(&p, path);
-  FILE* f = fopen(StrBuf_CStr(&p), "rb");
+  const char* p = StrView_DupCStr(arena, path);
+  FILE* f = fopen(p, "rb");
   if (!f) return false;
 
   StrBuf file = StrBuf_Make(arena, 8192);
@@ -89,9 +88,8 @@ static bool Edit_ReadFile(Arena* arena, StrView path, StrView* out) {
 }
 
 static bool Edit_WriteFile(Arena* arena, StrView path, StrView content) {
-  StrBuf p = StrBuf_Make(arena, path.Length + 1);
-  StrBuf_Append(&p, path);
-  FILE* f = fopen(StrBuf_CStr(&p), "wb");
+  const char* p = StrView_DupCStr(arena, path);
+  FILE* f = fopen(p, "wb");
   if (!f) return false;
   bool ok = true;
   if (content.Length && fwrite(content.Data, 1, content.Length, f) != content.Length) ok = false;

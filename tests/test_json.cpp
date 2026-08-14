@@ -57,6 +57,46 @@ void TestJson() {
   CHECK(Json_Parse(&a, SV("{bad")) == nullptr);
   CHECK(Json_Parse(&a, SV("{} trailing")) == nullptr);
 
+  // A lone surrogate escape has no UTF-8 form. Encoding it as CESU-8 is what
+  // makes providers answer "surrogates not allowed", so it decodes to U+FFFD.
+  JsonValue* lone = Json_Parse(&a, SV("{\"s\":\"x\\ud83dy\"}"));
+  StrView ls = Json_GetStr(lone, "s");
+  CHECK_ALL(ls.Length == 5, ls.Data[0] == 'x', (u8)ls.Data[1] == 0xEF,
+            (u8)ls.Data[2] == 0xBF, (u8)ls.Data[3] == 0xBD, ls.Data[4] == 'y');
+
+  // The writer is the one serialization choke point, so it has to emit
+  // well-formed UTF-8 whatever a tool result or shell capture put in the text.
+  struct {
+    const char* input;
+    const char* expected;
+  } cases[] = {
+      {"ok \xC3\xA9 \xE4\xB8\xAD \xF0\x9F\x98\x80",
+       "ok \xC3\xA9 \xE4\xB8\xAD \xF0\x9F\x98\x80"},  // valid stays byte-identical
+      {"a\xEF\xBF\xBD" "b", "a\xEF\xBF\xBD" "b"},     // an existing U+FFFD survives
+      {"a\xED" "bBb", "a\xEF\xBF\xBD" "bBb"},         // truncated 3-byte lead
+      {"a\xED\xA0\xBD" "b", "a\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD" "b"},  // CESU-8 surrogate
+      {"a\xC0\xAF" "b", "a\xEF\xBF\xBD\xEF\xBF\xBD" "b"},                  // overlong
+      {"a\xF5\x80\x80\x80" "b",
+       "a\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD" "b"},  // above U+10FFFF
+      {"caf\xE9 ", "caf\xEF\xBF\xBD "},                          // cp1252 shell byte
+      {"a\xE4\xB8", "a\xEF\xBF\xBD\xEF\xBF\xBD"},                // chopped at end
+  };
+  for (u32 i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    StrBuf out = StrBuf_Make(&a, 32);
+    Json_WriteString(&out, SV(cases[i].input));
+    StrView view = StrBuf_View(&out);
+    CHECK_ALL(view.Length >= 2, view.Data[0] == '"',
+              view.Data[view.Length - 1] == '"',
+              StrView_Eq(StrView{view.Data + 1, view.Length - 2},
+                         SV(cases[i].expected)));
+    // Whatever went in, what comes out re-parses as well-formed UTF-8.
+    StrBuf sanitized = StrBuf_Make(&a, 32);
+    StrBuf_AppendCStr(&sanitized, "{\"x\":");
+    StrBuf_Append(&sanitized, view);
+    StrBuf_AppendCStr(&sanitized, "}");
+    CHECK(Json_IsObject(Json_Parse(&a, StrBuf_View(&sanitized))));
+  }
+
   // Tool schemas are compiled once, coerce primitive arguments like Pi, and
   // reject unsupported validation keywords instead of validating partially.
   JsonSchema schema = {};

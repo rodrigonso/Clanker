@@ -5,32 +5,19 @@
 #include "tools/tools.h"
 #include "tools/truncate.h"
 
-static char Ls_LowerAscii(char c) {
-  if (c >= 'A' && c <= 'Z') return (char)(c + ('a' - 'A'));
-  return c;
-}
-
 static int Ls_CompareEntries(const void* a, const void* b) {
   const FsEntry* ea = (const FsEntry*)a;
   const FsEntry* eb = (const FsEntry*)b;
   u32 n = ClankMin(ea->Name.Length, eb->Name.Length);
   for (u32 i = 0; i < n; i++) {
-    char ca = Ls_LowerAscii(ea->Name.Data[i]);
-    char cb = Ls_LowerAscii(eb->Name.Data[i]);
+    char ca = Ascii_ToLower(ea->Name.Data[i]);
+    char cb = Ascii_ToLower(eb->Name.Data[i]);
     if (ca < cb) return -1;
     if (ca > cb) return 1;
   }
   if (ea->Name.Length < eb->Name.Length) return -1;
   if (ea->Name.Length > eb->Name.Length) return 1;
   return 0;
-}
-
-static void Ls_AppendKb(StrBuf* b, u32 bytes) {
-  u32 kbx10 = (bytes * 10u + 512u) / 1024u;
-  StrBuf_AppendU64(b, kbx10 / 10u);
-  StrBuf_AppendChar(b, '.');
-  StrBuf_AppendU64(b, kbx10 % 10u);
-  StrBuf_AppendCStr(b, "KB");
 }
 
 bool LsExec(void* ctx, Arena* arena, StrView id, const ToolArgs* args,
@@ -93,7 +80,7 @@ bool LsExec(void* ctx, Arena* arena, StrView id, const ToolArgs* args,
     }
     if (byteLimitReached) {
       if (limitReached) StrBuf_AppendChar(&result, ' ');
-      Ls_AppendKb(&result, TRUNC_MAX_BYTES);
+      Trunc_AppendKb(&result, TRUNC_MAX_BYTES);
       StrBuf_AppendCStr(&result, " limit reached");
     }
     StrBuf_AppendChar(&result, ']');

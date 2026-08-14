@@ -4,11 +4,6 @@
 #include "tools/tools.h"
 #include "tools/truncate.h"
 
-static bool Find_StartsWith(StrView s, StrView prefix) {
-  return s.Length >= prefix.Length &&
-         (prefix.Length == 0 || memcmp(s.Data, prefix.Data, prefix.Length) == 0);
-}
-
 static StrView Find_AdjustPattern(Arena* arena, StrView pattern, bool* matchPath) {
   bool hasSlash = false;
   for (u32 i = 0; i < pattern.Length; i++) {
@@ -20,7 +15,7 @@ static StrView Find_AdjustPattern(Arena* arena, StrView pattern, bool* matchPath
 
   *matchPath = hasSlash;
   if (!hasSlash) return pattern;
-  if (Find_StartsWith(pattern, SVL("/")) || Find_StartsWith(pattern, SVL("**/")) ||
+  if (StrView_StartsWith(pattern, SVL("/")) || StrView_StartsWith(pattern, SVL("**/")) ||
       StrView_Eq(pattern, SVL("**"))) {
     return pattern;
   }
