@@ -18,7 +18,7 @@
 //
 // This layer knows nothing about the agent. The three things it needs from a
 // running agent arrive as TuiAgentHooks, and progress arrives as ordinary
-// calls, so `clank_tui` does not link `clank_agent`.
+// calls, so `clanker_tui` does not link `clanker_agent`.
 
 // What the controller asks of whatever is driving it. All three are invoked
 // while the TUI lock is held, which fixes the lock order as

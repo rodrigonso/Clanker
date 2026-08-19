@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Clank CXX)
+project(Clanker CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,60 +26,60 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # ---- base ----------------------------------------------------------------
 if(WIN32)
-  set(CLANK_THREAD_SRC src/base/thread_win.cpp)
+  set(CLANKER_THREAD_SRC src/base/thread_win.cpp)
 else()
-  set(CLANK_THREAD_SRC src/base/thread_posix.cpp)
+  set(CLANKER_THREAD_SRC src/base/thread_posix.cpp)
 endif()
-add_library(clank_base STATIC
+add_library(clanker_base STATIC
   src/base/arena.cpp
   src/base/config_file.cpp
   src/base/process_file_lock.cpp
   src/base/sysinfo.cpp
-  ${CLANK_THREAD_SRC})
-target_include_directories(clank_base PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  ${CLANKER_THREAD_SRC})
+target_include_directories(clanker_base PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 if(WIN32)
-  target_link_libraries(clank_base PUBLIC psapi)
+  target_link_libraries(clanker_base PUBLIC psapi)
 else()
-  target_link_libraries(clank_base PUBLIC pthread)
+  target_link_libraries(clanker_base PUBLIC pthread)
 endif()
 
 # ---- json ----------------------------------------------------------------
-add_library(clank_json STATIC
+add_library(clanker_json STATIC
   src/json/json.cpp
   src/json/schema.cpp)
-target_link_libraries(clank_json PUBLIC clank_base)
+target_link_libraries(clanker_json PUBLIC clanker_base)
 
 # ---- crypto --------------------------------------------------------------
-add_library(clank_crypto STATIC
+add_library(clanker_crypto STATIC
   src/crypto/random.cpp)
-target_link_libraries(clank_crypto PUBLIC clank_base)
+target_link_libraries(clanker_crypto PUBLIC clanker_base)
 if(WIN32)
-  target_link_libraries(clank_crypto PUBLIC bcrypt)
+  target_link_libraries(clanker_crypto PUBLIC bcrypt)
 endif()
 
 # ---- durable sessions ---------------------------------------------------
-add_library(clank_session STATIC
+add_library(clanker_session STATIC
   src/session/id.cpp
   src/session/entry.cpp
   src/session/metadata.cpp
   src/session/reducer.cpp
   src/session/memory_repository.cpp
   src/session/jsonl_repository.cpp)
-target_link_libraries(clank_session PUBLIC clank_base clank_json clank_crypto)
+target_link_libraries(clanker_session PUBLIC clanker_base clanker_json clanker_crypto)
 
 # ---- agent ---------------------------------------------------------------
-add_library(clank_agent STATIC
+add_library(clanker_agent STATIC
   src/agent/harness.cpp
   src/agent/driver.cpp
   src/agent/primitives.cpp
   src/agent/compaction.cpp
   src/agent/event_json.cpp
   src/llm/retry.cpp)
-target_link_libraries(clank_agent PUBLIC clank_base clank_session)
+target_link_libraries(clanker_agent PUBLIC clanker_base clanker_session)
 
 # ---- libcurl (vendored via FetchContent) ---------------------------------
 include(FetchContent)
-set(CLANK_FETCHCONTENT_CACHE_ROOT
+set(CLANKER_FETCHCONTENT_CACHE_ROOT
   "${CMAKE_CURRENT_SOURCE_DIR}/out/fetchcontent"
   CACHE PATH "Persistent download cache for vendored dependencies")
 set(FETCHCONTENT_UPDATES_DISCONNECTED ON CACHE BOOL "" FORCE)
@@ -110,40 +110,40 @@ endif()
 FetchContent_Declare(curl
   URL https://curl.se/download/curl-8.11.1.tar.xz
   URL_HASH SHA256=c7ca7db48b0909743eaef34250da02c19bc61d4f1dcedd6603f109409536ab56
-  DOWNLOAD_DIR "${CLANK_FETCHCONTENT_CACHE_ROOT}/downloads"
+  DOWNLOAD_DIR "${CLANKER_FETCHCONTENT_CACHE_ROOT}/downloads"
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
 FetchContent_MakeAvailable(curl)
 
-add_library(clank_http STATIC src/net/http_curl.cpp)
-target_link_libraries(clank_http PUBLIC clank_base CURL::libcurl)
+add_library(clanker_http STATIC src/net/http_curl.cpp)
+target_link_libraries(clanker_http PUBLIC clanker_base CURL::libcurl)
 
 # ---- term (terminal I/O + cell renderer) ---------------------------------
 if(WIN32)
-  set(CLANK_TERM_PLATFORM src/term/term_win.cpp)
+  set(CLANKER_TERM_PLATFORM src/term/term_win.cpp)
 else()
-  set(CLANK_TERM_PLATFORM src/term/term_posix.cpp)
+  set(CLANKER_TERM_PLATFORM src/term/term_posix.cpp)
 endif()
-add_library(clank_term STATIC
+add_library(clanker_term STATIC
   src/term/term.cpp
   src/term/keys.cpp
   src/term/cell.cpp
   src/term/screen.cpp
   src/term/sanitize.cpp
-  ${CLANK_TERM_PLATFORM})
-target_link_libraries(clank_term PUBLIC clank_base)
+  ${CLANKER_TERM_PLATFORM})
+target_link_libraries(clanker_term PUBLIC clanker_base)
 
 # ---- ui (reusable terminal component library) ----------------------------
-add_library(clank_ui STATIC
+add_library(clanker_ui STATIC
   src/ui/lineedit.cpp
   src/ui/ui.cpp
   src/ui/layout.cpp
   src/ui/canvas.cpp
   src/ui/event.cpp
   src/ui/widgets.cpp)
-target_link_libraries(clank_ui PUBLIC clank_base clank_term)
+target_link_libraries(clanker_ui PUBLIC clanker_base clanker_term)
 
-# ---- tui (Clank-specific full-screen application) ------------------------
-add_library(clank_tui STATIC
+# ---- tui (Clanker-specific full-screen application) ----------------------
+add_library(clanker_tui STATIC
   src/tui/markdown.cpp
   src/tui/modal.cpp
   src/tui/perf.cpp
@@ -155,26 +155,26 @@ add_library(clank_tui STATIC
   src/tui/toolview.cpp
   src/tui/tui.cpp)
 # The TUI is a terminal component layer: it takes progress as ordinary calls and
-# asks for steer/cancel through TuiAgentHooks, so it does not link clank_agent.
+# asks for steer/cancel through TuiAgentHooks, so it does not link clanker_agent.
 # src/app/tui_bridge.cpp is the only place that knows about both.
-target_link_libraries(clank_tui PUBLIC clank_ui clank_term clank_json clank_proto)
+target_link_libraries(clanker_tui PUBLIC clanker_ui clanker_term clanker_json clanker_proto)
 
 # ---- llm providers -------------------------------------------------------
-add_library(clank_proto STATIC
+add_library(clanker_proto STATIC
   src/llm/responses_proto.cpp)
-target_link_libraries(clank_proto PUBLIC clank_json)
+target_link_libraries(clanker_proto PUBLIC clanker_json)
 
-add_library(clank_responses STATIC src/llm/responses.cpp)
-target_link_libraries(clank_responses PUBLIC clank_proto clank_http clank_auth)
+add_library(clanker_responses STATIC src/llm/responses.cpp)
+target_link_libraries(clanker_responses PUBLIC clanker_proto clanker_http clanker_auth)
 
 # ---- auth (api keys) -----------------------------------------------------
-add_library(clank_auth STATIC
+add_library(clanker_auth STATIC
   src/auth/store.cpp
   src/auth/resolve.cpp)
-target_link_libraries(clank_auth PUBLIC clank_json)
+target_link_libraries(clanker_auth PUBLIC clanker_json)
 
 # ---- tools ---------------------------------------------------------------
-add_library(clank_tools STATIC
+add_library(clanker_tools STATIC
   src/tools/exec.cpp
   src/tools/tools_manager.cpp
   src/tools/tool_select.cpp
@@ -191,10 +191,10 @@ add_library(clank_tools STATIC
   src/tools/grep.cpp
   src/tools/ask_user.cpp
   src/tools/shell.cpp)
-target_link_libraries(clank_tools PUBLIC clank_json clank_agent clank_http)
+target_link_libraries(clanker_tools PUBLIC clanker_json clanker_agent clanker_http)
 
 # ---- app support (settings, provider registry, interactive commands) ------
-add_library(clank_app STATIC
+add_library(clanker_app STATIC
   src/app/auth_flow.cpp
   src/app/command.cpp
   src/app/commands.cpp
@@ -214,20 +214,20 @@ add_library(clank_app STATIC
   src/app/settings.cpp
   src/app/skills.cpp
   src/app/tui_bridge.cpp)
-target_link_libraries(clank_app PUBLIC clank_responses clank_auth clank_tui clank_tools)
+target_link_libraries(clanker_app PUBLIC clanker_responses clanker_auth clanker_tui clanker_tools)
 
 # ---- executables ---------------------------------------------------------
-add_executable(clank src/app/main.cpp)
-target_link_libraries(clank PRIVATE clank_app clank_responses clank_tools clank_agent clank_auth clank_tui)
-set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT clank)
-set_target_properties(clank PROPERTIES
+add_executable(clanker src/app/main.cpp)
+target_link_libraries(clanker PRIVATE clanker_app clanker_responses clanker_tools clanker_agent clanker_auth clanker_tui)
+set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT clanker)
+set_target_properties(clanker PROPERTIES
   VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # ---- tests ---------------------------------------------------------------
 # One harness for everything: tests/test_main.cpp is a CLI that selects suites
 # by name, --filter, or --all. There are deliberately no other test binaries.
 enable_testing()
-add_executable(clank_tests EXCLUDE_FROM_ALL
+add_executable(clanker_tests EXCLUDE_FROM_ALL
   tests/test_main.cpp
   tests/benchmark_agent.cpp
   tests/test_base.cpp
@@ -265,9 +265,9 @@ add_executable(clank_tests EXCLUDE_FROM_ALL
   tests/test_ui_demo.cpp
   tests/test_tui.cpp
   tests/test_http.cpp)
-target_link_libraries(clank_tests PRIVATE clank_app clank_responses clank_proto clank_agent clank_session clank_tools clank_crypto clank_auth clank_tui clank_ui clank_term clank_http)
+target_link_libraries(clanker_tests PRIVATE clanker_app clanker_responses clanker_proto clanker_agent clanker_session clanker_tools clanker_crypto clanker_auth clanker_tui clanker_ui clanker_term clanker_http)
 
 # Default ctest run stays offline; the network suite is opt-in.
-add_test(NAME unit COMMAND clank_tests)
-add_test(NAME network COMMAND clank_tests http_live)
+add_test(NAME unit COMMAND clanker_tests)
+add_test(NAME network COMMAND clanker_tests http_live)
 set_tests_properties(network PROPERTIES LABELS network DISABLED TRUE)

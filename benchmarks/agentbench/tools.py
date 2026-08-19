@@ -279,13 +279,13 @@ def registry() -> dict[str, Tool]:
     jcode_bin = _env_path("JCODE_BIN", ".local/bin/jcode")
 
     return {
-        "clank": Tool(
-            name="clank",
-            binary=_env_path("CLANK_BIN", "clank-src/build-linux/clank"),
+        "clanker": Tool(
+            name="clanker",
+            binary=_env_path("CLANKER_BIN", "clanker-src/build-linux/clanker"),
             version_args=["--help"],
             env={
                 "PATH": path,
-                # Clank links a locally staged OpenSSL; the loader needs it.
+                # Clanker links a locally staged OpenSSL; the loader needs it.
                 "LD_LIBRARY_PATH": ssl_lib + os.pathsep + os.environ.get("LD_LIBRARY_PATH", ""),
             },
         ),
@@ -335,12 +335,12 @@ def registry() -> dict[str, Tool]:
     }
 
 
-DEFAULT_TOOLS = ["clank", "jcode", "jcode-embed-off", "pi", "claude", "opencode"]
+DEFAULT_TOOLS = ["clanker", "jcode", "jcode-embed-off", "pi", "claude", "opencode"]
 
 # watch and demo attribute processes to tools live, and every jcode session on
 # a machine is served by one daemon. Two jcode panes would share it and both
 # would be misread, so the live views carry a single jcode.
-LIVE_TOOLS = ["clank", "jcode", "pi", "claude", "opencode"]
+LIVE_TOOLS = ["clanker", "jcode", "pi", "claude", "opencode"]
 
 
 def resolve(names: list[str] | None, default: list[str] | None = None) -> list[Tool]:

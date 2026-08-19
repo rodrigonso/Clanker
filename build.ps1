@@ -1,7 +1,7 @@
 #requires -Version 5.0
 <#
 .SYNOPSIS
-    Configures and builds Clank with CMake + Ninja using the Visual Studio toolchain.
+    Configures and builds Clanker with CMake + Ninja using the Visual Studio toolchain.
 
 .DESCRIPTION
     Locates a Visual Studio installation (via vswhere), sets up the vcvars64
@@ -15,16 +15,16 @@
     Build directory (default: build), relative to the repo root unless absolute.
 
 .PARAMETER Target
-    Optional specific target to build (e.g. clank, clank_tests). Builds clank by default.
+    Optional specific target to build (e.g. clanker, clanker_tests). Builds clanker by default.
 
 .PARAMETER Clean
     Delete the build directory before configuring for a fresh build.
 
 .PARAMETER Test
-    Build and run the test harness (clank_tests) after a successful build.
+    Build and run the test harness (clanker_tests) after a successful build.
 
 .PARAMETER TestArgs
-    Arguments forwarded to clank_tests, e.g. suite names, --list, or --filter.
+    Arguments forwarded to clanker_tests, e.g. suite names, --list, or --filter.
     Implies -Test. With no arguments the full offline sweep runs.
 
 .EXAMPLE
@@ -34,7 +34,7 @@
 .EXAMPLE
     .\build.ps1 -Test -TestArgs json,session
 .EXAMPLE
-    .\build.ps1 -Target clank -Clean
+    .\build.ps1 -Target clanker -Clean
 #>
 [CmdletBinding()]
 param(
@@ -135,9 +135,9 @@ foreach ($p in @(
 }
 
 $targets = [System.Collections.Generic.List[string]]::new()
-$targets.Add($(if ($Target) { $Target } else { 'clank' }))
-if ($Test -and -not $targets.Contains('clank_tests')) {
-    $targets.Add('clank_tests')
+$targets.Add($(if ($Target) { $Target } else { 'clanker' }))
+if ($Test -and -not $targets.Contains('clanker_tests')) {
+    $targets.Add('clanker_tests')
 }
 
 $cmakeExe = Join-Path $vsPath 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
@@ -176,7 +176,7 @@ if ($hasBuildWork) {
 Write-Host "Build succeeded -> $buildPath" -ForegroundColor Green
 
 if ($Test) {
-    $tests = Join-Path $buildPath 'clank_tests.exe'
+    $tests = Join-Path $buildPath 'clanker_tests.exe'
     $suiteLabel = if ($TestArgs) { $TestArgs -join ' ' } else { 'all offline suites' }
     Write-Host "Running tests ($suiteLabel)..." -ForegroundColor Cyan
     if ($TestArgs) { & $tests @TestArgs } else { & $tests }

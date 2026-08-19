@@ -1,7 +1,7 @@
 """Run qualitybench with evidence-preserving defaults.
 
 Pier retries remove a failed trial directory before starting the next attempt.
-This wrapper fixes Pier retries at zero and puts the retry budget inside Clank,
+This wrapper fixes Pier retries at zero and puts the retry budget inside Clanker,
 where a transient provider failure does not discard agent progress or logs.
 """
 
@@ -39,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tasks", type=Path, default=Path("~/deep-swe/tasks"), help="DeepSWE tasks"
     )
-    parser.add_argument("--clank-binary", type=Path, default=None)
+    parser.add_argument("--clanker-binary", type=Path, default=None)
     parser.add_argument("--environment", choices=("modal", "docker"), default="modal")
     parser.add_argument("--concurrency", type=int, default=None)
     parser.add_argument("--model", default=None)
@@ -79,13 +79,13 @@ def _binary_path(
     parser: argparse.ArgumentParser, requested: Path | None, dry_run: bool
 ) -> Path:
     raw = requested
-    if raw is None and os.environ.get("CLANK_BIN"):
-        raw = Path(os.environ["CLANK_BIN"])
+    if raw is None and os.environ.get("CLANKER_BIN"):
+        raw = Path(os.environ["CLANKER_BIN"])
     if raw is None:
-        parser.error("--clank-binary or CLANK_BIN is required")
+        parser.error("--clanker-binary or CLANKER_BIN is required")
     binary = raw.expanduser().resolve()
     if not dry_run and not binary.is_file():
-        parser.error(f"Clank binary not found: {binary}")
+        parser.error(f"Clanker binary not found: {binary}")
     return binary
 
 
@@ -117,16 +117,16 @@ def build_command(
         return [*command, "--agent", "oracle"]
 
     if binary is None:
-        raise ValueError("Clank binary is required for agent benchmarks")
+        raise ValueError("Clanker binary is required for agent benchmarks")
     selected_model = model or MODELS[gate]
     command.extend(
         [
             "--agent-import-path",
-            "clank_agent:ClankAgent",
+            "clanker_agent:ClankerAgent",
             "--model",
             selected_model,
             "--ak",
-            f"clank_binary={binary}",
+            f"clanker_binary={binary}",
             "--ak",
             f"effort={effort}",
             "--ak",
@@ -171,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
     binary = None
     model = args.model
     if args.gate != "oracle":
-        binary = _binary_path(parser, args.clank_binary, args.dry_run)
+        binary = _binary_path(parser, args.clanker_binary, args.dry_run)
         model = model or MODELS[args.gate]
         provider = model.split("/", 1)[0].split("-", 1)[0].lower()
         key = PROVIDER_KEYS.get(provider)

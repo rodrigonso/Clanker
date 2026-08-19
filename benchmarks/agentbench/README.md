@@ -1,6 +1,6 @@
 # agentbench
 
-Compares coding-agent CLIs on memory: **clank**, **jcode**, **pi**,
+Compares coding-agent CLIs on memory: **clanker**, **jcode**, **pi**,
 **Claude Code** and **opencode**. Linux only (PSS has no Windows analogue) — on
 Windows, run it under WSL.
 
@@ -35,7 +35,7 @@ jcode did before the size was set.
 sessions from one daemon that it `setsid()`s away from the client, putting it in
 neither the client's descendant tree nor its process group. Walking from the
 client alone would miss roughly two thirds of jcode's footprint — an error in
-Clank's favour, which is exactly what the fairness rules below exist to prevent.
+Clanker's favour, which is exactly what the fairness rules below exist to prevent.
 So a tool may declare a `setup` hook that starts its daemon on an isolated
 socket, hands back the daemon's pid to be charged for, and has it torn down with
 the run. That also stops a daemon surviving on its idle timeout into the next
@@ -52,25 +52,25 @@ sampled it ~10% low, mid-initialisation.
 
 ## Results
 
-Ubuntu 24.04 (WSL2), 4 CPU, 7.7 GB RAM. Clank at `5df61d0`, Release.
+Ubuntu 24.04 (WSL2), 4 CPU, 7.7 GB RAM. Clanker at `5df61d0`, Release.
 Medians across repeats.
 
 | tool | 1 session | 10 sessions | per added session |
 |---|---:|---:|---:|
-| **clank** | **4.9 MB** | **13.7 MB** | **~1.0 MB** |
+| **clanker** | **4.9 MB** | **13.7 MB** | **~1.0 MB** |
 | jcode (local embedding off) | 98.4 MB | 156.0 MB | ~6.4 MB |
 | jcode | 202.1 MB | 259.5 MB | ~6.4 MB |
 | pi | 161.0 MB | 890.2 MB | ~81.0 MB |
 | Claude Code | 296.4 MB | 1701.7 MB | ~156.1 MB |
 | opencode | 867.1 MB | 5663.0 MB | ~532.9 MB |
 
-Versions: clank `5df61d0`, jcode `v0.71.1`, pi `0.74.2`, Claude Code `2.1.226`,
+Versions: clanker `5df61d0`, jcode `v0.71.1`, pi `0.74.2`, Claude Code `2.1.226`,
 opencode `1.18.15`.
 
-At one session Clank is **20× lighter than jcode with its local embedding
+At one session Clanker is **20× lighter than jcode with its local embedding
 off** — its closest competitor — **33× lighter than pi**, **60× lighter than
 Claude Code** and **177× lighter than opencode**. At ten it is **11×**, **65×**,
-**124×** and **413×**. Ten opencode sessions need 5.7 GB; ten Clank sessions
+**124×** and **413×**. Ten opencode sessions need 5.7 GB; ten Clanker sessions
 need 14 MB.
 
 "10 sessions" means ten instances running concurrently, not ten turns — it
@@ -80,11 +80,11 @@ when running several at once.
 jcode is the only other tool with a shallow slope, and it gets there a different
 way: one daemon serves every session, so ten sessions are ten thin clients
 against a single server rather than ten copies of the agent. That is worth about
-6.4 MB per added session against Clank's 1.0 MB, but it also means jcode's first
+6.4 MB per added session against Clanker's 1.0 MB, but it also means jcode's first
 session carries the whole server — 98 MB before the embedding model, 202 MB with
-it. Clank has no daemon; its floor and its slope are the same 1–5 MB process.
+it. Clanker has no daemon; its floor and its slope are the same 1–5 MB process.
 
-Clank's 4.9 MB is 1.8 MB of Clank plus 3.1 MB of OpenSSL, which this build
+Clanker's 4.9 MB is 1.8 MB of Clanker plus 3.1 MB of OpenSSL, which this build
 links from a privately staged copy that nothing else on the machine maps, so
 PSS charges it in full. A distro-packaged build sharing the system libssl
 measures nearer 3.3 MB. The higher figure is reported because it is what the
@@ -96,10 +96,10 @@ single-session cost: the ten processes share one copy of OpenSSL.
 The measurement started as a port of jcode's
 [`scripts/bench_memory_cli.py`](https://github.com/1jehuang/jcode/blob/master/scripts/bench_memory_cli.py)
 (MIT). jcode is now measured here too rather than only cross-referenced, so the
-deviations below are listed in both directions: the ones that cost Clank and
+deviations below are listed in both directions: the ones that cost Clanker and
 the ones that flatter a competitor.
 
-Deviations that make the comparison *less* favourable to Clank:
+Deviations that make the comparison *less* favourable to Clanker:
 
 - **Every tool gets a throwaway `HOME`.** Upstream isolates only jcode and lets
   the others inherit the real profile with whatever sessions are in it.
@@ -181,7 +181,7 @@ Three things the registry exists to get right. Claude Code and opencode ship
 native ELF binaries — named `.exe` on every platform despite installing from
 npm — so they are matched by resolved path, while pi is a node script whose
 argv is rewritten and has to be matched through node. Each tool carries its own
-environment: clank needs `LD_LIBRARY_PATH` for its staged OpenSSL, pi needs
+environment: clanker needs `LD_LIBRARY_PATH` for its staged OpenSSL, pi needs
 `PATH` to reach node or its shebang fails silently. And an entry may declare an
 `image` hook for a binary that is really a launcher — `jcode` on disk is a
 505-byte `sh` script that `exec`s a sibling 156 MB ELF, so without following
@@ -195,9 +195,9 @@ reading `JCODE_MEMORY_ENABLED` out of `/proc/<pid>/environ`, which is why
 ## Setup
 
 ```bash
-# clank, built for Linux (stock flags; libcurl is vendored, OpenSSL is not)
+# clanker, built for Linux (stock flags; libcurl is vendored, OpenSSL is not)
 cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build-linux --target clank
+cmake --build build-linux --target clanker
 
 # the others
 npm install -g @earendil-works/pi-coding-agent @anthropic-ai/claude-code opencode-ai
@@ -206,7 +206,7 @@ curl -fsSL https://jcode.sh/install | bash
 sudo apt install -y tmux   # demo only
 ```
 
-Binaries are found via `CLANK_BIN`, `JCODE_BIN`, `PI_BIN`, `CLAUDE_BIN`,
+Binaries are found via `CLANKER_BIN`, `JCODE_BIN`, `PI_BIN`, `CLAUDE_BIN`,
 `OPENCODE_BIN`, defaulting under `~`. `agentbench doctor` reports what it found
 and what is missing, and warns if a jcode server is already running — a stale
 shared daemon is the likeliest source of a bad jcode number.
@@ -228,5 +228,5 @@ shared daemon is the likeliest source of a bad jcode number.
 - The demo is for the visual; numbers move as each TUI settles. Quote `measure`.
 - One machine, one OS. Directional, not a published claim.
 - Idle footprint only. What an agent costs *while working* is a different
-  measurement; for Clank that is `clank_tests --benchmark`, which reports
+  measurement; for Clanker that is `clanker_tests --benchmark`, which reports
   agent-loop latency and peak RSS on a scripted workload.

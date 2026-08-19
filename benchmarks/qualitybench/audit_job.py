@@ -63,7 +63,7 @@ def audit(job: Path) -> dict:
     usage = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
     request_retries = 0
     model = None
-    clank_trials = 0
+    clanker_trials = 0
     empty_patches = 0
 
     pier_retries = stats.get("n_retries", 0) or 0
@@ -85,9 +85,9 @@ def audit(job: Path) -> dict:
             continue
         trial = _json(trial_result_path)
         agent = trial.get("agent_info") or {}
-        if agent.get("name") != "clank":
+        if agent.get("name") != "clanker":
             continue
-        clank_trials += 1
+        clanker_trials += 1
         trial_name = trial.get("trial_name") or trial_dir.name
         trial_model = ((agent.get("model_info") or {}).get("name"))
         if model is None:
@@ -104,9 +104,9 @@ def audit(job: Path) -> dict:
         elif patch.stat().st_size == 0:
             empty_patches += 1
 
-        events = trial_dir / "agent" / "clank.ndjson"
+        events = trial_dir / "agent" / "clanker.ndjson"
         if not events.is_file():
-            issues.append(f"{trial_name}: clank.ndjson is missing")
+            issues.append(f"{trial_name}: clanker.ndjson is missing")
             continue
         trial_usage, final_stop, retries = _ndjson_summary(events)
         for key in usage:
@@ -118,15 +118,15 @@ def audit(job: Path) -> dict:
             issues.append(f"{trial_name}: final assistant message was truncated")
 
     evals = stats.get("evals") or {}
-    if any(name.startswith("clank__") for name in evals):
-        if clank_trials != completed_trials:
+    if any(name.startswith("clanker__") for name in evals):
+        if clanker_trials != completed_trials:
             issues.append(
-                f"found evidence for {clank_trials}/{completed_trials} completed "
-                "Clank trials"
+                f"found evidence for {clanker_trials}/{completed_trials} completed "
+                "Clanker trials"
             )
     if empty_patches:
         warnings.append(
-            f"{empty_patches} Clank trials produced an empty model.patch and scored zero"
+            f"{empty_patches} Clanker trials produced an empty model.patch and scored zero"
         )
 
     pricing = PRICING_PER_MILLION.get(model)
@@ -147,7 +147,7 @@ def audit(job: Path) -> dict:
         "completed_trials": completed_trials,
         "errored_trials": errored,
         "pier_retries": pier_retries,
-        "clank_trials": clank_trials,
+        "clanker_trials": clanker_trials,
         "request_retries": request_retries,
         "empty_patches": empty_patches,
         "model": model,
@@ -172,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
         f"{report['errored_trials']} exceptions"
     )
     print(
-        f"retries: {report['request_retries']} Clank request, "
+        f"retries: {report['request_retries']} Clanker request, "
         f"{report['pier_retries']} Pier trial"
     )
     usage = report["usage"]

@@ -5,7 +5,7 @@
 // styling applied, long lines left for the line model to wrap).
 //
 // Modelled on pi's packages/tui/src/components/markdown.ts, which lexes with
-// `marked` and hand-writes the walk to ANSI. Clank keeps the same visual
+// `marked` and hand-writes the walk to ANSI. Clanker keeps the same visual
 // vocabulary but scans lines directly instead of materialising a token tree:
 // Markdown_Render runs on every streamed delta (LineModel_AppendAssistant
 // re-renders the whole assistant entry), so allocation stays proportional to
@@ -25,7 +25,7 @@
 //     absolute 4-column grid.
 
 // 256-colour palette indices, chosen as the nearest xterm cube/ramp entries to
-// pi's builtin dark theme. Clank's Style carries a palette index rather than
+// pi's builtin dark theme. Clanker's Style carries a palette index rather than
 // 24-bit colour, so these are approximations.
 struct MarkdownPalette {
   u8 Heading;          // pi mdHeading #f0c674

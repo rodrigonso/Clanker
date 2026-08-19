@@ -34,7 +34,7 @@
       "configurePreset": "vs2026-x64",
       "configuration": "Debug",
       "targets": [
-        "clank_tests"
+        "clanker_tests"
       ]
     },
     {
@@ -43,7 +43,7 @@
       "configurePreset": "vs2026-x64",
       "configuration": "Release",
       "targets": [
-        "clank_tests"
+        "clanker_tests"
       ]
     }
   ],

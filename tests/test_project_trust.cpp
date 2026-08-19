@@ -25,10 +25,10 @@ void RemoveDir(const char* path) {
 
 void TestProjectTrust() {
   Arena scratch = ArenaCreate((usize)64 << 20);
-  StrView root = SVL("clank_project_trust_test");
+  StrView root = SVL("clanker_project_trust_test");
   StrView parent = Fs_Join(&scratch, root, SVL("parent"));
   StrView child = Fs_Join(&scratch, parent, SVL("child"));
-  StrView config = Fs_Join(&scratch, child, SVL(".clank"));
+  StrView config = Fs_Join(&scratch, child, SVL(".clanker"));
   StrView system = Fs_Join(&scratch, config, SVL("SYSTEM.md"));
   StrView storePath = Fs_Join(&scratch, root, SVL("config/trust.json"));
   CHECK(Fs_MkdirP(&scratch, child));
@@ -100,13 +100,13 @@ void TestProjectTrust() {
   CHECK(ProjectTrustStore_Load(&scratch, storePath, &store) ==
         ProjectTrustStoreLoadResult::Malformed);
 
-  remove("clank_project_trust_test/config/trust.json");
-  remove("clank_project_trust_test/config/trust.json.lock");
-  remove("clank_project_trust_test/parent/child/.clank/SYSTEM.md");
-  RemoveDir("clank_project_trust_test/parent/child/.clank");
-  RemoveDir("clank_project_trust_test/parent/child");
-  RemoveDir("clank_project_trust_test/parent");
-  RemoveDir("clank_project_trust_test/config");
-  RemoveDir("clank_project_trust_test");
+  remove("clanker_project_trust_test/config/trust.json");
+  remove("clanker_project_trust_test/config/trust.json.lock");
+  remove("clanker_project_trust_test/parent/child/.clanker/SYSTEM.md");
+  RemoveDir("clanker_project_trust_test/parent/child/.clanker");
+  RemoveDir("clanker_project_trust_test/parent/child");
+  RemoveDir("clanker_project_trust_test/parent");
+  RemoveDir("clanker_project_trust_test/config");
+  RemoveDir("clanker_project_trust_test");
   ArenaRelease(&scratch);
 }

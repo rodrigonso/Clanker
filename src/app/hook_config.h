@@ -41,7 +41,7 @@ enum class HookConfigLoadResult : u8 {
   ReadFailure,
 };
 
-// Default path: <home>/.clank/hooks.json.
+// Default path: <home>/.clanker/hooks.json.
 StrView HookConfig_DefaultPath(Arena* arena);
 
 // Successful strings are owned by `arena`.

@@ -96,8 +96,8 @@ static void TestFileLock() {
 }
 
 static void TestProcessFileLockProbe(Arena* a) {
-  StrView path = SVL("clank_lock_probe.tmp");
-  remove("clank_lock_probe.tmp");
+  StrView path = SVL("clanker_lock_probe.tmp");
+  remove("clanker_lock_probe.tmp");
   // Asking whether a lock is held must never author the sentinel. Session
   // listings ask this once per session, so a probe that created the file would
   // write one lock beside every log it merely displayed.

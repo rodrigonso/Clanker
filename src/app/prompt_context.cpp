@@ -15,7 +15,7 @@ const StrView kContextCandidates[] = {
 
 // Identity text for the built-in prompt, mirroring pi's `buildSystemPrompt`.
 constexpr const char* kDefaultPromptPreamble =
-    "You are an expert coding assistant operating inside Clank, a coding agent "
+    "You are an expert coding assistant operating inside Clanker, a coding agent "
     "harness. You help users by reading files, executing commands, editing "
     "code, and writing new files.";
 
@@ -226,7 +226,7 @@ bool ResolveConfiguredPrompt(PromptContext* context,
                              StrView* content, StrBuf* error) {
   if (options->ProjectTrusted) {
     StrView projectConfig =
-        Fs_Join(&context->Mem, options->WorkingDirectory, SVL(".clank"));
+        Fs_Join(&context->Mem, options->WorkingDirectory, SVL(".clanker"));
     StrView projectPath = Fs_Join(&context->Mem, projectConfig, fileName);
     FsStat stat = Fs_Stat(projectPath);
     if (stat.Exists && !stat.IsDir) {
@@ -344,7 +344,7 @@ Array<StrView> CollectGuidelines(Arena* arena,
                                  const PromptContextOptions* options) {
   Array<StrView> guidelines = Array_Make<StrView>(arena, 16);
   // Only worth steering the model toward the shell when no dedicated search or
-  // listing tool is active. Keyed on Clank's built-in tool names.
+  // listing tool is active. Keyed on Clanker's built-in tool names.
   if (HasTool(options, SVL("shell")) && !HasTool(options, SVL("grep")) &&
       !HasTool(options, SVL("find")) && !HasTool(options, SVL("ls")))
     AddGuideline(&guidelines,

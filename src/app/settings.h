@@ -28,7 +28,7 @@ enum class AppSettingsLoadResult : u8 {
   ReadFailure,
 };
 
-// Default path: <home>/.clank/settings.json.
+// Default path: <home>/.clanker/settings.json.
 StrView AppSettings_DefaultPath(Arena* arena);
 
 // Successful strings are owned by `arena`.

@@ -1,12 +1,12 @@
-"""Clank as a Pier / Harbor agent.
+"""Clanker as a Pier / Harbor agent.
 
 [Pier](https://github.com/datacurve-ai/pier) runs DeepSWE; Harbor runs
 Terminal-Bench. Both resolve a custom agent from a ``module:ClassName`` import
 path and expose the same ``BaseInstalledAgent`` surface, so one adapter serves
-both. Clank is a compiled binary with no package registry to install from, so
+both. Clanker is a compiled binary with no package registry to install from, so
 it is uploaded from the host rather than fetched by ``install_spec``.
 
-    pier run -p deep-swe/tasks --agent-import-path clank_agent:ClankAgent ...
+    pier run -p deep-swe/tasks --agent-import-path clanker_agent:ClankerAgent ...
 """
 
 from __future__ import annotations
@@ -38,9 +38,9 @@ except ImportError:  # pragma: no cover
     except ImportError:
         allowlist_from_urls = None
 
-CONTAINER_BIN = "/usr/local/bin/clank"
-CONTAINER_LIB_DIR = "/opt/clank/lib"
-CONTAINER_HOME = "/tmp/clank-home"
+CONTAINER_BIN = "/usr/local/bin/clanker"
+CONTAINER_LIB_DIR = "/opt/clanker/lib"
+CONTAINER_HOME = "/tmp/clanker-home"
 
 #              api domain           key env              base-url overrides
 PROVIDERS = {
@@ -74,17 +74,17 @@ def _bounded_int(
     return parsed
 
 
-class ClankAgent(BaseInstalledAgent):
-    """Runs ``clank -p <instruction> --mode json`` inside the task container."""
+class ClankerAgent(BaseInstalledAgent):
+    """Runs ``clanker -p <instruction> --mode json`` inside the task container."""
 
     SUPPORTS_ATIF = False
-    _OUTPUT_FILENAME = "clank.ndjson"
+    _OUTPUT_FILENAME = "clanker.ndjson"
 
     def __init__(
         self,
         *args,
-        clank_binary: str | None = None,
-        clank_libs: list[str] | str | None = None,
+        clanker_binary: str | None = None,
+        clanker_libs: list[str] | str | None = None,
         workdir: str | None = None,
         effort: str | None = None,
         max_retries: int | str | None = None,
@@ -92,22 +92,22 @@ class ClankAgent(BaseInstalledAgent):
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        binary = clank_binary or os.environ.get("CLANK_BIN")
+        binary = clanker_binary or os.environ.get("CLANKER_BIN")
         if not binary:
             raise ValueError(
-                "ClankAgent needs the host path of a Linux x86_64 clank binary. "
-                "Pass --agent-kwarg clank_binary=/path/to/clank or set CLANK_BIN."
+                "ClankerAgent needs the host path of a Linux x86_64 clanker binary. "
+                "Pass --agent-kwarg clanker_binary=/path/to/clanker or set CLANKER_BIN."
             )
         self._binary = Path(binary).expanduser().resolve()
         if not self._binary.is_file():
-            raise ValueError(f"clank binary not found: {self._binary}")
+            raise ValueError(f"clanker binary not found: {self._binary}")
 
-        if isinstance(clank_libs, str):
-            clank_libs = [p for p in clank_libs.split(",") if p]
-        self._libs = [Path(p).expanduser().resolve() for p in (clank_libs or [])]
+        if isinstance(clanker_libs, str):
+            clanker_libs = [p for p in clanker_libs.split(",") if p]
+        self._libs = [Path(p).expanduser().resolve() for p in (clanker_libs or [])]
         self._workdir = workdir
 
-        # Not declared as a CliFlag: clank reads effort from settings.json, so
+        # Not declared as a CliFlag: clanker reads effort from settings.json, so
         # declaring one would leak a bare argument onto the command line.
         if effort is not None and effort not in EFFORTS:
             raise ValueError(
@@ -129,7 +129,7 @@ class ClankAgent(BaseInstalledAgent):
             MAX_U32,
         )
 
-        # clank has no --version, so the binary's digest is the only honest
+        # clanker has no --version, so the binary's digest is the only honest
         # build identifier available for the trial metadata.
         if self._version is None:
             digest = hashlib.sha256(self._binary.read_bytes()).hexdigest()
@@ -144,14 +144,14 @@ class ClankAgent(BaseInstalledAgent):
             provider = None
         if provider and not self._get_env(PROVIDERS[provider][1]):
             raise ValueError(
-                f"{PROVIDERS[provider][1]} is not set, so clank cannot "
+                f"{PROVIDERS[provider][1]} is not set, so clanker cannot "
                 f"authenticate to {provider} inside the task container. "
                 f"Export it before running, or pass it as job-level agent env."
             )
 
     @staticmethod
     def name() -> str:
-        return "clank"
+        return "clanker"
 
     def get_version_command(self) -> str | None:
         return None  # Version comes from the host-side digest.
@@ -210,7 +210,7 @@ class ClankAgent(BaseInstalledAgent):
         )
 
     def network_allowlist(self):
-        """Domains Clank must reach while the task itself is air-gapped.
+        """Domains Clanker must reach while the task itself is air-gapped.
 
         DeepSWE runs the agent with ``network_mode = "no-network"`` and Pier
         opens an egress proxy only for domains declared here, so inheriting the
@@ -230,7 +230,7 @@ class ClankAgent(BaseInstalledAgent):
     def _runtime_env(self) -> dict[str, str]:
         base: dict[str, str | None] = {
             "HOME": CONTAINER_HOME,
-            "CLANK_OFFLINE": "1",
+            "CLANKER_OFFLINE": "1",
             "TERM": "dumb",
             "NO_COLOR": "1",
         }
@@ -247,15 +247,15 @@ class ClankAgent(BaseInstalledAgent):
                 "model_name must be 'provider/model', e.g. openai/gpt-5.6-sol"
             )
         provider, model = self.model_name.split("/", 1)
-        # Pier uses gateway-qualified providers like 'openai-api'; clank knows
+        # Pier uses gateway-qualified providers like 'openai-api'; clanker knows
         # only the bare provider id.
         provider = provider.split("-")[0].lower()
         if provider not in PROVIDERS:
-            raise ValueError(f"clank has no provider '{provider}'")
+            raise ValueError(f"clanker has no provider '{provider}'")
         return provider, model
 
     def _settings_json(self) -> str:
-        """Clank takes provider and effort from settings.json, not from argv.
+        """Clanker takes provider and effort from settings.json, not from argv.
 
         ``-m`` overrides only the model id, so a provider mismatch would leave
         an OpenAI model id pointed at the Anthropic provider.
@@ -264,7 +264,7 @@ class ClankAgent(BaseInstalledAgent):
         settings: dict[str, Any] = {
             "provider": provider,
             "model": model,
-            # Benchmark repos ship no .clank/, so trust never actually gates
+            # Benchmark repos ship no .clanker/, so trust never actually gates
             # here; set anyway so a task that does ship one is not silently
             # stripped of its prompt files in a non-interactive run.
             "defaultProjectTrust": "always",
@@ -289,20 +289,20 @@ class ClankAgent(BaseInstalledAgent):
         await self.exec_as_agent(
             environment,
             command=(
-                f"mkdir -p {CONTAINER_HOME}/.clank && "
+                f"mkdir -p {CONTAINER_HOME}/.clanker && "
                 f"printf '%s' {shlex.quote(self._settings_json())} "
-                f"> {CONTAINER_HOME}/.clank/settings.json"
+                f"> {CONTAINER_HOME}/.clanker/settings.json"
             ),
             env=env,
         )
 
-        # clank has no -C/--cwd; the working directory is set on exec instead,
+        # clanker has no -C/--cwd; the working directory is set on exec instead,
         # and left unset by default so the task image's own WORKDIR applies.
         await self.exec_as_agent(
             environment,
             command=(
                 f"{CONTAINER_BIN} --mode json --approve -p {shlex.quote(instruction)} "
-                f"</dev/null 2>/logs/agent/clank.stderr "
+                f"</dev/null 2>/logs/agent/clanker.stderr "
                 f"| stdbuf -oL tee /logs/agent/{self._OUTPUT_FILENAME}"
             ),
             cwd=self._workdir,
@@ -338,15 +338,15 @@ class ClankAgent(BaseInstalledAgent):
         context.n_input_tokens = totals["input"] + totals["cacheRead"]
         context.n_output_tokens = totals["output"]
         context.n_cache_tokens = totals["cacheRead"]
-        # Clank does not price requests, so cost is left for the harness to
+        # Clanker does not price requests, so cost is left for the harness to
         # derive from token counts rather than reported as zero.
 
         # A truncated run did not decide it was finished, it was cut off --
         # most likely before committing, which grades identically to a wrong
-        # answer. Current clank fails the run outright; older builds exit clean.
+        # answer. Current clanker fails the run outright; older builds exit clean.
         if final_stop == "length":
             print(
-                "clank_agent: WARNING - final assistant message stopped on "
+                "clanker_agent: WARNING - final assistant message stopped on "
                 "'length' (output token cap). This trial was truncated, not "
                 "completed; its score does not reflect answer quality.",
                 file=sys.stderr,

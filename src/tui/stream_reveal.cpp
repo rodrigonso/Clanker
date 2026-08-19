@@ -134,7 +134,7 @@ StrView StreamReveal_NextFrame(StreamReveal* r, u64 nowMs, bool blocked) {
     // Capping the balance at one full step keeps idle time from banking credit
     // that would later burst; it also bounds a frame at MAX_STEP_MS x rate.
     u64 credit = (u64)r->CreditMilliScalars + elapsed * rate;
-    r->CreditMilliScalars = (u32)ClankMin(credit, MAX_STEP_MS * rate);
+    r->CreditMilliScalars = (u32)ClankerMin(credit, MAX_STEP_MS * rate);
     budget = r->CreditMilliScalars / ONE_SCALAR;
 
     if (r->DeadlineMs != 0) {

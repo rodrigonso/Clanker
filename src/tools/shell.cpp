@@ -48,7 +48,7 @@ static StrView Shell_WriteTempOutput(Arena* arena, StrView output, StrView direc
     if (path.Length && path.Data[path.Length - 1] != '/')
       StrBuf_AppendChar(&path, '/');
 #endif
-    StrBuf_AppendCStr(&path, "clank-shell-");
+    StrBuf_AppendCStr(&path, "clanker-shell-");
   }
   u32 prefixLength = path.Length;
 

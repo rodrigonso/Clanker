@@ -4,7 +4,7 @@
 what it *does*: task success on a public coding benchmark, with the model held
 fixed so the harness is the only thing that varies.
 
-`clank_agent.py` exposes Clank as an agent to [Pier](https://github.com/datacurve-ai/pier)
+`clanker_agent.py` exposes Clanker as an agent to [Pier](https://github.com/datacurve-ai/pier)
 (DeepSWE) and [Harbor](https://github.com/harbor-framework/harbor)
 (Terminal-Bench). Both resolve a custom agent from an import path and expose the
 same `BaseInstalledAgent` surface, so one file serves both. **Only the DeepSWE
@@ -13,27 +13,27 @@ untested.
 
 ## Setup
 
-Clank is a compiled binary with no package registry to install from, so the
+Clanker is a compiled binary with no package registry to install from, so the
 adapter uploads it into the task container. **It must be built against the task
 image's glibc, not your host's.** DeepSWE images are Debian 12 bookworm (glibc
 2.36); a binary built on Ubuntu 24.04 (glibc 2.39) fails at agent setup with
 
 ```
-/usr/local/bin/clank: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.38' not found
+/usr/local/bin/clanker: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.38' not found
 ```
 
 `build_bookworm.py` builds a compatible binary in a Modal sandbox, so it needs
 no local Docker:
 
 ```bash
-python build_bookworm.py ~/clank-src -o ~/clank-bookworm
-export CLANK_BIN=$HOME/clank-bookworm
+python build_bookworm.py ~/clanker-src -o ~/clanker-bookworm
+export CLANKER_BIN=$HOME/clanker-bookworm
 ```
 
 Bookworm ships `libssl-dev`, so that build links the image's own OpenSSL and
-needs **no** `clank_libs` upload. Check any other binary with `ldd` and
-`objdump -T clank | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1`; pass
-`--ak clank_libs=a.so,b.so` only if it needs libraries the image lacks.
+needs **no** `clanker_libs` upload. Check any other binary with `ldd` and
+`objdump -T clanker | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1`; pass
+`--ak clanker_libs=a.so,b.so` only if it needs libraries the image lacks.
 
 Then the harness itself:
 
@@ -61,10 +61,10 @@ Three gates before committing to a full sweep. Each buys information the next
 stage depends on; skipping one means finding the problem five hours and a large
 API bill in. `run_benchmark.py` owns the safe defaults for all three:
 
-- Clank retries transient provider requests in place (up to eight retries and a
+- Clanker retries transient provider requests in place (up to eight retries and a
   60-second delay), preserving the task state and prompt cache.
 - Pier trial retries are fixed at zero. Pier deletes the failed trial directory
-  before retrying, including `clank.stderr`, NDJSON and the exception body.
+  before retrying, including `clanker.stderr`, NDJSON and the exception body.
 - Agent concurrency defaults to four. The oracle, which makes no model calls,
   defaults to eight.
 - The full sweep refuses to start until its API-cost warning is acknowledged.
@@ -102,8 +102,8 @@ python3 run_benchmark.py full --confirm-full-sweep
 
 Override the conservative defaults with `--concurrency`, `--environment`,
 `--model`, `--max-retries` or `--retry-max-delay-ms`. Results land in
-`jobs/<timestamp>/`, one directory per trial holding `agent/clank.ndjson`,
-`agent/clank.stderr`, `artifacts/model.patch` and `verifier/reward.json`;
+`jobs/<timestamp>/`, one directory per trial holding `agent/clanker.ndjson`,
+`agent/clanker.stderr`, `artifacts/model.patch` and `verifier/reward.json`;
 `pier view jobs` browses them.
 
 Audit every job before reading its score:
@@ -115,7 +115,7 @@ python3 audit_job.py jobs/<timestamp>
 The audit fails on incomplete jobs, exceptions, destructive Pier retries,
 missing patches, missing event logs, and truncated final messages. Empty
 patches are legitimate scored failures and produce warnings. The audit also
-counts Clank's in-place request retries and estimates API cost from the actual
+counts Clanker's in-place request retries and estimates API cost from the actual
 input, cache-read, cache-write and output tokens. A failed audit means the
 score is not benchmark evidence, even if Pier's final table has zero
 exceptions.
@@ -132,7 +132,7 @@ Two things bite only at full scale:
   in jcode's Opus run.
 - **Rate limits, not Modal, set the concurrency ceiling.** The measured ten-task
   canary averaged 8.1M cache-read, 132.6k cache-write and 56.5k output tokens per
-  task. Clank honors provider retry headers and emits `retry_start`/`retry_end`
+  task. Clanker honors provider retry headers and emits `retry_start`/`retry_end`
   events; the adapter widens its request budget to eight retries capped at one
   minute. Keep concurrency at four unless a clean canary supports raising it.
   Never use Pier's `-r`/`--max-retries`: it restarts the whole task and erases
@@ -147,7 +147,7 @@ sweep. Job logs run around 1.2 MB per trial, or roughly 140 MB for all 113.
 Adapter checks run with no harness installed:
 
 ```bash
-python3 test_clank_agent.py
+python3 test_clanker_agent.py
 python3 test_benchmark_flow.py
 ```
 
@@ -194,16 +194,16 @@ Three things follow, and they set expectations for anything measured here:
   median and max agent seconds, per-task rewards, harness commit, dataset
   commit.
 - **Nobody publishes cost or tokens.** No harness in that table reports either,
-  and jcode's own entries set `cost_usd: null`. DeepSWE cannot carry Clank's
+  and jcode's own entries set `cost_usd: null`. DeepSWE cannot carry Clanker's
   footprint argument; that stays in `agentbench/`.
 
-So the realistic goal here is not a win but a floor: evidence that Clank
+So the realistic goal here is not a win but a floor: evidence that Clanker
 resolves tasks in the same band as Claude Code and OpenCode, so the footprint
 claim rests on a harness that is not quietly worse.
 
 ## Results so far
 
-Three tasks at `--sample-seed 0`, Clank on claude-sonnet-4-6 high, k=1:
+Three tasks at `--sample-seed 0`, Clanker on claude-sonnet-4-6 high, k=1:
 
 | task | F2P | P2P | reward |
 |---|---:|---:|---:|
@@ -221,7 +221,7 @@ The ten-task concurrency gate on the same Sonnet model completed with F2P
 healthy, but Pier retried the initial eight-task wave and deleted all eight
 failed attempts. `audit_job.py` therefore rejects that job despite its final
 `Exceptions: 0`. A subsequent eight-way one-turn probe succeeded 8/8 with
-Clank retries disabled, ruling out a persistent eight-request account limit;
+Clanker retries disabled, ruling out a persistent eight-request account limit;
 the first-wave error itself is unrecoverable.
 
 Our checkout is `435ee89`, a descendant of jcode's `8cae5984`. The only
@@ -234,7 +234,7 @@ identical.
 
 The first real run scored **F2P 0.000** with `P2P 260/260` and a **0-byte
 `model.patch`** on every task — the signature of an agent that never committed.
-It was a bug in Clank, which is the benchmark earning its keep on day one.
+It was a bug in Clanker, which is the benchmark earning its keep on day one.
 
 Every trial ended with `stopReason: length` and `usage.output` of exactly
 **8192**, the hardcoded Anthropic output cap. Context was 39k–99k of 1M, so this
@@ -243,7 +243,7 @@ alone:
 
 1. The model starts writing a large file; the response exceeds 8192 tokens.
 2. Anthropic returns `stop_reason: max_tokens` without closing the in-flight
-   `tool_use` block, so Clank materializes a message with text and **no tool
+   `tool_use` block, so Clanker materializes a message with text and **no tool
    calls**.
 3. `AgentCheckpoint_ContinueTurn` continues only while tools are running, so an
    empty batch reads as *"the model is done"*.
@@ -271,17 +271,17 @@ agent that scores 0 is not necessarily an agent that answered badly.** Check
 `stopReason`, the patch size, and whether `git commit` appears in the tool calls
 first.
 
-## How it maps onto Clank
+## How it maps onto Clanker
 
-- **Instruction** — `clank --mode json --approve -p "<instruction>"`, which runs
+- **Instruction** — `clanker --mode json --approve -p "<instruction>"`, which runs
   fully headless: no tool-approval prompt, and `--approve` covers project prompt
   resources only.
-- **Model and effort** — Clank's `-m` overrides the model id but *not* the
+- **Model and effort** — Clanker's `-m` overrides the model id but *not* the
   provider, so an OpenAI model id would silently point at the Anthropic
-  provider. Both, plus effort, are written to `~/.clank/settings.json` instead.
+  provider. Both, plus effort, are written to `~/.clanker/settings.json` instead.
   Efforts: `low`, `medium`, `high`, `xhigh`, `max`, `ultra`.
 - **Accounting** — token counts come from `record.payload.message.usage` on
-  assistant messages. Clank does not price requests, so cost is left unreported
+  assistant messages. Clanker does not price requests, so cost is left unreported
   rather than reported as zero.
 - **Network** — DeepSWE runs the agent with `network_mode = "no-network"`, and
   Pier opens an egress path only for domains an agent declares in
@@ -289,7 +289,7 @@ first.
   `*_BASE_URL` override; Pier fronts the container with an authenticated Squid
   proxy and injects `HTTPS_PROXY`, which libcurl honours for free. The inherited
   empty allowlist would fail every task with no route to host.
-- **Offline tools** — `CLANK_OFFLINE=1` is set and `ripgrep` installed at image
+- **Offline tools** — `CLANKER_OFFLINE=1` is set and `ripgrep` installed at image
   build, so the `grep` tool never reaches for a download mid-trial.
 - **Install vs upload** — the `apt-get` step is baked into the image, but the
   binary is uploaded in `setup()`, not `install()`: Pier skips `install()`

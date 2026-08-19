@@ -127,7 +127,7 @@ bool DefaultProjectTrust_Parse(StrView value, DefaultProjectTrust* out) {
 }
 
 StrView ProjectTrust_DefaultPath(Arena* arena) {
-  return ClankDataPath(arena, "trust.json");
+  return ClankerDataPath(arena, "trust.json");
 }
 
 StrView ProjectTrust_CanonicalPath(Arena* arena, StrView path) {
@@ -153,7 +153,7 @@ StrView ProjectTrust_ParentPath(Arena* arena, StrView path) {
 }
 
 bool ProjectTrust_HasGatedResources(Arena* arena, StrView workingDirectory) {
-  StrView config = Fs_Join(arena, workingDirectory, SVL(".clank"));
+  StrView config = Fs_Join(arena, workingDirectory, SVL(".clanker"));
   const StrView names[] = {SVL("SYSTEM.md"), SVL("APPEND_SYSTEM.md")};
   for (u32 i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
     FsStat stat = Fs_Stat(Fs_Join(arena, config, names[i]));

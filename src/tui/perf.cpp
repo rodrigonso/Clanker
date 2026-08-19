@@ -72,7 +72,7 @@ void TuiPerf_TurnMessageEnded(TuiPerf* p, Usage use, u64 nowUs) {
 
 void TuiPerf_ToolStarted(TuiPerf* p, StrView name, u64 nowUs) {
   p->ToolStartUs = nowUs;
-  u32 n = ClankMin(name.Length, (u32)sizeof(p->LastTool));
+  u32 n = ClankerMin(name.Length, (u32)sizeof(p->LastTool));
   if (n) memcpy(p->LastTool, name.Data, n);
   p->LastToolLength = (u8)n;
   p->LastToolUs = 0;

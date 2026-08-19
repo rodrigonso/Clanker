@@ -153,8 +153,8 @@ void TestParseTolerance() {
 
 void TestLoad() {
   Arena a = ArenaCreate();
-  const char* dir = "clank_hooks_test";
-  const char* path = "clank_hooks_test/hooks.json";
+  const char* dir = "clanker_hooks_test";
+  const char* path = "clanker_hooks_test/hooks.json";
   remove(path);
 #if defined(_WIN32)
   _rmdir(dir);
@@ -192,7 +192,7 @@ void TestPayload() {
   HookSessionInfo session = {};
   session.SessionId = SVL("0123456789abcdefghijkl");
   session.WorkingDirectory = SVL("C:\\work\\repo");
-  session.TranscriptPath = SVL("C:\\home\\.clank\\sessions\\v2\\repo-1\\s.jsonl");
+  session.TranscriptPath = SVL("C:\\home\\.clanker\\sessions\\v2\\repo-1\\s.jsonl");
   session.Interactive = true;
 
   HookToolInfo tool = {};
@@ -305,7 +305,7 @@ u32 CountLines(StrView text) {
 // stdin pipe and the shutdown guarantee have no execution coverage at all.
 void TestRunnerDelivery() {
   Arena a = ArenaCreate();
-  const char* sinkPath = "clank_hooks_live.txt";
+  const char* sinkPath = "clanker_hooks_live.txt";
   remove(sinkPath);
 
   StrBuf document = StrBuf_Make(&a, 512);
@@ -345,7 +345,7 @@ void TestRunnerDelivery() {
 // timeouts, and must not cost the terminal event its delivery.
 void TestRunnerShutdownIsBounded() {
   Arena a = ArenaCreate();
-  const char* sinkPath = "clank_hooks_bounded.txt";
+  const char* sinkPath = "clanker_hooks_bounded.txt";
   remove(sinkPath);
 
   StrBuf document = StrBuf_Make(&a, 512);
@@ -441,7 +441,7 @@ void TestExecInputCapture() {
 }
 void TestRunnerSessionSwitch() {
   Arena a = ArenaCreate();
-  const char* sinkPath = "clank_hooks_switch.txt";
+  const char* sinkPath = "clanker_hooks_switch.txt";
   remove(sinkPath);
 
   StrBuf document = StrBuf_Make(&a, 512);
@@ -456,8 +456,8 @@ void TestRunnerSessionSwitch() {
 
   HookSessionInfo first = {};
   first.SessionId = SVL("first-session");
-  first.WorkingDirectory = SVL("C:\\Users\\dev\\projects\\clank");
-  first.TranscriptPath = SVL("C:\\Users\\dev\\.clank\\sessions\\v2\\clank-c838f21a\\first.jsonl");
+  first.WorkingDirectory = SVL("C:\\Users\\dev\\projects\\clanker");
+  first.TranscriptPath = SVL("C:\\Users\\dev\\.clanker\\sessions\\v2\\clanker-c838f21a\\first.jsonl");
   HookRunner* runner = HookRunner_Create(&a, &config, &first);
   CHECK(runner != nullptr);
 
@@ -465,9 +465,9 @@ void TestRunnerSessionSwitch() {
   // at the identity sizes a real session actually reports.
   HookSessionInfo second = {};
   second.SessionId = SVL("second-session");
-  second.WorkingDirectory = SVL("C:\\Users\\dev\\projects\\clank");
+  second.WorkingDirectory = SVL("C:\\Users\\dev\\projects\\clanker");
   second.TranscriptPath =
-      SVL("C:\\Users\\dev\\.clank\\sessions\\v2\\clank-c838f21a\\second.jsonl");
+      SVL("C:\\Users\\dev\\.clanker\\sessions\\v2\\clanker-c838f21a\\second.jsonl");
   for (u32 i = 0; i < 20000; i++) HookRunner_SetSession(runner, &second);
 
   // A value too large to store is reported as absent rather than truncated:
@@ -495,7 +495,7 @@ void TestRunnerSessionSwitch() {
 void TestSelectionIsNotCapped() {
   Arena a = ArenaCreate();
   constexpr u32 kCommands = 12;
-  const char* sinkPath = "clank_hooks_fanout.txt";
+  const char* sinkPath = "clanker_hooks_fanout.txt";
   remove(sinkPath);
 
   StrView command = SelfCommand(&a, "--sink-stdin", SV(sinkPath));
@@ -689,7 +689,7 @@ void TestExecInputTimeoutIsNotSpurious() {
 }
 void TestGateDelivery() {
   Arena a = ArenaCreate();
-  const char* sinkPath = "clank_gate_live.txt";
+  const char* sinkPath = "clanker_gate_live.txt";
   ToolArgs args = {};
   args.Json = SVL("{\"path\":\"a.txt\"}");
   AgentToolGateDecision decision = {};

@@ -15,8 +15,8 @@
 
 void TestSettings() {
   Arena a = ArenaCreate();
-  const char* dir = "clank_settings_test";
-  const char* path = "clank_settings_test/settings.json";
+  const char* dir = "clanker_settings_test";
+  const char* path = "clanker_settings_test/settings.json";
   remove(path);
 #if defined(_WIN32)
   _rmdir(dir);

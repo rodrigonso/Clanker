@@ -27,13 +27,13 @@ void TestSessionProjectKey() {
 
   // The key is a filesystem-safe basename plus a hash of the full path, so two
   // directories sharing a basename never collide into one session directory.
-  StrView a = SessionProjectKey(&arena, SVL("/home/dev/clank"));
-  StrView b = SessionProjectKey(&arena, SVL("/srv/build/clank"));
-  CHECK_ALL(!StrView_Eq(a, b), StrView_Contains(a, "clank"),
-            StrView_Contains(b, "clank"));
+  StrView a = SessionProjectKey(&arena, SVL("/home/dev/clanker"));
+  StrView b = SessionProjectKey(&arena, SVL("/srv/build/clanker"));
+  CHECK_ALL(!StrView_Eq(a, b), StrView_Contains(a, "clanker"),
+            StrView_Contains(b, "clanker"));
 
   // Same input, same key -- session directories must be stable across runs.
-  CHECK(StrView_Eq(a, SessionProjectKey(&arena, SVL("/home/dev/clank"))));
+  CHECK(StrView_Eq(a, SessionProjectKey(&arena, SVL("/home/dev/clanker"))));
 
   // Characters that cannot appear in a path component are replaced rather than
   // escaped, and the hash still separates the results.
@@ -53,8 +53,8 @@ void TestSessionProjectKey() {
   // Windows paths are compared case-insensitively with normalized separators,
   // so one directory spelled two ways resolves to a single session rather than
   // silently forking into two session directories.
-  CHECK(StrView_Eq(SessionProjectKey(&arena, SVL("C:\\Work\\Clank")),
-                   SessionProjectKey(&arena, SVL("c:/work/clank"))));
+  CHECK(StrView_Eq(SessionProjectKey(&arena, SVL("C:\\Work\\Clanker")),
+                   SessionProjectKey(&arena, SVL("c:/work/clanker"))));
   // Distinct directories that differ only by case of a *parent* component still
   // agree, because the whole path feeds the hash.
   CHECK(StrView_Eq(SessionProjectKey(&arena, SVL("C:\\A\\proj")),
@@ -70,29 +70,29 @@ void TestSessionProjectKey() {
 // A key recorded before the basename was case-folded still has to open, since
 // on Windows it names the very same storage directory.
 void TestProjectKeyComparison() {
-  CHECK(SessionProjectKey_Eq(SVL("clank-abc"), SVL("clank-abc")));
-  CHECK(!SessionProjectKey_Eq(SVL("clank-abc"), SVL("clank-abd")));
-  CHECK(!SessionProjectKey_Eq(SVL("clank-abc"), SVL("clank-ab")));
+  CHECK(SessionProjectKey_Eq(SVL("clanker-abc"), SVL("clanker-abc")));
+  CHECK(!SessionProjectKey_Eq(SVL("clanker-abc"), SVL("clanker-abd")));
+  CHECK(!SessionProjectKey_Eq(SVL("clanker-abc"), SVL("clanker-ab")));
 #if defined(_WIN32)
-  CHECK(SessionProjectKey_Eq(SVL("Clank-abc"), SVL("clank-abc")));
+  CHECK(SessionProjectKey_Eq(SVL("Clanker-abc"), SVL("clanker-abc")));
   CHECK(SessionProjectKey_Eq(SVL("MyProj-0011"), SVL("myproj-0011")));
 #else
-  CHECK(!SessionProjectKey_Eq(SVL("Clank-abc"), SVL("clank-abc")));
+  CHECK(!SessionProjectKey_Eq(SVL("Clanker-abc"), SVL("clanker-abc")));
 #endif
 }
 
 void TestConfigPaths() {  Arena arena = ArenaCreate();
 
   // Every per-user file hangs off one root, and the root is a prefix of each.
-  StrView root = ClankDataRoot(&arena);
-  StrView settings = ClankDataPath(&arena, "settings.json");
-  CHECK_ALL(StrView_Contains(root, ".clank"),
-            StrView_Contains(settings, ".clank/settings.json"),
+  StrView root = ClankerDataRoot(&arena);
+  StrView settings = ClankerDataPath(&arena, "settings.json");
+  CHECK_ALL(StrView_Contains(root, ".clanker"),
+            StrView_Contains(settings, ".clanker/settings.json"),
             settings.Length > root.Length,
             memcmp(settings.Data, root.Data, root.Length) == 0);
 
   // An empty name is the root itself rather than a trailing slash.
-  CHECK(StrView_Eq(ClankDataRoot(&arena), ClankDataPath(&arena, nullptr)));
+  CHECK(StrView_Eq(ClankerDataRoot(&arena), ClankerDataPath(&arena, nullptr)));
 
   ArenaRelease(&arena);
 }
@@ -232,8 +232,8 @@ void TestRuntimeSetPromptOptions() {
 
 void TestRuntimePersistSettings() {
   Arena arena = ArenaCreate();
-  const char* dir = "clank_runtime_settings_test";
-  const char* path = "clank_runtime_settings_test/settings.json";
+  const char* dir = "clanker_runtime_settings_test";
+  const char* path = "clanker_runtime_settings_test/settings.json";
   remove(path);
 
   InteractiveRuntime rt = {};

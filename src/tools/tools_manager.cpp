@@ -64,7 +64,7 @@ bool ToolManager_IsTruthy(const char* value) {
 }
 
 bool ToolManager_IsOffline() {
-  return ToolManager_IsTruthy(getenv("CLANK_OFFLINE")) ||
+  return ToolManager_IsTruthy(getenv("CLANKER_OFFLINE")) ||
          ToolManager_IsTruthy(getenv("PI_OFFLINE"));
 }
 
@@ -132,7 +132,7 @@ StrView ToolManager_BinDir(Arena* arena) {
   StrView home = Sys_HomeDir(arena);
   StrBuf path = StrBuf_Make(arena, home.Length + 20);
   StrBuf_Append(&path, home.Length ? home : SVL("."));
-  StrBuf_AppendCStr(&path, "/.clank/bin");
+  StrBuf_AppendCStr(&path, "/.clanker/bin");
   return StrBuf_View(&path);
 }
 
@@ -225,7 +225,7 @@ StrView ToolManager_AssetName(Arena* arena, StrView version) {
 }
 
 bool ToolManager_Fetch(Arena* arena, StrView url, volatile i32* abort, HttpResponse* out) {
-  HttpHeader headers[] = {{SVL("user-agent"), SVL("clank-coding-agent")},
+  HttpHeader headers[] = {{SVL("user-agent"), SVL("clanker-coding-agent")},
                           {SVL("accept"), SVL("application/vnd.github+json")}};
   HttpRequest request = {};
   request.Method = SVL("GET");
@@ -413,11 +413,11 @@ StrView ToolManager_DownloadRipgrep(Arena* arena, volatile i32* abort, StrBuf* e
 }  // namespace
 
 StrView ToolManager_EnsureRipgrep(Arena* arena, volatile i32* abort, StrBuf* err) {
-  const char* overridePath = getenv("CLANK_RG_PATH");
+  const char* overridePath = getenv("CLANKER_RG_PATH");
   if (overridePath && *overridePath) {
     StrView path = Fs_RealPath(arena, SV(overridePath));
     if (Fs_Exists(path)) return path;
-    StrBuf_AppendCStr(err, "CLANK_RG_PATH does not exist: ");
+    StrBuf_AppendCStr(err, "CLANKER_RG_PATH does not exist: ");
     StrBuf_Append(err, path);
     return StrView{};
   }

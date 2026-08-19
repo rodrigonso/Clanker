@@ -6,7 +6,7 @@
 // Credential storage in a JSON file keyed by provider id, one credential each.
 // Writes are atomic (temp + rename) with restrictive perms on POSIX.
 
-// Default path: <home>/.clank/auth.json.
+// Default path: <home>/.clanker/auth.json.
 StrView AuthStore_DefaultPath(Arena* arena);
 
 bool AuthStore_Read(Arena* arena, StrView path, StrView providerId, Credential* out);

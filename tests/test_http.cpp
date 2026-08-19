@@ -12,13 +12,13 @@
 #if defined(_WIN32)
 #include <winsock2.h>
 #include <ws2tcpip.h>
-typedef int clank_socklen_t;
+typedef int clanker_socklen_t;
 #else
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 typedef int SOCKET;
-typedef socklen_t clank_socklen_t;
+typedef socklen_t clanker_socklen_t;
 #define INVALID_SOCKET (-1)
 #endif
 
@@ -464,7 +464,7 @@ SOCKET OpenLoopbackListener(u16* outPort) {
   }
   sockaddr_in bound;
   memset(&bound, 0, sizeof(bound));
-  clank_socklen_t bl = sizeof(bound);
+  clanker_socklen_t bl = sizeof(bound);
   getsockname(fd, (sockaddr*)&bound, &bl);
   *outPort = ntohs(bound.sin_port);
   return fd;
@@ -673,7 +673,7 @@ bool LiveOnData(void* user, StrView chunk) {
 void TestLiveHttp() {
   // Overridable so the suite can be pointed at a local server in sandboxed or
   // offline environments.
-  const char* url = getenv("CLANK_TEST_HTTP_URL");
+  const char* url = getenv("CLANKER_TEST_HTTP_URL");
   if (!url) url = "https://example.com";
 
   Http_GlobalInit();

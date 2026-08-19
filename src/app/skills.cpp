@@ -365,7 +365,7 @@ void Skills_Load(Arena* arena, const SkillLoadOptions* options, SkillSet* out) {
     if (options->ProjectTrusted && options->WorkingDirectory.Length) {
       LoadAgentsAncestors(&ctx, &scratch, options->WorkingDirectory);
       StrView config =
-          Fs_Join(&scratch, options->WorkingDirectory, SVL(".clank"));
+          Fs_Join(&scratch, options->WorkingDirectory, SVL(".clanker"));
       LoadRoot(&ctx, &scratch, Fs_Join(&scratch, config, SVL("skills")));
     }
     for (u32 i = 0; i < options->SettingsPathCount; i++)

@@ -1,19 +1,19 @@
 # Terminal UI Component Library
 
-`clank_ui` is an internal, reusable C++17 component library layered over the
-cell renderer in `clank_term`. It has no agent, JSON, conversation, provider,
-or application dependencies. The Clank-specific full-screen application lives
-in `clank_tui`.
+`clanker_ui` is an internal, reusable C++17 component library layered over the
+cell renderer in `clanker_term`. It has no agent, JSON, conversation, provider,
+or application dependencies. The Clanker-specific full-screen application lives
+in `clanker_tui`.
 
 ## Layers
 
 ```text
-clank_term  terminal modes, input decoding, cells, screen diffing
-clank_ui    frame tree, layout, canvas, events, focus, reusable widgets
-clank_tui   transcript, command palette, modals, agent/application state
+clanker_term  terminal modes, input decoding, cells, screen diffing
+clanker_ui    frame tree, layout, canvas, events, focus, reusable widgets
+clanker_tui   transcript, command palette, modals, agent/application state
 ```
 
-Application code paints through `UiCanvas`; only `clank_ui` writes to `Screen`.
+Application code paints through `UiCanvas`; only `clanker_ui` writes to `Screen`.
 `Screen_Flush` remains responsible for suppressing unchanged terminal output.
 
 ## Keyboard Protocols
@@ -185,7 +185,7 @@ streaming ever feels heavy.
 `Markdown_Render` (`src/tui/markdown.{h,cpp}`) turns an assistant message into
 logical span-lines for the transcript. It is modelled on pi's
 `packages/tui/src/components/markdown.ts`, which lexes with `marked` and
-hand-writes the walk to ANSI; Clank keeps the same visual vocabulary but scans
+hand-writes the walk to ANSI; Clanker keeps the same visual vocabulary but scans
 lines directly instead of materialising a token tree. That choice is a
 consequence of streaming: `LineModel_AppendAssistant` re-renders the entire
 entry on every delta, so allocation has to stay proportional to output rather
@@ -207,7 +207,7 @@ parent's marker was.
 
 A soft line break stays a line break. pi's `applyTextWithNewlines` splits on
 `\n` and rejoins on `\n`, so a single newline inside a paragraph is preserved,
-and Clank matches that: agent replies use single newlines deliberately, and
+and Clanker matches that: agent replies use single newlines deliberately, and
 joining them would reflow text the model laid out. The inline pass still runs
 over the whole paragraph before the spans are cut, so emphasis may span a
 break.

@@ -13,10 +13,10 @@
 
 #if defined(_WIN32)
 #include <direct.h>
-#define CLANK_RMDIR _rmdir
+#define CLANKER_RMDIR _rmdir
 #else
 #include <unistd.h>
-#define CLANK_RMDIR rmdir
+#define CLANKER_RMDIR rmdir
 #endif
 
 // ---- helpers -------------------------------------------------------------
@@ -90,7 +90,7 @@ static StrView Args1(Arena* a, const char* k, const char* v) {
 // ---- read ----------------------------------------------------------------
 
 static void TestRead(Arena* a) {
-  const char* path = "clank_tool_read_test.txt";
+  const char* path = "clanker_tool_read_test.txt";
   MakeFile(path, "line1\nline2\n");
 
   Tool rt = ReadTool();
@@ -110,11 +110,11 @@ static void TestRead(Arena* a) {
   CHECK(!RunTool(rt, a, SV("{\"path\":\"no_such_file_xyz.txt\"}"), &o3, &e3));
 
   // offset + limit window with a continuation notice
-  const char* p2 = "clank_tool_read_ol.txt";
+  const char* p2 = "clanker_tool_read_ol.txt";
   MakeFile(p2, "l1\nl2\nl3\nl4\nl5\n");
   ToolResult o4 = {};
   StrBuf e4 = StrBuf_Make(a, 32);
-  CHECK(RunTool(rt, a, SV("{\"path\":\"clank_tool_read_ol.txt\",\"offset\":2,\"limit\":2}"), &o4, &e4));
+  CHECK(RunTool(rt, a, SV("{\"path\":\"clanker_tool_read_ol.txt\",\"offset\":2,\"limit\":2}"), &o4, &e4));
   CHECK_ALL(StrView_Contains(o4.Content.Data[0].Text, "l2"),
             StrView_Contains(o4.Content.Data[0].Text, "l3"),
             !StrView_Contains(o4.Content.Data[0].Text, "l5"),
@@ -122,7 +122,7 @@ static void TestRead(Arena* a) {
   remove(p2);
 
   // image file => text + image content blocks
-  const char* pimg = "clank_tool_read.png";
+  const char* pimg = "clanker_tool_read.png";
   unsigned char png[12] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13};
   {
     FILE* f = fopen(pimg, "wb");
@@ -161,13 +161,13 @@ static StrView ReportedOverflowPath(StrView text) {
 }
 
 static void RemoveEmptyDir(const char* path) {
-  CLANK_RMDIR(path);
+  CLANKER_RMDIR(path);
 }
 
 // Output past the truncation limit spills to a file whose path is reported back
 // to the model. That file belongs to the session directory when there is one.
 static void TestShellOverflow(Arena* a) {
-  const char* source = "clank_tool_shell_big.txt";
+  const char* source = "clanker_tool_shell_big.txt";
   {
     FILE* f = fopen(source, "wb");
     CHECK(f != nullptr);
@@ -177,12 +177,12 @@ static void TestShellOverflow(Arena* a) {
     fclose(f);
   }
 #if defined(_WIN32)
-  StrView command = SVL("{\"command\":\"type clank_tool_shell_big.txt\"}");
+  StrView command = SVL("{\"command\":\"type clanker_tool_shell_big.txt\"}");
 #else
-  StrView command = SVL("{\"command\":\"cat clank_tool_shell_big.txt\"}");
+  StrView command = SVL("{\"command\":\"cat clanker_tool_shell_big.txt\"}");
 #endif
 
-  const char* sessionDir = "clank_tool_shell_session";
+  const char* sessionDir = "clanker_tool_shell_session";
   ShellToolContext context = {};
   context.Directory = SV(sessionDir);
   Tool scoped = ShellTool(&context);
@@ -217,7 +217,7 @@ static void TestShellOverflow(Arena* a) {
   StrView fallbackPath = ReportedOverflowPath(fallback.Content.Data[0].Text);
   CHECK_ALL(fallbackPath.Length > 0,
             !StrView_Contains(fallbackPath, sessionDir),
-            StrView_Contains(fallbackPath, "clank-shell-"));
+            StrView_Contains(fallbackPath, "clanker-shell-"));
   StrBuf fallbackNative = StrBuf_Make(a, fallbackPath.Length + 1);
   StrBuf_Append(&fallbackNative, fallbackPath);
   CHECK(Fs_Exists(StrBuf_View(&fallbackNative)));
@@ -284,10 +284,10 @@ static void TestShell(Arena* a) {
 
 static void TestWrite(Arena* a) {
   Tool wt = WriteTool();
-  const char* path = "clank_tool_write_test.txt";
+  const char* path = "clanker_tool_write_test.txt";
   ToolResult out = {};
   StrBuf err = StrBuf_Make(a, 32);
-  bool ok = RunTool(wt, a, SV("{\"path\":\"clank_tool_write_test.txt\",\"content\":\"written-data\"}"),
+  bool ok = RunTool(wt, a, SV("{\"path\":\"clanker_tool_write_test.txt\",\"content\":\"written-data\"}"),
                     &out, &err);
   CHECK_ALL(ok, StrView_Contains(out.Content.Data[0].Text, "Successfully wrote"),
             StrView_EqCStr(Slurp(a, path), "written-data"));
@@ -300,13 +300,13 @@ static void TestEdit(Arena* a) {
   Tool et = EditTool();
 
   // exact match
-  const char* p1 = "clank_tool_edit_exact.txt";
+  const char* p1 = "clanker_tool_edit_exact.txt";
   MakeFile(p1, "hello world\nsecond line\n");
   ToolResult o1 = {};
   StrBuf e1 = StrBuf_Make(a, 32);
   bool ok1 = RunTool(
       et, a,
-      SV("{\"path\":\"clank_tool_edit_exact.txt\",\"edits\":[{\"oldText\":\"hello world\",\"newText\":"
+      SV("{\"path\":\"clanker_tool_edit_exact.txt\",\"edits\":[{\"oldText\":\"hello world\",\"newText\":"
          "\"HELLO\"}]}"),
       &o1, &e1);
   CHECK_ALL(ok1, StrView_EqCStr(Slurp(a, p1), "HELLO\nsecond line\n"));
@@ -320,26 +320,26 @@ static void TestEdit(Arena* a) {
   CHECK(StrView_Contains(StrBuf_View(&missingPathErr), "root.path"));
 
   // fuzzy match (different internal whitespace)
-  const char* p2 = "clank_tool_edit_fuzzy.txt";
+  const char* p2 = "clanker_tool_edit_fuzzy.txt";
   MakeFile(p2, "x = foo   bar\n");
   ToolResult o2 = {};
   StrBuf e2 = StrBuf_Make(a, 32);
   bool ok2 = RunTool(
       et, a,
-      SV("{\"path\":\"clank_tool_edit_fuzzy.txt\",\"edits\":[{\"oldText\":\"foo bar\",\"newText\":"
+      SV("{\"path\":\"clanker_tool_edit_fuzzy.txt\",\"edits\":[{\"oldText\":\"foo bar\",\"newText\":"
          "\"baz\"}]}"),
       &o2, &e2);
   CHECK_ALL(ok2, StrView_Contains(Slurp(a, p2), "baz"));
   remove(p2);
 
   // not-found => error
-  const char* p3 = "clank_tool_edit_err.txt";
+  const char* p3 = "clanker_tool_edit_err.txt";
   MakeFile(p3, "alpha\n");
   ToolResult o3 = {};
   StrBuf e3 = StrBuf_Make(a, 32);
   bool ok3 = RunTool(
       et, a,
-      SV("{\"path\":\"clank_tool_edit_err.txt\",\"edits\":[{\"oldText\":\"zzz\",\"newText\":\"q\"}]}"),
+      SV("{\"path\":\"clanker_tool_edit_err.txt\",\"edits\":[{\"oldText\":\"zzz\",\"newText\":\"q\"}]}"),
       &o3, &e3);
   CHECK(!ok3);
   remove(p3);
@@ -348,12 +348,12 @@ static void TestEdit(Arena* a) {
 // ---- ls / find / grep (share a temp tree) --------------------------------
 
 static void TestTreeTools(Arena* a) {
-  Fs_MkdirP(a, SV("clank_tools_it/sub"));
-  MakeFile("clank_tools_it/a.txt", "alpha\nbeta\ngamma\n");
-  MakeFile("clank_tools_it/b.md", "hello\n");
-  MakeFile("clank_tools_it/sub/c.txt", "deep\n");
+  Fs_MkdirP(a, SV("clanker_tools_it/sub"));
+  MakeFile("clanker_tools_it/a.txt", "alpha\nbeta\ngamma\n");
+  MakeFile("clanker_tools_it/b.md", "hello\n");
+  MakeFile("clanker_tools_it/sub/c.txt", "deep\n");
   {
-    FILE* longFile = fopen("clank_tools_it/long.txt", "wb");
+    FILE* longFile = fopen("clanker_tools_it/long.txt", "wb");
     if (longFile) {
       for (u32 i = 0; i < 600; i++) fputc('x', longFile);
       fputc('\n', longFile);
@@ -365,7 +365,7 @@ static void TestTreeTools(Arena* a) {
   Tool lt = LsTool();
   ToolResult lo = {};
   StrBuf le = StrBuf_Make(a, 32);
-  CHECK(RunTool(lt, a, Args1(a, "path", "clank_tools_it"), &lo, &le));
+  CHECK(RunTool(lt, a, Args1(a, "path", "clanker_tools_it"), &lo, &le));
   CHECK_ALL(StrView_Contains(lo.Content.Data[0].Text, "a.txt"),
             StrView_Contains(lo.Content.Data[0].Text, "b.md"),
             StrView_Contains(lo.Content.Data[0].Text, "sub/"));
@@ -374,22 +374,22 @@ static void TestTreeTools(Arena* a) {
   Tool ft = FindTool();
   ToolResult fo = {};
   StrBuf fe = StrBuf_Make(a, 32);
-  CHECK(RunTool(ft, a, SV("{\"pattern\":\"*.txt\",\"path\":\"clank_tools_it\"}"), &fo, &fe));
+  CHECK(RunTool(ft, a, SV("{\"pattern\":\"*.txt\",\"path\":\"clanker_tools_it\"}"), &fo, &fe));
   CHECK_ALL(StrView_Contains(fo.Content.Data[0].Text, "a.txt"),
             StrView_Contains(fo.Content.Data[0].Text, "c.txt"),
             !StrView_Contains(fo.Content.Data[0].Text, "b.md"));
 
-  const char* oldRgPathRaw = getenv("CLANK_RG_PATH");
-  const char* oldFakeRgRaw = getenv("CLANK_TEST_FAKE_RG");
+  const char* oldRgPathRaw = getenv("CLANKER_RG_PATH");
+  const char* oldFakeRgRaw = getenv("CLANKER_TEST_FAKE_RG");
   StrView oldRgPath = oldRgPathRaw ? StrView_Dup(a, SV(oldRgPathRaw)) : StrView{};
   StrView oldFakeRg = oldFakeRgRaw ? StrView_Dup(a, SV(oldFakeRgRaw)) : StrView{};
-  bool useRealRipgrep = getenv("CLANK_TEST_REAL_RG") != nullptr;
+  bool useRealRipgrep = getenv("CLANKER_TEST_REAL_RG") != nullptr;
   if (!useRealRipgrep) {
     StrView fakeRg = Fs_RealPath(a, SV(g_test_executable));
     StrBuf fakeRgNative = StrBuf_Make(a, fakeRg.Length + 1);
     StrBuf_Append(&fakeRgNative, fakeRg);
-    SetTestEnv("CLANK_RG_PATH", StrBuf_CStr(&fakeRgNative));
-    SetTestEnv("CLANK_TEST_FAKE_RG", "1");
+    SetTestEnv("CLANKER_RG_PATH", StrBuf_CStr(&fakeRgNative));
+    SetTestEnv("CLANKER_TEST_FAKE_RG", "1");
   }
 
   // grep forwards pi's ripgrep options and formats context from the source file.
@@ -398,7 +398,7 @@ static void TestTreeTools(Arena* a) {
   StrBuf ge = StrBuf_Make(a, 32);
   CHECK(RunTool(
       gt, a,
-      SV("{\"pattern\":\"BETA\",\"path\":\"clank_tools_it\",\"glob\":\"a.txt\","
+      SV("{\"pattern\":\"BETA\",\"path\":\"clanker_tools_it\",\"glob\":\"a.txt\","
          "\"ignoreCase\":true,\"literal\":true,\"context\":1}"),
       &go, &ge));
   CHECK(StrView_EqCStr(go.Content.Data[0].Text,
@@ -407,7 +407,7 @@ static void TestTreeTools(Arena* a) {
   ToolResult limited = {};
   StrBuf limitedErr = StrBuf_Make(a, 32);
   CHECK(RunTool(gt, a,
-                SV("{\"pattern\":\"alpha|beta|gamma\",\"path\":\"clank_tools_it/a.txt\","
+                SV("{\"pattern\":\"alpha|beta|gamma\",\"path\":\"clanker_tools_it/a.txt\","
                    "\"limit\":2}"),
                 &limited, &limitedErr));
   CHECK_ALL(StrView_Contains(limited.Content.Data[0].Text, "a.txt:1: alpha"),
@@ -417,7 +417,7 @@ static void TestTreeTools(Arena* a) {
 
   ToolResult longLine = {};
   StrBuf longErr = StrBuf_Make(a, 32);
-  CHECK(RunTool(gt, a, SV("{\"pattern\":\"x+\",\"path\":\"clank_tools_it/long.txt\"}"),
+  CHECK(RunTool(gt, a, SV("{\"pattern\":\"x+\",\"path\":\"clanker_tools_it/long.txt\"}"),
                 &longLine, &longErr));
   CHECK_ALL(StrView_Contains(longLine.Content.Data[0].Text, "... [truncated]"),
             StrView_Contains(longLine.Content.Data[0].Text,
@@ -426,25 +426,25 @@ static void TestTreeTools(Arena* a) {
   ToolResult noMatches = {};
   StrBuf noMatchesErr = StrBuf_Make(a, 32);
   CHECK(RunTool(gt, a,
-                SV("{\"pattern\":\"definitely-no-match\",\"path\":\"clank_tools_it/a.txt\"}"),
+                SV("{\"pattern\":\"definitely-no-match\",\"path\":\"clanker_tools_it/a.txt\"}"),
                 &noMatches, &noMatchesErr));
   CHECK(StrView_EqCStr(noMatches.Content.Data[0].Text, "No matches found"));
 
   ToolResult invalidRegex = {};
   StrBuf invalidRegexErr = StrBuf_Make(a, 32);
-  CHECK(!RunTool(gt, a, SV("{\"pattern\":\"[\",\"path\":\"clank_tools_it/a.txt\"}"),
+  CHECK(!RunTool(gt, a, SV("{\"pattern\":\"[\",\"path\":\"clanker_tools_it/a.txt\"}"),
                  &invalidRegex, &invalidRegexErr));
   CHECK(StrView_Contains(StrBuf_View(&invalidRegexErr), "regex parse error"));
 
   ToolResult missingPath = {};
   StrBuf missingPathErr = StrBuf_Make(a, 32);
-  CHECK(!RunTool(gt, a, SV("{\"pattern\":\"x\",\"path\":\"clank_tools_missing\"}"),
+  CHECK(!RunTool(gt, a, SV("{\"pattern\":\"x\",\"path\":\"clanker_tools_missing\"}"),
                  &missingPath, &missingPathErr));
   CHECK(StrView_Contains(StrBuf_View(&missingPathErr), "Path not found"));
 
   ToolResult emptyPattern = {};
   StrBuf emptyPatternErr = StrBuf_Make(a, 32);
-  CHECK(RunTool(gt, a, SV("{\"pattern\":\"\",\"path\":\"clank_tools_it/a.txt\"}"),
+  CHECK(RunTool(gt, a, SV("{\"pattern\":\"\",\"path\":\"clanker_tools_it/a.txt\"}"),
                 &emptyPattern, &emptyPatternErr));
   CHECK(StrView_Contains(emptyPattern.Content.Data[0].Text, "a.txt:1: alpha"));
 
@@ -452,16 +452,16 @@ static void TestTreeTools(Arena* a) {
   StrBuf_Append(&oldRgPathNative, oldRgPath);
   StrBuf oldFakeRgNative = StrBuf_Make(a, oldFakeRg.Length + 1);
   StrBuf_Append(&oldFakeRgNative, oldFakeRg);
-  SetTestEnv("CLANK_TEST_FAKE_RG",
+  SetTestEnv("CLANKER_TEST_FAKE_RG",
              oldFakeRg.Length ? StrBuf_CStr(&oldFakeRgNative) : nullptr);
-  SetTestEnv("CLANK_RG_PATH", oldRgPath.Length ? StrBuf_CStr(&oldRgPathNative) : nullptr);
+  SetTestEnv("CLANKER_RG_PATH", oldRgPath.Length ? StrBuf_CStr(&oldRgPathNative) : nullptr);
 
-  remove("clank_tools_it/a.txt");
-  remove("clank_tools_it/b.md");
-  remove("clank_tools_it/long.txt");
-  remove("clank_tools_it/sub/c.txt");
-  CLANK_RMDIR("clank_tools_it/sub");
-  CLANK_RMDIR("clank_tools_it");
+  remove("clanker_tools_it/a.txt");
+  remove("clanker_tools_it/b.md");
+  remove("clanker_tools_it/long.txt");
+  remove("clanker_tools_it/sub/c.txt");
+  CLANKER_RMDIR("clanker_tools_it/sub");
+  CLANKER_RMDIR("clanker_tools_it");
 }
 
 // ---- ask_user ------------------------------------------------------------

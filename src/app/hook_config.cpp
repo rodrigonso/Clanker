@@ -61,7 +61,7 @@ void ReadGroup(const JsonValue* group, Array<HookCommand>* out) {
 }  // namespace
 
 StrView HookConfig_DefaultPath(Arena* arena) {
-  return ClankDataPath(arena, "hooks.json");
+  return ClankerDataPath(arena, "hooks.json");
 }
 
 HookConfigLoadResult HookConfig_Parse(Arena* arena, StrView text, HookConfig* out) {

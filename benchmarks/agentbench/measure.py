@@ -151,7 +151,7 @@ def main(args) -> int:
     if unavailable:
         for t in unavailable:
             print(f"!! {t.name} not found at {t.binary}")
-        print("\nSet CLANK_BIN / JCODE_BIN / PI_BIN / CLAUDE_BIN / OPENCODE_BIN, or run "
+        print("\nSet CLANKER_BIN / JCODE_BIN / PI_BIN / CLAUDE_BIN / OPENCODE_BIN, or run "
               "`agentbench doctor`.")
         return 1
 

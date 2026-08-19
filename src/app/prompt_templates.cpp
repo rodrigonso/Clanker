@@ -396,7 +396,7 @@ void PromptTemplates_Load(Arena* arena, const PromptTemplateLoadOptions* options
     }
     if (options->ProjectTrusted && options->WorkingDirectory.Length) {
       StrView config =
-          Fs_Join(&scratch, options->WorkingDirectory, SVL(".clank"));
+          Fs_Join(&scratch, options->WorkingDirectory, SVL(".clanker"));
       LoadTemplateDir(&ctx, &scratch, Fs_Join(&scratch, config, SVL("prompts")));
     }
     for (u32 i = 0; i < options->SettingsPathCount; i++)

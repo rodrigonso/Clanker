@@ -207,13 +207,13 @@ u32 CountUnder(const PromptTemplateSet* set, const char* marker) {
 }
 
 void TestDiscovery(Arena* a) {
-  const char* root = "clank_prompt_template_test";
+  const char* root = "clanker_prompt_template_test";
   StrView rootView = SV(root);
   StrView agentDir = Fs_Join(a, rootView, SVL("agent"));
   StrView globalDir = Fs_Join(a, agentDir, SVL("prompts"));
   StrView projectDir = Fs_Join(a, rootView, SVL("project"));
   StrView projectPrompts =
-      Fs_Join(a, Fs_Join(a, projectDir, SVL(".clank")), SVL("prompts"));
+      Fs_Join(a, Fs_Join(a, projectDir, SVL(".clanker")), SVL("prompts"));
 
   CHECK(Fs_MkdirP(a, globalDir));
   CHECK(Fs_MkdirP(a, projectPrompts));
@@ -304,23 +304,23 @@ void TestDiscovery(Arena* a) {
 
 void Cleanup() {
   const char* files[] = {
-      "clank_prompt_template_test/agent/prompts/shared.md",
-      "clank_prompt_template_test/agent/prompts/onlyglobal.md",
-      "clank_prompt_template_test/agent/prompts/notes.txt",
-      "clank_prompt_template_test/agent/prompts/.hidden.md",
-      "clank_prompt_template_test/agent/prompts/nested/deep.md",
-      "clank_prompt_template_test/project/.clank/prompts/shared.md",
-      "clank_prompt_template_test/project/.clank/prompts/onlyproject.md",
+      "clanker_prompt_template_test/agent/prompts/shared.md",
+      "clanker_prompt_template_test/agent/prompts/onlyglobal.md",
+      "clanker_prompt_template_test/agent/prompts/notes.txt",
+      "clanker_prompt_template_test/agent/prompts/.hidden.md",
+      "clanker_prompt_template_test/agent/prompts/nested/deep.md",
+      "clanker_prompt_template_test/project/.clanker/prompts/shared.md",
+      "clanker_prompt_template_test/project/.clanker/prompts/onlyproject.md",
   };
   for (u32 i = 0; i < sizeof(files) / sizeof(files[0]); i++) remove(files[i]);
   const char* dirs[] = {
-      "clank_prompt_template_test/agent/prompts/nested",
-      "clank_prompt_template_test/agent/prompts",
-      "clank_prompt_template_test/agent",
-      "clank_prompt_template_test/project/.clank/prompts",
-      "clank_prompt_template_test/project/.clank",
-      "clank_prompt_template_test/project",
-      "clank_prompt_template_test",
+      "clanker_prompt_template_test/agent/prompts/nested",
+      "clanker_prompt_template_test/agent/prompts",
+      "clanker_prompt_template_test/agent",
+      "clanker_prompt_template_test/project/.clanker/prompts",
+      "clanker_prompt_template_test/project/.clanker",
+      "clanker_prompt_template_test/project",
+      "clanker_prompt_template_test",
   };
   for (u32 i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) RemoveDir(dirs[i]);
 }

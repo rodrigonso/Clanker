@@ -121,7 +121,7 @@ void TestRequestBasics() {
                  "{\"type\":\"message\",\"role\":\"user\",\"content\":"
                  "[{\"type\":\"input_text\",\"text\":\"hello \\\"world\\\"\"}]}"));
 
-  // "ultra" is Clank's name for the tier the wire calls "max".
+  // "ultra" is Clanker's name for the tier the wire calls "max".
   options.Profile.Effort = ModelEffort::Ultra;
   StrBuf ultra = Responses_BuildRequest(&arena, &model, &context, &options);
   CHECK(Contains(StrBuf_View(&ultra), "\"reasoning\":{\"effort\":\"max\""));
@@ -267,7 +267,7 @@ void TestRequestMessageShapes() {
   StrView foreignBody = StrBuf_View(&foreign);
   CHECK_ALL(!Contains(foreignBody, "rs_1"), !Contains(foreignBody, "msg_1"),
             !Contains(foreignBody, "\"id\":\"fc_1\""),
-            Contains(foreignBody, "\"id\":\"msg_clank_1_1\""),
+            Contains(foreignBody, "\"id\":\"msg_clanker_1_1\""),
             Contains(foreignBody, "\"text\":\"calling\""));
   ArenaRelease(&arena);
 }

@@ -8,7 +8,7 @@
 #include "tools/exec.h"
 
 // Synchronous PreToolUse evaluation: pi's `beforeToolCall` seam, with the
-// policy supplied by external commands rather than by JS extensions. Clank
+// policy supplied by external commands rather than by JS extensions. Clanker
 // ships no policy of its own, which is the same posture pi takes.
 //
 // Deliberately separate from HookRunner's fire-and-forget queue. Every other

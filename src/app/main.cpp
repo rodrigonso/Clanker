@@ -72,7 +72,7 @@ struct PromptContextLifetime {
 
 
 static void MaybeReportMem() {
-  if (getenv("CLANK_PRINT_MEM")) {
+  if (getenv("CLANKER_PRINT_MEM")) {
     u64 b = PeakRssBytes();
     fprintf(stderr, "[peak RSS: %llu KB]\n", (unsigned long long)(b / 1024));
   }
@@ -84,8 +84,8 @@ static void MaybeReportMem() {
 
 static void PrintHelp() {
   printf(
-      "Clank - a tiny memory-efficient coding agent\n\n"
-      "Usage: clank [options]\n"
+      "Clanker - a tiny memory-efficient coding agent\n\n"
+      "Usage: clanker [options]\n"
       "  -m <model>        Override the configured model for this run only\n"
       "  -p <prompt>       Run a single prompt and exit (print mode)\n"
       "  --mode <text|json>\n"
@@ -139,7 +139,7 @@ static void RunPlainRepl(InteractiveRuntime* rt) {
   }
   rt->EventPump = &pump;
   rt->EventSink = sink;
-  printf("Clank (%.*s / %.*s). Ctrl+C interrupts a turn, /exit quits.\n",
+  printf("Clanker (%.*s / %.*s). Ctrl+C interrupts a turn, /exit quits.\n",
            (int)rt->Spec->Name.Length, rt->Spec->Name.Data, (int)rt->CurrentModel.Id.Length,
            rt->CurrentModel.Id.Data);
 
@@ -411,7 +411,7 @@ int main(int argc, char** argv) {
                strcmp(argv[i], "--no-tools") == 0 ||
                strcmp(argv[i], "-nbt") == 0 ||
                strcmp(argv[i], "--no-builtin-tools") == 0) {
-      // clank has no extension registry, so "no builtin tools" and "no tools"
+      // clanker has no extension registry, so "no builtin tools" and "no tools"
       // describe the same empty set. Both spellings are accepted for parity.
       noTools = true;
     } else if (strcmp(argv[i], "-a") == 0 ||
@@ -657,7 +657,7 @@ int main(int argc, char** argv) {
   if (onePrompt) {
     if (hasProjectResources && !projectTrusted)
       fprintf(stderr,
-              "warning: project .clank prompt files are disabled because the project is untrusted\n");
+              "warning: project .clanker prompt files are disabled because the project is untrusted\n");
     PrintPromptDiagnostics(&promptContext);
   }
 

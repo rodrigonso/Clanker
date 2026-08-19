@@ -661,7 +661,7 @@ bool ResolveStartupProjectTrust(
   StrBuf title = StrBuf_Make(arena, cwd.Length + 96);
   StrBuf_AppendCStr(
       &title,
-      "This project contains .clank prompt files that can replace system instructions:\n");
+      "This project contains .clanker prompt files that can replace system instructions:\n");
   StrBuf_Append(&title, cwd);
   u32 selected = 0;
   if (!Plain_Select(StrBuf_View(&title), options, count, &selected)) {
@@ -682,7 +682,7 @@ bool ResolveStartupProjectTrust(
   return true;
 }
 
-StrView SessionDataRoot(Arena* arena) { return ClankDataRoot(arena); }
+StrView SessionDataRoot(Arena* arena) { return ClankerDataRoot(arena); }
 
 StrView SessionProjectKey(Arena* arena, StrView workingDirectory) {
   u64 hash = 1469598103934665603ull;
@@ -707,8 +707,8 @@ StrView SessionProjectKey(Arena* arena, StrView workingDirectory) {
     char c = base.Data[i];
 #if defined(_WIN32)
     // The hash half of the key already folds case, so the readable half has to
-    // fold it too. Otherwise one directory reached as C:\Work\Clank and as
-    // c:/work/clank hashes identically but yields two different keys, and the
+    // fold it too. Otherwise one directory reached as C:\Work\Clanker and as
+    // c:/work/clanker hashes identically but yields two different keys, and the
     // same project gets two session directories.
     if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
 #endif

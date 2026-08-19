@@ -18,7 +18,7 @@ class RunnerTests(unittest.TestCase):
             Path("/tasks"),
             "modal",
             4,
-            Path("/clank"),
+            Path("/clanker"),
             pier="pier",
         )
         self.assertIn("max_retries=8", command)
@@ -30,7 +30,7 @@ class RunnerTests(unittest.TestCase):
 
     def test_full_sweep_requires_cost_acknowledgement(self) -> None:
         with self.assertRaises(SystemExit) as raised:
-            run_main(["full", "--dry-run", "--clank-binary", "/clank"])
+            run_main(["full", "--dry-run", "--clanker-binary", "/clanker"])
         self.assertEqual(raised.exception.code, 2)
 
     def test_invalid_retry_delay_is_rejected_before_running(self) -> None:
@@ -39,15 +39,15 @@ class RunnerTests(unittest.TestCase):
                 [
                     "canary",
                     "--dry-run",
-                    "--clank-binary",
-                    "/clank",
+                    "--clanker-binary",
+                    "/clanker",
                     "--retry-max-delay-ms",
                     "0",
                 ]
             )
         self.assertEqual(raised.exception.code, 2)
 
-    def test_oracle_has_no_clank_agent(self) -> None:
+    def test_oracle_has_no_clanker_agent(self) -> None:
         command = build_command("oracle", Path("/tasks"), "modal", 8)
         self.assertEqual(command[command.index("--agent") + 1], "oracle")
         self.assertNotIn("--agent-import-path", command)
@@ -84,7 +84,7 @@ class AuditTests(unittest.TestCase):
                 {
                     "trial_name": "task__abc",
                     "agent_info": {
-                        "name": "clank",
+                        "name": "clanker",
                         "model_info": {"name": "claude-sonnet-4-6"},
                     },
                     "exception_info": None,
@@ -113,7 +113,7 @@ class AuditTests(unittest.TestCase):
                 },
             },
         ]
-        (trial / "agent" / "clank.ndjson").write_text(
+        (trial / "agent" / "clanker.ndjson").write_text(
             "\n".join(json.dumps(event) for event in events)
         )
         return job

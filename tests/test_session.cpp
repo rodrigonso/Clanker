@@ -262,8 +262,8 @@ static Array<SessionRecord> BuildValidTrace(Arena* arena) {
 
   SessionRecord started = BaseRecord(sessionId, 1, 2, SessionRecordKind::SessionStarted);
   started.EntryId = rootId;
-  started.SessionStarted.WorkingDirectory = SVL("C:\\work\\clank");
-  started.SessionStarted.ProjectKey = SVL("clank-1234");
+  started.SessionStarted.WorkingDirectory = SVL("C:\\work\\clanker");
+  started.SessionStarted.ProjectKey = SVL("clanker-1234");
   started.SessionStarted.Label = SVL("test");
   Array_Push(&records, started);
 
@@ -612,7 +612,7 @@ static SessionResult RepositoryCreate(SessionRepository* repository, Arena* aren
   SessionCreateOptions options = {};
   options.RequestedId = id;
   options.ProjectKey = projectKey;
-  options.WorkingDirectory = SVL("C:\\work\\clank");
+  options.WorkingDirectory = SVL("C:\\work\\clanker");
   options.Label = SVL("contract");
   return repository->Create(repository->Ctx, arena, &options, outLog, outInfo);
 }
@@ -699,7 +699,7 @@ static void RunRepositoryContract(Arena* arena, SessionRepository* repository, S
   fork.SourceHeadId = forkHead;
   fork.RequestedTargetId = TestId((u8)(seed + 10));
   fork.ProjectKey = open.ProjectKey;
-  fork.WorkingDirectory = SVL("C:\\work\\clank");
+  fork.WorkingDirectory = SVL("C:\\work\\clanker");
   fork.Label = SVL("forked");
   SessionLog forkLog = {};
   SessionInfo forkInfo = {};
@@ -732,7 +732,7 @@ static void TestMemoryRepository(Arena* arena) {
   MemoryRepository memory = {};
   MemoryRepository_Init(&memory);
   SessionRepository repository = MemoryRepository_AsRepository(&memory);
-  RunRepositoryContract(arena, &repository, SVL("clank-memory-contract"), 70);
+  RunRepositoryContract(arena, &repository, SVL("clanker-memory-contract"), 70);
   repository.Close(repository.Ctx);
 
   // Deterministic counter: ReadAll only increments for an actual
@@ -741,7 +741,7 @@ static void TestMemoryRepository(Arena* arena) {
   MemoryRepository_Init(&memory);
   repository = MemoryRepository_AsRepository(&memory);
   DurableId countedId = TestId(85);
-  StrView countedProject = SVL("clank-memory-counters");
+  StrView countedProject = SVL("clanker-memory-counters");
   SessionLog counted = {};
   SessionInfo countedInfo = {};
   CHECK(SessionResult_IsOk(
@@ -767,7 +767,7 @@ static void TestMemoryRepository(Arena* arena) {
   MemoryRepository_Init(&memory);
   repository = MemoryRepository_AsRepository(&memory);
   DurableId sessionId = TestId(90);
-  StrView projectKey = SVL("clank-memory-failure");
+  StrView projectKey = SVL("clanker-memory-failure");
   SessionLog writer = {};
   SessionInfo info = {};
   CHECK(SessionResult_IsOk(RepositoryCreate(&repository, arena, sessionId, projectKey, &writer, &info)));
@@ -938,14 +938,14 @@ static void PersistWithUserMessage(Arena* arena, SessionLog* log,
 }
 
 static void TestJsonlRepository(Arena* arena) {
-  StrView root = SVL("clank_jsonl_test");
-  StrView contractProject = SVL("clank-jsonl-contract");
-  StrView repairProject = SVL("clank-jsonl-repair");
-  StrView corruptProject = SVL("clank-jsonl-corrupt");
-  StrView harnessProject = SVL("clank-jsonl-harness");
-  StrView scopeProjectA = SVL("clank-jsonl-scope-a");
-  StrView scopeProjectB = SVL("clank-jsonl-scope-b");
-  StrView deferProject = SVL("clank-jsonl-defer");
+  StrView root = SVL("clanker_jsonl_test");
+  StrView contractProject = SVL("clanker-jsonl-contract");
+  StrView repairProject = SVL("clanker-jsonl-repair");
+  StrView corruptProject = SVL("clanker-jsonl-corrupt");
+  StrView harnessProject = SVL("clanker-jsonl-harness");
+  StrView scopeProjectA = SVL("clanker-jsonl-scope-a");
+  StrView scopeProjectB = SVL("clanker-jsonl-scope-b");
+  StrView deferProject = SVL("clanker-jsonl-defer");
   DurableId contractId = TestId(120);
   DurableId forkId = TestId(130);
   DurableId repairId = TestId(140);
@@ -986,7 +986,7 @@ static void TestJsonlRepository(Arena* arena) {
   StrBuf_AppendCStr(&expectedLog, ".jsonl");
   CHECK_ALL(artifactDir.Length > 0,
             Fs_PathEquals(StrBuf_View(&expectedLog), logPath),
-            StrView_Contains(artifactDir, "clank-jsonl-contract"));
+            StrView_Contains(artifactDir, "clanker-jsonl-contract"));
   // An unusable repository or key yields nothing rather than a bare root path.
   JsonlRepository uninitialized = {};
   CHECK_ALL(JsonlRepository_SessionDir(arena, &uninitialized, contractProject,
@@ -1132,7 +1132,7 @@ static void TestJsonlRepository(Arena* arena) {
   forkBuffered.SourceHeadId = bufferedRoot.Data[0].EntryId;
   forkBuffered.RequestedTargetId = forkTargetId;
   forkBuffered.ProjectKey = deferProject;
-  forkBuffered.WorkingDirectory = SVL("C:\\work\\clank");
+  forkBuffered.WorkingDirectory = SVL("C:\\work\\clanker");
   forkBuffered.Label = SVL("buffered fork");
   SessionLog forkedLog = {};
   SessionInfo forkedInfo = {};
@@ -1282,8 +1282,8 @@ static void TestCompactionReplay(Arena* arena) {
   // root -> user -> assistant -> toolResult -> user -> assistant, plus a
   // sibling of the first user message so an off-branch reference can be tested.
   SessionRecord root = BaseRecord(sessionId, 1, 10, SessionRecordKind::SessionStarted);
-  root.SessionStarted.WorkingDirectory = SVL("C:\\work\\clank");
-  root.SessionStarted.ProjectKey = SVL("clank-compaction");
+  root.SessionStarted.WorkingDirectory = SVL("C:\\work\\clanker");
+  root.SessionStarted.ProjectKey = SVL("clanker-compaction");
   root.SessionStarted.Label = SVL("compaction");
 
   SessionRecord userOne = BaseRecord(sessionId, 2, 12, SessionRecordKind::Message);

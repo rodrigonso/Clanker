@@ -21,8 +21,8 @@ static void SetTestEnv(const char* name, const char* value) {
 
 static void TestStore() {
   Arena a = ArenaCreate();
-  StrView path = SVL("clank_auth_test.json");
-  remove("clank_auth_test.json");
+  StrView path = SVL("clanker_auth_test.json");
+  remove("clanker_auth_test.json");
 
   Credential key = {};
   key.ApiKey = SVL("sk-test-123");
@@ -61,21 +61,21 @@ static void TestStore() {
       &a, path, SVL("{\"openai\":{\"type\":\"oauth\",\"access\":\"tok\"}}")));
   CHECK(!AuthStore_Read(&a, path, SVL("openai"), &gone));
 
-  remove("clank_auth_test.json");
+  remove("clanker_auth_test.json");
   ArenaRelease(&a);
 }
 
 static void TestResolve() {
   Arena a = ArenaCreate();
-  StrView path = SVL("clank_auth_resolve_test.json");
-  remove("clank_auth_resolve_test.json");
+  StrView path = SVL("clanker_auth_resolve_test.json");
+  remove("clanker_auth_resolve_test.json");
 
   // A missing store is not an error; it just resolves to nothing.
   CHECK(Auth_ResolveToken(&a, path, SVL("openai"), nullptr).Length == 0);
 
-  SetTestEnv("CLANK_TEST_AUTH_KEY", "env-key");
+  SetTestEnv("CLANKER_TEST_AUTH_KEY", "env-key");
   CHECK(StrView_EqCStr(
-      Auth_ResolveToken(&a, path, SVL("openai"), "CLANK_TEST_AUTH_KEY"),
+      Auth_ResolveToken(&a, path, SVL("openai"), "CLANKER_TEST_AUTH_KEY"),
       "env-key"));
 
   // A stored key wins over the environment.
@@ -83,16 +83,16 @@ static void TestResolve() {
   key.ApiKey = SVL("sk-stored");
   CHECK(AuthStore_Write(&a, path, SVL("openai"), &key));
   CHECK(StrView_EqCStr(
-      Auth_ResolveToken(&a, path, SVL("openai"), "CLANK_TEST_AUTH_KEY"),
+      Auth_ResolveToken(&a, path, SVL("openai"), "CLANKER_TEST_AUTH_KEY"),
       "sk-stored"));
 
   // An empty environment variable is treated as unset.
   CHECK(AuthStore_Delete(&a, path, SVL("openai")));
-  SetTestEnv("CLANK_TEST_AUTH_KEY", nullptr);
-  CHECK(Auth_ResolveToken(&a, path, SVL("openai"), "CLANK_TEST_AUTH_KEY")
+  SetTestEnv("CLANKER_TEST_AUTH_KEY", nullptr);
+  CHECK(Auth_ResolveToken(&a, path, SVL("openai"), "CLANKER_TEST_AUTH_KEY")
             .Length == 0);
 
-  remove("clank_auth_resolve_test.json");
+  remove("clanker_auth_resolve_test.json");
   ArenaRelease(&a);
 }
 

@@ -1,16 +1,16 @@
-// Clank test harness.
+// Clanker test harness.
 //
 // A single CLI entry point for every test suite in the project. Humans and
 // agents select what to run by name or substring instead of always paying for
 // the full sweep:
 //
-//   clank_tests                    run every default suite
-//   clank_tests --list             print suite names and tags
-//   clank_tests json session       run the named suites
-//   clank_tests --filter tui       run suites whose name contains "tui"
-//   clank_tests --all              include network-tagged suites
-//   clank_tests --benchmark ...    run the opt-in agent-loop benchmark
-//   clank_tests --help             usage
+//   clanker_tests                    run every default suite
+//   clanker_tests --list             print suite names and tags
+//   clanker_tests json session       run the named suites
+//   clanker_tests --filter tui       run suites whose name contains "tui"
+//   clanker_tests --all              include network-tagged suites
+//   clanker_tests --benchmark ...    run the opt-in agent-loop benchmark
+//   clanker_tests --help             usage
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -90,7 +90,7 @@ bool Contains(const char* haystack, const char* needle) {
 
 void PrintUsage(const char* exe) {
   printf("usage: %s [options] [suite...]\n\n", exe);
-  printf("Runs Clank's test suites. With no suite arguments, every suite\n");
+  printf("Runs Clanker's test suites. With no suite arguments, every suite\n");
   printf("except network-tagged ones is run.\n\n");
   printf("options:\n");
   printf("  --list            list available suites and exit\n");
@@ -226,7 +226,7 @@ bool DrainStdinToFile(const char* path) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (getenv("CLANK_TEST_FAKE_RG")) return RunFakeRipgrep(argc, argv);
+  if (getenv("CLANKER_TEST_FAKE_RG")) return RunFakeRipgrep(argc, argv);
   if (argc == 3 && strcmp(argv[1], "--echo-arg") == 0) {
     fwrite(argv[2], 1, strlen(argv[2]), stdout);
     return 0;

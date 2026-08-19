@@ -1,13 +1,13 @@
 #requires -Version 5.0
 <#
 .SYNOPSIS
-    Incrementally builds Clank and runs the resulting executable.
+    Incrementally builds Clanker and runs the resulting executable.
 
 .DESCRIPTION
     Delegates the build to build.ps1 (Visual Studio toolchain + CMake/Ninja),
     which is already incremental: it reconfigures only when the cache is
     missing or the build type changed, and skips the build entirely when Ninja
-    reports no work to do. Only the `clank` target is built, so the test
+    reports no work to do. Only the `clanker` target is built, so the test
     harness is not compiled.
 
     The executable runs in your current working directory with stdin/stdout
@@ -22,12 +22,12 @@
 .PARAMETER NoBuild
     Skip the build and run the executable already in the build directory.
 
-.PARAMETER ClankArgs
-    Arguments forwarded verbatim to clank.exe.
+.PARAMETER ClankerArgs
+    Arguments forwarded verbatim to clanker.exe.
 
     PowerShell binds a leading-dash token to this script's own parameters when
     it is an unambiguous prefix, so `-c` would be read as `-Config`. Put `--`
-    before Clank's own short options to pass them through untouched.
+    before Clanker's own short options to pass them through untouched.
 
 .EXAMPLE
     .\run.ps1
@@ -50,7 +50,7 @@ param(
     [string]$BuildDir = 'build',
     [switch]$NoBuild,
     [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
-    [string[]]$ClankArgs
+    [string[]]$ClankerArgs
 )
 
 $ErrorActionPreference = 'Stop'
@@ -58,19 +58,19 @@ $root = $PSScriptRoot
 
 # Resolve the build directory the same way build.ps1 does.
 $buildPath = if ([System.IO.Path]::IsPathRooted($BuildDir)) { $BuildDir } else { Join-Path $root $BuildDir }
-$exe = Join-Path $buildPath 'clank.exe'
+$exe = Join-Path $buildPath 'clanker.exe'
 
 if (-not $NoBuild) {
-    & (Join-Path $root 'build.ps1') -Config $Config -BuildDir $BuildDir -Target clank
+    & (Join-Path $root 'build.ps1') -Config $Config -BuildDir $BuildDir -Target clanker
     # build.ps1 exits non-zero on configure/compile failure; throws otherwise.
     if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
 if (-not (Test-Path $exe)) {
     $hint = if ($NoBuild) { "Drop -NoBuild to build it" } else { "Check -BuildDir and -Config" }
-    throw "clank.exe not found at '$exe'. $hint."
+    throw "clanker.exe not found at '$exe'. $hint."
 }
 
 Write-Host "Running $exe" -ForegroundColor Cyan
-if ($ClankArgs) { & $exe @ClankArgs } else { & $exe }
+if ($ClankerArgs) { & $exe @ClankerArgs } else { & $exe }
 exit $LASTEXITCODE

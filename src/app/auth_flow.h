@@ -48,6 +48,6 @@ StrView SelectionMessage(InteractiveRuntime* rt, const char* prefix);
 AppCommandHandlerResult HandleModelCommand(void* user, const AppCommandUx* ux);
 AppCommandHandlerResult HandleAuthCommand(void* user, const AppCommandUx* ux);
 
-// `clank --logout <provider>`: removes the stored credential without entering
+// `clanker --logout <provider>`: removes the stored credential without entering
 // the TUI.
 int RunCommandLineLogout(Arena* arena, StrView authPath, const char* providerId);

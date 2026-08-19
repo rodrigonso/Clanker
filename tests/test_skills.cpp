@@ -193,7 +193,7 @@ void TestDiscovery(Arena* scratch, StrView root) {
   StrView userSkills = Fs_Join(scratch, agentDir, SVL("skills"));
   StrView work = Fs_Join(scratch, root, SVL("work"));
   StrView projectSkills =
-      Fs_Join(scratch, Fs_Join(scratch, work, SVL(".clank")), SVL("skills"));
+      Fs_Join(scratch, Fs_Join(scratch, work, SVL(".clanker")), SVL("skills"));
 
   StrView outer = Fs_Join(scratch, userSkills, SVL("outer"));
   CHECK(WriteSkill(scratch, outer,
@@ -275,32 +275,32 @@ void TestDiscovery(Arena* scratch, StrView root) {
 
 void Cleanup(const char* root) {
   const char* files[] = {
-      "clank_skills_test/agent/skills/outer/SKILL.md",
-      "clank_skills_test/agent/skills/outer/nested/SKILL.md",
-      "clank_skills_test/agent/skills/loose.md",
-      "clank_skills_test/agent/skills/deep/buried.md",
-      "clank_skills_test/agent/skills/.hidden/SKILL.md",
-      "clank_skills_test/agent/skills/node_modules/SKILL.md",
-      "clank_skills_test/agent/skills/ignored/SKILL.md",
-      "clank_skills_test/agent/skills/.fdignore",
-      "clank_skills_test/work/.clank/skills/outer/SKILL.md",
-      "clank_skills_test/work/.clank/skills/only-proj/SKILL.md",
+      "clanker_skills_test/agent/skills/outer/SKILL.md",
+      "clanker_skills_test/agent/skills/outer/nested/SKILL.md",
+      "clanker_skills_test/agent/skills/loose.md",
+      "clanker_skills_test/agent/skills/deep/buried.md",
+      "clanker_skills_test/agent/skills/.hidden/SKILL.md",
+      "clanker_skills_test/agent/skills/node_modules/SKILL.md",
+      "clanker_skills_test/agent/skills/ignored/SKILL.md",
+      "clanker_skills_test/agent/skills/.fdignore",
+      "clanker_skills_test/work/.clanker/skills/outer/SKILL.md",
+      "clanker_skills_test/work/.clanker/skills/only-proj/SKILL.md",
   };
   for (u32 i = 0; i < sizeof(files) / sizeof(files[0]); i++) remove(files[i]);
   const char* dirs[] = {
-      "clank_skills_test/agent/skills/outer/nested",
-      "clank_skills_test/agent/skills/outer",
-      "clank_skills_test/agent/skills/deep",
-      "clank_skills_test/agent/skills/.hidden",
-      "clank_skills_test/agent/skills/node_modules",
-      "clank_skills_test/agent/skills/ignored",
-      "clank_skills_test/agent/skills",
-      "clank_skills_test/agent",
-      "clank_skills_test/work/.clank/skills/outer",
-      "clank_skills_test/work/.clank/skills/only-proj",
-      "clank_skills_test/work/.clank/skills",
-      "clank_skills_test/work/.clank",
-      "clank_skills_test/work",
+      "clanker_skills_test/agent/skills/outer/nested",
+      "clanker_skills_test/agent/skills/outer",
+      "clanker_skills_test/agent/skills/deep",
+      "clanker_skills_test/agent/skills/.hidden",
+      "clanker_skills_test/agent/skills/node_modules",
+      "clanker_skills_test/agent/skills/ignored",
+      "clanker_skills_test/agent/skills",
+      "clanker_skills_test/agent",
+      "clanker_skills_test/work/.clanker/skills/outer",
+      "clanker_skills_test/work/.clanker/skills/only-proj",
+      "clanker_skills_test/work/.clanker/skills",
+      "clanker_skills_test/work/.clanker",
+      "clanker_skills_test/work",
   };
   for (u32 i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) RemoveDir(dirs[i]);
   RemoveDir(root);
@@ -310,7 +310,7 @@ void Cleanup(const char* root) {
 
 void TestSkills() {
   Arena scratch = ArenaCreate((usize)64 << 20);
-  StrView root = SVL("clank_skills_test");
+  StrView root = SVL("clanker_skills_test");
   CHECK(Fs_MkdirP(&scratch, root));
 
   TestFrontmatter(&scratch);
@@ -318,6 +318,6 @@ void TestSkills() {
   TestInvocation(&scratch);
   TestDiscovery(&scratch, root);
 
-  Cleanup("clank_skills_test");
+  Cleanup("clanker_skills_test");
   ArenaRelease(&scratch);
 }

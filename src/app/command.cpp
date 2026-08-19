@@ -52,7 +52,7 @@ const AppCommandSpec kCommands[] = {
      SVL("Usage: /skill:<name> [instructions]"),
      AppCommandArgumentPolicy::Optional},
     {AppCommandKind::Exit, SVL("exit"), SVL("quit"),
-     SVL("Exit Clank and return to the shell (alias: /quit)"),
+     SVL("Exit Clanker and return to the shell (alias: /quit)"),
      SVL("Usage: /exit (alias: /quit)"), AppCommandArgumentPolicy::None},
 };
 

@@ -502,7 +502,7 @@ static AppCommandHandlerResult HandleTrustCommand(
   ArenaRelease(&scratch);
   return AppCommandHandlerResult{
       AppCommandHandlerStatus::Success,
-      SVL("Trust decision saved. Restart Clank for it to take effect.")};
+      SVL("Trust decision saved. Restart Clanker for it to take effect.")};
 }
 
 static AppCommandHandlerResult HandleReloadCommand(
@@ -550,7 +550,7 @@ static AppCommandHandlerResult HandleReloadCommand(
     ArenaRelease(&scratch);
     return AppCommandHandlerResult{
         AppCommandHandlerStatus::Failed,
-        SVL("New project prompt files were detected. Restart Clank to resolve trust.")};
+        SVL("New project prompt files were detected. Restart Clanker to resolve trust.")};
   }
   PromptContextOptions options = rt->PromptOptions;
   options.ProjectTrusted = trust.Trusted;

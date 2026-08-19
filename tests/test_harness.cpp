@@ -15,7 +15,7 @@ namespace {
 SessionResult CreateSession(SessionRepository* repository, Arena* arena, SessionLog* out) {
   SessionCreateOptions options = {};
   options.ProjectKey = SVL("harness-tests");
-  options.WorkingDirectory = SVL("C:\\work\\clank");
+  options.WorkingDirectory = SVL("C:\\work\\clanker");
   options.Label = SVL("harness");
   SessionInfo info = {};
   return repository->Create(repository->Ctx, arena, &options, out, &info);

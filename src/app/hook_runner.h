@@ -30,7 +30,7 @@ struct HookSessionInfo {
   StrView SessionId;
   StrView WorkingDirectory;
   StrView TranscriptPath;
-  // Whether a user is present to answer. Clank's answer to pi's `ctx.hasUI`,
+  // Whether a user is present to answer. Clanker's answer to pi's `ctx.hasUI`,
   // which its own permission-gate example uses to fail closed when headless.
   bool Interactive;
 };

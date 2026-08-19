@@ -110,7 +110,7 @@ void WriteTextItem(StrBuf* out, Arena* arena, const Content* content,
   StrBuf fallbackId = {};
   if (!id.Length || id.Length > 64) {
     fallbackId = StrBuf_Make(out->Backing, 48);
-    StrBuf_AppendCStr(&fallbackId, "msg_clank_");
+    StrBuf_AppendCStr(&fallbackId, "msg_clanker_");
     StrBuf_AppendU64(&fallbackId, messageIndex);
     StrBuf_AppendChar(&fallbackId, '_');
     StrBuf_AppendU64(&fallbackId, blockIndex);
@@ -539,7 +539,7 @@ StrBuf Responses_BuildRequest(Arena* arena, const Model* model,
   StrBuf out = StrBuf_Make(arena, 4096);
   StrBuf_AppendCStr(&out, "{\"model\":");
   Json_WriteString(&out, model->Id);
-  // Clank keeps the whole transcript itself, so server-side state is neither
+  // Clanker keeps the whole transcript itself, so server-side state is neither
   // needed nor wanted; reasoning comes back encrypted instead.
   StrBuf_AppendCStr(&out, ",\"store\":false,\"stream\":true");
 
@@ -557,7 +557,7 @@ StrBuf Responses_BuildRequest(Arena* arena, const Model* model,
   }
 
   if (profile.Effort != ModelEffort::None) {
-    // "ultra" is Clank's name for the tier the wire calls "max".
+    // "ultra" is Clanker's name for the tier the wire calls "max".
     ModelEffort wireEffort =
         profile.Effort == ModelEffort::Ultra ? ModelEffort::Max : profile.Effort;
     StrBuf_AppendCStr(&out, ",\"reasoning\":{\"effort\":");

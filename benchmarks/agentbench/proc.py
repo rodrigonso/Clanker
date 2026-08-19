@@ -31,7 +31,7 @@ def pss_kb(pid: int) -> int:
 
 def pss_breakdown(pid: int) -> dict[str, int]:
     """Per-mapping PSS in KB, keyed by backing file. Used to explain a total
-    rather than just report it -- e.g. how much of Clank is really OpenSSL."""
+    rather than just report it -- e.g. how much of Clanker is really OpenSSL."""
     out: dict[str, int] = {}
     current = ""
     try:

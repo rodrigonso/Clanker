@@ -1,12 +1,12 @@
-"""Build a Debian bookworm compatible `clank` binary using Modal.
+"""Build a Debian bookworm compatible `clanker` binary using Modal.
 
 DeepSWE task images are Debian 12 (glibc 2.36); a binary built on Ubuntu 24.04
 (glibc 2.39) fails at agent setup with ``version 'GLIBC_2.38' not found``. With
 no local Docker available, the build runs in a Modal sandbox instead. Bookworm
 carries libssl-dev, so the result also resolves libssl.so.3 from the image and
-needs no ``clank_libs`` upload.
+needs no ``clanker_libs`` upload.
 
-    python build_bookworm.py /path/to/clank-src [-o out/clank]
+    python build_bookworm.py /path/to/clanker-src [-o out/clanker]
 """
 
 from __future__ import annotations
@@ -22,24 +22,24 @@ set -eux
 cd /src
 rm -rf build-bookworm
 cmake -S . -B build-bookworm -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build-bookworm --target clank -j "$(nproc)"
-/src/build-bookworm/clank --help >/dev/null
+cmake --build build-bookworm --target clanker -j "$(nproc)"
+/src/build-bookworm/clanker --help >/dev/null
 echo '--- ldd ---'
-ldd /src/build-bookworm/clank
+ldd /src/build-bookworm/clanker
 echo '--- glibc requirement ---'
-objdump -T /src/build-bookworm/clank | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -3
+objdump -T /src/build-bookworm/clanker | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -3
 """
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("source", type=Path, help="clank checkout to build")
-    parser.add_argument("-o", "--output", type=Path, default=Path("clank-bookworm"))
+    parser.add_argument("source", type=Path, help="clanker checkout to build")
+    parser.add_argument("-o", "--output", type=Path, default=Path("clanker-bookworm"))
     args = parser.parse_args()
 
     source = args.source.expanduser().resolve()
     if not (source / "CMakeLists.txt").is_file():
-        print(f"not a clank checkout: {source}", file=sys.stderr)
+        print(f"not a clanker checkout: {source}", file=sys.stderr)
         return 1
 
     image = (
@@ -62,7 +62,7 @@ def main() -> int:
         )
     )
 
-    app = modal.App.lookup("clank-bookworm-build", create_if_missing=True)
+    app = modal.App.lookup("clanker-bookworm-build", create_if_missing=True)
 
     print(f"building {source} on debian:bookworm ...")
     # Keep the sandbox alive past the build: a sandbox whose entrypoint has
@@ -85,13 +85,13 @@ def main() -> int:
 
         output = args.output.expanduser().resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
-        sandbox.filesystem.copy_to_local("/src/build-bookworm/clank", str(output))
+        sandbox.filesystem.copy_to_local("/src/build-bookworm/clanker", str(output))
         output.chmod(0o755)
     finally:
         sandbox.terminate()
 
     print(f"\nwrote {output} ({output.stat().st_size} bytes)")
-    print(f"run it with --ak clank_binary={output} and no --ak clank_libs")
+    print(f"run it with --ak clanker_binary={output} and no --ak clanker_libs")
     return 0
 
 

@@ -31,7 +31,7 @@ struct Content {
   // request so a turn resumes the chain it started. The Responses API keys
   // conversation state on these: a reasoning block carries its whole item JSON
   // (including encrypted_content), a text block its item id, a tool call the id
-  // of the function_call item. Empty for blocks Clank synthesized itself, which
+  // of the function_call item. Empty for blocks Clanker synthesized itself, which
   // are then sent under a generated id instead.
   StrView Signature;
 };

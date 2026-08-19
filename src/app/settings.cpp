@@ -53,7 +53,7 @@ void WriteStringArray(StrBuf* content, const char* key,
 }  // namespace
 
 StrView AppSettings_DefaultPath(Arena* a) {
-  return ClankDataPath(a, "settings.json");
+  return ClankerDataPath(a, "settings.json");
 }
 
 AppSettingsLoadResult AppSettings_Load(Arena* a, StrView path, AppSettings* out) {

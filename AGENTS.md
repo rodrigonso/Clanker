@@ -1,4 +1,4 @@
-# Clank agent rules
+# Clanker agent rules
 
 A C++17 reimplementation of the core of [`earendil-works/pi`](https://github.com/earendil-works/pi)
 without a JavaScript runtime. Footprint is the point: prefer the change that
@@ -9,11 +9,11 @@ allocates less and copies less.
 Build and test through the repo scripts rather than invoking CMake directly:
 
 ```powershell
-.\build.ps1                                  # build clank (Release)
+.\build.ps1                                  # build clanker (Release)
 .\build.ps1 -Config Debug                    # debug build
 .\build.ps1 -Test -TestArgs session,tools    # build + run named suites
 .\build.ps1 -Test                            # full offline sweep
-.\run.ps1 -- -p "summarize README.md"        # build, then run; Clank flags after --
+.\run.ps1 -- -p "summarize README.md"        # build, then run; Clanker flags after --
 ```
 
 Suites are named in `tests/test_main.cpp` (`session`, `harness`, `compaction`,
@@ -28,7 +28,7 @@ scratch notes, or generated sample data in the repository tree. Nothing outside
 `build/`, `build-rel/`, and `out/` is expected to be disposable, and those are
 already ignored.
 
-Never commit anything under `~/.clank` or a session log; those are user data.
+Never commit anything under `~/.clanker` or a session log; those are user data.
 
 ## Code conventions
 
@@ -52,7 +52,7 @@ snippets, guideline bullets, and the `<project_context>` framing) are aligned
 byte-for-byte with pi's `buildSystemPrompt`. Do not reword them casually; a
 reword is a parity change.
 
-The provider layer is a deliberate divergence: Clank speaks only OpenAI's
+The provider layer is a deliberate divergence: Clanker speaks only OpenAI's
 Responses API (`src/llm/responses*`), not pi's per-vendor protocols. A provider
 is a row in `src/app/provider_registry.cpp` pairing a `ProviderSpec` with a
 `ResponsesEndpoint`; adding a compatible vendor means adding a row, not writing
@@ -62,11 +62,11 @@ full fidelity rather than clamped.
 
 ## Sessions and files on disk
 
-- Session logs: `~/.clank/sessions/v2/<project-key>/<session-id>.jsonl`, with a
+- Session logs: `~/.clanker/sessions/v2/<project-key>/<session-id>.jsonl`, with a
   `<session-id>.lock` sentinel that exists only while a writer holds it and a
   `<session-id>/` directory for that session's other artifacts.
-- Config: `~/.clank/settings.json`, `auth.json`, `trust.json`, and
-  `.clank/hooks.json` per project. All config writes go through
+- Config: `~/.clanker/settings.json`, `auth.json`, `trust.json`, and
+  `.clanker/hooks.json` per project. All config writes go through
   `ConfigFile_WriteAtomic`, which writes a sibling temp file and removes it on
   every failure path -- use it instead of writing config in place.
 - The `shell` tool spills output over the truncation limit to a randomly named

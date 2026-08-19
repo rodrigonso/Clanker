@@ -161,7 +161,7 @@ void TestHostInfo() {
   StrView cwd = Sys_CurrentDir(&a);
   CHECK(cwd.Length > 0);
   CHECK_ALL(Sys_SetCurrentDir(cwd),
-            !Sys_SetCurrentDir(SVL("clank-directory-that-does-not-exist")));
+            !Sys_SetCurrentDir(SVL("clanker-directory-that-does-not-exist")));
   bool hasSep = false;
   for (u32 i = 0; i < cwd.Length; i++)
     if (cwd.Data[i] == '/' || cwd.Data[i] == '\\') hasSep = true;

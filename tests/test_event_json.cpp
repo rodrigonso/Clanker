@@ -169,7 +169,7 @@ void TestRunStream(Arena* arena) {
   SessionRepository repository = MemoryRepository_AsRepository(&memory);
   SessionCreateOptions options = {};
   options.ProjectKey = SVL("event-json-tests");
-  options.WorkingDirectory = SVL("C:\\work\\clank");
+  options.WorkingDirectory = SVL("C:\\work\\clanker");
   options.Label = SVL("events");
   SessionLog log = {};
   SessionInfo info = {};

@@ -64,7 +64,7 @@ StrView AuthStore_DefaultPath(Arena* a) {
 #endif
   StrBuf p = StrBuf_Make(a, 128);
   StrBuf_AppendCStr(&p, (home && *home) ? home : ".");
-  StrBuf_AppendCStr(&p, "/.clank/auth.json");
+  StrBuf_AppendCStr(&p, "/.clanker/auth.json");
   return StrBuf_View(&p);
 }
 

@@ -1,7 +1,7 @@
-"""Checks ClankAgent's NDJSON accounting against real `clank --mode json` output.
+"""Checks ClankerAgent's NDJSON accounting against real `clanker --mode json` output.
 
 Runs without pier or harbor installed: the harness modules are stubbed with the
-handful of names the adapter imports. Run with `python3 test_clank_agent.py`.
+handful of names the adapter imports. Run with `python3 test_clanker_agent.py`.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 
 
 def _install_harness_stubs() -> None:
-    """Minimal stand-ins for the pier.* modules clank_agent imports."""
+    """Minimal stand-ins for the pier.* modules clanker_agent imports."""
 
     class BaseInstalledAgent:
         CLI_FLAGS: list = []
@@ -126,11 +126,11 @@ class FakeEnvironment:
 
 _install_harness_stubs()
 sys.path.insert(0, str(Path(__file__).parent))
-from clank_agent import ClankAgent  # noqa: E402
+from clanker_agent import ClankerAgent  # noqa: E402
 
 
 def _record(role: str, usage: dict | None = None) -> str:
-    """A record event in the exact shape `clank --mode json` emits."""
+    """A record event in the exact shape `clanker --mode json` emits."""
     message: dict = {
         "role": role,
         "content": [{"kind": "text", "text": "hi", "signature": ""}],
@@ -181,12 +181,12 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        binary = tmp_path / "clank"
+        binary = tmp_path / "clanker"
         binary.write_bytes(b"not a real binary")
 
         logs = tmp_path / "logs"
         logs.mkdir()
-        (logs / "clank.ndjson").write_text(
+        (logs / "clanker.ndjson").write_text(
             "\n".join(
                 [
                     '{"type":"agent_start","turn":"run"}',
@@ -202,10 +202,10 @@ def main() -> int:
             )
         )
 
-        agent = ClankAgent(
+        agent = ClankerAgent(
             logs_dir=logs,
             model_name="anthropic/claude-sonnet-4-6",
-            clank_binary=str(binary),
+            clanker_binary=str(binary),
         )
 
         context = type("Ctx", (), {})()
@@ -228,10 +228,10 @@ def main() -> int:
         check("model", settings["model"], "claude-sonnet-4-6")
         check("trust", settings["defaultProjectTrust"], "always")
 
-        openai_agent = ClankAgent(
+        openai_agent = ClankerAgent(
             logs_dir=logs,
             model_name="openai-api/gpt-5.6-sol",
-            clank_binary=str(binary),
+            clanker_binary=str(binary),
             effort="xhigh",
         )
         openai_settings = json.loads(openai_agent._settings_json())
@@ -245,11 +245,11 @@ def main() -> int:
         )
 
         # Retry is a settings.json block, not a flag; a long concurrent run
-        # needs more than clank's default 3 attempts at 8s to survive 429s.
-        retrying = ClankAgent(
+        # needs more than clanker's default 3 attempts at 8s to survive 429s.
+        retrying = ClankerAgent(
             logs_dir=logs,
             model_name="anthropic/claude-sonnet-4-6",
-            clank_binary=str(binary),
+            clanker_binary=str(binary),
             max_retries="8",
             retry_max_delay_ms="60000",
         )
@@ -260,12 +260,12 @@ def main() -> int:
         )
 
         # An unknown effort must fail at construction, not silently produce a
-        # settings.json that clank rejects as malformed mid-trial.
+        # settings.json that clanker rejects as malformed mid-trial.
         try:
-            ClankAgent(
+            ClankerAgent(
                 logs_dir=logs,
                 model_name="anthropic/claude-sonnet-4-6",
-                clank_binary=str(binary),
+                clanker_binary=str(binary),
                 effort="turbo",
             )
             failures.append("bad effort: expected ValueError, got none")
@@ -273,10 +273,10 @@ def main() -> int:
             pass
 
         try:
-            ClankAgent(
+            ClankerAgent(
                 logs_dir=logs,
                 model_name="anthropic/claude-sonnet-4-6",
-                clank_binary=str(binary),
+                clanker_binary=str(binary),
                 max_retries="-1",
             )
             failures.append("negative retries: expected ValueError, got none")
@@ -284,10 +284,10 @@ def main() -> int:
             pass
 
         try:
-            ClankAgent(
+            ClankerAgent(
                 logs_dir=logs,
                 model_name="anthropic/claude-sonnet-4-6",
-                clank_binary=str(binary),
+                clanker_binary=str(binary),
                 max_retries="1001",
             )
             failures.append("excessive retries: expected ValueError, got none")
@@ -295,32 +295,32 @@ def main() -> int:
             pass
 
         try:
-            ClankAgent(
+            ClankerAgent(
                 logs_dir=logs,
                 model_name="anthropic/claude-sonnet-4-6",
-                clank_binary=str(binary),
+                clanker_binary=str(binary),
                 retry_max_delay_ms="0",
             )
             failures.append("zero retry delay: expected ValueError, got none")
         except ValueError:
             pass
 
-        # Likewise for a provider clank does not implement.
+        # Likewise for a provider clanker does not implement.
         try:
-            ClankAgent(
+            ClankerAgent(
                 logs_dir=logs,
                 model_name="google/gemini-3-pro",
-                clank_binary=str(binary),
+                clanker_binary=str(binary),
             )._settings_json()
             failures.append("bad provider: expected ValueError, got none")
         except ValueError:
             pass
 
         # A missing log must not raise; the trial may have died before writing.
-        empty = ClankAgent(
+        empty = ClankerAgent(
             logs_dir=tmp_path / "nonexistent",
             model_name="anthropic/claude-sonnet-4-6",
-            clank_binary=str(binary),
+            clanker_binary=str(binary),
         )
         blank = type("Ctx", (), {})()
         empty.populate_context_post_run(blank)
@@ -339,10 +339,10 @@ def main() -> int:
             ["api.openai.com"],
         )
 
-        gateway = ClankAgent(
+        gateway = ClankerAgent(
             logs_dir=logs,
             model_name="openai-api/gpt-5.6-sol",
-            clank_binary=str(binary),
+            clanker_binary=str(binary),
         )
         gateway._extra_env["OPENAI_BASE_URL"] = "https://gateway.internal/v1"
         check(
@@ -355,31 +355,31 @@ def main() -> int:
         # skips whenever the install spec is baked into the image.
         lib = tmp_path / "libssl.so.3"
         lib.write_bytes(b"stub")
-        uploader = ClankAgent(
+        uploader = ClankerAgent(
             logs_dir=logs,
             model_name="anthropic/claude-sonnet-4-6",
-            clank_binary=str(binary),
-            clank_libs=str(lib),
+            clanker_binary=str(binary),
+            clanker_libs=str(lib),
         )
         preinstalled = FakeEnvironment(
-            agent_install_spec=type("S", (), {"agent_name": "clank"})()
+            agent_install_spec=type("S", (), {"agent_name": "clanker"})()
         )
         asyncio.run(uploader.setup(preinstalled))
         check("install skipped when preinstalled", uploader.install_called, False)
         check(
             "binary uploaded anyway",
             [target for _, target in preinstalled.uploads],
-            ["/usr/local/bin/clank", "/opt/clank/lib/libssl.so.3"],
+            ["/usr/local/bin/clanker", "/opt/clanker/lib/libssl.so.3"],
         )
 
         # Regression: a missing provider key must fail at construction, before
         # a sandbox is built and a task started.
         saved = os.environ.pop("ANTHROPIC_API_KEY")
         try:
-            ClankAgent(
+            ClankerAgent(
                 logs_dir=logs,
                 model_name="anthropic/claude-sonnet-4-6",
-                clank_binary=str(binary),
+                clanker_binary=str(binary),
             )
             failures.append("missing key: expected ValueError, got none")
         except ValueError:
@@ -391,7 +391,7 @@ def main() -> int:
             print(f"FAIL {failure}")
         if failures:
             return 1
-        print("ok: clank_agent NDJSON accounting and settings mapping")
+        print("ok: clanker_agent NDJSON accounting and settings mapping")
         return 0
 
 

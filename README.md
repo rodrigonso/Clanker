@@ -1,4 +1,4 @@
-# Clank
+# Clanker
 
 A tiny, memory-efficient coding-agent harness in C++ — a clean reimplementation
 of the core of [`earendil-works/pi`](https://github.com/earendil-works/pi)
@@ -6,10 +6,10 @@ without a JavaScript runtime.
 
 The goal is footprint. A Node/Bun-based agent pays for an embedded JS engine and
 SDK object graphs before it does any work, and duplicates the transcript several
-times in UTF-16. Clank runs the same agent loop with an arena-allocated, UTF-8,
+times in UTF-16. Clanker runs the same agent loop with an arena-allocated, UTF-8,
 zero-copy transcript.
 
-**Measured** on Windows x64 with `CLANK_PRINT_MEM=1`: a complete live run
+**Measured** on Windows x64 with `CLANKER_PRINT_MEM=1`: a complete live run
 (libcurl + TLS + one prompt and response over HTTPS) peaks at **~12.4 MB RSS**
 from a Release build. For scale, an empty `node -e ''` process
 on the same machine (Node 24.13.0) sits at ~33 MB before loading an agent at
@@ -18,7 +18,7 @@ a specific upstream measurement — pi publishes no memory numbers.
 
 ## What it is
 
-A runnable Clank agent: the agent loop + an OpenAI Responses API provider
+A runnable Clanker agent: the agent loop + an OpenAI Responses API provider
 (HTTP/SSE) + `read`, `write`, `edit`, `ls`, `find`, `grep`,
 `shell`, and `ask_user` tools + a streaming REPL.
 
@@ -83,13 +83,13 @@ tests/     single CLI test harness (suite selection via args; offline by default
   the same checkpoints as the in-memory queues. Overrides are run-scoped and
   never touch the config or the session tree; a failing hook surfaces as a
   typed `HookError`.
-- **One reimplemented wire protocol**, not vendor SDKs. Clank speaks
+- **One reimplemented wire protocol**, not vendor SDKs. Clanker speaks
   `POST /v1/responses` and nothing else; every provider is a row of
   endpoint data rather than a protocol implementation. The request builder and
   SSE parser are tested against recorded fixtures offline. See
   [Providers](#providers).
 - **External lifecycle hooks** let an editor or supervisor follow a run without
-  linking against Clank. See [Lifecycle hooks](#lifecycle-hooks).
+  linking against Clanker. See [Lifecycle hooks](#lifecycle-hooks).
 
 ## Build
 
@@ -98,29 +98,29 @@ via a checksummed release archive (Schannel on Windows, system TLS elsewhere).
 The release archive is cached under `out/fetchcontent/`.
 
 The `grep` tool uses a system `rg` when available. Otherwise it downloads the
-current ripgrep release to `~/.clank/bin`; set `CLANK_OFFLINE=1` to disable tool
-downloads or `CLANK_RG_PATH` to select an existing binary explicitly.
+current ripgrep release to `~/.clanker/bin`; set `CLANKER_OFFLINE=1` to disable tool
+downloads or `CLANKER_RG_PATH` to select an existing binary explicitly.
 
 ```sh
 cmake -S . -B build -G Ninja
 cmake --build build
-cmake --build build --target clank_tests
+cmake --build build --target clanker_tests
 ctest --test-dir build
 ```
 
 On Windows with the VS toolchain, run the commands from a `vcvars64` shell (or
-use the VS-bundled CMake/Ninja). `build.ps1` builds only the `clank` executable
+use the VS-bundled CMake/Ninja). `build.ps1` builds only the `clanker` executable
 by default, skips redundant configure passes, and accepts `-Test` to build and
 run the unit tests. `run.ps1` builds incrementally and then launches the
 executable in your current directory:
 
 ```powershell
 .\run.ps1                             # build, then start the TUI
-.\run.ps1 -- -c                       # forward Clank's own flags after --
+.\run.ps1 -- -c                       # forward Clanker's own flags after --
 .\run.ps1 -NoBuild --help             # skip the build, run what's there
 ```
 
-Put `--` before Clank's short options: without it PowerShell binds `-c` to
+Put `--` before Clanker's short options: without it PowerShell binds `-c` to
 `run.ps1`'s own `-Config`.
 
 ### Visual Studio 2026
@@ -128,8 +128,8 @@ Put `--` before Clank's short options: without it PowerShell binds `-c` to
 Open the repository folder in Visual Studio 2026. The checked-in `.vsconfig`
 declares the Desktop development with C++ and CMake components, and Visual
 Studio will discover the `vs2026-x64` configure preset automatically. Select
-`clank.exe` as the startup target and choose Debug or Release in the toolbar.
-The debugger starts Clank with the repository root as its working directory.
+`clanker.exe` as the startup target and choose Debug or Release in the toolbar.
+The debugger starts Clanker with the repository root as its working directory.
 
 The same presets can be used from a Developer PowerShell:
 
@@ -145,33 +145,33 @@ ctest --preset vs2026-debug
 ## Run
 
 ```sh
-./build/clank -p "hi"                # set OPENAI_API_KEY
-./build/clank                        # full-screen TUI; /model picks provider + model
-./build/clank -m gpt-5.6-sol -p "summarize README.md"
-./build/clank --mode json -p "summarize README.md"   # NDJSON event stream
-./build/clank --continue             # most recent session for this project
-./build/clank --resume SESSION_ID     # exact ID, including sessions from other projects
-./build/clank --no-session            # no session filesystem writes
-./build/clank --system-prompt SYSTEM.md -p "review this project"
-./build/clank --append-system-prompt "Prefer minimal changes"
-./build/clank --no-context-files       # skip AGENTS.md / CLAUDE.md discovery
-./build/clank --no-skills              # skip SKILL.md discovery
-./build/clank --skill ./my-skill       # load one skill explicitly (repeatable)
-./build/clank --no-prompt-templates    # skip prompt-template discovery
-./build/clank --prompt-template ./review.md   # load one template (repeatable)
-./build/clank -t read,ls,grep          # allowlist of tools to enable
-./build/clank -xt shell                # disable specific tools
-./build/clank --no-tools               # read-only conversation
-./build/clank --max-turns 25           # ask to continue every 25 turns (0: unlimited)
-./build/clank --approve                # trust project prompt files for this run
+./build/clanker -p "hi"                # set OPENAI_API_KEY
+./build/clanker                        # full-screen TUI; /model picks provider + model
+./build/clanker -m gpt-5.6-sol -p "summarize README.md"
+./build/clanker --mode json -p "summarize README.md"   # NDJSON event stream
+./build/clanker --continue             # most recent session for this project
+./build/clanker --resume SESSION_ID     # exact ID, including sessions from other projects
+./build/clanker --no-session            # no session filesystem writes
+./build/clanker --system-prompt SYSTEM.md -p "review this project"
+./build/clanker --append-system-prompt "Prefer minimal changes"
+./build/clanker --no-context-files       # skip AGENTS.md / CLAUDE.md discovery
+./build/clanker --no-skills              # skip SKILL.md discovery
+./build/clanker --skill ./my-skill       # load one skill explicitly (repeatable)
+./build/clanker --no-prompt-templates    # skip prompt-template discovery
+./build/clanker --prompt-template ./review.md   # load one template (repeatable)
+./build/clanker -t read,ls,grep          # allowlist of tools to enable
+./build/clanker -xt shell                # disable specific tools
+./build/clanker --no-tools               # read-only conversation
+./build/clanker --max-turns 25           # ask to continue every 25 turns (0: unlimited)
+./build/clanker --approve                # trust project prompt files for this run
 ```
 
 ## Project context and system prompts
 
-Clank builds the system prompt from the active tool catalog, project
+Clanker builds the system prompt from the active tool catalog, project
 instructions, and cwd. It loads the first regular file named
 `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, or `CLAUDE.MD`
-from `~/.clank` and each directory from the filesystem root through cwd.
+from `~/.clanker` and each directory from the filesystem root through cwd.
 `AGENTS.override.md` therefore wins over the other candidates in its own
 directory, while every other directory still layers normally. Global context is
 applied first, followed by broad-to-specific project context. Use
@@ -181,17 +181,17 @@ Tools contribute their own prompt text: a one-line snippet for the `Available
 tools` list and optional guideline bullets that are merged, in tool order, with
 the always-on guidelines. A tool without a snippet is not listed.
 
-`~/.clank/SYSTEM.md` replaces the built-in prompt globally, and
-`~/.clank/APPEND_SYSTEM.md` appends instructions. Trusted projects can override
-those files with `<cwd>/.clank/SYSTEM.md` and
-`<cwd>/.clank/APPEND_SYSTEM.md`. `--system-prompt` and repeatable
+`~/.clanker/SYSTEM.md` replaces the built-in prompt globally, and
+`~/.clanker/APPEND_SYSTEM.md` appends instructions. Trusted projects can override
+those files with `<cwd>/.clanker/SYSTEM.md` and
+`<cwd>/.clanker/APPEND_SYSTEM.md`. `--system-prompt` and repeatable
 `--append-system-prompt` values have highest precedence; each value is read as
 a file when it names an existing regular file, otherwise it is treated as
 literal text. Custom prompts still receive project context and cwd.
 
 Project prompt overrides require trust. Decisions are stored hierarchically in
-`~/.clank/trust.json`; the nearest saved ancestor wins. Set
-`defaultProjectTrust` in `~/.clank/settings.json` to `ask` (default), `always`,
+`~/.clanker/trust.json`; the nearest saved ancestor wins. Set
+`defaultProjectTrust` in `~/.clanker/settings.json` to `ask` (default), `always`,
 or `never`. `--approve` (`-a`) and `--no-approve` (`-na`) override trust for one
 run. `/trust` saves a decision for the current or parent folder and requires a
 restart; `/reload` reloads settings and prompt/context files while preserving
@@ -199,13 +199,13 @@ the current process's resolved trust. If gated project prompt files first
 appear after startup, `/reload` fails closed and requires a restart unless an
 explicit CLI trust override covers the run.
 
-`~/.clank/settings.json` also stores the active provider/model and explicit
+`~/.clanker/settings.json` also stores the active provider/model and explicit
 effort or selectable context-window preferences. Unsupported saved values fall
 back to the selected model's defaults. Current fixed provider context windows are displayed without an extra chooser.
 
 ## Skills
 
-Clank implements the [Agent Skills](https://agentskills.io/specification)
+Clanker implements the [Agent Skills](https://agentskills.io/specification)
 standard. A skill is a `SKILL.md` file with YAML frontmatter carrying a `name`
 and a required `description`; everything after the frontmatter is the body.
 
@@ -228,11 +228,11 @@ reachable only through `/skill:`.
 
 Skills are discovered from, in order:
 
-1. `~/.clank/skills/`
+1. `~/.clanker/skills/`
 2. `~/.agents/skills/`
 3. `.agents/skills/` in each directory from the repository root through cwd
-4. `<cwd>/.clank/skills/`
-5. the `skills` array in `~/.clank/settings.json`
+4. `<cwd>/.clanker/skills/`
+5. the `skills` array in `~/.clanker/settings.json`
 6. `--skill <path>`, repeatable
 
 Roots 3 and 4 are project-local and require trust, like project prompt
@@ -257,8 +257,8 @@ instructions appended. Loaded skills appear in the TUI command flyout, and
 `/reload` re-runs discovery.
 
 ```sh
-./build/clank --skill ./tools/review-skill      # load one skill explicitly
-./build/clank --no-skills                        # skip all skill discovery
+./build/clanker --skill ./tools/review-skill      # load one skill explicitly
+./build/clanker --no-skills                        # skip all skill discovery
 ```
 
 ## Prompt templates
@@ -280,9 +280,9 @@ Saved as `review.md`, that becomes `/review src/agent/driver.cpp`.
 
 Templates are discovered from, in order:
 
-1. `~/.clank/prompts/`
-2. `<cwd>/.clank/prompts/`
-3. the `promptTemplates` array in `~/.clank/settings.json`
+1. `~/.clanker/prompts/`
+2. `<cwd>/.clanker/prompts/`
+3. the `promptTemplates` array in `~/.clanker/settings.json`
 4. `--prompt-template <path>`, repeatable
 
 The name is the filename without `.md` — frontmatter cannot change it. Only
@@ -313,8 +313,8 @@ given. Loaded templates appear in the TUI command flyout, and `/reload` re-runs
 discovery.
 
 ```sh
-./build/clank --prompt-template ./review.md   # load one template explicitly
-./build/clank --no-prompt-templates            # skip all template discovery
+./build/clanker --prompt-template ./review.md   # load one template explicitly
+./build/clanker --no-prompt-templates            # skip all template discovery
 ```
 
 ## Tool selection
@@ -324,9 +324,9 @@ All eight tools (`read`, `write`, `edit`, `ls`, `find`, `grep`, `shell`,
 disabling a tool also removes its snippet and guideline bullets.
 
 ```sh
-./build/clank -t read,ls,grep      # allowlist: only these three
-./build/clank -xt shell,write      # everything except these
-./build/clank -nt                  # no tools at all
+./build/clanker -t read,ls,grep      # allowlist: only these three
+./build/clanker -xt shell,write      # everything except these
+./build/clanker -nt                  # no tools at all
 ```
 
 `--tools` (`-t`) and `--exclude-tools` (`-xt`) each take one comma-separated
@@ -337,10 +337,10 @@ is always a typo.
 
 ## Lifecycle hooks
 
-Clank reports lifecycle transitions to external commands so an editor or
+Clanker reports lifecycle transitions to external commands so an editor or
 supervisor can follow a run it did not start, and lets one of those commands
 decide whether a tool call is allowed to run at all. Hooks are configured in
-`~/.clank/hooks.json` — deliberately **not** `settings.json`, which is rewritten
+`~/.clanker/hooks.json` — deliberately **not** `settings.json`, which is rewritten
 from its own known keys whenever a setting changes and would drop anything it
 does not model.
 
@@ -384,7 +384,7 @@ Each command runs through the platform shell and receives a JSON payload on
   "hook_event_name": "PreToolUse",
   "session_id": "DuPy5yQe3amJZd0ZKOaUlw",
   "cwd": "C:\\work\\repo",
-  "transcript_path": "C:\\Users\\me\\.clank\\sessions\\v2\\repo-c838...\\DuPy....jsonl",
+  "transcript_path": "C:\\Users\\me\\.clanker\\sessions\\v2\\repo-c838...\\DuPy....jsonl",
   "tool_name": "read",
   "tool_call_id": "call_01",
   "tool_input": { "path": "src/main.cpp" },
@@ -400,7 +400,7 @@ nested object, not a string. If the arguments would push the payload past the
 appears instead — half a JSON object is not a JSON object. `interactive` is
 `true` when a user is present to answer, and appears only on `PreToolUse`.
 
-The child never inherits Clank's stdin — the TUI holds the console in raw mode.
+The child never inherits Clanker's stdin — the TUI holds the console in raw mode.
 For every event other than `PreToolUse` its stdout, stderr, and exit code are
 ignored: a hook is a one-way status report, and a broken one must not become an
 agent failure.
@@ -463,7 +463,7 @@ never spawned. `matcher` narrows the gate by tool name in the usual way, so a
 tool no command matches costs nothing. Every gated call pays one process spawn,
 bounded by that command's `timeout`.
 
-Clank ships **no permission policy of its own** — no rules file, no path guards,
+Clanker ships **no permission policy of its own** — no rules file, no path guards,
 no dangerous-command patterns, no approval prompt. This is the same posture as
 pi, which states plainly that it "does not include a built-in permission system"
 and has "no permission popups. Run in a container, or build your own confirmation
@@ -481,7 +481,7 @@ esac
 
 ## Compaction
 
-Clank compacts automatically. Before each provider request the agent loop
+Clanker compacts automatically. Before each provider request the agent loop
 compares the branch's context against the active model's window; once the
 context has eaten into the reserved headroom it folds the older part of the
 branch into a single summary and continues. The most recent messages are kept
@@ -517,7 +517,7 @@ over budget, the request proceeds and the provider decides. If the compaction
 turn itself fails, the run stops with an `automatic compaction failed` error
 rather than letting an oversized request through.
 
-Tune or disable it in `~/.clank/settings.json`:
+Tune or disable it in `~/.clanker/settings.json`:
 
 ```json
 {
@@ -539,7 +539,7 @@ never persisted and never applied to automatic compaction.
 Provider requests that fail with a retryable error are retried by the agent
 loop. Retries are on by default: three attempts, 2 s base delay, doubling per
 attempt (2 s, 4 s, 8 s) with no jitter, capped at 8 s. Tune or disable in
-`~/.clank/settings.json`:
+`~/.clanker/settings.json`:
 
 ```json
 {
@@ -579,8 +579,8 @@ also resets the budget, since the loop is no longer running unattended.
 ```
 
 ```sh
-./build/clank --max-turns 25      # ask every 25 turns
-./build/clank --max-turns 0       # never ask; the loop is unbounded again
+./build/clanker --max-turns 25      # ask every 25 turns
+./build/clanker --max-turns 0       # never ask; the loop is unbounded again
 ```
 
 When nobody can answer — under `-p`, `--mode json`, or a non-interactive
@@ -617,7 +617,7 @@ while a turn waits on the network. Assistant deltas are displayed at complete
 UTF-8 boundaries on the next render frame, without a separate typing-speed
 throttle, so reveal speed is bounded only by provider delivery and rendering.
 
-The interface is assembled with the internal, arena-backed `clank_ui`
+The interface is assembled with the internal, arena-backed `clanker_ui`
 component library. Layout, focus, hit-testing, pointer capture, reusable
 widgets, and custom component integration are documented in
 [`docs/UI.md`](docs/UI.md).
@@ -670,7 +670,7 @@ Interactive commands:
 - `/fork [entry-id]` — fork and switch to a new session.
 - `/compact` — durably summarize the active branch (compaction also runs
   automatically; see Compaction above).
-- `/trust` — save project trust for a future Clank process.
+- `/trust` — save project trust for a future Clanker process.
 - `/reload` — transactionally reload settings and prompt context while idle.
 - `/debug [on|off]` — toggle the performance overlay described under
   Debug overlay below. TUI only.
@@ -678,7 +678,7 @@ Interactive commands:
   Rounded style below. TUI only; the choice is saved to `settings.json`.
 - `/clear` — create a fresh session while preserving the provider, model,
   effort, and context selection.
-- `/exit` (or `/quit`) — close Clank and return to the shell.
+- `/exit` (or `/quit`) — close Clanker and return to the shell.
 
 In the TUI, typing `/` opens a prefix-filtered command flyout over the content
 directly above the composer. Provider, model, and manual-entry choices drill down
@@ -691,14 +691,14 @@ active turn.
 
 The selected provider/model, explicit effort/context preferences,
 `defaultProjectTrust` policy, and the `rounded` UI style are written
-atomically to `~/.clank/settings.json`.
+atomically to `~/.clanker/settings.json`.
 New sessions use built-in defaults, then settings, then the runtime-only `-m`
 override. Resumed sessions restore their durable provider/model ancestry; `-m`
 adds a new durable model selection. Direct IDs are exact opaque durable IDs.
 Cross-project resume enters the session's stored working directory, resolves
 project trust again, rebuilds prompt context, and rollback-safely switches the
 session, process cwd, and TUI cwd/branch. `--continue` remains scoped to the current project. Sessions
-live under `~/.clank/sessions/v2/<project-key>/`. Canonical JSONL files also store names without
+live under `~/.clanker/sessions/v2/<project-key>/`. Canonical JSONL files also store names without
 a sidecar. A writer holds a `<session-id>.lock` sentinel beside its log for as
 long as it is open; the sentinel is removed on release, and on Windows the
 kernel removes it even if the process is killed. A `<session-id>/` directory
@@ -709,7 +709,7 @@ browsing/continuation. Interactive
 mode may start without credentials and blocks prompts with `/auth` guidance;
 `-p` remains fail-fast.
 
-Set `CLANK_PRINT_MEM=1` to print peak RSS at exit.
+Set `CLANKER_PRINT_MEM=1` to print peak RSS at exit.
 
 ### Debug overlay
 
@@ -731,11 +731,11 @@ The state is per-run and always starts off — nothing about it is written to
 
 `/rounded on` uses `╭ ╮ ╰ ╯` borders and `●`/`○` transcript bullets.
 `/rounded off` uses `┌ ┐ └ ┘` and `◼`/`◻`. The choice is stored as `"rounded"`
-in `~/.clank/settings.json`; `/reload` applies edits made to the file.
+in `~/.clanker/settings.json`; `/reload` applies edits made to the file.
 
 ## Providers
 
-Clank speaks exactly one wire protocol: OpenAI's Responses API
+Clanker speaks exactly one wire protocol: OpenAI's Responses API
 (`POST <base>/v1/responses`, SSE `response.*` events). A provider is
 a row in `src/app/provider_registry.cpp` carrying an ID, a default model, an
 API-key env var, and a `ResponsesEndpoint` — a base URL, a base-URL override env
@@ -753,7 +753,7 @@ LiteLLM or OpenRouter's Responses surface.
 ```sh
 OPENAI_BASE_URL=https://my-gateway.internal/v1 \
 OPENAI_API_KEY=... \
-  ./build/clank -m gpt-5.6-sol -p "summarize README.md"
+  ./build/clanker -m gpt-5.6-sol -p "summarize README.md"
 ```
 
 A base URL that already ends in `/v1` is not given a second one, which is how
@@ -763,11 +763,11 @@ non-conversational modality (embeddings, audio, image, moderation) or a family
 the endpoint does not serve, and merges the result with the provider's
 known-model table so context windows and effort support survive discovery.
 
-Why Responses and not Chat Completions: the models Clank targets reject
+Why Responses and not Chat Completions: the models Clanker targets reject
 `reasoning_effort` alongside function tools on `/v1/chat/completions`, and Chat
 Completions standardizes no way to return thinking to the server. Responses
 accepts both, and `include: ["reasoning.encrypted_content"]` with `store: false`
-lets Clank keep owning the transcript while still replaying reasoning across
+lets Clanker keep owning the transcript while still replaying reasoning across
 turns.
 
 Deliberate limits:
@@ -784,7 +784,7 @@ Deliberate limits:
 
 ## Authentication
 
-Credentials are stored in `~/.clank/auth.json` (atomic writes, restricted
+Credentials are stored in `~/.clanker/auth.json` (atomic writes, restricted
 perms). The resolved token is cached in the running app; storing a key, provider
 changes, and `/reload` invalidate or replace the cache.
 
@@ -796,22 +796,22 @@ credentials.
 
 ## Test
 
-`clank_tests` is the single test harness for the whole project: one CLI that
+`clanker_tests` is the single test harness for the whole project: one CLI that
 lets you (or an agent) pick exactly what to exercise.
 
 ```sh
-./build/clank_tests                 # every offline suite
-./build/clank_tests --list          # suite names, tags, descriptions
-./build/clank_tests json session    # only the named suites
-./build/clank_tests --filter line   # substring match: linemodel + lineedit
-./build/clank_tests --all           # include network-tagged suites
-./build/clank_tests --help          # usage
+./build/clanker_tests                 # every offline suite
+./build/clanker_tests --list          # suite names, tags, descriptions
+./build/clanker_tests json session    # only the named suites
+./build/clanker_tests --filter line   # substring match: linemodel + lineedit
+./build/clanker_tests --all           # include network-tagged suites
+./build/clanker_tests --help          # usage
 ```
 
 Suites tagged `network` (currently `http_live`, a live TLS/HTTP request that replaces
-the old `clank_http_smoke` binary) are skipped by default, so a bare run stays
+the old `clanker_http_smoke` binary) are skipped by default, so a bare run stays
 offline and deterministic. Request one by name or with `--all`; point it at a
-local server with `CLANK_TEST_HTTP_URL`. Exit code is 0 on success, 1 on test
+local server with `CLANKER_TEST_HTTP_URL`. Exit code is 0 on success, 1 on test
 failure, 2 on a usage error. `ctest` runs the offline sweep as the `unit` test;
 the `network` test is registered but disabled by default.
 
@@ -832,7 +832,7 @@ on stdout, flushed as it happens. All human-facing output stays on stderr, so
 stdout is safe to pipe.
 
 ```sh
-clank --mode json -p "summarize README.md"
+clanker --mode json -p "summarize README.md"
 ```
 
 ```json

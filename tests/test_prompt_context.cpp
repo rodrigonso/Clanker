@@ -99,7 +99,7 @@ void TestPromptAssembly(Arena* scratch, StrView root, StrView cwd,
   // then the two always-on bullets.
   CHECK_ALL(
       FindText(context.SystemPrompt,
-               "You are an expert coding assistant operating inside Clank, a "
+               "You are an expert coding assistant operating inside Clanker, a "
                "coding agent harness. You help users by reading files, "
                "executing commands, editing code, and writing new files."
                "\n\nAvailable tools:"
@@ -164,7 +164,7 @@ void TestDiscoveryAndTrust(Arena* scratch, StrView root, StrView cwd,
   StrView globalSystem = Fs_Join(scratch, agentDirectory, SVL("SYSTEM.md"));
   StrView globalAppend =
       Fs_Join(scratch, agentDirectory, SVL("APPEND_SYSTEM.md"));
-  StrView projectConfig = Fs_Join(scratch, cwd, SVL(".clank"));
+  StrView projectConfig = Fs_Join(scratch, cwd, SVL(".clanker"));
   StrView projectSystem = Fs_Join(scratch, projectConfig, SVL("SYSTEM.md"));
   StrView projectAppend =
       Fs_Join(scratch, projectConfig, SVL("APPEND_SYSTEM.md"));
@@ -192,7 +192,7 @@ void TestDiscoveryAndTrust(Arena* scratch, StrView root, StrView cwd,
             !StrView_Contains(context.SystemPrompt, "project append"),
             StrView_Contains(context.SystemPrompt, "global append"),
             globalAt >= 0 && rootAt > globalAt && cwdAt > rootAt,
-            CountContextFilesUnder(&context, "clank_prompt_context_test") == 3);
+            CountContextFilesUnder(&context, "clanker_prompt_context_test") == 3);
   PromptContext_Release(&context);
 
   options.ProjectTrusted = true;
@@ -222,7 +222,7 @@ void TestDiscoveryAndTrust(Arena* scratch, StrView root, StrView cwd,
   CHECK_ALL(StrView_Contains(context.SystemPrompt, "cwd override"),
             !StrView_Contains(context.SystemPrompt, "cwd context"),
             StrView_Contains(context.SystemPrompt, "root context"),
-            CountContextFilesUnder(&context, "clank_prompt_context_test") == 3);
+            CountContextFilesUnder(&context, "clanker_prompt_context_test") == 3);
   PromptContext_Release(&context);
 }
 
@@ -268,7 +268,7 @@ void TestSkillsBlock(Arena* scratch, StrView cwd, StrView agentDirectory) {
                              "</description>\n    <location>"),
             StrView_Contains(context.SystemPrompt,
                              "</location>\n  </skill>\n</available_skills>"),
-            CountSkillsUnder(&context, "clank_prompt_context_test") == 1);
+            CountSkillsUnder(&context, "clanker_prompt_context_test") == 1);
   PromptContext_Release(&context);
 
   Tool shellTool = MakeTool("shell", SVL("Execute shell commands"), nullptr, 0);
@@ -276,7 +276,7 @@ void TestSkillsBlock(Arena* scratch, StrView cwd, StrView agentDirectory) {
   StrBuf_Clear(&error);
   CHECK(PromptContext_Build(&options, &context, &error));
   CHECK_ALL(!StrView_Contains(context.SystemPrompt, "<available_skills>"),
-            CountSkillsUnder(&context, "clank_prompt_context_test") == 1);
+            CountSkillsUnder(&context, "clanker_prompt_context_test") == 1);
   PromptContext_Release(&context);
 
   options.Tools = &readTool;
@@ -284,14 +284,14 @@ void TestSkillsBlock(Arena* scratch, StrView cwd, StrView agentDirectory) {
   StrBuf_Clear(&error);
   CHECK(PromptContext_Build(&options, &context, &error));
   CHECK_ALL(!StrView_Contains(context.SystemPrompt, "<available_skills>"),
-            CountSkillsUnder(&context, "clank_prompt_context_test") == 0);
+            CountSkillsUnder(&context, "clanker_prompt_context_test") == 0);
   PromptContext_Release(&context);
 }
 }  // namespace
 
 void TestPromptContext() {
   Arena scratch = ArenaCreate((usize)64 << 20);
-  StrView root = SVL("clank_prompt_context_test");
+  StrView root = SVL("clanker_prompt_context_test");
   StrView agentDirectory = Fs_Join(&scratch, root, SVL("global"));
   StrView work = Fs_Join(&scratch, root, SVL("work"));
   StrView cwd = Fs_Join(&scratch, work, SVL("child"));
@@ -302,24 +302,24 @@ void TestPromptContext() {
   TestSkillsBlock(&scratch, cwd, agentDirectory);
 
   const char* files[] = {
-      "clank_prompt_context_test/global/AGENTS.md",
-      "clank_prompt_context_test/global/SYSTEM.md",
-      "clank_prompt_context_test/global/APPEND_SYSTEM.md",
-      "clank_prompt_context_test/AGENTS.md",
-      "clank_prompt_context_test/work/child/CLAUDE.md",
-      "clank_prompt_context_test/work/child/AGENTS.override.md",
-      "clank_prompt_context_test/work/child/.clank/SYSTEM.md",
-      "clank_prompt_context_test/work/child/.clank/APPEND_SYSTEM.md",
-      "clank_prompt_context_test/global/skills/placement/SKILL.md",
+      "clanker_prompt_context_test/global/AGENTS.md",
+      "clanker_prompt_context_test/global/SYSTEM.md",
+      "clanker_prompt_context_test/global/APPEND_SYSTEM.md",
+      "clanker_prompt_context_test/AGENTS.md",
+      "clanker_prompt_context_test/work/child/CLAUDE.md",
+      "clanker_prompt_context_test/work/child/AGENTS.override.md",
+      "clanker_prompt_context_test/work/child/.clanker/SYSTEM.md",
+      "clanker_prompt_context_test/work/child/.clanker/APPEND_SYSTEM.md",
+      "clanker_prompt_context_test/global/skills/placement/SKILL.md",
   };
   for (u32 i = 0; i < sizeof(files) / sizeof(files[0]); i++) remove(files[i]);
-  RemoveDir("clank_prompt_context_test/work/child/AGENTS.md");
-  RemoveDir("clank_prompt_context_test/work/child/.clank");
-  RemoveDir("clank_prompt_context_test/work/child");
-  RemoveDir("clank_prompt_context_test/work");
-  RemoveDir("clank_prompt_context_test/global/skills/placement");
-  RemoveDir("clank_prompt_context_test/global/skills");
-  RemoveDir("clank_prompt_context_test/global");
-  RemoveDir("clank_prompt_context_test");
+  RemoveDir("clanker_prompt_context_test/work/child/AGENTS.md");
+  RemoveDir("clanker_prompt_context_test/work/child/.clanker");
+  RemoveDir("clanker_prompt_context_test/work/child");
+  RemoveDir("clanker_prompt_context_test/work");
+  RemoveDir("clanker_prompt_context_test/global/skills/placement");
+  RemoveDir("clanker_prompt_context_test/global/skills");
+  RemoveDir("clanker_prompt_context_test/global");
+  RemoveDir("clanker_prompt_context_test");
   ArenaRelease(&scratch);
 }

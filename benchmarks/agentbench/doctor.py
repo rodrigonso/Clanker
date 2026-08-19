@@ -89,9 +89,9 @@ def main(args) -> int:
 
     if problems:
         print(f"\n{problems} problem(s) found.")
-        print("\nBuild clank for Linux with:")
+        print("\nBuild clanker for Linux with:")
         print("  cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release")
-        print("  cmake --build build-linux --target clank")
+        print("  cmake --build build-linux --target clanker")
         print("Install jcode with:")
         print("  curl -fsSL https://jcode.sh/install | bash")
         print("Install the others with:")

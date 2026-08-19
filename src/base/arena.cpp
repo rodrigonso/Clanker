@@ -19,9 +19,9 @@ static void ArenaCommitTo(Arena* a, usize targetUsed) {
   if (target <= a->Committed) return;
 #if defined(_WIN32)
   void* p = VirtualAlloc(a->Base + a->Committed, target - a->Committed, MEM_COMMIT, PAGE_READWRITE);
-  if (!p) CLANK_TRAP();
+  if (!p) CLANKER_TRAP();
 #else
-  if (mprotect(a->Base + a->Committed, target - a->Committed, PROT_READ | PROT_WRITE) != 0) CLANK_TRAP();
+  if (mprotect(a->Base + a->Committed, target - a->Committed, PROT_READ | PROT_WRITE) != 0) CLANKER_TRAP();
 #endif
   a->Committed = target;
 }
@@ -31,10 +31,10 @@ Arena ArenaCreate(usize reserveBytes) {
   usize reserve = RoundUp(reserveBytes, ARENA_COMMIT_CHUNK);
 #if defined(_WIN32)
   a.Base = (byte*)VirtualAlloc(nullptr, reserve, MEM_RESERVE, PAGE_READWRITE);
-  if (!a.Base) CLANK_TRAP();
+  if (!a.Base) CLANKER_TRAP();
 #else
   void* p = mmap(nullptr, reserve, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  if (p == MAP_FAILED) CLANK_TRAP();
+  if (p == MAP_FAILED) CLANKER_TRAP();
   a.Base = (byte*)p;
 #endif
   a.Reserved = reserve;
@@ -69,12 +69,12 @@ void ArenaTrim(Arena* a, usize keepBytes) {
 #if defined(_WIN32)
   // Decommit leaves the range reserved, so Base stays valid and ArenaCommitTo
   // can commit it again.
-  if (!VirtualFree(a->Base + keep, a->Committed - keep, MEM_DECOMMIT)) CLANK_TRAP();
+  if (!VirtualFree(a->Base + keep, a->Committed - keep, MEM_DECOMMIT)) CLANKER_TRAP();
 #else
   // MADV_DONTNEED drops the physical pages; PROT_NONE is what actually restores
   // the "not committed" state this arena's commit model is written against, so
   // ArenaCommitTo's mprotect on the next growth is not a no-op.
-  if (mprotect(a->Base + keep, a->Committed - keep, PROT_NONE) != 0) CLANK_TRAP();
+  if (mprotect(a->Base + keep, a->Committed - keep, PROT_NONE) != 0) CLANKER_TRAP();
   madvise(a->Base + keep, a->Committed - keep, MADV_DONTNEED);
 #endif
   a->Committed = keep;

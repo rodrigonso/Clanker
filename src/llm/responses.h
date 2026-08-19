@@ -9,7 +9,7 @@
 // OpenAI Responses protocol: `POST <base>/v1/responses` with an SSE stream of
 // typed `response.*` events.
 //
-// This is the only wire protocol Clank speaks. It is the endpoint OpenAI's
+// This is the only wire protocol Clanker speaks. It is the endpoint OpenAI's
 // reasoning models expect for tool use -- chat-completions rejects function
 // tools combined with a reasoning effort -- and it is the only one that lets a
 // turn hand its reasoning back on the next request, which is what keeps a

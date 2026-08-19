@@ -366,7 +366,7 @@ bool ParseList(Arena* arena, const char* value, const char* option,
 }
 
 void PrintBenchmarkUsage() {
-  printf("usage: clank_tests --benchmark [options]\n\n");
+  printf("usage: clanker_tests --benchmark [options]\n\n");
   printf("  --workload NAME          all, shallow, deep, or parallel (default: all)\n");
   printf("  --cycles N[,N...]        sequential tool-cycle depths\n");
   printf("  --tools N[,N...]         parallel tools per turn\n");
@@ -484,7 +484,7 @@ int RunAgentBenchmark(int argc, char** argv) {
   printf("[\n");
   for (u32 i = 0; i < caseCount; i++) {
     const BenchCase& item = cases[i];
-    printf("  {\"runtime\":\"clank\",\"workload\":\"%s\",", item.Workload);
+    printf("  {\"runtime\":\"clanker\",\"workload\":\"%s\",", item.Workload);
     if (item.Parallel)
       printf("\"toolsPerTurn\":%u,", item.Size);
     else
@@ -499,7 +499,7 @@ int RunAgentBenchmark(int argc, char** argv) {
   // Peak working set for this process, which is what a user sees the agent
   // loop cost. Reported once at the end rather than per case because the OS
   // figure is a high-water mark over the whole process.
-  printf("{\"runtime\":\"clank\",\"peakRssKb\":%llu}\n",
+  printf("{\"runtime\":\"clanker\",\"peakRssKb\":%llu}\n",
          (unsigned long long)(PeakRssBytes() / 1024));
   ArenaRelease(&arena);
   return 0;

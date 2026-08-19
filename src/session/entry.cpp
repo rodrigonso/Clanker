@@ -138,7 +138,7 @@ bool ReadRequiredBool(const JsonValue* object, const char* key, bool* out) {
   return true;
 }
 
-// Absent is not an error: a block Clank synthesized has no provider identity,
+// Absent is not an error: a block Clanker synthesized has no provider identity,
 // and neither does one recorded before signatures were written.
 bool ReadOptionalString(const JsonValue* object, const char* key,
                         StrView* out) {
