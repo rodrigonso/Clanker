@@ -147,7 +147,7 @@ void SeedPerf(Tui* t) {
   p->LastRssSampleMs = 1000;
   p->LastTtftUs = 612000;
   p->LastTurnUs = 8400000;
-  p->LastTokens = {1500, 362, 900, 120};
+  p->LastTokens = {1500, 362, 900};
   TuiPerf_ToolStarted(p, SVL("grep"), 1000);
   TuiPerf_ToolEnded(p, 215000);
   p->DroppedEvents = 2;
@@ -492,7 +492,7 @@ void TestTui() {
     CHECK(Tui_UpdateDebugOverlay(&ot, TuiToggleAction::Toggle));
     SeedPerf(&ot);
     Tui_ComposeFrame(&ot, 60, 24, 1000);
-    CHECK(FrameHash(&ot) == 2102621543496373578ull);
+    CHECK(FrameHash(&ot) == 1526713118616935166ull);
 
     CHECK_ALL(ScreenContains(&ot, "debug"),
               ScreenContains(&ot, "58.8"),     // 1e7 / 17000us, in tenths

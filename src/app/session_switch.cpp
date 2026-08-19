@@ -266,11 +266,12 @@ SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
             SessionStatus::InvalidState,
             SVL("the target session uses an unavailable provider"));
       }
-      targetModel = targetSpec->CreateModel(rt->Mem, targetState->Model);
+      targetModel =
+          targetSpec->CreateModel(rt->Mem, targetSpec, targetState->Model);
       targetProfile = Model_ResolveRequestPreference(
           &targetModel, rt->PreferredProfile);
       config.ModelInfo = targetModel;
-      config.ProviderImpl = targetSpec->CreateProvider(rt->Mem);
+      config.ProviderImpl = targetSpec->CreateProvider(rt->Mem, targetSpec);
       config.Stream.Auth = {};
       config.Stream.Profile = targetProfile;
     }
@@ -524,8 +525,6 @@ Array<StrView> SessionDetailLines(Arena* arena,
   StrBuf_AppendU64(&tokens, info->OutputTokens);
   StrBuf_AppendCStr(&tokens, ", cache read ");
   StrBuf_AppendU64(&tokens, info->CacheReadTokens);
-  StrBuf_AppendCStr(&tokens, ", write ");
-  StrBuf_AppendU64(&tokens, info->CacheWriteTokens);
   StrBuf_AppendCStr(&tokens, ", reasoning ");
   StrBuf_AppendU64(&tokens, info->ReasoningTokens);
   StrBuf_AppendChar(&tokens, ')');

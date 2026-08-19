@@ -51,7 +51,6 @@ target_link_libraries(clank_json PUBLIC clank_base)
 
 # ---- crypto --------------------------------------------------------------
 add_library(clank_crypto STATIC
-  src/crypto/sha256.cpp
   src/crypto/random.cpp)
 target_link_libraries(clank_crypto PUBLIC clank_base)
 if(WIN32)
@@ -118,15 +117,6 @@ FetchContent_MakeAvailable(curl)
 add_library(clank_http STATIC src/net/http_curl.cpp)
 target_link_libraries(clank_http PUBLIC clank_base CURL::libcurl)
 
-# ---- loopback (OAuth callback server + browser opener) -------------------
-add_library(clank_loopback STATIC
-  src/net/loopback.cpp
-  src/net/browser.cpp)
-target_link_libraries(clank_loopback PUBLIC clank_base)
-if(WIN32)
-  target_link_libraries(clank_loopback PUBLIC ws2_32 shell32)
-endif()
-
 # ---- term (terminal I/O + cell renderer) ---------------------------------
 if(WIN32)
   set(CLANK_TERM_PLATFORM src/term/term_win.cpp)
@@ -171,22 +161,17 @@ target_link_libraries(clank_tui PUBLIC clank_ui clank_term clank_json clank_prot
 
 # ---- llm providers -------------------------------------------------------
 add_library(clank_proto STATIC
-  src/llm/anthropic_proto.cpp
-  src/llm/openai_proto.cpp)
+  src/llm/chat_completions_proto.cpp)
 target_link_libraries(clank_proto PUBLIC clank_json)
 
-add_library(clank_anthropic STATIC src/llm/anthropic.cpp)
-target_link_libraries(clank_anthropic PUBLIC clank_proto clank_http)
+add_library(clank_chat STATIC src/llm/chat_completions.cpp)
+target_link_libraries(clank_chat PUBLIC clank_proto clank_http clank_auth)
 
-add_library(clank_openai STATIC src/llm/openai.cpp)
-target_link_libraries(clank_openai PUBLIC clank_proto clank_http clank_auth)
-
-# ---- auth (api keys + OAuth) ---------------------------------------------
+# ---- auth (api keys) -----------------------------------------------------
 add_library(clank_auth STATIC
   src/auth/store.cpp
-  src/auth/oauth.cpp
   src/auth/resolve.cpp)
-target_link_libraries(clank_auth PUBLIC clank_json clank_crypto clank_http clank_loopback)
+target_link_libraries(clank_auth PUBLIC clank_json)
 
 # ---- tools ---------------------------------------------------------------
 add_library(clank_tools STATIC
@@ -229,11 +214,11 @@ add_library(clank_app STATIC
   src/app/settings.cpp
   src/app/skills.cpp
   src/app/tui_bridge.cpp)
-target_link_libraries(clank_app PUBLIC clank_anthropic clank_openai clank_auth clank_tui clank_tools)
+target_link_libraries(clank_app PUBLIC clank_chat clank_auth clank_tui clank_tools)
 
 # ---- executables ---------------------------------------------------------
 add_executable(clank src/app/main.cpp)
-target_link_libraries(clank PRIVATE clank_app clank_anthropic clank_openai clank_tools clank_agent clank_auth clank_tui)
+target_link_libraries(clank PRIVATE clank_app clank_chat clank_tools clank_agent clank_auth clank_tui)
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT clank)
 set_target_properties(clank PROPERTIES
   VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -250,8 +235,7 @@ add_executable(clank_tests EXCLUDE_FROM_ALL
   tests/test_json.cpp
   tests/test_session.cpp
   tests/test_harness.cpp
-  tests/test_anthropic.cpp
-  tests/test_openai.cpp
+  tests/test_chat_completions.cpp
   tests/test_tools.cpp
   tests/test_tool_select.cpp
   tests/test_infra.cpp
@@ -262,7 +246,6 @@ add_executable(clank_tests EXCLUDE_FROM_ALL
   tests/test_hooks.cpp
   tests/test_prompt_context.cpp
   tests/test_project_trust.cpp
-  tests/test_loopback.cpp
   tests/test_provider_registry.cpp
   tests/test_settings.cpp
   tests/test_skills.cpp
@@ -282,7 +265,7 @@ add_executable(clank_tests EXCLUDE_FROM_ALL
   tests/test_ui_demo.cpp
   tests/test_tui.cpp
   tests/test_http.cpp)
-target_link_libraries(clank_tests PRIVATE clank_app clank_proto clank_agent clank_session clank_tools clank_crypto clank_auth clank_loopback clank_tui clank_ui clank_term clank_http)
+target_link_libraries(clank_tests PRIVATE clank_app clank_chat clank_proto clank_agent clank_session clank_tools clank_crypto clank_auth clank_tui clank_ui clank_term clank_http)
 
 # Default ctest run stays offline; the network suite is opt-in.
 add_test(NAME unit COMMAND clank_tests)

@@ -97,19 +97,18 @@ void TestReportedTokens(Arena* arena) {
   Usage use = {};
   use.Input = 100;
   use.CacheRead = 10;
-  use.CacheWrite = 5;
   use.Output = 20;
   Message reported[2] = {UserMessage(arena, SVL("aaaa")),
                          AssistantText(arena, SVL("dddd"), use)};
-  CHECK(AgentCompaction_ReportedContextTokens(reported, 2) == 135);
-  CHECK(AgentCompaction_ContextTokens(reported, 2) == 135);
+  CHECK(AgentCompaction_ReportedContextTokens(reported, 2) == 130);
+  CHECK(AgentCompaction_ContextTokens(reported, 2) == 130);
 
   // Messages appended after that assistant turn have not been billed, so they
   // are estimated on top.
   Message trailing[3] = {
       UserMessage(arena, SVL("aaaa")), AssistantText(arena, SVL("dddd"), use),
       Message_ToolResult(arena, SVL("call-1"), SVL("t"), SVL("bbbb"), false)};
-  CHECK(AgentCompaction_ReportedContextTokens(trailing, 3) == 140);
+  CHECK(AgentCompaction_ReportedContextTokens(trailing, 3) == 135);
 }
 
 void TestShouldCompact() {

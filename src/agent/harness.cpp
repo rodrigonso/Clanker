@@ -49,7 +49,6 @@ SessionResult CloneHarnessEvent(Arena* arena, const AgentHarnessEvent* source,
       for (u32 i = 0; i < source->Tool.Result.Content.Count; i++) {
         Content content = source->Tool.Result.Content.Data[i];
         content.Text = StrView_Dup(arena, content.Text);
-        content.Signature = StrView_Dup(arena, content.Signature);
         content.ToolId = StrView_Dup(arena, content.ToolId);
         content.ToolName = StrView_Dup(arena, content.ToolName);
         content.ToolArgsJson = StrView_Dup(arena, content.ToolArgsJson);

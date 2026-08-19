@@ -10,7 +10,6 @@
 #include "app/provider_registry.h"
 #include "auth/resolve.h"
 #include "base/str.h"
-#include "base/thread.h"
 #include "session/jsonl_repository.h"
 #include "session/repository.h"
 #include "tools/tools.h"
@@ -21,27 +20,12 @@
 // TUI or the plain REPL; it goes through the Runtime* calls below, which is what
 // lets the handlers live outside main.cpp and be driven by tests.
 
-struct AuthWarmup;
 struct HarnessEventPump;
 
 struct AppAuth {
   Arena* Mem;
   StrView Path;
   AuthTokenCache Cache;
-  AuthWarmup* Warmup;
-};
-
-struct AuthWarmup {
-  Thread Worker;
-  Arena ResultMem;
-  ResolvedAuthToken Result;
-  StrView Path;
-  StrView Provider;
-  const char* EnvVar;
-  volatile i32* Abort;
-  bool Resolved;
-  bool Started;
-  bool Joined;
 };
 
 // Human-facing consumer of the ordered watch stream. The pump owns event
@@ -96,10 +80,8 @@ struct InteractiveRuntime {
   StrView PendingPrompt;
   HarnessEventPump* EventPump;
   HarnessEventSink EventSink;
-  bool AutoOpen;
   Tui* TuiView;
   AppAuth* Auth;
-  AuthWarmup* AuthWarmupState;
   // Where the shell tool writes overflow logs; repointed on session switch.
   ShellToolContext* Shell;
 };

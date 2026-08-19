@@ -20,8 +20,6 @@ struct Content {
   ContentKind Kind;
   // Text / Thinking
   StrView Text;
-  StrView Signature;  // textSignature / thinkingSignature / thoughtSignature
-  bool Redacted;      // thinking was redacted by safety filters
   // ToolCall
   StrView ToolId;
   StrView ToolName;
@@ -43,12 +41,10 @@ inline Content Content_Text(StrView text) {
   c.Text = text;
   return c;
 }
-inline Content Content_Thinking(StrView text, StrView signature, bool redacted) {
+inline Content Content_Thinking(StrView text) {
   Content c = {};
   c.Kind = ContentKind::Thinking;
   c.Text = text;
-  c.Signature = signature;
-  c.Redacted = redacted;
   return c;
 }
 inline Content Content_ToolCall(StrView id, StrView name, StrView argsJson) {
@@ -72,7 +68,6 @@ inline Content Content_Image(StrView data, StrView mimeType) {
 inline Content Content_Clone(Arena* arena, const Content& source) {
   Content result = source;
   result.Text = StrView_Dup(arena, source.Text);
-  result.Signature = StrView_Dup(arena, source.Signature);
   result.ToolId = StrView_Dup(arena, source.ToolId);
   result.ToolName = StrView_Dup(arena, source.ToolName);
   result.ToolArgsJson = StrView_Dup(arena, source.ToolArgsJson);
@@ -106,7 +101,6 @@ struct Usage {
   u32 Input;
   u32 Output;
   u32 CacheRead;
-  u32 CacheWrite;
   u32 Reasoning;
   u32 TotalTokens;
 };
@@ -246,7 +240,6 @@ struct Model {
   StrView Id;
   StrView Name;
   StrView Provider;
-  StrView Api;
   StrView BaseUrl;
   u32 ContextWindow;
   u32 MaxTokens;
@@ -437,17 +430,8 @@ inline void StreamSink_Emit(const StreamSink& sink, const StreamEvent& ev) {
 
 struct HttpRetryPolicy;  // net/http.h; forward-declared so types.h stays net-independent
 
-enum class ProviderAuthKind : u8 {
-  None,
-  ApiKey,
-  OAuth,
-};
-
 struct ProviderAuth {
-  ProviderAuthKind Kind;
-  StrView Token;
-  StrView AccountId;
-  bool IsFedRamp;
+  StrView Token;  // empty only when the endpoint allows anonymous access
 };
 
 struct StreamOptions {

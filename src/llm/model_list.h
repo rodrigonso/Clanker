@@ -31,7 +31,6 @@ inline Model Model_Dup(Arena* arena, const Model& source) {
   result.Id = StrView_Dup(arena, source.Id);
   result.Name = StrView_Dup(arena, source.Name);
   result.Provider = StrView_Dup(arena, source.Provider);
-  result.Api = StrView_Dup(arena, source.Api);
   result.BaseUrl = StrView_Dup(arena, source.BaseUrl);
   return result;
 }
@@ -41,7 +40,6 @@ namespace model_list_detail {
 inline void MergeFallbackMetadata(Model* target, const Model& fallback) {
   if (!target->Name.Length) target->Name = fallback.Name;
   if (!target->Provider.Length) target->Provider = fallback.Provider;
-  if (!target->Api.Length) target->Api = fallback.Api;
   if (!target->BaseUrl.Length) target->BaseUrl = fallback.BaseUrl;
   if (!target->ContextWindow) target->ContextWindow = fallback.ContextWindow;
   if (!target->MaxTokens) target->MaxTokens = fallback.MaxTokens;

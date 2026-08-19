@@ -50,7 +50,6 @@ struct SessionInfo {
   u64 InputTokens;
   u64 OutputTokens;
   u64 CacheReadTokens;
-  u64 CacheWriteTokens;
   u64 ReasoningTokens;
   u64 TotalTokens;
 

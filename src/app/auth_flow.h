@@ -3,11 +3,7 @@
 #include "app/runtime.h"
 
 // Credential resolution and the interactive provider/model pickers built on it.
-//
-// Auth resolution has a warmup path because the first prompt of a session would
-// otherwise block on a token refresh: StartAuthWarmup resolves in the
-// background while the user is still typing, and the prompt choke point joins
-// it. Everything here is renderer-neutral and drives the TUI or the plain REPL
+// Everything here is renderer-neutral and drives the TUI or the plain REPL
 // through the Runtime* seams.
 
 struct RuntimeSelection {
@@ -39,11 +35,6 @@ StrView AuthGuidance(Arena* arena, const ProviderSpec* spec, bool interactive);
 RuntimeSelection LoadRuntimeSelection(Arena* arena, StrView settingsPath,
                                       const char* modelOverride);
 
-bool StartAuthWarmup(AuthWarmup* warmup, AppAuth* auth, const ProviderSpec* spec,
-                     volatile i32* abort);
-void FinishRuntimeAuthWarmup(InteractiveRuntime* rt);
-void CancelRuntimeAuthWarmup(InteractiveRuntime* rt);
-
 // Reports whether the active provider has usable credentials, as a notice or an
 // error depending on `asError`.
 bool RuntimeCheckAuth(InteractiveRuntime* rt, const AppCommandUx* ux, bool asError);
@@ -55,10 +46,8 @@ bool ActivateRuntimeSelection(InteractiveRuntime* rt, const ProviderSpec* spec,
 StrView SelectionMessage(InteractiveRuntime* rt, const char* prefix);
 
 AppCommandHandlerResult HandleModelCommand(void* user, const AppCommandUx* ux);
-AppCommandHandlerResult HandleLoginCommand(void* user, const AppCommandUx* ux);
+AppCommandHandlerResult HandleAuthCommand(void* user, const AppCommandUx* ux);
 
-// `clank --login <provider>` / `--logout <provider>`: one-shot, non-interactive
-// entry points that reuse the same OAuth flow the slash command drives.
-int RunCommandLineLogin(Arena* arena, StrView authPath, const char* providerId,
-                        bool autoOpen);
+// `clank --logout <provider>`: removes the stored credential without entering
+// the TUI.
 int RunCommandLineLogout(Arena* arena, StrView authPath, const char* providerId);

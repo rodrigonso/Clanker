@@ -3,8 +3,8 @@
 namespace {
 
 const AppCommandSpec kCommands[] = {
-    {AppCommandKind::Login, SVL("login"), {},
-     SVL("Sign in and choose a provider"), SVL("Usage: /login"),
+    {AppCommandKind::Auth, SVL("auth"), {},
+     SVL("Store a provider API key and choose a model"), SVL("Usage: /auth"),
      AppCommandArgumentPolicy::None},
     {AppCommandKind::Model, SVL("model"), {},
      SVL("Change the active model, effort, and context"), SVL("Usage: /model"),
@@ -96,12 +96,12 @@ void ReportHandlerResult(const AppCommandUx* ux, AppCommandKind kind, AppCommand
   }
 
   if (result.Status == AppCommandHandlerStatus::Cancelled) {
-    Notice(ux, kind == AppCommandKind::Login ? SVL("Login cancelled.") : SVL("Model selection cancelled."));
+    Notice(ux, kind == AppCommandKind::Auth ? SVL("Authentication cancelled.") : SVL("Model selection cancelled."));
   } else if (result.Status == AppCommandHandlerStatus::Unsupported) {
-    Error(ux, kind == AppCommandKind::Login ? SVL("/login is unavailable in this mode.")
+    Error(ux, kind == AppCommandKind::Auth ? SVL("/auth is unavailable in this mode.")
                                             : SVL("/model is unavailable in this mode."));
   } else if (result.Status == AppCommandHandlerStatus::Failed) {
-    Error(ux, kind == AppCommandKind::Login ? SVL("Login failed.") : SVL("Model selection failed."));
+    Error(ux, kind == AppCommandKind::Auth ? SVL("Authentication failed.") : SVL("Model selection failed."));
   }
 }
 
@@ -202,16 +202,16 @@ AppCommandDispatchResult AppCommand_Dispatch(StrView input, const AppCommandHand
   }
 
   AppCommandHandlerResult result = {};
-  if (command.Kind == AppCommandKind::Login ||
+  if (command.Kind == AppCommandKind::Auth ||
       command.Kind == AppCommandKind::Model) {
     AppCommandHandlerFn fn = nullptr;
     if (handlers)
-      fn = command.Kind == AppCommandKind::Login ? handlers->Login
+      fn = command.Kind == AppCommandKind::Auth ? handlers->Auth
                                                  : handlers->Model;
     result = RunHandler(
         fn, handlers ? handlers->User : nullptr, ux,
-        command.Kind == AppCommandKind::Login
-            ? SVL("/login is unavailable in this mode.")
+        command.Kind == AppCommandKind::Auth
+            ? SVL("/auth is unavailable in this mode.")
             : SVL("/model is unavailable in this mode."));
   } else {
     AppCommandArgHandlerFn fn = nullptr;

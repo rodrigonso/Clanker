@@ -52,6 +52,14 @@ snippets, guideline bullets, and the `<project_context>` framing) are aligned
 byte-for-byte with pi's `buildSystemPrompt`. Do not reword them casually; a
 reword is a parity change.
 
+The provider layer is a deliberate divergence: Clank speaks only
+OpenAI-compatible Chat Completions (`src/llm/chat_completions*`), not pi's
+vendor-native protocols. A provider is a row in
+`src/app/provider_registry.cpp` pairing a `ProviderSpec` with a `ChatEndpoint`;
+adding a vendor means adding a row, not writing wire code. Thinking blocks are
+never sent back and `reasoning_effort` is clamped to `low`/`medium`/`high`,
+because the portable API defines nothing richer.
+
 ## Sessions and files on disk
 
 - Session logs: `~/.clank/sessions/v2/<project-key>/<session-id>.jsonl`, with a

@@ -17,7 +17,6 @@ struct TuiPerf {
     u32 Input;
     u32 Output;
     u32 CacheRead;
-    u32 CacheWrite;
   } LastTokens;
   u32 LastTtftUs;
   u32 LastTurnUs;

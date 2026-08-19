@@ -3,7 +3,7 @@
 
 enum class AppCommandKind : u8 {
   NotCommand,
-  Login,
+  Auth,
   Model,
   Clear,
   Session,
@@ -92,7 +92,7 @@ typedef bool (*AppCommandTemplateHandlerFn)(void* user, const AppCommandUx* ux,
 
 struct AppCommandHandlers {
   void* User;
-  AppCommandHandlerFn Login;
+  AppCommandHandlerFn Auth;
   AppCommandHandlerFn Model;
   AppCommandArgHandlerFn Session;
   AppCommandArgHandlerFn Name;

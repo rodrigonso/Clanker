@@ -18,7 +18,6 @@
 #include "app/session_switch.h"
 #include "app/settings.h"
 #include "app/tui_bridge.h"
-#include "auth/oauth.h"
 #include "auth/resolve.h"
 #include "auth/store.h"
 #include "base/arena.h"
@@ -26,7 +25,6 @@
 #include "base/sysinfo.h"
 #include "base/thread.h"
 
-#include "net/browser.h"
 #include "net/http.h"
 #include "term/term.h"
 #include "tui/tui.h"
@@ -115,14 +113,12 @@ static void PrintHelp() {
       "  --max-turns N     Model turns to run before asking to continue (0: unlimited)\n"
       "  -a, --approve     Trust project prompt resources for this run\n"
       "  -na, --no-approve Do not trust project prompt resources for this run\n"
-      "  --login [prov]    OAuth login in your browser (anthropic or openai)\n"
-      "  --logout [prov]   Remove stored credentials (default: anthropic)\n"
-      "  --no-open         Do not auto-open a browser for --login or interactive /login\n"
+      "  --logout PROV     Remove stored credentials for a provider\n"
      "  --help            Show this help\n\n"
-      "Auth: run `--login anthropic` for Claude Pro/Max or `--login openai` for\n"
-      "a ChatGPT subscription; alternatively set ANTHROPIC_API_KEY or OPENAI_API_KEY.\n"
+      "Auth: run `/auth` inside the TUI to store an API key, or set the\n"
+      "provider's API key environment variable (for example OPENAI_API_KEY).\n"
       "Interactive commands: /session, /name, /sessions, /resume, /tree,\n"
-      "/checkout, /fork, /compact, /trust, /reload, /debug, /login, /model,\n"
+      "/checkout, /fork, /compact, /trust, /reload, /debug, /auth, /model,\n"
       "/skill:<name>, /clear, /exit.\n");
 }
 
@@ -247,10 +243,7 @@ static void RunTuiRepl(InteractiveRuntime* rt) {
   Tui_HydrateTranscript(&tui, snapshot.Transcript.Data,
                         snapshot.Transcript.Count);
 
-  AuthWarmup warmup = {};
   Http_GlobalInit();
-  rt->AuthWarmupState = &warmup;
-  StartAuthWarmup(&warmup, rt->Auth, rt->Spec, Tui_OperationAbort(&tui));
   Tui_LoadStartupContext(&tui);
 
   AppCommandUx commandUx = {&tui, TuiCommandNotice, TuiCommandError};
@@ -284,7 +277,6 @@ static void RunTuiRepl(InteractiveRuntime* rt) {
     else if (run.Message.Length)
       Tui_CommandNotice(&tui, run.Message);
   }
-  CancelRuntimeAuthWarmup(rt);
   StopHarnessEventPump(&pump);
   rt->EventPump = nullptr;
   Tui_Stop(&tui);
@@ -296,14 +288,12 @@ int main(int argc, char** argv) {
   const char* modelOverride = nullptr;
   const char* onePrompt = nullptr;
   bool jsonMode = false;
-  const char* loginProvider = nullptr;
   const char* logoutProvider = nullptr;
   const char* resumeSession = nullptr;
   bool hasExplicitSystemPrompt = false;
   StrView explicitSystemPrompt = {};
   Array<StrView> explicitAppendPrompts = Array_Make<StrView>(&arena, 4);
   ProjectTrustOverride trustOverride = ProjectTrustOverride::Unspecified;
-  bool noOpen = false;
   bool noSession = false;
   bool noContextFiles = false;
   bool noSkills = false;
@@ -455,12 +445,14 @@ int main(int argc, char** argv) {
         return 1;
       }
       resumeSession = argv[++i];
-    } else if (strcmp(argv[i], "--no-open") == 0) {
-      noOpen = true;
-    } else if (strcmp(argv[i], "--login") == 0) {
-      loginProvider = (i + 1 < argc && argv[i + 1][0] != '-') ? argv[++i] : "anthropic";
     } else if (strcmp(argv[i], "--logout") == 0) {
-      logoutProvider = (i + 1 < argc && argv[i + 1][0] != '-') ? argv[++i] : "anthropic";
+      if (i + 1 < argc && argv[i + 1][0] != '-') {
+        logoutProvider = argv[++i];
+      } else {
+        fprintf(stderr, "error: --logout requires a provider id\n");
+        ArenaRelease(&arena);
+        return 1;
+      }
     } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
       PrintHelp();
       ArenaRelease(&arena);
@@ -492,16 +484,8 @@ int main(int argc, char** argv) {
   StrView settingsPath = AppSettings_DefaultPath(&arena);
   signal(SIGINT, OnSigint);
 
-  if (loginProvider) {
-    Http_GlobalInit();
-    int rc = RunCommandLineLogin(&arena, authPath, loginProvider, !noOpen);
-    Http_GlobalShutdown();
-    ArenaRelease(&arena);
-    return rc;
-  }
   if (logoutProvider) {
     int rc = RunCommandLineLogout(&arena, authPath, logoutProvider);
-    Http_GlobalShutdown();
     ArenaRelease(&arena);
     return rc;
   }
@@ -590,7 +574,7 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  Model model = selected.Spec->CreateModel(&arena, selected.ModelId);
+  Model model = selected.Spec->CreateModel(&arena, selected.Spec, selected.ModelId);
   bool unsupportedProfilePreference = false;
   ModelRequestProfile preference = Model_NormalizeRequestPreference(
       &model, selected.RequestedProfile, &unsupportedProfilePreference);
@@ -682,7 +666,7 @@ int main(int argc, char** argv) {
   harnessConfig.ModelInfo = model;
   harnessConfig.Tools = tools;
   harnessConfig.ToolCount = toolCount;
-  harnessConfig.ProviderImpl = selected.Spec->CreateProvider(&arena);
+  harnessConfig.ProviderImpl = selected.Spec->CreateProvider(&arena, selected.Spec);
   harnessConfig.Stream.Profile = profile;
   harnessConfig.ToolExec = ToolExecution::Parallel;
   harnessConfig.Compaction = selected.Compaction;
@@ -785,10 +769,10 @@ int main(int argc, char** argv) {
         }
         selected.Spec = restored;
         model = restored->CreateModel(
-            &arena, modelOverride ? SV(modelOverride) : state.Model);
+            &arena, restored, modelOverride ? SV(modelOverride) : state.Model);
         profile = Model_ResolveRequestPreference(&model, preference);
         harness.Config.ModelInfo = model;
-        harness.Config.ProviderImpl = restored->CreateProvider(&arena);
+        harness.Config.ProviderImpl = restored->CreateProvider(&arena, restored);
         harness.Config.Stream.Profile = profile;
         if (modelOverride) {
           SessionResult overridden = AgentHarness_SetModel(
@@ -858,7 +842,6 @@ int main(int argc, char** argv) {
   runtime.Rounded = selected.Rounded;
   runtime.Prompt = &promptContext;
   RuntimeSetPromptOptions(&runtime, &promptOptions);
-  runtime.AutoOpen = !noOpen;
   runtime.Auth = &appAuth;
   runtime.Interactive = trustInteractive;
   // Installed here rather than in harnessConfig because the seam points at the

@@ -1,112 +1,19 @@
 #include "app/auth_flow.h"
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "app/settings.h"
-#include "auth/oauth.h"
 #include "auth/store.h"
 #include "base/thread.h"
-#include "net/browser.h"
 
 void AppAuth_Invalidate(AppAuth* auth) {
   if (auth) AuthTokenCache_Invalidate(&auth->Cache);
 }
 
-static bool AppAuth_CacheToken(AppAuth* auth, StrView provider,
-                               const ResolvedAuthToken& token) {
-  return auth && AuthTokenCache_Store(auth->Mem, &auth->Cache, provider,
-                                      &token);
-}
-
-static bool AppAuth_CacheCredential(AppAuth* auth, StrView provider,
-                                    const Credential& credential) {
-  ResolvedAuthToken token = {};
-  token.Kind = credential.Kind;
-  token.AccountId = credential.AccountId;
-  token.IsFedRamp = credential.IsFedRamp;
-  if (credential.Kind == CredKind::ApiKey) {
-    token.Value = credential.ApiKey;
-  } else if (credential.Kind == CredKind::OAuth) {
-    token.Value = credential.Access;
-    token.ExpiresMs = credential.ExpiresMs;
-  }
-  return AppAuth_CacheToken(auth, provider, token);
-}
-
-static bool AppAuth_HasUsableCache(const AppAuth* auth, StrView provider) {
-  ResolvedAuthToken ignored = {};
+static bool AppAuth_CacheToken(AppAuth* auth, StrView provider, StrView token) {
   return auth &&
-         AuthTokenCache_Get(&auth->Cache, provider, NowMillis(), &ignored);
-}
-
-static ProviderAuth ToProviderAuth(const ResolvedAuthToken& token) {
-  ProviderAuth result = {};
-  result.Token = token.Value;
-  result.AccountId = token.AccountId;
-  result.IsFedRamp = token.IsFedRamp;
-  if (token.Kind == CredKind::ApiKey)
-    result.Kind = ProviderAuthKind::ApiKey;
-  else if (token.Kind == CredKind::OAuth)
-    result.Kind = ProviderAuthKind::OAuth;
-  return result;
-}
-
-static void RunAuthWarmup(void* user) {
-  AuthWarmup* warmup = (AuthWarmup*)user;
-  warmup->Resolved = Auth_ResolveTokenInfo(
-      &warmup->ResultMem, warmup->Path, warmup->Provider, warmup->EnvVar,
-      &warmup->Result, warmup->Abort);
-}
-
-bool StartAuthWarmup(AuthWarmup* warmup, AppAuth* auth,
-                            const ProviderSpec* spec, volatile i32* abort) {
-  if (!warmup || !auth || !spec) return false;
-  *warmup = AuthWarmup{};
-  warmup->Path = auth->Path;
-  warmup->Provider = spec->Id;
-  warmup->EnvVar = spec->ApiKeyEnvVar;
-  warmup->Abort = abort;
-  warmup->ResultMem = ArenaCreate((usize)16 << 20);
-  auth->Warmup = warmup;
-  if (!Thread_Start(&warmup->Worker, RunAuthWarmup, warmup)) {
-    ArenaRelease(&warmup->ResultMem);
-    auth->Warmup = nullptr;
-    return false;
-  }
-  warmup->Started = true;
-  return true;
-}
-
-static void JoinAuthWarmup(AuthWarmup* warmup, AppAuth* auth) {
-  if (!warmup || !warmup->Started || warmup->Joined) return;
-  Thread_Join(&warmup->Worker);
-  warmup->Joined = true;
-  if (auth && warmup->Resolved)
-    AppAuth_CacheToken(auth, warmup->Provider, warmup->Result);
-  ArenaRelease(&warmup->ResultMem);
-  if (auth && auth->Warmup == warmup) auth->Warmup = nullptr;
-}
-
-static void CancelAuthWarmup(AuthWarmup* warmup, AppAuth* auth) {
-  if (!warmup) return;
-  if (warmup->Abort) *warmup->Abort = 1;
-  JoinAuthWarmup(warmup, nullptr);
-  if (auth && auth->Warmup == warmup) {
-    auth->Warmup = nullptr;
-  }
-}
-
-void FinishRuntimeAuthWarmup(InteractiveRuntime* rt) {
-  if (rt && rt->AuthWarmupState)
-    JoinAuthWarmup(rt->AuthWarmupState, rt->Auth);
-}
-
-void CancelRuntimeAuthWarmup(InteractiveRuntime* rt) {
-  if (!rt || !rt->AuthWarmupState) return;
-  CancelAuthWarmup(rt->AuthWarmupState, rt->Auth);
-  rt->AuthWarmupState = nullptr;
+         AuthTokenCache_Store(auth->Mem, &auth->Cache, provider, token);
 }
 
 bool AppResolveAuth(void* user, Arena* arena, StrView provider, volatile i32* abort,
@@ -114,32 +21,24 @@ bool AppResolveAuth(void* user, Arena* arena, StrView provider, volatile i32* ab
   if (out) *out = {};
   if (!out) return false;
   AppAuth* aa = (AppAuth*)user;
-  AuthWarmup* warmup = aa->Warmup;
-  if (warmup && StrView_Eq(warmup->Provider, provider))
-    JoinAuthWarmup(warmup, aa);
-  if (AppAuth_HasUsableCache(aa, provider)) {
-    ResolvedAuthToken cached = {};
-    AuthTokenCache_Get(&aa->Cache, provider, NowMillis(), &cached);
-    *out = ToProviderAuth(cached);
+  if (abort && Atomic_LoadI32(abort)) return false;
+  StrView cached = {};
+  if (AuthTokenCache_Get(&aa->Cache, provider, &cached)) {
+    out->Token = cached;
     return true;
   }
-  AppAuth_Invalidate(aa);
   const ProviderSpec* spec = ProviderRegistry_Find(provider);
-  ResolvedAuthToken resolved = {};
-  if (Auth_ResolveTokenInfo(arena, aa->Path, provider,
-                            spec ? spec->ApiKeyEnvVar : nullptr, &resolved,
-                            abort)) {
-    AppAuth_CacheToken(aa, provider, resolved);
-    if (AppAuth_HasUsableCache(aa, provider)) {
-      ResolvedAuthToken cached = {};
-      AuthTokenCache_Get(&aa->Cache, provider, NowMillis(), &cached);
-      *out = ToProviderAuth(cached);
-    } else {
-      *out = ToProviderAuth(resolved);
-    }
+  StrView token = Auth_ResolveToken(arena, aa->Path, provider,
+                                    spec ? spec->ApiKeyEnvVar : nullptr);
+  if (token.Length) {
+    AppAuth_CacheToken(aa, provider, token);
+    out->Token = token;
     return true;
   }
-  return false;
+  // Local OpenAI-compatible servers authenticate nobody. Succeeding with an
+  // empty token lets the request go out without an Authorization header
+  // instead of failing the prompt on a credential the endpoint would ignore.
+  return spec && spec->Endpoint && spec->Endpoint->AllowAnonymous;
 }
 
 bool ResolvePromptAuth(AgentHarness* harness, volatile i32* abort) {
@@ -157,41 +56,27 @@ bool ResolvePromptAuth(AgentHarness* harness, volatile i32* abort) {
   return true;
 }
 
-static bool ProviderCanLogin(const ProviderSpec* spec) {
-  return spec && OAuth_GetConfig(spec->Id);
-}
-
-static bool ProviderIsSelectable(const ProviderSpec* spec, bool oauthOnly) {
-  return spec && spec->CreateProvider && spec->CreateModel &&
-         (!oauthOnly || ProviderCanLogin(spec));
-}
-
 StrView AuthGuidance(Arena* arena, const ProviderSpec* spec, bool interactive) {
   if (!spec) return SVL("No provider is selected.");
-  bool canLogin = ProviderCanLogin(spec);
   StrBuf b = StrBuf_Make(arena, 192);
   StrBuf_AppendCStr(&b, "No credentials are configured for ");
   StrBuf_Append(&b, spec->Name);
   StrBuf_AppendCStr(&b, " ('");
   StrBuf_Append(&b, spec->Id);
   StrBuf_AppendCStr(&b, "'). ");
-  if (canLogin) {
-    if (interactive) {
-      StrBuf_AppendCStr(&b, "Run `/login` and choose ");
-      StrBuf_Append(&b, spec->Name);
-    } else {
-      StrBuf_AppendCStr(&b, "Run `clank --login ");
-      StrBuf_Append(&b, spec->Id);
-      StrBuf_AppendCStr(&b, "`");
-    }
+  // Interactive `/auth` can take a key directly; the headless path can only
+  // point at the environment.
+  if (interactive) {
+    StrBuf_AppendCStr(&b, "Run `/auth` and choose ");
+    StrBuf_Append(&b, spec->Name);
     if (spec->ApiKeyEnvVar) StrBuf_AppendCStr(&b, " or ");
   }
   if (spec->ApiKeyEnvVar) {
     StrBuf_AppendCStr(&b, "set ");
     StrBuf_AppendCStr(&b, spec->ApiKeyEnvVar);
-  }
-  if (!canLogin && !spec->ApiKeyEnvVar)
+  } else if (!interactive) {
     StrBuf_AppendCStr(&b, "Configure credentials for this provider");
+  }
   StrBuf_AppendCStr(&b, " before sending a prompt.");
   return StrBuf_View(&b);
 }
@@ -252,48 +137,25 @@ RuntimeSelection LoadRuntimeSelection(Arena* arena, StrView settingsPath,
 struct RuntimeProviderChoice {
   RuntimeChoiceStatus Status;
   const ProviderSpec* Spec;
-  StrView Message;
 };
 
-static RuntimeProviderChoice ChooseProvider(InteractiveRuntime* rt, bool oauthOnly) {
+static RuntimeProviderChoice ChooseProvider(InteractiveRuntime* rt) {
   Arena scratch = ArenaCreate((usize)16 << 20);
-  u32 count = 0;
-  for (u32 i = 0; i < ProviderRegistry_Count(); i++) {
-    const ProviderSpec* spec = ProviderRegistry_At(i);
-    if (ProviderIsSelectable(spec, oauthOnly)) count++;
-  }
-
-  if (count == 0) {
-    ArenaRelease(&scratch);
-    return RuntimeProviderChoice{
-        RuntimeChoiceStatus::Failed, nullptr,
-        oauthOnly ? SVL("No registered providers support OAuth login.")
-                  : SVL("No usable model providers are registered.")};
-  }
+  u32 count = ProviderRegistry_Count();
 
   const ProviderSpec** specs = ArenaPushArray(&scratch, const ProviderSpec*, count);
   StrView* options = ArenaPushArray(&scratch, StrView, count);
   u32 initial = 0;
-  u32 at = 0;
-  for (u32 i = 0; i < ProviderRegistry_Count(); i++) {
+  for (u32 i = 0; i < count; i++) {
     const ProviderSpec* spec = ProviderRegistry_At(i);
-    if (!ProviderIsSelectable(spec, oauthOnly)) continue;
-    specs[at] = spec;
-    StrBuf label = StrBuf_Make(&scratch, spec->Name.Length + spec->Id.Length + 8);
-    StrBuf_Append(&label, spec->Name);
-    StrBuf_AppendCStr(&label, " (");
-    StrBuf_Append(&label, spec->Id);
-    StrBuf_AppendChar(&label, ')');
-    options[at] = StrBuf_View(&label);
-    if (rt->Spec && StrView_Eq(rt->Spec->Id, spec->Id)) initial = at;
-    at++;
+    specs[i] = spec;
+    options[i] = ProviderRegistry_Label(&scratch, spec);
+    if (rt->Spec && StrView_Eq(rt->Spec->Id, spec->Id)) initial = i;
   }
 
   u32 selected = 0;
-  StrView title = oauthOnly ? SVL("Choose a provider to log in")
-                            : SVL("Choose a model provider");
-  RuntimeInputResult result =
-      RuntimeSelect(rt, title, options, count, &selected, initial);
+  RuntimeInputResult result = RuntimeSelect(rt, SVL("Choose a model provider"),
+                                            options, count, &selected, initial);
   const ProviderSpec* spec =
       result == RuntimeInputResult::Confirmed ? specs[selected] : nullptr;
   ArenaRelease(&scratch);
@@ -302,128 +164,62 @@ static RuntimeProviderChoice ChooseProvider(InteractiveRuntime* rt, bool oauthOn
                                : result == RuntimeInputResult::Back
                                    ? RuntimeChoiceStatus::Back
                                    : RuntimeChoiceStatus::Cancelled,
-                               spec, StrView{}};
+                               spec};
 }
 
-struct LoginReadyContext {
-  InteractiveRuntime* Runtime;
-  const AppCommandUx* Ux;
-  Arena* Scratch;
-};
+static AppCommandHandlerResult RunApiKeyEntry(InteractiveRuntime* rt,
+                                              const ProviderSpec* spec,
+                                              const AppCommandUx* ux) {
+  if (!spec)
+    return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
+                                   SVL("No provider is selected.")};
 
-static void OnLoginReady(void* user, StrView url) {
-  LoginReadyContext* ready = (LoginReadyContext*)user;
-  RuntimeSetOperationStatus(ready->Runtime, ready->Ux,
-                            SVL("Waiting for browser approval; Ctrl+C cancels."));
+  Arena scratch = ArenaCreate((usize)16 << 20);
+  StrBuf title = StrBuf_Make(&scratch, spec->Name.Length + 24);
+  StrBuf_AppendCStr(&title, "API key for ");
+  StrBuf_Append(&title, spec->Name);
 
-  StrBuf message = StrBuf_Make(ready->Scratch, url.Length + 64);
-  StrBuf_AppendCStr(&message, "Open this URL in your browser to approve access:\n");
-  StrBuf_Append(&message, url);
-  EmitCommandNotice(ready->Ux, StrBuf_View(&message));
-
-  if (ready->Runtime->AutoOpen) {
-    OpenBrowser(url);
-    EmitCommandNotice(ready->Ux, SVL("Opened the authorization URL in your default browser."));
-  }
-}
-
-static AppCommandHandlerResult RunOAuthLogin(InteractiveRuntime* rt, const ProviderSpec* spec,
-                                             const AppCommandUx* ux) {
-  CancelRuntimeAuthWarmup(rt);
-  const OAuthConfig* cfg = spec ? OAuth_GetConfig(spec->Id) : nullptr;
-  if (!cfg)
-    return AppCommandHandlerResult{AppCommandHandlerStatus::Unsupported,
-                                   SVL("OAuth login is unavailable for this provider.")};
-
-  Arena scratch = ArenaCreate((usize)64 << 20);
-  StrBuf label = StrBuf_Make(&scratch, spec->Name.Length + 24);
-  StrBuf_AppendCStr(&label, "Logging in to ");
-  StrBuf_Append(&label, spec->Name);
-  volatile i32* abort = RuntimeBeginOperation(rt, ux, StrBuf_View(&label));
-  RuntimeSetOperationStatus(rt, ux, SVL("Starting the local callback server."));
-
-  OAuthBegin begin = OAuth_BeginAuthCode(&scratch, cfg);
-  OAuthCode code = {};
-  StrBuf error = StrBuf_Make(&scratch, 128);
-  LoginReadyContext ready = {rt, ux, &scratch};
-  if (!OAuth_WaitForCallback(&scratch, cfg, begin.AuthUrl, begin.State, &code,
-                             abort, &error,
-                             OnLoginReady, &ready)) {
-    bool cancelled = (abort && Atomic_LoadI32(abort)) || StrView_Contains(StrBuf_View(&error), "cancelled");
-    AppCommandHandlerResult result = {};
-    if (cancelled) {
-      result.Status = AppCommandHandlerStatus::Cancelled;
-      result.Message = SVL("Login cancelled.");
-    } else {
-      StrBuf message = StrBuf_Make(&scratch, error.Length + 24);
-      StrBuf_AppendCStr(&message, "Login failed: ");
-      StrBuf_Append(&message, StrBuf_View(&error));
-      result.Status = AppCommandHandlerStatus::Failed;
-      result.Message = StrView_Dup(&rt->CommandMem, StrBuf_View(&message));
-    }
-    if (RuntimeEndOperation(rt))
-      result = AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled,
-                                       SVL("Login cancelled.")};
-    ArenaRelease(&scratch);
-    return result;
-  }
-
-  if (abort && Atomic_LoadI32(abort)) {
-    RuntimeEndOperation(rt);
-    ArenaRelease(&scratch);
-    return AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled, SVL("Login cancelled.")};
-  }
-
-  RuntimeSetOperationStatus(rt, ux, SVL("Exchanging the authorization code."));
-  StrView state = code.State.Length ? code.State : begin.State;
-  Credential credential = {};
-  StrBuf_Clear(&error);
-  if (!OAuth_ExchangeCode(&scratch, cfg, code.Code, state, begin.Verifier, &credential, &error,
-                          abort)) {
-    if (abort && Atomic_LoadI32(abort)) {
-      RuntimeEndOperation(rt);
+  StrView entered = {};
+  for (;;) {
+    RuntimeInputResult entry =
+        RuntimeReadText(rt, &scratch, StrBuf_View(&title), SVL("API key"),
+                        StrView{}, &entered);
+    if (entry != RuntimeInputResult::Confirmed) {
       ArenaRelease(&scratch);
-      return AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled, SVL("Login cancelled.")};
+      return AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled,
+                                     SVL("Authentication cancelled.")};
     }
-    StrBuf message = StrBuf_Make(&scratch, error.Length + 24);
-    StrBuf_AppendCStr(&message, "Login failed: ");
-    StrBuf_Append(&message, StrBuf_View(&error));
-    AppCommandHandlerResult result = {AppCommandHandlerStatus::Failed,
-                                      StrView_Dup(&rt->CommandMem, StrBuf_View(&message))};
-    if (RuntimeEndOperation(rt))
-      result = AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled,
-                                       SVL("Login cancelled.")};
-    ArenaRelease(&scratch);
-    return result;
+    entered = TrimAscii(entered);
+    if (entered.Length) break;
+    EmitCommandError(ux, SVL("An API key is required."));
   }
 
-  RuntimeSetOperationStatus(rt, ux, SVL("Saving credentials."));
-  if (!AuthStore_Write(&scratch, rt->AuthPath, cfg->Id, &credential)) {
+  Credential credential = {};
+  credential.ApiKey = entered;
+  if (!AuthStore_Write(&scratch, rt->AuthPath, spec->Id, &credential)) {
     StrBuf message = StrBuf_Make(&scratch, rt->AuthPath.Length + 48);
     StrBuf_AppendCStr(&message, "Failed to save credentials to ");
     StrBuf_Append(&message, rt->AuthPath);
     StrBuf_AppendChar(&message, '.');
-    AppCommandHandlerResult result = {AppCommandHandlerStatus::Failed,
-                                      StrView_Dup(&rt->CommandMem, StrBuf_View(&message))};
-    if (RuntimeEndOperation(rt))
-      result = AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled,
-                                       SVL("Login cancelled.")};
+    AppCommandHandlerResult result = {
+        AppCommandHandlerStatus::Failed,
+        StrView_Dup(&rt->CommandMem, StrBuf_View(&message))};
     ArenaRelease(&scratch);
     return result;
   }
-  AppAuth_CacheCredential(rt->Auth, cfg->Id, credential);
+  AppAuth_CacheToken(rt->Auth, spec->Id, credential.ApiKey);
 
-  StrBuf message = StrBuf_Make(&scratch, spec->Name.Length + rt->AuthPath.Length + 48);
-  StrBuf_AppendCStr(&message, "Logged in to ");
+  // The key itself is never echoed back into the transcript.
+  StrBuf message =
+      StrBuf_Make(&scratch, spec->Name.Length + rt->AuthPath.Length + 48);
+  StrBuf_AppendCStr(&message, "Saved an API key for ");
   StrBuf_Append(&message, spec->Name);
-  StrBuf_AppendCStr(&message, ". Credentials saved to ");
+  StrBuf_AppendCStr(&message, " to ");
   StrBuf_Append(&message, rt->AuthPath);
   StrBuf_AppendChar(&message, '.');
-  AppCommandHandlerResult result = {AppCommandHandlerStatus::Success,
-                                    StrView_Dup(&rt->CommandMem, StrBuf_View(&message))};
-  if (RuntimeEndOperation(rt))
-    result = AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled,
-                                     SVL("Login cancelled.")};
+  AppCommandHandlerResult result = {
+      AppCommandHandlerStatus::Success,
+      StrView_Dup(&rt->CommandMem, StrBuf_View(&message))};
   ArenaRelease(&scratch);
   return result;
 }
@@ -450,14 +246,13 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
   volatile i32* abort = RuntimeBeginOperation(rt, ux, StrBuf_View(&label));
 
   RuntimeSetOperationStatus(rt, ux, SVL("Resolving provider credentials."));
-  FinishRuntimeAuthWarmup(rt);
   ProviderAuth auth = {};
   AppResolveAuth(rt->Auth, &scratch, spec->Id, abort, &auth);
   ProviderModelList live = {};
   if (!(abort && Atomic_LoadI32(abort))) {
     RuntimeSetOperationStatus(rt, ux, SVL("Fetching the provider model catalog."));
     if (spec->ListModels) {
-      live = spec->ListModels(&scratch, auth, abort);
+      live = spec->ListModels(&scratch, spec, auth, abort);
     } else {
       live.Status = ProviderModelListStatus::Unavailable;
       live.Error = SVL("this provider does not support live model discovery");
@@ -572,7 +367,7 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
         }
         entered = TrimAscii(entered);
         if (entered.Length) {
-          chosen = spec->CreateModel(rt->Mem, entered);
+          chosen = spec->CreateModel(rt->Mem, spec, entered);
           break;
         }
         EmitCommandError(ux, SVL("A model ID is required."));
@@ -664,7 +459,6 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
 }
 
 bool RuntimeCheckAuth(InteractiveRuntime* rt, const AppCommandUx* ux, bool asError) {
- FinishRuntimeAuthWarmup(rt);
   volatile i32* abort =
       rt->TuiView ? Tui_OperationAbort(rt->TuiView) : &g_abort;
   if (abort && Atomic_LoadI32(abort)) return false;
@@ -706,7 +500,7 @@ bool ActivateRuntimeSelection(InteractiveRuntime* rt, const ProviderSpec* spec,
   preference = Model_NormalizeRequestPreference(&model, preference);
   ModelRequestProfile activeProfile =
       Model_ResolveRequestProfile(&model, preference);
-  Provider provider = spec->CreateProvider(rt->Mem);
+  Provider provider = spec->CreateProvider(rt->Mem, spec);
   SessionResult changed =
       AgentHarness_SetModel(rt->Harness, model, provider, activeProfile);
   if (!SessionResult_IsOk(changed)) {
@@ -759,15 +553,12 @@ StrView SelectionMessage(InteractiveRuntime* rt, const char* prefix) {
 AppCommandHandlerResult HandleModelCommand(void* user, const AppCommandUx* ux) {
   InteractiveRuntime* rt = (InteractiveRuntime*)user;
   for (;;) {
-    RuntimeProviderChoice provider = ChooseProvider(rt, false);
+    RuntimeProviderChoice provider = ChooseProvider(rt);
     if (provider.Status == RuntimeChoiceStatus::Back)
       return ReturnToCommandPalette(rt);
     if (provider.Status == RuntimeChoiceStatus::Cancelled)
       return AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled,
                                      StrView{}};
-    if (provider.Status == RuntimeChoiceStatus::Failed)
-      return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
-                                     provider.Message};
 
     RuntimeModelChoice model = ChooseModelForProvider(rt, provider.Spec, ux);
     if (model.Status == RuntimeChoiceStatus::Back) continue;
@@ -788,23 +579,20 @@ AppCommandHandlerResult HandleModelCommand(void* user, const AppCommandUx* ux) {
   }
 }
 
-AppCommandHandlerResult HandleLoginCommand(void* user, const AppCommandUx* ux) {
+AppCommandHandlerResult HandleAuthCommand(void* user, const AppCommandUx* ux) {
   InteractiveRuntime* rt = (InteractiveRuntime*)user;
   const ProviderSpec* authenticated = nullptr;
   for (;;) {
-    RuntimeProviderChoice provider = ChooseProvider(rt, true);
+    RuntimeProviderChoice provider = ChooseProvider(rt);
     if (provider.Status == RuntimeChoiceStatus::Back)
       return ReturnToCommandPalette(rt);
     if (provider.Status == RuntimeChoiceStatus::Cancelled)
       return AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled,
                                      StrView{}};
-    if (provider.Status == RuntimeChoiceStatus::Failed)
-      return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
-                                     provider.Message};
 
     if (authenticated != provider.Spec) {
-      AppCommandHandlerResult login = RunOAuthLogin(rt, provider.Spec, ux);
-      if (login.Status != AppCommandHandlerStatus::Success) return login;
+      AppCommandHandlerResult keyEntry = RunApiKeyEntry(rt, provider.Spec, ux);
+      if (keyEntry.Status != AppCommandHandlerStatus::Success) return keyEntry;
       authenticated = provider.Spec;
     }
 
@@ -813,14 +601,14 @@ AppCommandHandlerResult HandleLoginCommand(void* user, const AppCommandUx* ux) {
     if (model.Status != RuntimeChoiceStatus::Selected) {
       if (model.Status == RuntimeChoiceStatus::Failed && model.Message.Length)
         EmitCommandError(ux, model.Message);
-      Model fallback =
-          provider.Spec->CreateModel(rt->Mem, provider.Spec->DefaultModel);
+      Model fallback = provider.Spec->CreateModel(
+          rt->Mem, provider.Spec, provider.Spec->DefaultModel);
       bool persisted = false;
       if (!ActivateRuntimeSelection(rt, provider.Spec, fallback,
                                     ModelRequestProfile{}, ux, &persisted))
         return AppCommandHandlerResult{
             AppCommandHandlerStatus::Failed,
-            SVL("Login succeeded, but the provider could not be activated.")};
+            SVL("The API key was saved, but the provider could not be activated.")};
 
       StrBuf notice =
           StrBuf_Make(&rt->CommandMem, provider.Spec->Name.Length +
@@ -840,45 +628,12 @@ AppCommandHandlerResult HandleLoginCommand(void* user, const AppCommandUx* ux) {
                                          model.Profile, ux)) {
       return AppCommandHandlerResult{
           AppCommandHandlerStatus::Failed,
-          SVL("Login succeeded, but the selected model could not be activated.")};
+          SVL("The API key was saved, but the selected model could not be activated.")};
     }
 
     return AppCommandHandlerResult{AppCommandHandlerStatus::Success,
-                                   SelectionMessage(rt, "Logged in; using ")};
+                                   SelectionMessage(rt, "Authenticated; using ")};
   }
-}
-
-static void ReportStandaloneCommandResult(const AppCommandUx* ux,
-                                          AppCommandHandlerResult result) {
-  if (result.Status == AppCommandHandlerStatus::Success ||
-      result.Status == AppCommandHandlerStatus::Cancelled)
-    EmitCommandNotice(ux, result.Message);
-  else
-    EmitCommandError(ux, result.Message);
-}
-
-int RunCommandLineLogin(Arena* arena, StrView authPath, const char* providerId,
-                               bool autoOpen) {
-  AppCommandUx ux = {nullptr, PlainCommandNotice, PlainCommandError};
-  const ProviderSpec* spec = ProviderRegistry_Find(SV(providerId));
-  if (!ProviderCanLogin(spec)) {
-    StrBuf message = StrBuf_Make(arena, (u32)strlen(providerId) + 48);
-    StrBuf_AppendCStr(&message, "No OAuth login is configured for provider '");
-    StrBuf_AppendCStr(&message, providerId);
-    StrBuf_AppendCStr(&message, "'.");
-    EmitCommandError(&ux, StrBuf_View(&message));
-    return 1;
-  }
-
-  InteractiveRuntime runtime = {};
-  InteractiveRuntime_Init(&runtime, arena);
-  runtime.AuthPath = authPath;
-  runtime.Spec = spec;
-  runtime.AutoOpen = autoOpen;
-  AppCommandHandlerResult result = RunOAuthLogin(&runtime, spec, &ux);
-  ReportStandaloneCommandResult(&ux, result);
-  InteractiveRuntime_Release(&runtime);
-  return result.Status == AppCommandHandlerStatus::Success ? 0 : 1;
 }
 
 int RunCommandLineLogout(Arena* arena, StrView authPath, const char* providerId) {

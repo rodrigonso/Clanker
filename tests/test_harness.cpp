@@ -603,11 +603,11 @@ bool UsageRetryProviderStream(void* context, Arena* arena, const Model* model, c
   if (state->Calls++ == 0) {
     out->Stop = StopReason::Error;
     out->ErrorMessage = SVL("provider overloaded; please retry");
-    out->Use = Usage{3, 2, 1, 0, 0, 9};
+    out->Use = Usage{3, 2, 1, 0, 9};
     return false;
   }
   out->Stop = StopReason::Stop;
-  out->Use = Usage{5, 4, 2, 1, 3, 0};
+  out->Use = Usage{5, 4, 2, 3, 0};
   Array_Push(&out->Content, Content_Text(SVL("completed")));
   return true;
 }
@@ -945,9 +945,9 @@ static void TestHarnessReplayAndIncremental() {
     SessionInfo info = {};
     CHECK(SessionResult_IsOk(
         SessionMetadata_Build(&arena, records.Data, records.Count, &build, &info)));
-    CHECK_ALL(providerState.Calls == 2, info.AssistantMessageCount == 1, info.TotalTokens == 12,
+    CHECK_ALL(providerState.Calls == 2, info.AssistantMessageCount == 1, info.TotalTokens == 11,
               info.InputTokens == 5, info.OutputTokens == 4, info.CacheReadTokens == 2,
-              info.CacheWriteTokens == 1, info.ReasoningTokens == 3);
+              info.ReasoningTokens == 3);
     CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
     repository.Close(repository.Ctx);
     ArenaRelease(&arena);

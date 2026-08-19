@@ -802,7 +802,7 @@ AppCommandHandlers RuntimeCommandHandlers(InteractiveRuntime* rt) {
   bool selectorsAvailable = rt->TuiView || Term_IsInteractive();
   if (selectorsAvailable) handlers.Trust = HandleTrustCommand;
   if (selectorsAvailable) {
-    handlers.Login = HandleLoginCommand;
+    handlers.Auth = HandleAuthCommand;
     handlers.Model = HandleModelCommand;
   }
   return handlers;

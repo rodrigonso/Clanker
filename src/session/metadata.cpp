@@ -66,7 +66,6 @@ u64 NormalizedTokens(const Usage* usage) {
   if (usage->TotalTokens) return usage->TotalTokens;
   u64 total = usage->Input;
   total = AddSaturated(total, usage->CacheRead);
-  total = AddSaturated(total, usage->CacheWrite);
   return AddSaturated(total, usage->Output);
 }
 
@@ -75,8 +74,6 @@ void AddUsage(SessionInfo* info, const Usage* usage) {
   info->OutputTokens = AddSaturated(info->OutputTokens, usage->Output);
   info->CacheReadTokens =
       AddSaturated(info->CacheReadTokens, usage->CacheRead);
-  info->CacheWriteTokens =
-      AddSaturated(info->CacheWriteTokens, usage->CacheWrite);
   info->ReasoningTokens =
       AddSaturated(info->ReasoningTokens, usage->Reasoning);
   info->TotalTokens =

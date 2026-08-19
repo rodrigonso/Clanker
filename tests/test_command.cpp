@@ -4,7 +4,7 @@
 namespace {
 
 struct FakeCommandContext {
-  int LoginCalls;
+  int AuthCalls;
   int ModelCalls;
   int SessionCalls;
   int NameCalls;
@@ -18,7 +18,7 @@ struct FakeCommandContext {
   int TemplateCalls;
   int Notices;
   int Errors;
-  AppCommandHandlerResult LoginResult;
+  AppCommandHandlerResult AuthResult;
   AppCommandHandlerResult ModelResult;
   AppCommandHandlerResult SkillResult;
   StrView LastNotice;
@@ -42,11 +42,11 @@ void Error(void* user, StrView message) {
   ctx->LastError = message;
 }
 
-AppCommandHandlerResult Login(void* user, const AppCommandUx* ux) {
+AppCommandHandlerResult Auth(void* user, const AppCommandUx* ux) {
   (void)ux;
   FakeCommandContext* ctx = (FakeCommandContext*)user;
-  ctx->LoginCalls++;
-  return ctx->LoginResult;
+  ctx->AuthCalls++;
+  return ctx->AuthResult;
 }
 
 AppCommandHandlerResult Model(void* user, const AppCommandUx* ux) {
@@ -153,8 +153,9 @@ bool PromptTemplate(void* user, const AppCommandUx* ux, StrView name,
 void TestParse() {
   CHECK_ALL(AppCommandSpec_Count() == 17,
             AppCommandSpec_At(AppCommandSpec_Count()) == nullptr,
-            AppCommandSpec_At(0)->Kind == AppCommandKind::Login,
-            StrView_EqCStr(AppCommandSpec_At(0)->Name, "login"),
+            AppCommandSpec_At(0)->Kind == AppCommandKind::Auth,
+            StrView_EqCStr(AppCommandSpec_At(0)->Name, "auth"),
+            AppCommandSpec_At(0)->Alias.Length == 0,
             AppCommandSpec_At(0)->Arguments ==
                 AppCommandArgumentPolicy::None,
             AppCommandSpec_At(13)->Kind == AppCommandKind::Debug,
@@ -184,9 +185,12 @@ void TestParse() {
   AppCommand plain = AppCommand_Parse(SVL("  hello  "));
   CHECK(plain.Kind == AppCommandKind::NotCommand);
 
-  AppCommand login = AppCommand_Parse(SVL("\t /login \r\n"));
-  CHECK(login.Kind == AppCommandKind::Login);
-  CHECK(login.Arguments.Length == 0);
+  AppCommand auth = AppCommand_Parse(SVL("\t /auth \r\n"));
+  CHECK(auth.Kind == AppCommandKind::Auth);
+  CHECK(auth.Arguments.Length == 0);
+
+  AppCommand removed = AppCommand_Parse(SVL("/login"));
+  CHECK(removed.Kind == AppCommandKind::Unknown);
 
   struct ParseCase {
     StrView Input;
@@ -256,13 +260,13 @@ void TestParse() {
 
 void TestDispatch() {
   FakeCommandContext ctx = {};
-  ctx.LoginResult = {AppCommandHandlerStatus::Success, SVL("Logged in.")};
+  ctx.AuthResult = {AppCommandHandlerStatus::Success, SVL("Authenticated.")};
   ctx.ModelResult = {AppCommandHandlerStatus::Success, SVL("Model selected.")};
   ctx.SkillResult = {AppCommandHandlerStatus::Success, StrView{}};
   AppCommandUx ux = {&ctx, Notice, Error};
   AppCommandHandlers handlers = {};
   handlers.User = &ctx;
-  handlers.Login = Login;
+  handlers.Auth = Auth;
   handlers.Model = Model;
   handlers.Session = Session;
   handlers.Name = Name;
@@ -277,10 +281,10 @@ void TestDispatch() {
   AppCommandDispatchResult plain = AppCommand_Dispatch(SVL("ordinary prompt"), &handlers, &ux);
   CHECK_ALL(!plain.Handled, plain.Action == AppLoopAction::Continue);
 
-  AppCommandDispatchResult login = AppCommand_Dispatch(SVL(" /login "), &handlers, &ux);
-  CHECK_ALL(login.Handled && login.Action == AppLoopAction::Continue,
-            ctx.LoginCalls == 1 && ctx.ModelCalls == 0,
-            ctx.Notices == 1 && StrView_EqCStr(ctx.LastNotice, "Logged in."));
+  AppCommandDispatchResult auth = AppCommand_Dispatch(SVL(" /auth "), &handlers, &ux);
+  CHECK_ALL(auth.Handled && auth.Action == AppLoopAction::Continue,
+            ctx.AuthCalls == 1 && ctx.ModelCalls == 0,
+            ctx.Notices == 1 && StrView_EqCStr(ctx.LastNotice, "Authenticated."));
 
   AppCommandDispatchResult model = AppCommand_Dispatch(SVL("/model"), &handlers, &ux);
   CHECK_ALL(model.Handled && model.Action == AppLoopAction::Continue, ctx.ModelCalls == 1,
@@ -335,15 +339,15 @@ void TestDispatch() {
   AppCommand_Dispatch(SVL("/rounded"), &handlers, &ux);
   CHECK_ALL(ctx.RoundedCalls == 2, ctx.LastArguments.Length == 0);
 
-  int calls = ctx.LoginCalls + ctx.ModelCalls;
-  AppCommandDispatchResult args = AppCommand_Dispatch(SVL("/login anthropic"), &handlers, &ux);
+  int calls = ctx.AuthCalls + ctx.ModelCalls;
+  AppCommandDispatchResult args = AppCommand_Dispatch(SVL("/auth anthropic"), &handlers, &ux);
   CHECK_ALL(args.Handled && args.Action == AppLoopAction::Continue,
-            ctx.LoginCalls + ctx.ModelCalls == calls,
-            ctx.Errors == 1 && StrView_EqCStr(ctx.LastError, "Usage: /login"));
+            ctx.AuthCalls + ctx.ModelCalls == calls,
+            ctx.Errors == 1 && StrView_EqCStr(ctx.LastError, "Usage: /auth"));
 
   AppCommandDispatchResult modelArgs = AppCommand_Dispatch(SVL("/model claude-test"), &handlers, &ux);
   CHECK_ALL(modelArgs.Handled && modelArgs.Action == AppLoopAction::Continue,
-            ctx.LoginCalls + ctx.ModelCalls == calls,
+            ctx.AuthCalls + ctx.ModelCalls == calls,
             ctx.Errors == 2 && StrView_EqCStr(ctx.LastError, "Usage: /model"));
 
   AppCommandDispatchResult clearArgs = AppCommand_Dispatch(SVL("/clear now"), &handlers, &ux);
@@ -427,19 +431,19 @@ void TestHandlerOutcomes() {
   AppCommandUx ux = {&ctx, Notice, Error};
   AppCommandHandlers handlers = {};
   handlers.User = &ctx;
-  handlers.Login = Login;
+  handlers.Auth = Auth;
   handlers.Model = Model;
 
-  ctx.LoginResult = {AppCommandHandlerStatus::Cancelled, StrView{}};
-  AppCommand_Dispatch(SVL("/login"), &handlers, &ux);
-  CHECK(ctx.Notices == 1 && StrView_EqCStr(ctx.LastNotice, "Login cancelled."));
+  ctx.AuthResult = {AppCommandHandlerStatus::Cancelled, StrView{}};
+  AppCommand_Dispatch(SVL("/auth"), &handlers, &ux);
+  CHECK(ctx.Notices == 1 && StrView_EqCStr(ctx.LastNotice, "Authentication cancelled."));
 
   ctx.ModelResult = {AppCommandHandlerStatus::Failed, SVL("Discovery failed.")};
   AppCommand_Dispatch(SVL("/model"), &handlers, &ux);
   CHECK(ctx.Errors == 1 && StrView_EqCStr(ctx.LastError, "Discovery failed."));
 
   AppCommandHandlers noHandlers = {};
-  AppCommand_Dispatch(SVL("/login"), &noHandlers, &ux);
+  AppCommand_Dispatch(SVL("/auth"), &noHandlers, &ux);
   CHECK(ctx.Errors == 2 && StrView_Contains(ctx.LastError, "unavailable in this mode"));
   AppCommand_Dispatch(SVL("/model"), &noHandlers, &ux);
   CHECK(ctx.Errors == 3 && StrView_Contains(ctx.LastError, "unavailable in this mode"));

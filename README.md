@@ -18,8 +18,8 @@ a specific upstream measurement — pi publishes no memory numbers.
 
 ## What it is
 
-A runnable Clank agent: the agent loop + native Anthropic Messages and OpenAI
-Responses providers (HTTP/SSE) + `read`, `write`, `edit`, `ls`, `find`, `grep`,
+A runnable Clank agent: the agent loop + an OpenAI-compatible Chat Completions
+provider (HTTP/SSE) + `read`, `write`, `edit`, `ls`, `find`, `grep`,
 `shell`, and `ask_user` tools + a streaming REPL.
 
 ```
@@ -27,21 +27,20 @@ src/
   base/    Arena (cross-platform reserve/commit), Array<T>, UTF-8 Str/StrBuf,
            FFI fastfail, peak-RSS reporter   (caboose conventions, no C++ std)
   json/    arena DOM parser + escaping writer (hand-rolled, no deps)
-  crypto/  SHA-256, base64url, secure random, PKCE (no deps)
-  llm/     data model, Anthropic Messages and OpenAI Responses
-           protocols (request build + SSE parse), retry policy, model registry
-  net/     streaming HTTP + non-streaming fetch over libcurl; loopback OAuth
-           callback server + browser opener (no deps beyond OS sockets)
-  auth/    credentials + generic OAuth (PKCE flow, callback capture, store,
-           refresh, resolve)
+  crypto/  base64, secure random (no deps)
+  llm/     data model, OpenAI-compatible Chat Completions protocol
+           (request build + SSE parse), retry policy, model registry
+  net/     streaming HTTP + non-streaming fetch over libcurl
+  auth/    credential store (api keys) + resolution/caching
   session/ append-only v2 message tree, reducer, memory + JSONL repositories
   agent/   incremental AgentHarness, in-memory queues, hooks, events, compaction
   tools/   read/write/edit/ls/find/grep/shell/ask_user, direct/shell process
            exec, ripgrep discovery, fs/glob/diff/truncate/filelock infra
   term/    full-screen TUI: raw-mode terminal, key decoder, differential
            renderer, markdown, transcript model, multi-line editor, controller
-  app/     CLI entry + durable session startup + TUI/plain REPL + login flow +
-           external lifecycle hooks (hooks.json config + dispatch runner)
+  app/     CLI entry + durable session startup + TUI/plain REPL + credential
+           resolution + external lifecycle hooks (hooks.json config + dispatch
+           runner)
 tests/     single CLI test harness (suite selection via args; offline by default)
 ```
 
@@ -84,9 +83,11 @@ tests/     single CLI test harness (suite selection via args; offline by default
   the same checkpoints as the in-memory queues. Overrides are run-scoped and
   never touch the config or the session tree; a failing hook surfaces as a
   typed `HookError`.
-- **Providers are reimplemented wire protocols**, not vendor SDKs. Anthropic
-  Messages and OpenAI Responses request builders and SSE parsers are tested
-  against recorded fixtures offline.
+- **One reimplemented wire protocol**, not vendor SDKs. Clank speaks
+  `POST /v1/chat/completions` and nothing else; every provider is a row of
+  endpoint data rather than a protocol implementation. The request builder and
+  SSE parser are tested against recorded fixtures offline. See
+  [Providers](#providers).
 - **External lifecycle hooks** let an editor or supervisor follow a run without
   linking against Clank. See [Lifecycle hooks](#lifecycle-hooks).
 
@@ -144,9 +145,8 @@ ctest --preset vs2026-debug
 ## Run
 
 ```sh
-./build/clank --login anthropic     # OAuth (Claude Pro/Max), or set ANTHROPIC_API_KEY
-./build/clank --login openai        # OAuth (ChatGPT subscription), or set OPENAI_API_KEY
-./build/clank                        # full-screen TUI; login can also happen inside it
+./build/clank -p "hi"                # set OPENAI_API_KEY (or ANTHROPIC_API_KEY)
+./build/clank                        # full-screen TUI; /model picks provider + model
 ./build/clank -m claude-sonnet-4-6 -p "summarize README.md"
 ./build/clank --mode json -p "summarize README.md"   # NDJSON event stream
 ./build/clank --continue             # most recent session for this project
@@ -651,11 +651,11 @@ everywhere.
 When stdin/stdout isn't a TTY (pipes, redirected) or with `-p`, it falls back to
 a plain line renderer. Plain and piped output write provider deltas immediately
 without display pacing. Session commands remain available; interactive
-selectors such as `/login` and `/model` require a TTY.
+selectors such as `/auth` and `/model` require a TTY.
 
 Interactive commands:
 
-- `/login` — choose an OAuth-capable provider, authenticate, then choose a model.
+- `/auth` — store an API key for a provider, then choose a model.
 - `/model` — choose a provider and a live-discovered, fallback, or manual model
   ID, then choose the effort and context tier when that model exposes those
   controls. Fixed context windows are displayed without an unnecessary prompt.
@@ -706,7 +706,7 @@ beside the log holds that session's other artifacts, currently the `shell`
 tool's output-overflow logs; it is created only when something needs it.
 Unreadable session files are reported and skipped during
 browsing/continuation. Interactive
-mode may start without credentials and blocks prompts with `/login` guidance;
+mode may start without credentials and blocks prompts with `/auth` guidance;
 `-p` remains fail-fast.
 
 Set `CLANK_PRINT_MEM=1` to print peak RSS at exit.
@@ -733,37 +733,69 @@ The state is per-run and always starts off — nothing about it is written to
 `/rounded off` uses `┌ ┐ └ ┘` and `◼`/`◻`. The choice is stored as `"rounded"`
 in `~/.clank/settings.json`; `/reload` applies edits made to the file.
 
+## Providers
+
+Clank speaks exactly one wire protocol: OpenAI-compatible Chat Completions
+(`POST <base>/v1/chat/completions`, SSE `choices[].delta` frames). A provider is
+a row in `src/app/provider_registry.cpp` carrying an ID, a default model, an
+API-key env var, and a `ChatEndpoint` — a base URL, a base-URL override env var,
+and an optional table of known-model metadata. Adding a vendor is adding a row.
+
+| Provider | Default base URL | API key env | Base URL env |
+| --- | --- | --- | --- |
+| `openai` | `https://api.openai.com` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
+| `anthropic` | `https://api.anthropic.com` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
+| `openai-compat` | `http://localhost:11434` | `OPENAI_COMPAT_API_KEY` | `OPENAI_COMPAT_BASE_URL` |
+
+`openai-compat` is the escape hatch for anything else that implements the shape
+— OpenRouter, Groq, Together, DeepSeek, Fireworks, vLLM, llama.cpp, LM Studio,
+Ollama — and defaults to Ollama's local address. It is the one provider marked
+anonymous: a missing credential is not an error and no `Authorization` header is
+sent, so a local model works with nothing configured.
+
+```sh
+OPENAI_COMPAT_BASE_URL=https://openrouter.ai/api/v1 \
+OPENAI_COMPAT_API_KEY=sk-or-... \
+  ./build/clank -m moonshotai/kimi-k2 -p "summarize README.md"
+```
+
+A base URL that already ends in `/v1` is not given a second one, which is how
+aggregators and local servers usually publish their address. `/model` discovers
+live models from `GET <base>/v1/models`, skips IDs that name a
+non-conversational modality (embeddings, audio, image, moderation), and merges
+the result with the provider's known-model table so context windows and effort
+support survive discovery.
+
+Deliberate limits of the portable protocol:
+
+- **No OAuth.** Subscription tokens (Claude Pro/Max, ChatGPT) are issued for
+  vendor-native endpoints — Anthropic's `/v1/messages` and ChatGPT's Codex
+  backend — which this build does not speak. API keys are the only credential:
+  `/auth` stores one, and there is no browser flow.
+- **No reasoning round-trip.** Chat Completions standardizes no way to return
+  thinking to the server, so thinking blocks are shown and stored but never
+  resent. `reasoning_content` (DeepSeek, vLLM) and `reasoning` (OpenRouter) are
+  read on output only.
+- **Portable effort only.** `reasoning_effort` is clamped to `low`/`medium`/
+  `high`; higher local tiers still ask for maximum reasoning, just in wording
+  every server accepts.
+- **Anthropic through the compatibility endpoint** exposes neither extended
+  thinking nor the 1M-token context beta, so neither is advertised for those
+  models, and the provider picker says so before you pick the row.
+
 ## Authentication
 
-Two credential types, stored in `~/.clank/auth.json` (atomic writes,
-restricted perms). The resolved token and OAuth expiry are cached in the
-running app; expiry, login, provider changes, and `/reload` invalidate or
-replace the cache so OAuth refresh still works mid-session.
+Credentials are stored in `~/.clank/auth.json` (atomic writes, restricted
+perms). The resolved token is cached in the running app; storing a key, provider
+changes, and `/reload` invalidate or replace the cache.
 
-- **API key** — set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`, or store a key in
-  `auth.json`.
-- **OAuth (subscription)** — `clank --login anthropic` runs an
-  authorization-code + PKCE flow: it opens your browser to approve access and a
-  local callback server on `http://localhost:53692/callback` captures the
-  redirect automatically (no copy/paste). The browser shows a success page; the
-  access/refresh tokens are saved and auto-refreshed. Pass `--no-open` to print
-  the URL instead of launching a browser. `clank --login openai` uses the same
-  browser flow on OpenAI's callback port for a ChatGPT subscription.
-  Interactive `/login` supports both providers. `--logout <provider>` removes
-  credentials.
+- **API key** — run `/auth` in the TUI, set the provider's env var
+  (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_COMPAT_API_KEY`), or store a
+  key in `auth.json`.
+- **No credential** — only `openai-compat`, whose endpoint is assumed local.
 
-OpenAI API-key requests use the public Responses API. ChatGPT subscription
-requests use the backend protocol implemented by OpenAI's official Codex
-client. That OAuth/backend surface is not a stable public API, so it is isolated
-from the public API path and covered by separate fixtures.
-
-The OAuth flow/storage is **provider-generic** (`src/auth/`): a config table
-(`OAuthConfig`) plus generic PKCE/exchange/refresh. Only how the token is applied to a request is per-provider. Anthropic OAuth uses
-the Claude subscription endpoint conventions; OpenAI OAuth uses the ChatGPT
-Responses backend conventions, including the account ID carried by the access
-token.
-
-Resolution priority: stored api_key → stored OAuth (refresh) → env var.
+Resolution priority: stored api_key → env var. `--logout <provider>` removes
+credentials.
 
 ## Test
 
@@ -790,10 +822,10 @@ Adding a suite is a new `tests/test_*.cpp`, a declaration in `tests/tests.h`, an
 one row in the `kSuites` table in `tests/test_main.cpp`.
 
 The default run is network-free and key-free: the loop runs against the
-scripted provider in `tests/script_provider.h`, the Anthropic SSE parser against a recorded fixture, the OAuth module
-against fixtures, the callback server against an in-process loopback socket, and
-the TUI via pure units (key decoder, differential-renderer diff, markdown,
-line-wrapping, the multi-line editor) plus a headless controller test driving the
+scripted provider in `tests/script_provider.h`, the chat-completions request
+builder and SSE parser against recorded fixtures, and the TUI via pure units
+(key decoder, differential-renderer diff, markdown, line-wrapping, the
+multi-line editor) plus a headless controller test driving the
 event→transcript mapping. Live full-screen rendering is verified manually.
 
 ## JSON mode
@@ -837,10 +869,10 @@ This is the small clean core.
 
 Deliberately out of scope for now (the structure leaves seams for them):
 
-- Additional OpenAI-compatible or vendor-specific providers.
+- Vendor-native protocols (Anthropic Messages, OpenAI Responses) and the
+  subscription OAuth flows that depend on them.
 - A bidirectional RPC mode. `-p` with `--mode text|json` is the non-interactive
   surface; there is no stdin-driven protocol yet.
-- Device-code OAuth (e.g. GitHub Copilot) — the loopback callback flow is done.
 - TUI niceties: visual-row (vs logical-line) Up/Down, syntax highlighting,
   images, undo. The full-screen differential TUI itself is done.
 - Skills packages (`pi install`-style distribution), general extensions, and

@@ -128,7 +128,6 @@ SessionResult AgentRunState_Apply(Arena* arena, AgentRunState* run,
     run->ModelInfo.Id = StrView_Dup(arena, update->ModelInfo.Id);
     run->ModelInfo.Name = StrView_Dup(arena, update->ModelInfo.Name);
     run->ModelInfo.Provider = StrView_Dup(arena, update->ModelInfo.Provider);
-    run->ModelInfo.Api = StrView_Dup(arena, update->ModelInfo.Api);
     run->ModelInfo.BaseUrl = StrView_Dup(arena, update->ModelInfo.BaseUrl);
   }
   if (update->HasProfile) {

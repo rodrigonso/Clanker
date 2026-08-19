@@ -64,7 +64,7 @@ void TuiPerf_AssistantDelta(TuiPerf* p, u64 nowUs) {
 }
 
 void TuiPerf_TurnMessageEnded(TuiPerf* p, Usage use, u64 nowUs) {
-  p->LastTokens = {use.Input, use.Output, use.CacheRead, use.CacheWrite};
+  p->LastTokens = {use.Input, use.Output, use.CacheRead};
   if (!p->TurnStartUs) return;
   p->LastTurnUs = SaturatingElapsed(p->TurnStartUs, nowUs);
   p->TurnStartUs = 0;
@@ -231,12 +231,10 @@ void BuildLines(const TuiPerf* p, OverlayBuilder* b) {
   Text(b, " out");
   EndLine(b);
 
-  if (p->LastTokens.CacheRead || p->LastTokens.CacheWrite) {
+  if (p->LastTokens.CacheRead) {
     BeginLine(b, "cache");
     Num(b, p->LastTokens.CacheRead);
-    Text(b, " r  ");
-    Num(b, p->LastTokens.CacheWrite);
-    Text(b, " w");
+    Text(b, " r");
     EndLine(b);
   }
 
@@ -282,8 +280,7 @@ void BuildDebugOverlayComponent(Tui* t, u16 cols, u16 rows, u64 nowMs) {
   if (!t->Perf.Visible) return;
 
   u8 lineCount = 6;
-  if (t->Perf.LastTokens.CacheRead || t->Perf.LastTokens.CacheWrite)
-    lineCount++;
+  if (t->Perf.LastTokens.CacheRead) lineCount++;
   if (t->Perf.LastToolLength) lineCount++;
   if (t->Perf.DroppedEvents) lineCount++;
   u16 panelW = (u16)(kOverlayInnerWidth + 4);

@@ -53,14 +53,12 @@ static Message AssistantToolMessage(Arena* arena) {
   message.Use.Input = 10;
   message.Use.Output = 2;
   message.Use.CacheRead = 3;
-  message.Use.CacheWrite = 4;
   message.Use.Reasoning = 1;
   message.Model = SVL("claude-test");
   message.Provider = SVL("anthropic");
   Array_Push(&message.Content, Content_Text(SVL("checking")));
   Array_Push(&message.Content,
              Content_ToolCall(SVL("call-1"), SVL("read"), SVL("{\"path\":\"a.txt\"}")));
-  message.Content.Data[1].Signature = SVL("fc-item-1");
   return message;
 }
 
@@ -107,21 +105,7 @@ static void TestRecordCodec(Arena* arena) {
             decoded.MessageEntry.Value.Use.Input == 10,
             decoded.MessageEntry.Value.Content.Count == 2,
             StrView_EqCStr(decoded.MessageEntry.Value.Content.Data[1].ToolName, "read"),
-            StrView_EqCStr(decoded.MessageEntry.Value.Content.Data[1].Signature,
-                           "fc-item-1"),
             StrView_EqCStr(decoded.MessageEntry.Value.Model, "claude-test"));
-
-  message.MessageEntry.Value.Content.Data[1].Signature = {};
-  StrBuf legacyToolCall = StrBuf_Make(arena, 512);
-  CHECK(SessionResult_IsOk(
-      SessionRecord_Encode(&legacyToolCall, &message)));
-  CHECK(!StrView_Contains(StrBuf_View(&legacyToolCall), "\"signature\":\"fc-item-1\""));
-  CHECK(SessionResult_IsOk(SessionRecord_Decode(
-      arena, StrBuf_View(&legacyToolCall), &decoded)));
-  CHECK_ALL(
-      decoded.MessageEntry.Value.Content.Count == 2,
-      decoded.MessageEntry.Value.Content.Data[1].Signature.Length == 0);
-  message.MessageEntry.Value.Content.Data[1].Signature = SVL("fc-item-1");
 
   message.MessageEntry.Value.Content.Data[1].ToolArgsJson = SVL("not-json");
   StrBuf invalidArguments = StrBuf_Make(arena, 512);
@@ -138,6 +122,28 @@ static void TestRecordCodec(Arena* arena) {
   StrBuf_AppendCStr(&trailing, " trailing");
   CHECK(SessionRecord_Decode(arena, StrBuf_View(&trailing), &decoded).Status ==
         SessionStatus::Corrupt);
+
+  // A record written before the vendor-native protocols were removed carries
+  // `signature`, `redacted`, and `cacheWrite`. Those fields are gone, but the
+  // extra keys must not stop an existing session log from loading.
+  const char* preMigration =
+      "{\"schemaVersion\":2,\"sessionId\":\"AQIDBAUGBwgJCgsMDQ4PEA\",\"seq\":2,"
+      "\"entryId\":\"FBUWFxgZGhscHR4fICEiIw\",\"type\":\"message\","
+      "\"createdAt\":1700000000002,\"payload\":{\"parentId\":"
+      "\"AQIDBAUGBwgJCgsMDQ4PEA\",\"message\":{\"role\":\"assistant\","
+      "\"content\":[{\"kind\":\"text\",\"text\":\"checking\",\"signature\":\"\"},"
+      "{\"kind\":\"thinking\",\"text\":\"pondering\",\"signature\":\"sig-1\","
+      "\"redacted\":false},{\"kind\":\"tool_call\",\"toolId\":\"call-1\","
+      "\"toolName\":\"read\",\"argumentsJson\":\"{}\",\"signature\":\"fc-1\"}],"
+      "\"timestamp\":1700000000001,\"stopReason\":\"tool_use\",\"usage\":{"
+      "\"input\":10,\"output\":2,\"cacheRead\":3,\"cacheWrite\":4,"
+      "\"reasoning\":1,\"totalTokens\":0},\"errorMessage\":\"\","
+      "\"model\":\"claude-test\",\"provider\":\"anthropic\"}}}";
+  CHECK(SessionResult_IsOk(SessionRecord_Decode(arena, SV(preMigration), &decoded)));
+  CHECK_ALL(decoded.MessageEntry.Value.Content.Count == 3,
+            StrView_EqCStr(decoded.MessageEntry.Value.Content.Data[1].Text, "pondering"),
+            decoded.MessageEntry.Value.Use.CacheRead == 3,
+            decoded.MessageEntry.Value.Use.Input == 10);
 
   const char* unknownType =
       "{\"schemaVersion\":2,\"sessionId\":\"AQIDBAUGBwgJCgsMDQ4PEA\",\"seq\":1,"
@@ -165,7 +171,7 @@ static void TestRecordCodec(Arena* arena) {
   compaction.CompactionEntry.SourceHeadId = TestId(1);
   compaction.CompactionEntry.Summary = UserMessage(arena, "summary text");
   compaction.CompactionEntry.HasUsage = true;
-  compaction.CompactionEntry.Use = Usage{11, 12, 13, 14, 15, 65};
+  compaction.CompactionEntry.Use = Usage{11, 12, 13, 15, 65};
   StrBuf compactionJson = StrBuf_Make(arena, 512);
   CHECK(SessionResult_IsOk(SessionRecord_Encode(&compactionJson, &compaction)));
   CHECK(StrView_Contains(StrBuf_View(&compactionJson), "\"usage\""));
@@ -545,8 +551,8 @@ static void TestMetadata(Arena* arena) {
       SessionMetadata_Build(arena, records.Data, records.Count, &options, &info)));
   CHECK_ALL(info.MessageCount == 3, info.UserMessageCount == 1, info.AssistantMessageCount == 1,
             info.ToolResultMessageCount == 1, info.ToolCallCount == 1, info.CompactionCount == 0,
-            info.TotalTokens == 19, info.InputTokens == 10, info.OutputTokens == 2,
-            info.CacheReadTokens == 3, info.CacheWriteTokens == 4, info.ReasoningTokens == 1,
+            info.TotalTokens == 15, info.InputTokens == 10, info.OutputTokens == 2,
+            info.CacheReadTokens == 3, info.ReasoningTokens == 1,
             StrView_EqCStr(info.CurrentProvider, "anthropic"),
             StrView_EqCStr(info.CurrentModel, "claude-test"), StrView_EqCStr(info.DisplayTitle, "hello"),
             info.ExplicitName.Length == 0, info.LastActivityAt == records.Data[3].CreatedAt,
@@ -565,7 +571,7 @@ static void TestMetadata(Arena* arena) {
   compaction.CompactionEntry.Summary =
       Message_User(arena, SVL("Summary of previous conversation:\nsummary"));
   compaction.CompactionEntry.HasUsage = true;
-  compaction.CompactionEntry.Use = Usage{20, 5, 2, 1, 7, 40};
+  compaction.CompactionEntry.Use = Usage{20, 5, 2, 7, 40};
   Array_Push(&withExtras, compaction);
 
   SessionRecord name = BaseRecord(records.Data[0].SessionId, 6, 91, SessionRecordKind::SessionName);
@@ -579,7 +585,7 @@ static void TestMetadata(Arena* arena) {
   SessionInfo busyInfo = {};
   CHECK(SessionResult_IsOk(
       SessionMetadata_Build(arena, withExtras.Data, withExtras.Count, &busyOptions, &busyInfo)));
-  CHECK_ALL(busyInfo.CompactionCount == 1, busyInfo.TotalTokens == 19 + 40,
+  CHECK_ALL(busyInfo.CompactionCount == 1, busyInfo.TotalTokens == 15 + 40,
             StrView_EqCStr(busyInfo.ExplicitName, "  Named\n\tSession  "),
             StrView_EqCStr(busyInfo.DisplayTitle, "Named Session"), busyInfo.Busy,
             busyInfo.WallSpanMs == busyOptions.NowMs - records.Data[0].CreatedAt,

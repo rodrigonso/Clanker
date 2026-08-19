@@ -155,18 +155,6 @@ bool ReadRequiredId(const JsonValue* object, const char* key, DurableId* out) {
   return Json_IsString(value) && DurableId_Parse(value->Str, out);
 }
 
-bool ReadOptionalString(const JsonValue* object, const char* key,
-                        StrView* out) {
-  JsonValue* value = Json_Get(object, key);
-  if (!value || value->Kind == JsonKind::Null) {
-    *out = {};
-    return true;
-  }
-  if (!Json_IsString(value)) return false;
-  *out = value->Str;
-  return true;
-}
-
 bool ReadOptionalId(const JsonValue* object, const char* key, DurableId* out) {
   JsonValue* value = Json_Get(object, key);
   if (!value || value->Kind == JsonKind::Null) {
@@ -183,19 +171,14 @@ void WriteContent(StrBuf* out, const Content* content) {
   switch (content->Kind) {
     case ContentKind::Text:
       JsonWrite_String(&w, "text", content->Text);
-      JsonWrite_String(&w, "signature", content->Signature);
       break;
     case ContentKind::Thinking:
       JsonWrite_String(&w, "text", content->Text);
-      JsonWrite_String(&w, "signature", content->Signature);
-      JsonWrite_Bool(&w, "redacted", content->Redacted);
       break;
     case ContentKind::ToolCall:
       JsonWrite_String(&w, "toolId", content->ToolId);
       JsonWrite_String(&w, "toolName", content->ToolName);
       JsonWrite_String(&w, "argumentsJson", content->ToolArgsJson);
-      if (content->Signature.Length)
-        JsonWrite_String(&w, "signature", content->Signature);
       break;
     case ContentKind::Image:
       JsonWrite_String(&w, "data", content->ImageData);
@@ -211,7 +194,6 @@ void WriteUsage(StrBuf* out, const Usage* usage) {
   JsonWrite_U64(&w, "input", usage->Input);
   JsonWrite_U64(&w, "output", usage->Output);
   JsonWrite_U64(&w, "cacheRead", usage->CacheRead);
-  JsonWrite_U64(&w, "cacheWrite", usage->CacheWrite);
   JsonWrite_U64(&w, "reasoning", usage->Reasoning);
   JsonWrite_U64(&w, "totalTokens", usage->TotalTokens);
   JsonWrite_End(&w);
@@ -252,24 +234,16 @@ bool DecodeContent(const JsonValue* object, Content* out) {
   if (!ParseContentKind(Json_GetStr(object, "kind"), &result.Kind)) return false;
   switch (result.Kind) {
     case ContentKind::Text:
-      if (!ReadRequiredString(object, "text", true, &result.Text) ||
-          !ReadRequiredString(object, "signature", true, &result.Signature)) {
-        return false;
-      }
+      if (!ReadRequiredString(object, "text", true, &result.Text)) return false;
       break;
     case ContentKind::Thinking:
-      if (!ReadRequiredString(object, "text", true, &result.Text) ||
-          !ReadRequiredString(object, "signature", true, &result.Signature) ||
-          !ReadRequiredBool(object, "redacted", &result.Redacted)) {
-        return false;
-      }
+      if (!ReadRequiredString(object, "text", true, &result.Text)) return false;
       break;
     case ContentKind::ToolCall: {
       if (!ReadRequiredString(object, "toolId", false, &result.ToolId) ||
           !ReadRequiredString(object, "toolName", false, &result.ToolName) ||
           !ReadRequiredString(object, "argumentsJson", false,
-                              &result.ToolArgsJson) ||
-          !ReadOptionalString(object, "signature", &result.Signature)) {
+                              &result.ToolArgsJson)) {
         return false;
       }
       break;
@@ -290,13 +264,11 @@ bool DecodeUsage(const JsonValue* object, Usage* out) {
   u64 input = 0;
   u64 output = 0;
   u64 cacheRead = 0;
-  u64 cacheWrite = 0;
   u64 reasoning = 0;
   u64 total = 0;
   if (!ReadRequiredU64(object, "input", &input) || input > 0xFFFFFFFFull ||
       !ReadRequiredU64(object, "output", &output) || output > 0xFFFFFFFFull ||
       !ReadRequiredU64(object, "cacheRead", &cacheRead) || cacheRead > 0xFFFFFFFFull ||
-      !ReadRequiredU64(object, "cacheWrite", &cacheWrite) || cacheWrite > 0xFFFFFFFFull ||
       !ReadRequiredU64(object, "reasoning", &reasoning) || reasoning > 0xFFFFFFFFull ||
       !ReadRequiredU64(object, "totalTokens", &total) || total > 0xFFFFFFFFull) {
     return false;
@@ -304,7 +276,6 @@ bool DecodeUsage(const JsonValue* object, Usage* out) {
   out->Input = (u32)input;
   out->Output = (u32)output;
   out->CacheRead = (u32)cacheRead;
-  out->CacheWrite = (u32)cacheWrite;
   out->Reasoning = (u32)reasoning;
   out->TotalTokens = (u32)total;
   return true;

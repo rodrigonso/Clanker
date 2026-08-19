@@ -114,7 +114,7 @@ u32 AgentCompaction_ReportedContextTokens(const Message* messages, u32 count) {
     const Message* message = &messages[i - 1];
     if (message->Kind != Role::Assistant) continue;
     const Usage* use = &message->Use;
-    if (use->Input || use->CacheRead || use->CacheWrite || use->Output) {
+    if (use->Input || use->CacheRead || use->Output) {
       anchor = i - 1;
       break;
     }
@@ -124,7 +124,6 @@ u32 AgentCompaction_ReportedContextTokens(const Message* messages, u32 count) {
   const Usage* use = &messages[anchor].Use;
   u32 total = use->Input;
   total = AddSaturated(total, use->CacheRead);
-  total = AddSaturated(total, use->CacheWrite);
   total = AddSaturated(total, use->Output);
   for (u32 i = anchor + 1; i < count; i++)
     total = AddSaturated(total, AgentCompaction_EstimateMessageTokens(&messages[i]));

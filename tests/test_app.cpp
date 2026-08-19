@@ -168,9 +168,8 @@ void TestCommandResultMapping() {
 }  // namespace
 
 // Command results allocate from CommandMem, which a zero-initialized runtime
-// does not have. `clank --login` built its runtime by hand and skipped it, so
-// the success message trapped in ArenaAlloc after the credentials were already
-// written -- InteractiveRuntime_Init is what makes that unforgettable.
+// does not have. A hand-built runtime that skips InteractiveRuntime_Init traps
+// in ArenaAlloc the first time a handler formats a message.
 void TestRuntimeCommandArena() {
   Arena arena = ArenaCreate();
   InteractiveRuntime rt = {};

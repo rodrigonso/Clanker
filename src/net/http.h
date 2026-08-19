@@ -30,9 +30,9 @@ struct HttpRequest {
   // and buffered internally instead (see HttpResult::Body); the sink only
   // ever sees bytes from a successful (2xx) response. Existing callers that
   // want every byte via `sink` regardless of status (e.g. Http_Fetch based
-  // OAuth/tool downloads) leave this false, the default. Streaming SSE
-  // parsers set it so a retryable error page's bytes never reach the event
-  // parser (see AnthropicParse_Feed).
+  // tool downloads) leave this false, the default. Streaming SSE parsers set
+  // it so a retryable error page's bytes never reach the event parser (see
+  // ChatParse_Feed).
   bool BufferNonSuccessBody;
 };
 
@@ -81,7 +81,7 @@ struct HttpResult {
 };
 
 // Non-streaming request: accumulates the full response body. For request/response
-// endpoints like OAuth token exchange (not SSE).
+// endpoints like model discovery (not SSE).
 struct HttpResponse {
   i32 Status;
   StrView Body;

@@ -544,7 +544,7 @@ void TestRealServerBuffersNonSuccessBody() {
   StrBuf url = StrBuf_Make(&a, 64);
   StrBuf_AppendCStr(&url, "http://127.0.0.1:");
   StrBuf_AppendU64(&url, port);
-  StrBuf_AppendCStr(&url, "/v1/messages");
+  StrBuf_AppendCStr(&url, "/v1/chat/completions");
 
   Counter counter = {};
   HttpStreamSink sink = {};
@@ -569,9 +569,8 @@ void TestRealServerBuffersNonSuccessBody() {
 }
 
 // The same non-2xx response, but with BufferNonSuccessBody left false (the
-// default): existing callers like Http_Fetch (OAuth token exchange, tool
-// downloads) rely on every byte reaching the sink regardless of status, and
-// that behavior must be unchanged.
+// default): existing callers like Http_Fetch rely on every byte reaching the
+// sink regardless of status, and that behavior must be unchanged.
 void TestRealServerDefaultForwardsNonSuccessBody() {
   Arena a = ArenaCreate();
   Http_GlobalInit();

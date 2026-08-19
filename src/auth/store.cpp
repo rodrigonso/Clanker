@@ -15,49 +15,15 @@ struct Entry {
 
 bool ParseCred(JsonValue* v, Credential* out) {
   *out = {};
-  StrView type = Json_GetStr(v, "type");
-  if (StrView_EqCStr(type, "api_key")) {
-    out->Kind = CredKind::ApiKey;
-    out->ApiKey = Json_GetStr(v, "key");
-    return true;
-  }
-  if (StrView_EqCStr(type, "oauth")) {
-    out->Kind = CredKind::OAuth;
-    out->Access = Json_GetStr(v, "access");
-    out->Refresh = Json_GetStr(v, "refresh");
-    out->ExpiresMs = (u64)Json_GetInt(v, "expires", 0);
-    out->IdToken = Json_GetStr(v, "idToken");
-    out->AccountId = Json_GetStr(v, "accountId");
-    out->IsFedRamp = Json_GetBool(v, "isFedRamp", false);
-    return true;
-  }
-  return false;
+  if (!StrView_EqCStr(Json_GetStr(v, "type"), "api_key")) return false;
+  out->ApiKey = Json_GetStr(v, "key");
+  return true;
 }
 
 void WriteCred(StrBuf* b, const Credential* c) {
-  if (c->Kind == CredKind::ApiKey) {
-    StrBuf_AppendCStr(b, "{\"type\":\"api_key\",\"key\":");
-    Json_WriteString(b, c->ApiKey);
-    StrBuf_AppendChar(b, '}');
-  } else {
-    StrBuf_AppendCStr(b, "{\"type\":\"oauth\",\"access\":");
-    Json_WriteString(b, c->Access);
-    StrBuf_AppendCStr(b, ",\"refresh\":");
-    Json_WriteString(b, c->Refresh);
-    StrBuf_AppendCStr(b, ",\"expires\":");
-    StrBuf_AppendU64(b, c->ExpiresMs);
-    if (c->IdToken.Length) {
-      StrBuf_AppendCStr(b, ",\"idToken\":");
-      Json_WriteString(b, c->IdToken);
-    }
-    if (c->AccountId.Length) {
-      StrBuf_AppendCStr(b, ",\"accountId\":");
-      Json_WriteString(b, c->AccountId);
-    }
-    if (c->IsFedRamp)
-      StrBuf_AppendCStr(b, ",\"isFedRamp\":true");
-    StrBuf_AppendChar(b, '}');
-  }
+  StrBuf_AppendCStr(b, "{\"type\":\"api_key\",\"key\":");
+  Json_WriteString(b, c->ApiKey);
+  StrBuf_AppendChar(b, '}');
 }
 
 Array<Entry> LoadEntries(Arena* a, StrView path) {
