@@ -109,10 +109,10 @@ change in place.
 
 ## Stream Reveal
 
-Providers deliver assistant text at wildly different cadences. Anthropic
-coalesces deltas into clumps of tens of characters every ~80-100 ms, so
+Providers deliver assistant text at wildly different cadences. Some endpoints
+coalesce deltas into clumps of tens of characters every ~80-100 ms, so
 revealing each burst the instant it arrives makes the transcript stair-step,
-while OpenAI's token-level deltas already look smooth. `StreamReveal`
+while token-level deltas already look smooth. `StreamReveal`
 (`src/tui/stream_reveal.{h,cpp}`) decouples *arrival* from *reveal* so both
 read the same way.
 

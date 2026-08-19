@@ -18,8 +18,8 @@ a specific upstream measurement — pi publishes no memory numbers.
 
 ## What it is
 
-A runnable Clank agent: the agent loop + an OpenAI-compatible Chat Completions
-provider (HTTP/SSE) + `read`, `write`, `edit`, `ls`, `find`, `grep`,
+A runnable Clank agent: the agent loop + an OpenAI Responses API provider
+(HTTP/SSE) + `read`, `write`, `edit`, `ls`, `find`, `grep`,
 `shell`, and `ask_user` tools + a streaming REPL.
 
 ```
@@ -28,7 +28,7 @@ src/
            FFI fastfail, peak-RSS reporter   (caboose conventions, no C++ std)
   json/    arena DOM parser + escaping writer (hand-rolled, no deps)
   crypto/  base64, secure random (no deps)
-  llm/     data model, OpenAI-compatible Chat Completions protocol
+  llm/     data model, OpenAI Responses protocol
            (request build + SSE parse), retry policy, model registry
   net/     streaming HTTP + non-streaming fetch over libcurl
   auth/    credential store (api keys) + resolution/caching
@@ -84,7 +84,7 @@ tests/     single CLI test harness (suite selection via args; offline by default
   never touch the config or the session tree; a failing hook surfaces as a
   typed `HookError`.
 - **One reimplemented wire protocol**, not vendor SDKs. Clank speaks
-  `POST /v1/chat/completions` and nothing else; every provider is a row of
+  `POST /v1/responses` and nothing else; every provider is a row of
   endpoint data rather than a protocol implementation. The request builder and
   SSE parser are tested against recorded fixtures offline. See
   [Providers](#providers).
@@ -145,9 +145,9 @@ ctest --preset vs2026-debug
 ## Run
 
 ```sh
-./build/clank -p "hi"                # set OPENAI_API_KEY (or ANTHROPIC_API_KEY)
+./build/clank -p "hi"                # set OPENAI_API_KEY
 ./build/clank                        # full-screen TUI; /model picks provider + model
-./build/clank -m claude-sonnet-4-6 -p "summarize README.md"
+./build/clank -m gpt-5.6-sol -p "summarize README.md"
 ./build/clank --mode json -p "summarize README.md"   # NDJSON event stream
 ./build/clank --continue             # most recent session for this project
 ./build/clank --resume SESSION_ID     # exact ID, including sessions from other projects
@@ -735,53 +735,52 @@ in `~/.clank/settings.json`; `/reload` applies edits made to the file.
 
 ## Providers
 
-Clank speaks exactly one wire protocol: OpenAI-compatible Chat Completions
-(`POST <base>/v1/chat/completions`, SSE `choices[].delta` frames). A provider is
+Clank speaks exactly one wire protocol: OpenAI's Responses API
+(`POST <base>/v1/responses`, SSE `response.*` events). A provider is
 a row in `src/app/provider_registry.cpp` carrying an ID, a default model, an
-API-key env var, and a `ChatEndpoint` — a base URL, a base-URL override env var,
-and an optional table of known-model metadata. Adding a vendor is adding a row.
+API-key env var, and a `ResponsesEndpoint` — a base URL, a base-URL override env
+var, and an optional table of known-model metadata. Adding a compatible vendor
+is adding a row.
 
 | Provider | Default base URL | API key env | Base URL env |
 | --- | --- | --- | --- |
 | `openai` | `https://api.openai.com` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
-| `anthropic` | `https://api.anthropic.com` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
-| `openai-compat` | `http://localhost:11434` | `OPENAI_COMPAT_API_KEY` | `OPENAI_COMPAT_BASE_URL` |
 
-`openai-compat` is the escape hatch for anything else that implements the shape
-— OpenRouter, Groq, Together, DeepSeek, Fireworks, vLLM, llama.cpp, LM Studio,
-Ollama — and defaults to Ollama's local address. It is the one provider marked
-anonymous: a missing credential is not an error and no `Authorization` header is
-sent, so a local model works with nothing configured.
+`OPENAI_BASE_URL` is the escape hatch for anything else that implements the
+Responses shape — vLLM, Azure-style gateways, and pass-through proxies such as
+LiteLLM or OpenRouter's Responses surface.
 
 ```sh
-OPENAI_COMPAT_BASE_URL=https://openrouter.ai/api/v1 \
-OPENAI_COMPAT_API_KEY=sk-or-... \
-  ./build/clank -m moonshotai/kimi-k2 -p "summarize README.md"
+OPENAI_BASE_URL=https://my-gateway.internal/v1 \
+OPENAI_API_KEY=... \
+  ./build/clank -m gpt-5.6-sol -p "summarize README.md"
 ```
 
 A base URL that already ends in `/v1` is not given a second one, which is how
-aggregators and local servers usually publish their address. `/model` discovers
+gateways and local servers usually publish their address. `/model` discovers
 live models from `GET <base>/v1/models`, skips IDs that name a
-non-conversational modality (embeddings, audio, image, moderation), and merges
-the result with the provider's known-model table so context windows and effort
-support survive discovery.
+non-conversational modality (embeddings, audio, image, moderation) or a family
+the endpoint does not serve, and merges the result with the provider's
+known-model table so context windows and effort support survive discovery.
 
-Deliberate limits of the portable protocol:
+Why Responses and not Chat Completions: the models Clank targets reject
+`reasoning_effort` alongside function tools on `/v1/chat/completions`, and Chat
+Completions standardizes no way to return thinking to the server. Responses
+accepts both, and `include: ["reasoning.encrypted_content"]` with `store: false`
+lets Clank keep owning the transcript while still replaying reasoning across
+turns.
 
-- **No OAuth.** Subscription tokens (Claude Pro/Max, ChatGPT) are issued for
-  vendor-native endpoints — Anthropic's `/v1/messages` and ChatGPT's Codex
-  backend — which this build does not speak. API keys are the only credential:
+Deliberate limits:
+
+- **No OAuth.** Subscription tokens (ChatGPT, Claude Pro/Max) are issued for
+  endpoints this build does not speak. API keys are the only credential:
   `/auth` stores one, and there is no browser flow.
-- **No reasoning round-trip.** Chat Completions standardizes no way to return
-  thinking to the server, so thinking blocks are shown and stored but never
-  resent. `reasoning_content` (DeepSeek, vLLM) and `reasoning` (OpenRouter) are
-  read on output only.
-- **Portable effort only.** `reasoning_effort` is clamped to `low`/`medium`/
-  `high`; higher local tiers still ask for maximum reasoning, just in wording
-  every server accepts.
-- **Anthropic through the compatibility endpoint** exposes neither extended
-  thinking nor the 1M-token context beta, so neither is advertised for those
-  models, and the provider picker says so before you pick the row.
+- **Reasoning replay is model-scoped.** Encrypted reasoning and item IDs are
+  only valid for the model that produced them, so a mid-session model switch
+  drops prior reasoning and regenerates IDs rather than replaying stale ones.
+- **No non-Responses vendors.** Anything that only implements Chat Completions
+  — Ollama, llama.cpp, LM Studio, Anthropic's compatibility endpoint — needs a
+  proxy in front of it.
 
 ## Authentication
 
@@ -789,10 +788,8 @@ Credentials are stored in `~/.clank/auth.json` (atomic writes, restricted
 perms). The resolved token is cached in the running app; storing a key, provider
 changes, and `/reload` invalidate or replace the cache.
 
-- **API key** — run `/auth` in the TUI, set the provider's env var
-  (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_COMPAT_API_KEY`), or store a
-  key in `auth.json`.
-- **No credential** — only `openai-compat`, whose endpoint is assumed local.
+- **API key** — run `/auth` in the TUI, set `OPENAI_API_KEY`, or store a key in
+  `auth.json`. A credential is always required.
 
 Resolution priority: stored api_key → env var. `--logout <provider>` removes
 credentials.
@@ -822,7 +819,7 @@ Adding a suite is a new `tests/test_*.cpp`, a declaration in `tests/tests.h`, an
 one row in the `kSuites` table in `tests/test_main.cpp`.
 
 The default run is network-free and key-free: the loop runs against the
-scripted provider in `tests/script_provider.h`, the chat-completions request
+scripted provider in `tests/script_provider.h`, the Responses request
 builder and SSE parser against recorded fixtures, and the TUI via pure units
 (key decoder, differential-renderer diff, markdown, line-wrapping, the
 multi-line editor) plus a headless controller test driving the
@@ -869,7 +866,7 @@ This is the small clean core.
 
 Deliberately out of scope for now (the structure leaves seams for them):
 
-- Vendor-native protocols (Anthropic Messages, OpenAI Responses) and the
+- Other vendors' native protocols (Anthropic Messages, Google Gemini) and the
   subscription OAuth flows that depend on them.
 - A bidirectional RPC mode. `-p` with `--mode text|json` is the non-interactive
   surface; there is no stdin-driven protocol yet.

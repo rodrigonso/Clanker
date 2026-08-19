@@ -666,7 +666,7 @@ bool ImmediateErrorProviderStream(void* context, Arena* arena, const Model* mode
   return false;
 }
 
-// Reproduces an Anthropic response cut off at the output cap: the call itself
+// Reproduces a response cut off at the output cap: the call itself
 // succeeds, but the tool_use block the model was mid-way through is never
 // closed, so the message carries text and no tool calls at all.
 bool TruncatedLengthProviderStream(void* context, Arena* arena, const Model* model,

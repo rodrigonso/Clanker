@@ -163,7 +163,7 @@ u32 HttpRetry_DelayMs(const HttpRetryPolicy* policy, const HttpRetryMeta* meta, 
                      double jitterRandom01);
 
 // Injection points so the retry loop is testable without real sockets, sleeps,
-// or randomness (mirrors the AnthropicModelsFetchFn injection pattern).
+// or randomness (mirrors the ModelsFetchFn injection pattern).
 typedef HttpResult (*HttpTransportFn)(void* user, Arena* arena, const HttpRequest* req,
                                       HttpStreamSink sink, volatile i32* abort);
 typedef void (*HttpRetrySleepFn)(void* user, u32 ms);

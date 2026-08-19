@@ -16,7 +16,7 @@ void TestSession();
 void TestHarness();
 void TestCompaction();
 void TestEventJson();
-void TestChatCompletions();
+void TestResponses();
 void TestTools();
 void TestToolSelect();
 void TestInfra();

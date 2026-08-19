@@ -30,15 +30,10 @@ bool AppResolveAuth(void* user, Arena* arena, StrView provider, volatile i32* ab
   const ProviderSpec* spec = ProviderRegistry_Find(provider);
   StrView token = Auth_ResolveToken(arena, aa->Path, provider,
                                     spec ? spec->ApiKeyEnvVar : nullptr);
-  if (token.Length) {
-    AppAuth_CacheToken(aa, provider, token);
-    out->Token = token;
-    return true;
-  }
-  // Local OpenAI-compatible servers authenticate nobody. Succeeding with an
-  // empty token lets the request go out without an Authorization header
-  // instead of failing the prompt on a credential the endpoint would ignore.
-  return spec && spec->Endpoint && spec->Endpoint->AllowAnonymous;
+  if (!token.Length) return false;
+  AppAuth_CacheToken(aa, provider, token);
+  out->Token = token;
+  return true;
 }
 
 bool ResolvePromptAuth(AgentHarness* harness, volatile i32* abort) {

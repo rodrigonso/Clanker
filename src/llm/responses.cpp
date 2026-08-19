@@ -1,22 +1,21 @@
 #include "base/thread.h"
-#include "llm/chat_completions.h"
+#include "llm/responses.h"
 #include "net/http.h"
 
 namespace {
 
-constexpr u32 CHAT_HEADER_CAPACITY = 4;
+constexpr u32 RESPONSES_HEADER_CAPACITY = 3;
 
-bool OnChatData(void* user, StrView chunk) {
-  ChatParse_Feed((ChatParse*)user, chunk);
+bool OnResponsesData(void* user, StrView chunk) {
+  ResponsesParse_Feed((ResponsesParse*)user, chunk);
   return true;
 }
 
-bool BuildChatHeaders(Arena* arena, ProviderAuth auth, bool streaming,
-                      bool allowAnonymous, HttpHeader* headers, u32* count,
-                      StrView* error) {
+bool BuildResponsesHeaders(Arena* arena, ProviderAuth auth, bool streaming,
+                           HttpHeader* headers, u32* count, StrView* error) {
   *count = 0;
   *error = {};
-  if (!auth.Token.Length && !allowAnonymous) {
+  if (!auth.Token.Length) {
     *error = SVL("credentials are unavailable for this provider");
     return false;
   }
@@ -26,8 +25,7 @@ bool BuildChatHeaders(Arena* arena, ProviderAuth auth, bool streaming,
   headers[(*count)++] = HttpHeader{
       SVL("accept"),
       streaming ? SVL("text/event-stream") : SVL("application/json")};
-  if (auth.Token.Length)
-    headers[(*count)++] = Http_BearerHeader(arena, auth.Token);
+  headers[(*count)++] = Http_BearerHeader(arena, auth.Token);
   return true;
 }
 
@@ -37,8 +35,8 @@ void EmitSimple(StreamSink sink, StreamEventKind kind) {
   StreamSink_Emit(sink, event);
 }
 
-bool FailChat(Arena* arena, const Model* model, StreamSink sink, StrView error,
-              StopReason stop, Message* out) {
+bool FailResponses(Arena* arena, const Model* model, StreamSink sink,
+                   StrView error, StopReason stop, Message* out) {
   Message message = Message_AssistantEmpty(arena);
   message.Model = model ? model->Id : StrView{};
   message.Provider = model ? model->Provider : StrView{};
@@ -51,14 +49,13 @@ bool FailChat(Arena* arena, const Model* model, StreamSink sink, StrView error,
   return false;
 }
 
-bool ChatCompletions_Stream(void* ctx, Arena* arena, const Model* model,
-                            const LlmContext* context,
-                            const StreamOptions* options, StreamSink sink,
-                            Message* out) {
-  const ChatEndpoint* endpoint = (const ChatEndpoint*)ctx;
+bool Responses_Stream(void* ctx, Arena* arena, const Model* model,
+                      const LlmContext* context, const StreamOptions* options,
+                      StreamSink sink, Message* out) {
+  (void)ctx;
   StreamOptions resolved = options ? *options : StreamOptions{};
   if (!Model_RequestProfileIsValid(model, resolved.Profile)) {
-    return FailChat(
+    return FailResponses(
         arena, model, sink,
         SVL("the selected model does not support the requested effort or "
             "context window"),
@@ -67,52 +64,51 @@ bool ChatCompletions_Stream(void* ctx, Arena* arena, const Model* model,
   resolved.Profile = Model_ResolveRequestProfile(model, resolved.Profile);
 
   if (!model->BaseUrl.Length) {
-    return FailChat(arena, model, sink,
-                    SVL("no endpoint is configured for this provider"),
-                    StopReason::Error, out);
+    return FailResponses(arena, model, sink,
+                         SVL("no endpoint is configured for this provider"),
+                         StopReason::Error, out);
   }
 
-  HttpHeader headers[CHAT_HEADER_CAPACITY];
+  HttpHeader headers[RESPONSES_HEADER_CAPACITY];
   u32 headerCount = 0;
   StrView headerError = {};
-  if (!BuildChatHeaders(arena, resolved.Auth, true,
-                        endpoint && endpoint->AllowAnonymous, headers,
-                        &headerCount, &headerError)) {
-    return FailChat(arena, model, sink, headerError, StopReason::Error, out);
+  if (!BuildResponsesHeaders(arena, resolved.Auth, true, headers, &headerCount,
+                             &headerError)) {
+    return FailResponses(arena, model, sink, headerError, StopReason::Error,
+                         out);
   }
 
-  StrBuf body = ChatCompletions_BuildRequest(arena, model, context, &resolved);
+  StrBuf body = Responses_BuildRequest(arena, model, context, &resolved);
   Message message = Message_AssistantEmpty(arena);
   message.Model = model->Id;
   message.Provider = model->Provider;
-  ChatParse parser = {};
-  ChatParse_Init(&parser, arena, &message, sink);
+  ResponsesParse parser = {};
+  ResponsesParse_Init(&parser, arena, &message, sink);
   EmitSimple(sink, StreamEventKind::Start);
 
   HttpRequest request = {};
   request.Method = SVL("POST");
-  request.Url = ChatCompletions_Url(arena, model->BaseUrl, "chat/completions");
+  request.Url = Responses_Url(arena, model->BaseUrl, "responses");
   request.Headers = headers;
   request.HeaderCount = headerCount;
   request.Body = StrBuf_View(&body);
   request.BufferNonSuccessBody = true;
   HttpStreamSink httpSink = {};
   httpSink.User = &parser;
-  httpSink.OnData = OnChatData;
+  httpSink.OnData = OnResponsesData;
   HttpResult result =
       resolved.Retry
           ? Http_StreamWithRetry(arena, &request, httpSink, resolved.Abort,
                                  resolved.Retry)
           : Http_Stream(arena, &request, httpSink, resolved.Abort);
 
-  ChatParse_Finish(&parser);
+  ResponsesParse_Finish(&parser);
   message.Use = parser.Use;
   message.Timestamp = NowMillis();
 
   if (parser.SawError || result.Status < 0 || result.Status >= 400 ||
-      !ChatParse_SawTerminal(&parser)) {
-    bool aborted =
-        result.Status < 0 && StrView_EqCStr(result.Error, "aborted");
+      !ResponsesParse_SawTerminal(&parser)) {
+    bool aborted = result.Status < 0 && StrView_EqCStr(result.Error, "aborted");
     message.Stop = aborted ? StopReason::Aborted : StopReason::Error;
     StrBuf error = StrBuf_Make(arena, 160);
     if (parser.SawError && parser.Error.Length) {
@@ -142,52 +138,52 @@ bool ChatCompletions_Stream(void* ctx, Arena* arena, const Model* model,
   return true;
 }
 
-HttpResponse ChatHttpFetch(void*, Arena* arena, const HttpRequest* request,
-                           volatile i32* abort) {
+HttpResponse ResponsesHttpFetch(void*, Arena* arena, const HttpRequest* request,
+                                volatile i32* abort) {
   return Http_Fetch(arena, request, abort);
 }
 
 }  // namespace
 
-Provider ChatCompletions_Provider() {
+Provider Responses_Provider() {
   Provider provider = {};
-  provider.Stream = ChatCompletions_Stream;
+  provider.Stream = Responses_Stream;
   return provider;
 }
 
-ProviderModelList ChatCompletions_ListModelsWithFetch(
-    Arena* arena, const ChatEndpoint* endpoint, ProviderAuth auth,
-    volatile i32* abort, ChatModelsFetchFn fetch, void* fetchUser) {
+ProviderModelList Responses_ListModelsWithFetch(
+    Arena* arena, const ResponsesEndpoint* endpoint, ProviderAuth auth,
+    volatile i32* abort, ResponsesModelsFetchFn fetch, void* fetchUser) {
   if (!endpoint)
     return ProviderModelList_Error(arena, ProviderModelListStatus::Unavailable,
                                    SVL("no endpoint is configured"));
   if (!fetch)
     return ProviderModelList_Error(arena, ProviderModelListStatus::Unavailable,
                                    SVL("the model transport is unavailable"));
-  if (!auth.Token.Length && !endpoint->AllowAnonymous)
+  if (!auth.Token.Length)
     return ProviderModelList_Error(arena, ProviderModelListStatus::Unavailable,
                                    SVL("credentials are unavailable"));
   if (abort && Atomic_LoadI32(abort))
     return ProviderModelList_Error(arena, ProviderModelListStatus::Unavailable,
                                    SVL("model discovery was aborted"));
 
-  HttpHeader headers[CHAT_HEADER_CAPACITY];
+  HttpHeader headers[RESPONSES_HEADER_CAPACITY];
   u32 headerCount = 0;
   StrView headerError = {};
-  if (!BuildChatHeaders(arena, auth, false, endpoint->AllowAnonymous, headers,
-                        &headerCount, &headerError)) {
+  if (!BuildResponsesHeaders(arena, auth, false, headers, &headerCount,
+                             &headerError)) {
     return ProviderModelList_Error(arena, ProviderModelListStatus::Failed,
                                    headerError);
   }
 
-  StrView baseUrl = ChatEndpoint_ResolveBaseUrl(arena, endpoint);
+  StrView baseUrl = ResponsesEndpoint_ResolveBaseUrl(arena, endpoint);
   if (!baseUrl.Length)
     return ProviderModelList_Error(arena, ProviderModelListStatus::Unavailable,
                                    SVL("no endpoint is configured"));
 
   HttpRequest request = {};
   request.Method = SVL("GET");
-  request.Url = ChatCompletions_Url(arena, baseUrl, "models");
+  request.Url = Responses_Url(arena, baseUrl, "models");
   request.Headers = headers;
   request.HeaderCount = headerCount;
 
@@ -207,16 +203,14 @@ ProviderModelList ChatCompletions_ListModelsWithFetch(
   }
 
   ProviderModelList parsed = {};
-  if (!ChatCompletions_ParseModelsResponse(arena, endpoint, response.Body,
-                                           &parsed))
+  if (!Responses_ParseModelsResponse(arena, endpoint, response.Body, &parsed))
     return parsed;
   return ProviderModelList_Merge(arena, parsed, nullptr, 0);
 }
 
-ProviderModelList ChatCompletions_ListModels(Arena* arena,
-                                             const ChatEndpoint* endpoint,
-                                             ProviderAuth auth,
-                                             volatile i32* abort) {
-  return ChatCompletions_ListModelsWithFetch(arena, endpoint, auth, abort,
-                                             ChatHttpFetch, nullptr);
+ProviderModelList Responses_ListModels(Arena* arena,
+                                       const ResponsesEndpoint* endpoint,
+                                       ProviderAuth auth, volatile i32* abort) {
+  return Responses_ListModelsWithFetch(arena, endpoint, auth, abort,
+                                       ResponsesHttpFetch, nullptr);
 }

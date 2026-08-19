@@ -27,6 +27,13 @@ struct Content {
   // Image
   StrView ImageData;      // base64
   StrView ImageMimeType;  // e.g. "image/png"
+  // The provider's own identity for this block, replayed verbatim on the next
+  // request so a turn resumes the chain it started. The Responses API keys
+  // conversation state on these: a reasoning block carries its whole item JSON
+  // (including encrypted_content), a text block its item id, a tool call the id
+  // of the function_call item. Empty for blocks Clank synthesized itself, which
+  // are then sent under a generated id instead.
+  StrView Signature;
 };
 
 // Several structs below carry a `Content` member whose type is also `Content`.
@@ -73,6 +80,7 @@ inline Content Content_Clone(Arena* arena, const Content& source) {
   result.ToolArgsJson = StrView_Dup(arena, source.ToolArgsJson);
   result.ImageData = StrView_Dup(arena, source.ImageData);
   result.ImageMimeType = StrView_Dup(arena, source.ImageMimeType);
+  result.Signature = StrView_Dup(arena, source.Signature);
   return result;
 }
 

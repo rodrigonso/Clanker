@@ -138,6 +138,17 @@ bool ReadRequiredBool(const JsonValue* object, const char* key, bool* out) {
   return true;
 }
 
+// Absent is not an error: a block Clank synthesized has no provider identity,
+// and neither does one recorded before signatures were written.
+bool ReadOptionalString(const JsonValue* object, const char* key,
+                        StrView* out) {
+  JsonValue* value = Json_Get(object, key);
+  if (!value) return true;
+  if (!Json_IsString(value)) return false;
+  *out = value->Str;
+  return true;
+}
+
 bool ReadRequiredU64(const JsonValue* object, const char* key, u64* out) {
   JsonValue* value = Json_Get(object, key);
   if (!value || value->Kind != JsonKind::Number || value->Number < 0 ||
@@ -185,6 +196,10 @@ void WriteContent(StrBuf* out, const Content* content) {
       JsonWrite_String(&w, "mimeType", content->ImageMimeType);
       break;
   }
+  // Only blocks the provider identified carry one, so it is written only when
+  // present rather than as an empty field on every block.
+  if (content->Signature.Length)
+    JsonWrite_String(&w, "signature", content->Signature);
   JsonWrite_End(&w);
 }
 
@@ -255,6 +270,7 @@ bool DecodeContent(const JsonValue* object, Content* out) {
       }
       break;
   }
+  if (!ReadOptionalString(object, "signature", &result.Signature)) return false;
   *out = result;
   return true;
 }
