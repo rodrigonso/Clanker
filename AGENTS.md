@@ -9,16 +9,16 @@ allocates less and copies less.
 Build and test through the repo scripts rather than invoking CMake directly:
 
 ```powershell
-.\build.ps1                                  # build clanker (Release)
-.\build.ps1 -Config Debug                    # debug build
-.\build.ps1 -Test -TestArgs session,tools    # build + run named suites
-.\build.ps1 -Test                            # full offline sweep
-.\run.ps1 -- -p "summarize README.md"        # build, then run; Clanker flags after --
+.\tools\build.ps1                            # build clanker (Release)
+.\tools\build.ps1 -Config Debug              # debug build
+.\tools\build.ps1 -Test -TestArgs session,tools  # build + run named suites
+.\tools\build.ps1 -Test                      # full offline sweep
+.\tools\run.ps1 -- -p "summarize README.md"  # build, then run; Clanker flags after --
 ```
 
 Suites are named in `tests/test_main.cpp` (`session`, `harness`, `compaction`,
 `tools`, `infra`, `prompt_context`, ...). Run the narrowest suite that covers
-your change; use `.\build.ps1 -Test` before declaring a change finished.
+your change; use `.\tools\build.ps1 -Test` before declaring a change finished.
 Network-tagged suites only run with `--all` and are not part of a normal pass.
 
 For ad-hoc scripts, `write` them to a temp file (e.g. the OS temp directory or

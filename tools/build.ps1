@@ -28,13 +28,13 @@
     Implies -Test. With no arguments the full offline sweep runs.
 
 .EXAMPLE
-    .\build.ps1
+    .\tools\build.ps1
 .EXAMPLE
-    .\build.ps1 -Config Debug -Test
+    .\tools\build.ps1 -Config Debug -Test
 .EXAMPLE
-    .\build.ps1 -Test -TestArgs json,session
+    .\tools\build.ps1 -Test -TestArgs json,session
 .EXAMPLE
-    .\build.ps1 -Target clanker -Clean
+    .\tools\build.ps1 -Target clanker -Clean
 #>
 [CmdletBinding()]
 param(
@@ -53,7 +53,7 @@ param(
 if ($TestArgs -and -not $Test) { $Test = $true }
 
 $ErrorActionPreference = 'Stop'
-$root = $PSScriptRoot
+$root = Split-Path -Parent $PSScriptRoot
 
 $vsInstallerDir = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer'
 

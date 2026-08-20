@@ -109,15 +109,15 @@ ctest --test-dir build
 ```
 
 On Windows with the VS toolchain, run the commands from a `vcvars64` shell (or
-use the VS-bundled CMake/Ninja). `build.ps1` builds only the `clanker` executable
-by default, skips redundant configure passes, and accepts `-Test` to build and
-run the unit tests. `run.ps1` builds incrementally and then launches the
-executable in your current directory:
+use the VS-bundled CMake/Ninja). `tools\build.ps1` builds only the `clanker`
+executable by default, skips redundant configure passes, and accepts `-Test` to
+build and run the unit tests. `tools\run.ps1` builds incrementally and then
+launches the executable in your current directory:
 
 ```powershell
-.\run.ps1                             # build, then start the TUI
-.\run.ps1 -- -c                       # forward Clanker's own flags after --
-.\run.ps1 -NoBuild --help             # skip the build, run what's there
+.\tools\run.ps1                       # build, then start the TUI
+.\tools\run.ps1 -- -c                 # forward Clanker's own flags after --
+.\tools\run.ps1 -NoBuild --help       # skip the build, run what's there
 ```
 
 Put `--` before Clanker's short options: without it PowerShell binds `-c` to

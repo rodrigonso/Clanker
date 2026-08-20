@@ -4,7 +4,7 @@
     Incrementally builds Clanker and runs the resulting executable.
 
 .DESCRIPTION
-    Delegates the build to build.ps1 (Visual Studio toolchain + CMake/Ninja),
+    Delegates the build to tools\build.ps1 (Visual Studio toolchain + CMake/Ninja),
     which is already incremental: it reconfigures only when the cache is
     missing or the build type changed, and skips the build entirely when Ninja
     reports no work to do. Only the `clanker` target is built, so the test
@@ -30,18 +30,18 @@
     before Clanker's own short options to pass them through untouched.
 
 .EXAMPLE
-    .\run.ps1
+    .\tools\run.ps1
     Build and launch the interactive TUI.
 
 .EXAMPLE
-    .\run.ps1 -- -c
+    .\tools\run.ps1 -- -c
     Continue the most recent session for this project.
 
 .EXAMPLE
-    .\run.ps1 -Config Debug -- -p "summarize this repo"
+    .\tools\run.ps1 -Config Debug -- -p "summarize this repo"
 
 .EXAMPLE
-    .\run.ps1 -NoBuild --help
+    .\tools\run.ps1 -NoBuild --help
 #>
 [CmdletBinding(PositionalBinding = $false)]
 param(
@@ -54,14 +54,14 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$root = $PSScriptRoot
+$root = Split-Path -Parent $PSScriptRoot
 
 # Resolve the build directory the same way build.ps1 does.
 $buildPath = if ([System.IO.Path]::IsPathRooted($BuildDir)) { $BuildDir } else { Join-Path $root $BuildDir }
 $exe = Join-Path $buildPath 'clanker.exe'
 
 if (-not $NoBuild) {
-    & (Join-Path $root 'build.ps1') -Config $Config -BuildDir $BuildDir -Target clanker
+    & (Join-Path $PSScriptRoot 'build.ps1') -Config $Config -BuildDir $BuildDir -Target clanker
     # build.ps1 exits non-zero on configure/compile failure; throws otherwise.
     if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
