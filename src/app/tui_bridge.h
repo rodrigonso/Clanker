@@ -14,5 +14,8 @@
 // as a HarnessEventSink callback with `user` set to a Tui*.
 void TuiBridge_HarnessEvent(void* user, const AgentHarnessEvent* ev);
 
+TuiPermissionMode TuiBridge_ToTuiPermissionMode(AgentPermissionMode mode);
+AgentPermissionMode TuiBridge_FromTuiPermissionMode(TuiPermissionMode mode);
+
 // Hooks backed by `harness`, for Tui::Agent.
 TuiAgentHooks TuiBridge_AgentHooks(AgentHarness* harness);

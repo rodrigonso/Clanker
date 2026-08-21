@@ -17,6 +17,12 @@ constexpr u32 AGENT_HARNESS_MAX_WATCH_EVENTS = 256;
 // retry (Config.Retry / AgentRetryPolicy), driven by the agent loop.
 enum class RetryLayer : u8 { ProviderRequest, AssistantTurn };
 
+enum class AgentPermissionReviewOutcome : u8 {
+  Allow,
+  Ask,
+  Unavailable,
+};
+
 // Durable events mirror appended session-tree entries (authoritative for
 // snapshots/replay). Transient events are watcher-only lifecycle notices for
 // the UI/REPL -- agent/turn/tool/retry/queue progress that v2 never persists;
@@ -33,6 +39,8 @@ enum class AgentHarnessEventKind : u8 {
   TransientToolEnd,
   TransientRetryStart,  // a retry backoff is about to begin
   TransientRetryEnd,    // the attempt following a backoff has concluded
+  TransientPermissionReviewStart,
+  TransientPermissionReviewEnd,
   TransientQueueUpdate, // steer/follow-up/next-turn queue depth changed
   TransientCancelRequested,  // AgentHarness_RequestCancel set the abort flag
   TransientEventsDropped,    // watcher overflowed; N transient events were skipped
@@ -70,6 +78,13 @@ struct AgentHarnessQueueEvent {
   u32 NextTurnCount;
 };
 
+struct AgentHarnessPermissionReviewEvent {
+  StrView ToolName;
+  StrView Model;
+  AgentPermissionReviewOutcome Outcome;
+  StrView Rationale;
+};
+
 // Reports a gap in the transient stream. Durable records are never dropped, so
 // a consumer's view of the session tree stays complete across one of these; only
 // progress rendering missed something.
@@ -94,6 +109,7 @@ struct AgentHarnessEvent {
     AgentHarnessTurnEvent Turn;    // Transient{Agent,Turn}{Start,End}
     AgentHarnessToolEvent Tool;    // TransientTool{Start,Update,End}
     AgentHarnessRetryEvent Retry;  // TransientRetry{Start,End}
+    AgentHarnessPermissionReviewEvent PermissionReview;
     AgentHarnessQueueEvent Queue;  // TransientQueueUpdate
     AgentHarnessDroppedEvent Dropped;  // TransientEventsDropped
   };

@@ -406,5 +406,6 @@ Tool GrepTool() {
       "show before and after each match\"},\"limit\":{\"type\":\"number\",\"default\":100,\"description\":"
       "\"Maximum number of matches to return\"}},\"required\":[\"pattern\"]}");
   tool.Execute = GrepExec;
+  tool.PermissionEffect = ToolPermissionEffect::Inspection;
   return tool;
 }

@@ -49,6 +49,7 @@ const Suite kSuites[] = {
     {"json", TestJson, TagDefault, "json parser and writer"},
     {"session", TestSession, TagDefault, "durable sessions and replay"},
     {"harness", TestHarness, TagDefault, "agent harness loop"},
+    {"permissions", TestPermissions, TagDefault, "built-in tool permissions"},
     {"compaction", TestCompaction, TagDefault, "compaction policy and cut points"},
     {"event_json", TestEventJson, TagDefault, "NDJSON agent event stream"},
     {"responses", TestResponses, TagDefault,

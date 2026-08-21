@@ -45,6 +45,20 @@ inline void ToolUpdateSink_Emit(const ToolUpdateSink* sink,
 // one-at-a-time (mirrors pi's `executionMode === "sequential"`).
 enum class ToolExecMode : u8 { Default, Sequential };
 
+// Permission metadata is conservative by default: a zero-initialized or
+// extension-defined tool is Sensitive and requires Ask/Auto review.
+enum class ToolPermissionEffect : u8 {
+  Sensitive,
+  Inspection,
+  UserInteraction,
+};
+
+struct ToolPermissionInfo {
+  StrView Action;
+  StrView GrantKey;
+  bool AutoAllow;
+};
+
 // A tool the agent can execute. The harness prepares and validates `ToolArgs`
 // before `Execute`; failures become isError tool results.
 struct Tool {
@@ -61,9 +75,13 @@ struct Tool {
   u32 PromptGuidelineCount;
   StrView ParamsJsonSchema;
   ToolExecMode ExecMode;  // Default => may run in parallel; Sequential => forces serial batch
+  ToolPermissionEffect PermissionEffect;
   void* Ctx;
   bool (*PrepareArguments)(void* ctx, Arena* arena, JsonValue* input,
                            JsonValue** out, StrBuf* err);
+  bool (*DescribePermission)(void* ctx, Arena* arena, const ToolArgs* args,
+                             StrView workingDirectory,
+                             ToolPermissionInfo* out, StrBuf* err);
   bool (*Execute)(void* ctx, Arena* arena, StrView toolCallId,
                   const ToolArgs* args, volatile i32* abort,
                   const ToolUpdateSink* updates, ToolResult* out, StrBuf* err);

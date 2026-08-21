@@ -511,6 +511,16 @@ done:
   return ok;
 }
 
+static bool EditDescribePermission(void* ctx, Arena* arena,
+                                   const ToolArgs* args,
+                                   StrView workingDirectory,
+                                   ToolPermissionInfo* out, StrBuf* err) {
+  (void)ctx;
+  return Fs_DescribeMutationPermission(
+      arena, args, workingDirectory, SVL("Edit file "), SVL("edit\n"), out,
+      err);
+}
+
 constexpr StrView kEditPromptGuidelines[] = {
     SVL("Use edit for precise changes (edits[].oldText must match exactly)"),
     SVL("When changing multiple separate locations in one file, use one edit "
@@ -540,5 +550,7 @@ Tool EditTool() {
   t.PrepareArguments = EditPrepareArguments;
   t.Execute = EditExec;
   t.ExecMode = ToolExecMode::Default;
+  t.PermissionEffect = ToolPermissionEffect::Sensitive;
+  t.DescribePermission = EditDescribePermission;
   return t;
 }

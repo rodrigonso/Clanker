@@ -12,13 +12,17 @@
 #endif
 
 #include "app/config_paths.h"
+#include "app/auth_flow.h"
+#include "app/commands.h"
 #include "app/provider_registry.h"
 #include "app/runtime.h"
 #include "app/session_switch.h"
 #include "app/settings.h"
 #include "base/arena.h"
+#include "base/config_file.h"
 #include "check.h"
 #include "session/metadata.h"
+#include "session/memory_repository.h"
 
 namespace {
 
@@ -165,6 +169,34 @@ void TestCommandResultMapping() {
             StrView_EqCStr(failed.Message, "bad input"));
 }
 
+struct RuntimeCommandCapture {
+  u32 Notices;
+  u32 Errors;
+  StrView LastNotice;
+  StrView LastError;
+};
+
+void CaptureRuntimeNotice(void* user, StrView message) {
+  RuntimeCommandCapture* capture = (RuntimeCommandCapture*)user;
+  capture->Notices++;
+  capture->LastNotice = message;
+}
+
+void CaptureRuntimeError(void* user, StrView message) {
+  RuntimeCommandCapture* capture = (RuntimeCommandCapture*)user;
+  capture->Errors++;
+  capture->LastError = message;
+}
+
+Model TestReviewerModel(Arena* arena, const ProviderSpec* spec,
+                        StrView modelId) {
+  Model model = {};
+  model.Id = StrView_Dup(arena, modelId);
+  model.Name = StrView_Dup(arena, modelId);
+  model.Provider = spec ? StrView_Dup(arena, spec->Id) : StrView{};
+  return model;
+}
+
 }  // namespace
 
 // Command results allocate from CommandMem, which a zero-initialized runtime
@@ -247,15 +279,268 @@ void TestRuntimePersistSettings() {
   rt.Harness = &harness;
   rt.CurrentModel.Id = rt.Spec->DefaultModel;
   rt.SettingsPath = SV(path);
+  rt.PermissionMode = AgentPermissionMode::Yolo;
+  rt.PermissionReviewerModel = SVL("reviewer/model");
+  rt.YoloAcknowledged = true;
   rt.Rounded = false;
   CHECK(RuntimePersistSettings(&rt));
 
   AppSettings loaded = {};
   CHECK(AppSettings_Load(&arena, SV(path), &loaded) ==
         AppSettingsLoadResult::Success);
-  CHECK(!loaded.Rounded);
+  CHECK_ALL(!loaded.Rounded, loaded.PermissionMode == AgentPermissionMode::Yolo,
+            StrView_EqCStr(loaded.PermissionReviewerModel, "reviewer/model"),
+            loaded.YoloAcknowledged);
+
+  rt.PermissionMode = AgentPermissionMode::Ask;
+  rt.PersistedPermissionMode = AgentPermissionMode::Yolo;
+  rt.PermissionModeOverridden = true;
+  rt.Rounded = true;
+  CHECK(RuntimePersistSettings(&rt));
+  CHECK(AppSettings_Load(&arena, SV(path), &loaded) ==
+        AppSettingsLoadResult::Success);
+  CHECK_ALL(loaded.PermissionMode == AgentPermissionMode::Yolo,
+            loaded.Rounded);
+
+  rt.PermissionMode = AgentPermissionMode::Yolo;
+  rt.PersistedPermissionMode = AgentPermissionMode::Ask;
+  rt.PermissionModeOverridden = true;
+  rt.Rounded = false;
+  CHECK(RuntimePersistSettings(&rt));
+  CHECK(AppSettings_Load(&arena, SV(path), &loaded) ==
+        AppSettingsLoadResult::Success);
+  CHECK_ALL(loaded.PermissionMode == AgentPermissionMode::Ask,
+            !loaded.Rounded);
 
   InteractiveRuntime_Release(&rt);
+  remove(path);
+#if defined(_WIN32)
+  _rmdir(dir);
+#else
+  rmdir(dir);
+#endif
+  ArenaRelease(&arena);
+}
+
+void TestRuntimePermissionCommandEdges() {
+  Arena arena = ArenaCreate();
+  const char* dir = "clanker_runtime_permission_test";
+  const char* path = "clanker_runtime_permission_test/settings.json";
+  remove(path);
+#if defined(_WIN32)
+  _rmdir(dir);
+#else
+  rmdir(dir);
+#endif
+
+  MemoryRepository memory = {};
+  MemoryRepository_Init(&memory);
+  SessionRepository sessions = MemoryRepository_AsRepository(&memory);
+  SessionCreateOptions create = {};
+  create.ProjectKey = SVL("permission-command-test");
+  create.WorkingDirectory = SVL("C:\\work");
+  SessionLog log = {};
+  SessionInfo info = {};
+  CHECK(SessionResult_IsOk(
+      sessions.Create(sessions.Ctx, &arena, &create, &log, &info)));
+
+  const ProviderSpec* spec = ProviderRegistry_At(0);
+  CHECK(spec != nullptr);
+  Model model = spec->CreateModel(&arena, spec, spec->DefaultModel);
+  AgentHarnessConfig config = {};
+  config.ModelInfo = model;
+  config.ProviderImpl = spec->CreateProvider(&arena, spec);
+  config.PermissionMode = AgentPermissionMode::Auto;
+  config.PermissionReviewerModel =
+      spec->CreateModel(&arena, spec, AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL);
+  config.WorkingDirectory = create.WorkingDirectory;
+
+  AgentHarness harness = {};
+  CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+
+  InteractiveRuntime rt = {};
+  InteractiveRuntime_Init(&rt, &arena);
+  rt.SettingsPath = SV(path);
+  rt.Spec = spec;
+  rt.CurrentModel = model;
+  rt.Harness = &harness;
+  rt.Sessions = &sessions;
+  rt.PermissionMode = AgentPermissionMode::Auto;
+  rt.PersistedPermissionMode = AgentPermissionMode::Auto;
+  rt.PermissionReviewerModel = AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL;
+
+  u32 catalogCount = 0;
+  TuiCommandSpec* catalog =
+      RuntimeCommandCatalog(&rt, &arena, &catalogCount);
+  CHECK(catalogCount == AppCommandSpec_Count() - 1);
+  u32 catalogIndex = 0;
+  for (u32 i = 0; i < AppCommandSpec_Count(); i++) {
+    const AppCommandSpec* command = AppCommandSpec_At(i);
+    if (command->Kind == AppCommandKind::Skill) continue;
+    CHECK_ALL(StrView_Eq(catalog[catalogIndex].Name, command->Name),
+              StrView_Eq(catalog[catalogIndex].Alias, command->Alias),
+              StrView_Eq(catalog[catalogIndex].Description,
+                         command->Description));
+    if (command->Kind == AppCommandKind::Permissions)
+      CHECK(catalogIndex == 12);
+    catalogIndex++;
+  }
+
+  RuntimeCommandCapture capture = {};
+  AppCommandUx ux = {&capture, CaptureRuntimeNotice, CaptureRuntimeError};
+  AppCommandHandlers handlers = RuntimeCommandHandlers(&rt);
+
+  AppCommandDispatchResult report =
+      RuntimeDispatchCommand(&rt, SVL("/permissions"), &handlers, &ux);
+  CHECK_ALL(report.Handled && report.Action == AppLoopAction::Continue,
+            capture.Notices == 1,
+            StrView_Contains(capture.LastNotice, "Permission mode: auto"),
+            StrView_Contains(capture.LastNotice,
+                             "Permission reviewer model: z-ai/glm-5.2"),
+            StrView_Contains(capture.LastNotice, "Session grants: 0"));
+
+  rt.PermissionMode = AgentPermissionMode::Ask;
+  rt.PersistedPermissionMode = AgentPermissionMode::Yolo;
+  rt.PermissionModeOverridden = true;
+  AgentPermissionMode beforeMode =
+      AgentHarness_GetPermissionMode(&harness);
+  u32 errorsBefore = capture.Errors;
+  AppCommandDispatchResult invalid =
+      RuntimeDispatchCommand(&rt, SVL("/permissions nope"), &handlers, &ux);
+  CHECK_ALL(invalid.Handled && invalid.Action == AppLoopAction::Continue,
+            capture.Errors == errorsBefore + 1,
+            StrView_Eq(capture.LastError,
+                       AppCommand_Usage(AppCommandKind::Permissions)),
+            AgentHarness_GetPermissionMode(&harness) == beforeMode,
+            rt.PermissionMode == AgentPermissionMode::Ask,
+            rt.PersistedPermissionMode == AgentPermissionMode::Yolo,
+            rt.PermissionModeOverridden);
+
+  RuntimeDispatchCommand(&rt, SVL("/permissions ask"), &handlers, &ux);
+  CHECK_ALL(AgentHarness_GetPermissionMode(&harness) ==
+                AgentPermissionMode::Ask,
+            rt.PermissionMode == AgentPermissionMode::Ask,
+            rt.PersistedPermissionMode == AgentPermissionMode::Ask,
+            !rt.PermissionModeOverridden);
+  rt.Rounded = false;
+  CHECK(RuntimePersistSettings(&rt));
+  AppSettings loaded = {};
+  CHECK(AppSettings_Load(&arena, SV(path), &loaded) ==
+        AppSettingsLoadResult::Success);
+  CHECK_ALL(loaded.PermissionMode == AgentPermissionMode::Ask,
+            !loaded.Rounded);
+
+  RuntimeDispatchCommand(&rt, SVL("/permissions auto"), &handlers, &ux);
+  CHECK_ALL(AgentHarness_GetPermissionMode(&harness) ==
+                AgentPermissionMode::Auto,
+            rt.PermissionMode == AgentPermissionMode::Auto,
+            rt.PersistedPermissionMode == AgentPermissionMode::Auto,
+            !rt.PermissionModeOverridden);
+
+  CHECK(!rt.YoloAcknowledged);
+  RuntimeDispatchCommand(&rt, SVL("/permissions yolo"), &handlers, &ux);
+  CHECK_ALL(AgentHarness_GetPermissionMode(&harness) ==
+                AgentPermissionMode::Yolo,
+            rt.PermissionMode == AgentPermissionMode::Yolo,
+            !rt.YoloAcknowledged);
+
+  rt.YoloAcknowledged = true;
+  RuntimeDispatchCommand(&rt, SVL("/permissions reset"), &handlers, &ux);
+  CHECK_ALL(AgentHarness_GetPermissionMode(&harness) ==
+                AgentPermissionMode::Ask,
+            rt.PermissionMode == AgentPermissionMode::Ask,
+            rt.PersistedPermissionMode == AgentPermissionMode::Ask,
+            !rt.PermissionModeOverridden, rt.YoloAcknowledged);
+
+  InteractiveRuntime_Release(&rt);
+  CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+  sessions.Close(sessions.Ctx);
+  remove(path);
+#if defined(_WIN32)
+  _rmdir(dir);
+#else
+  rmdir(dir);
+#endif
+  ArenaRelease(&arena);
+}
+
+void TestRuntimeRefreshPermissionReviewer() {
+  Arena arena = ArenaCreate();
+  ProviderSpec first = {
+      SVL("provider-one"), SVL("Provider One"), SVL("model-one"),
+      nullptr,           nullptr,           nullptr,
+      TestReviewerModel, nullptr};
+  ProviderSpec second = {
+      SVL("provider-two"), SVL("Provider Two"), SVL("model-two"),
+      nullptr,            nullptr,            nullptr,
+      TestReviewerModel, nullptr};
+
+  InteractiveRuntime rt = {};
+  InteractiveRuntime_Init(&rt, &arena);
+  AgentHarness harness = {};
+  rt.Harness = &harness;
+  rt.Spec = &first;
+  rt.PermissionReviewerModel = SVL("reviewer-one");
+  CHECK(RuntimeRefreshPermissionReviewer(&rt));
+  CHECK_ALL(StrView_EqCStr(harness.Config.PermissionReviewerModel.Id,
+                           "reviewer-one"),
+            StrView_Eq(harness.Config.PermissionReviewerModel.Provider,
+                       first.Id));
+
+  rt.Spec = &second;
+  rt.PermissionReviewerModel = SVL("reviewer-two");
+  CHECK(RuntimeRefreshPermissionReviewer(&rt));
+  CHECK_ALL(StrView_EqCStr(harness.Config.PermissionReviewerModel.Id,
+                           "reviewer-two"),
+            StrView_Eq(harness.Config.PermissionReviewerModel.Provider,
+                       second.Id),
+            !StrView_Eq(harness.Config.PermissionReviewerModel.Provider,
+                        first.Id));
+
+  InteractiveRuntime_Release(&rt);
+  ArenaRelease(&arena);
+}
+
+void TestRuntimeSelectionPrecedence() {
+  Arena arena = ArenaCreate();
+  const char* dir = "clanker_runtime_selection_test";
+  const char* path = "clanker_runtime_selection_test/settings.json";
+  remove(path);
+#if defined(_WIN32)
+  _rmdir(dir);
+#else
+  rmdir(dir);
+#endif
+
+  RuntimeSelection defaults = LoadRuntimeSelection(&arena, SV(path), nullptr);
+  CHECK_ALL(defaults.Spec == ProviderRegistry_At(0),
+            StrView_Eq(defaults.ModelId, defaults.Spec->DefaultModel),
+            defaults.PermissionMode == AgentPermissionMode::Auto,
+            StrView_Eq(defaults.PermissionReviewerModel,
+                       AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL),
+            !defaults.YoloAcknowledged);
+
+  CHECK(ConfigFile_WriteAtomic(
+      &arena, SV(path),
+      SVL("{\"provider\":\"openrouter\",\"model\":\"configured\","
+          "\"permissionMode\":\"yolo\","
+          "\"permissionReviewerModel\":\"reviewer/model\","
+          "\"yoloAcknowledged\":true}")));
+  RuntimeSelection configured = LoadRuntimeSelection(&arena, SV(path), "override");
+  CHECK_ALL(StrView_EqCStr(configured.ModelId, "override"),
+            configured.PermissionMode == AgentPermissionMode::Yolo,
+            StrView_EqCStr(configured.PermissionReviewerModel,
+                           "reviewer/model"),
+            configured.YoloAcknowledged);
+
+  CHECK(ConfigFile_WriteAtomic(&arena, SV(path), SVL("{bad")));
+  RuntimeSelection malformed = LoadRuntimeSelection(&arena, SV(path), nullptr);
+  CHECK_ALL(malformed.Spec == ProviderRegistry_At(0),
+            StrView_Eq(malformed.ModelId, malformed.Spec->DefaultModel),
+            malformed.PermissionMode == AgentPermissionMode::Auto,
+            StrView_Eq(malformed.PermissionReviewerModel,
+                       AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL));
+
   remove(path);
 #if defined(_WIN32)
   _rmdir(dir);
@@ -307,6 +592,9 @@ void TestApp() {
   TestRuntimeCommandArena();
   TestRuntimeSetPromptOptions();
   TestRuntimePersistSettings();
+  TestRuntimePermissionCommandEdges();
+  TestRuntimeRefreshPermissionReviewer();
+  TestRuntimeSelectionPrecedence();
   TestRuntimeAskUserNonInteractive();
   TestConfigPaths();
   TestTrustChoiceMenu();

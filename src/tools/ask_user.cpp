@@ -1,4 +1,5 @@
 #include "agent/ask.h"
+#include "agent/permissions.h"
 #include "base/thread.h"
 #include "json/json.h"
 #include "tools/tools.h"
@@ -12,6 +13,38 @@ static bool AskUserExec(void* ctx, Arena* arena, StrView id, const ToolArgs* arg
                         ToolResult* out, StrBuf* err) {
   (void)id;
   (void)updates;
+
+  const AskUserToolContext* context = (const AskUserToolContext*)ctx;
+  const JsonValue* permissionIdValue =
+      ToolArgs_Get(args, "permission_request_id");
+  if (permissionIdValue) {
+    if (!Json_IsString(permissionIdValue) ||
+        permissionIdValue->Str.Length == 0) {
+      StrBuf_AppendCStr(err, "'permission_request_id' must be a non-empty string");
+      return false;
+    }
+    if (ToolArgs_Get(args, "question") || ToolArgs_Get(args, "choices")) {
+      StrBuf_AppendCStr(
+          err, "'permission_request_id' is mutually exclusive with 'question' "
+               "and 'choices'");
+      return false;
+    }
+
+    if (!context || !context->Permissions) {
+      StrBuf_AppendCStr(err,
+                        "no permission engine is available to resolve this "
+                        "request");
+      return false;
+    }
+    StrView message = {};
+    if (!AgentPermission_ResolveRequest(
+            context->Permissions, arena, permissionIdValue->Str, abort,
+            &message, err))
+      return false;
+    out->Content = Array_Make<Content>(arena, 1);
+    Array_Push(&out->Content, Content_Text(message));
+    return true;
+  }
 
   StrView question = ToolArgs_GetStr(args, "question");
   if (question.Length == 0) {
@@ -49,7 +82,6 @@ static bool AskUserExec(void* ctx, Arena* arena, StrView id, const ToolArgs* arg
     return false;
   }
 
-  const AskUserToolContext* context = (const AskUserToolContext*)ctx;
   AgentAskRequest request = {};
   request.Question = question;
   request.Choices = choiceCount ? choices : nullptr;
@@ -88,14 +120,18 @@ Tool AskUserTool(AskUserToolContext* context) {
   t.PromptSnippet = SVL("Ask the user a question when a decision is ambiguous");
   Tool_SetPromptGuidelines(&t, kAskUserPromptGuidelines);
   t.ParamsJsonSchema = SVL(
-      "{\"type\":\"object\",\"properties\":{\"question\":{\"type\":\"string\","
+      "{\"oneOf\":[{\"type\":\"object\",\"properties\":{\"question\":{\"type\":\"string\","
       "\"description\":\"The question to put to the user\"},\"choices\":{\"type\":"
       "\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Optional fixed "
-      "answers to choose from; omit to ask for free-form text\"}},"
-      "\"required\":[\"question\"]}");
+      "answers to choose from; omit to ask for free-form text\"}},\"required\":[\"question\"],"
+      "\"additionalProperties\":false},{\"type\":\"object\",\"properties\":{"
+      "\"permission_request_id\":{\"type\":\"string\",\"description\":\"Permission request ID "
+      "returned by a denied tool call\"}},\"required\":[\"permission_request_id\"],"
+      "\"additionalProperties\":false}]}");
   // A batch runs in parallel by default, and there is only one user and one
   // modal: two concurrent questions would race for it.
   t.ExecMode = ToolExecMode::Sequential;
+  t.PermissionEffect = ToolPermissionEffect::UserInteraction;
   t.Ctx = context;
   t.Execute = AskUserExec;
   return t;

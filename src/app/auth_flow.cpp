@@ -95,6 +95,9 @@ RuntimeSelection LoadRuntimeSelection(Arena* arena, StrView settingsPath,
   selected.Compaction = AgentCompactionPolicy_Default();
   selected.Retry = AgentRetryPolicy_Default();
   selected.TurnLimit = AgentTurnLimitPolicy_Default();
+  selected.PermissionMode = AgentPermissionMode::Auto;
+  selected.PermissionReviewerModel = AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL;
+  selected.YoloAcknowledged = false;
 
   AppSettings settings = {};
   AppSettingsLoadResult load = AppSettings_Load(arena, settingsPath, &settings);
@@ -103,6 +106,9 @@ RuntimeSelection LoadRuntimeSelection(Arena* arena, StrView settingsPath,
     selected.Compaction = settings.Compaction;
     selected.Retry = settings.Retry;
     selected.TurnLimit = settings.TurnLimit;
+    selected.PermissionMode = settings.PermissionMode;
+    selected.PermissionReviewerModel = settings.PermissionReviewerModel;
+    selected.YoloAcknowledged = settings.YoloAcknowledged;
     selected.Rounded = settings.Rounded;
     selected.Skills = settings.Skills;
     selected.PromptTemplates = settings.PromptTemplates;
@@ -498,6 +504,10 @@ bool ActivateRuntimeSelection(InteractiveRuntime* rt, const ProviderSpec* spec,
   rt->Spec = spec;
   rt->CurrentModel = model;
   rt->PreferredProfile = preference;
+  if (!RuntimeRefreshPermissionReviewer(rt)) {
+    EmitCommandError(ux, SVL("The permission reviewer could not be configured."));
+    return false;
+  }
   if (providerChanged &&
       (!rt->Auth ||
        !StrView_Eq(rt->Auth->Cache.Provider, spec->Id)))

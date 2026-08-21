@@ -35,6 +35,18 @@ void ResetModalMatches(Tui* t) {
   t->ModalFirst = 0;
 }
 
+// The modal title and prompt are painted as a single clipped row, so control
+// characters would silently swallow everything after them. Flatten to spaces
+// so a multi-line caller string degrades to one readable line instead.
+StrView DupModalLine(Arena* arena, StrView text) {
+  StrBuf line = StrBuf_Make(arena, text.Length + 1);
+  for (u32 i = 0; i < text.Length; i++) {
+    u8 c = (u8)text.Data[i];
+    StrBuf_AppendChar(&line, c < 0x20 || c == 0x7f ? ' ' : (char)c);
+  }
+  return StrBuf_View(&line);
+}
+
 void PaintModalEdit(const UiNode* node, UiCanvas* canvas, Tui* t, u16 textX,
                     u16 textEnd, u16 editY, Style edit) {
   StrView text = LineEdit_Text(&t->ModalEdit);
@@ -318,7 +330,7 @@ bool Tui_BeginSelection(Tui* t, StrView title, const StrView* options, u32 optio
   t->Sess.ModalOptionCount = optionCount;
   t->ModalSelected = initialSelection < optionCount ? initialSelection : optionCount - 1;
   t->ModalFirst = 0;
-  t->Sess.ModalTitle = StrView_Dup(&t->SessionMem, title);
+  t->Sess.ModalTitle = DupModalLine(&t->SessionMem, title);
   t->Sess.ModalCategory = StrView_Dup(&t->SessionMem, category);
   t->Sess.ModalPrompt = {};
   t->Sess.ModalTextResult = {};
@@ -339,9 +351,9 @@ bool Tui_BeginTextEntry(Tui* t, StrView title, StrView prompt, StrView initial,
   Ui_CancelPointer(&t->Ui);
   LineEdit_Clear(&t->ModalEdit);
   LineEdit_InsertText(&t->ModalEdit, initial);
-  t->Sess.ModalTitle = StrView_Dup(&t->SessionMem, title);
+  t->Sess.ModalTitle = DupModalLine(&t->SessionMem, title);
   t->Sess.ModalCategory = StrView_Dup(&t->SessionMem, category);
-  t->Sess.ModalPrompt = StrView_Dup(&t->SessionMem, prompt);
+  t->Sess.ModalPrompt = DupModalLine(&t->SessionMem, prompt);
   t->Sess.ModalOptions = nullptr;
   t->Sess.ModalOptionCount = 0;
   t->ModalSelected = 0;

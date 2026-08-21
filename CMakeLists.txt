@@ -72,6 +72,7 @@ add_library(clanker_agent STATIC
   src/agent/harness.cpp
   src/agent/driver.cpp
   src/agent/primitives.cpp
+  src/agent/permissions.cpp
   src/agent/compaction.cpp
   src/agent/event_json.cpp
   src/llm/retry.cpp)
@@ -235,6 +236,7 @@ add_executable(clanker_tests EXCLUDE_FROM_ALL
   tests/test_json.cpp
   tests/test_session.cpp
   tests/test_harness.cpp
+  tests/test_permissions.cpp
   tests/test_responses.cpp
   tests/test_tools.cpp
   tests/test_tool_select.cpp

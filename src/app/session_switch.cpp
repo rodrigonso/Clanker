@@ -276,6 +276,33 @@ SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
       config.Stream.Profile = targetProfile;
     }
   }
+  if (!targetSpec || !targetSpec->CreateModel) {
+    SessionLog_Close(&target);
+    PromptContext_Release(&nextPrompt);
+    ArenaRelease(&scratch);
+    return SessionResult_Error(
+        SessionStatus::InvalidState,
+        SVL("the target session has no usable provider"));
+  }
+  config.WorkingDirectory =
+      StrView_Dup(rt->Mem, targetInfo->WorkingDirectory);
+  // The engine's atomic mode is authoritative: the TUI can cycle it from the
+  // input thread, so the copied config field is not a reliable source here.
+  config.PermissionMode = AgentHarness_GetPermissionMode(rt->Harness);
+  StrView reviewerId = rt->PermissionReviewerModel.Length
+                           ? rt->PermissionReviewerModel
+                           : AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL;
+  config.PermissionReviewerModel =
+      targetSpec->CreateModel(rt->Mem, targetSpec, reviewerId);
+  if (!config.PermissionReviewerModel.Id.Length ||
+      !Model_MetadataIsValid(&config.PermissionReviewerModel)) {
+    SessionLog_Close(&target);
+    PromptContext_Release(&nextPrompt);
+    ArenaRelease(&scratch);
+    return SessionResult_Error(
+        SessionStatus::InvalidState,
+        SVL("the target session has no usable permission reviewer"));
+  }
 
   if (rt->EventPump) StopHarnessEventPump(rt->EventPump);
   SessionResult closed = AgentHarness_Close(rt->Harness);

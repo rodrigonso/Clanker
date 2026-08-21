@@ -184,5 +184,6 @@ Tool ReadTool() {
       "\"Line number to start reading from (1-indexed)\"},\"limit\":{\"type\":\"number\","
       "\"description\":\"Maximum number of lines to read\"}},\"required\":[\"path\"]}");
   t.Execute = ReadExec;
+  t.PermissionEffect = ToolPermissionEffect::Inspection;
   return t;
 }

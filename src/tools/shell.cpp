@@ -7,6 +7,7 @@
 #include "tools/truncate.h"
 
 #include <stdio.h>
+#include <string.h>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -143,6 +144,204 @@ static bool Shell_OnData(void* user, StrView chunk) {
   return true;
 }
 
+static constexpr u32 SHELL_PERMISSION_MAX_COMMAND = 8192;
+
+static bool Shell_IsSimpleCommandName(StrView name) {
+  if (name.Length == 0 || name.Data[0] == '-' || name.Data[0] == '.') return false;
+  for (u32 i = 0; i < name.Length; i++) {
+    char c = name.Data[i];
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.')
+      continue;
+    return false;
+  }
+  return true;
+}
+
+static bool Shell_StageQualifies(StrView stage) {
+  StrView tokens[32] = {};
+  u32 tokenCount = 0;
+  u32 pos = 0;
+  while (pos < stage.Length) {
+    while (pos < stage.Length && stage.Data[pos] == ' ') pos++;
+    if (pos >= stage.Length) break;
+    u32 start = pos;
+    while (pos < stage.Length && stage.Data[pos] != ' ') pos++;
+    if (tokenCount >= (u32)(sizeof(tokens) / sizeof(tokens[0]))) return false;
+    tokens[tokenCount++] = StrView{stage.Data + start, pos - start};
+  }
+  if (tokenCount == 0) return false;
+
+  if (tokenCount == 2 && Shell_IsSimpleCommandName(tokens[0]) &&
+      (StrView_EqCStr(tokens[1], "--help") ||
+       StrView_EqCStr(tokens[1], "--version")))
+    return true;
+
+  if (StrView_EqCStr(tokens[0], "git")) {
+    if (tokenCount < 2) return false;
+    for (u32 i = 2; i < tokenCount; i++) {
+      StrView token = tokens[i];
+      bool output =
+          StrView_EqCStr(token, "--output") ||
+          (token.Length > sizeof("--output=") - 1u &&
+           memcmp(token.Data, "--output=", sizeof("--output=") - 1u) == 0);
+      if (output || StrView_EqCStr(token, "--ext-diff") ||
+          StrView_EqCStr(token, "--textconv"))
+        return false;
+    }
+    if (StrView_EqCStr(tokens[1], "status") ||
+        StrView_EqCStr(tokens[1], "diff") ||
+        StrView_EqCStr(tokens[1], "log") ||
+        StrView_EqCStr(tokens[1], "show") ||
+        StrView_EqCStr(tokens[1], "rev-parse") ||
+        StrView_EqCStr(tokens[1], "ls-files"))
+      return true;
+    return StrView_EqCStr(tokens[1], "branch") && tokenCount == 3 &&
+           StrView_EqCStr(tokens[2], "--show-current");
+  }
+
+  return false;
+}
+
+static bool Shell_AppendPermissionChar(StrBuf* out, char c, bool* tooLong) {
+  if (out->Length + 1u >= SHELL_PERMISSION_MAX_COMMAND) {
+    *tooLong = true;
+    return false;
+  }
+  StrBuf_AppendChar(out, c);
+  return true;
+}
+
+static void Shell_AppendPermissionText(StrBuf* out, const char* text,
+                                       bool* tooLong) {
+  for (const char* p = text; *p; p++)
+    Shell_AppendPermissionChar(out, *p, tooLong);
+}
+
+static StrView Shell_CanonicalPermissionCommand(Arena* arena, StrView command,
+                                                bool* autoAllow,
+                                                bool* stableCanonical) {
+  StrBuf canonical = StrBuf_Make(
+      arena, ClankerMin(command.Length + 1u, SHELL_PERMISSION_MAX_COMMAND));
+  bool safe = true;
+  bool tooLong = false;
+  bool pendingSpace = false;
+  for (u32 i = 0; i < command.Length; i++) {
+    char c = command.Data[i];
+    if (Ascii_IsSpace(c)) {
+      if (c == '\r' || c == '\n') safe = false;
+      pendingSpace = canonical.Length != 0;
+      continue;
+    }
+
+    if (c == '&' && i + 1u < command.Length && command.Data[i + 1u] == '&') {
+      if (canonical.Length && canonical.Data[canonical.Length - 1u] != ' ')
+        Shell_AppendPermissionChar(&canonical, ' ', &tooLong);
+      Shell_AppendPermissionText(&canonical, "&& ", &tooLong);
+      pendingSpace = false;
+      i++;
+      continue;
+    }
+
+    if (pendingSpace && canonical.Length &&
+        canonical.Data[canonical.Length - 1u] != ' ')
+      Shell_AppendPermissionChar(&canonical, ' ', &tooLong);
+    pendingSpace = false;
+
+    switch (c) {
+      case '|':
+      case '<':
+      case '>':
+      case ';':
+      case '(':
+      case ')':
+      case '$':
+      case '`':
+      case '\'':
+      case '"':
+      case '\\':
+      case '*':
+      case '?':
+      case '~':
+      case '#':
+      case '%':
+      case '!':
+      case '^':
+      case '{':
+      case '}':
+      case '[':
+      case ']':
+        safe = false;
+        break;
+      case '&':
+        safe = false;
+        break;
+      default:
+        break;
+    }
+    Shell_AppendPermissionChar(&canonical, c, &tooLong);
+  }
+
+  while (canonical.Length && canonical.Data[canonical.Length - 1u] == ' ') {
+    canonical.Length--;
+    canonical.Data[canonical.Length] = '\0';
+  }
+
+  bool qualifies = safe && !tooLong;
+  u32 start = 0;
+  for (u32 i = 0; qualifies && i <= canonical.Length; i++) {
+    bool split = i == canonical.Length ||
+                 (i + 1u < canonical.Length && canonical.Data[i] == '&' &&
+                  canonical.Data[i + 1u] == '&');
+    if (!split) continue;
+    u32 end = i;
+    while (start < end && canonical.Data[start] == ' ') start++;
+    while (end > start && canonical.Data[end - 1u] == ' ') end--;
+    if (!Shell_StageQualifies(StrView{canonical.Data + start, end - start}))
+      qualifies = false;
+    start = i + 2u;
+    i++;
+  }
+  *autoAllow = qualifies;
+  *stableCanonical = safe && !tooLong;
+  return StrBuf_View(&canonical);
+}
+
+static bool ShellDescribePermission(void* ctx, Arena* arena,
+                                    const ToolArgs* args,
+                                    StrView workingDirectory,
+                                    ToolPermissionInfo* out, StrBuf* err) {
+  (void)ctx;
+  (void)workingDirectory;
+  StrView command = ToolArgs_GetStr(args, "command");
+  if (command.Length == 0) {
+    StrBuf_AppendCStr(err, "missing 'command' argument");
+    return false;
+  }
+
+  bool autoAllow = false;
+  bool stableCanonical = false;
+  StrView canonical =
+      Shell_CanonicalPermissionCommand(arena, command, &autoAllow,
+                                       &stableCanonical);
+  StrView identity = stableCanonical ? canonical : command;
+  StrView shown = identity.Length <= 2048 ? identity
+                                          : StrView{identity.Data, 2048};
+  StrBuf action = StrBuf_Make(arena, shown.Length + sizeof("Run "));
+  StrBuf_AppendCStr(&action, "Run ");
+  StrBuf_Append(&action, shown);
+  out->Action = StrBuf_View(&action);
+  if (identity.Length + sizeof("shell\n") - 1u <=
+      SHELL_PERMISSION_MAX_COMMAND) {
+    StrBuf key = StrBuf_Make(arena, identity.Length + 16u);
+    StrBuf_AppendCStr(&key, "shell\n");
+    StrBuf_Append(&key, identity);
+    out->GrantKey = StrBuf_View(&key);
+  }
+  out->AutoAllow = autoAllow;
+  return true;
+}
+
 static bool ShellExec(void* ctx, Arena* arena, StrView id,
                       const ToolArgs* args, volatile i32* abort,
                       const ToolUpdateSink* updates, ToolResult* out,
@@ -221,6 +420,8 @@ Tool ShellTool(ShellToolContext* context) {
       "command to execute\"},\"timeout\":{\"type\":\"number\",\"description\":\"Timeout in seconds "
       "(optional, no default timeout)\"}},\"required\":[\"command\"]}");
   t.Ctx = context;
+  t.PermissionEffect = ToolPermissionEffect::Sensitive;
+  t.DescribePermission = ShellDescribePermission;
   t.Execute = ShellExec;
   return t;
 }

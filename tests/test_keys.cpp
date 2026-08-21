@@ -102,6 +102,11 @@ void TestKeys() {
   Key su = Next(&d);
   CHECK(su.Kind == KeyKind::Up && su.Shift);
 
+  KeyDecoder_Init(&d);
+  Push(&d, "\x1b[Z");
+  Key backTab = Next(&d);
+  CHECK_ALL(backTab.Kind == KeyKind::Tab, backTab.Shift);
+
   // Alt+Enter and Alt+b/f.
   KeyDecoder_Init(&d);
   Push(&d, "\x1b\r");

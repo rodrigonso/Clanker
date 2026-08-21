@@ -38,6 +38,10 @@ const AppCommandSpec kCommands[] = {
     {AppCommandKind::Trust, SVL("trust"), {},
      SVL("Change saved project trust"), SVL("Usage: /trust"),
      AppCommandArgumentPolicy::None},
+    {AppCommandKind::Permissions, SVL("permissions"), {},
+     SVL("Show or change tool permission mode"),
+     SVL("Usage: /permissions [ask|auto|yolo|reset]"),
+     AppCommandArgumentPolicy::Optional},
     {AppCommandKind::Reload, SVL("reload"), {},
      SVL("Reload settings and prompt context"), SVL("Usage: /reload"),
      AppCommandArgumentPolicy::None},
@@ -226,6 +230,7 @@ AppCommandDispatchResult AppCommand_Dispatch(StrView input, const AppCommandHand
         case AppCommandKind::Fork: fn = handlers->Fork; break;
         case AppCommandKind::Compact: fn = handlers->Compact; break;
         case AppCommandKind::Trust: fn = handlers->Trust; break;
+        case AppCommandKind::Permissions: fn = handlers->Permissions; break;
         case AppCommandKind::Reload: fn = handlers->Reload; break;
         case AppCommandKind::Debug: fn = handlers->Debug; break;
         case AppCommandKind::Rounded: fn = handlers->Rounded; break;

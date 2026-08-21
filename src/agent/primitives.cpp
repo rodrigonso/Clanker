@@ -1,5 +1,6 @@
 #include "agent/primitives.h"
 
+#include "agent/permissions.h"
 #include "base/thread.h"
 #include "llm/retry.h"
 
@@ -25,7 +26,9 @@ void SetPreparedError(Arena* arena, AgentPreparedTool* prepared,
 }
 
 void PrepareOne(Arena* arena, const ToolRuntime* tools, u32 toolCount,
-                const AgentToolHooks* hooks, AgentPreparedTool* prepared) {
+                const AgentToolHooks* hooks,
+                const AgentPermissionGate* permissions,
+                AgentPreparedTool* prepared) {
   const Content* call = prepared->Call;
   if (prepared->Abort && *prepared->Abort) {
     prepared->EffectiveArgumentsJson = SVL("{}");
@@ -102,6 +105,17 @@ void PrepareOne(Arena* arena, const ToolRuntime* tools, u32 toolCount,
                        decision.Reason.Length ? decision.Reason
                                               : AGENT_TOOL_BLOCKED_FALLBACK,
                        decision.Terminate);
+      return;
+    }
+  }
+  if (permissions && permissions->Engine) {
+    AgentPermissionDecision decision = {};
+    AgentPermission_Decide(arena, permissions, prepared->Resolved,
+                           &prepared->Args, &decision);
+    if (decision.Block) {
+      SetPreparedError(arena, prepared, decision.Reason.Length
+                                            ? decision.Reason
+                                            : AGENT_TOOL_BLOCKED_FALLBACK);
       return;
     }
   }
@@ -310,6 +324,7 @@ bool AgentProvider_SleepBackoff(u32 delayMs, volatile i32* abort) {
 void AgentToolBatch_Prepare(Arena* arena, const ToolRuntime* tools, u32 toolCount,
                             const Message* assistant, ToolExecution execution,
                             volatile i32* abort, const AgentToolHooks* hooks,
+                            const AgentPermissionGate* permissions,
                             AgentToolBatchPlan* out) {
   u32 count = 0;
   for (u32 i = 0; i < assistant->Content.Count; i++)
@@ -324,7 +339,7 @@ void AgentToolBatch_Prepare(Arena* arena, const ToolRuntime* tools, u32 toolCoun
     AgentPreparedTool prepared = {};
     prepared.Call = content;
     prepared.Abort = abort;
-    PrepareOne(arena, tools, toolCount, hooks, &prepared);
+    PrepareOne(arena, tools, toolCount, hooks, permissions, &prepared);
     if (prepared.Runnable) {
       plan.RunnableCount++;
       if (prepared.Resolved->ExecMode == ToolExecMode::Sequential)

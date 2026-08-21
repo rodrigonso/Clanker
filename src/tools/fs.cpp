@@ -1,5 +1,6 @@
 #include "tools/fs.h"
 
+#include "agent/tool.h"
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -162,6 +163,297 @@ StrView Fs_RealPath(Arena* arena, StrView path) {
   if (realpath(in, resolved)) return StrView_Dup(arena, SV(resolved));
 #endif
   return Fs_NormalizedCopy(arena, path);
+}
+
+static bool Fs_IsDriveRelative(StrView path) {
+#if defined(_WIN32)
+  return path.Length >= 2 && path.Data[1] == ':' &&
+         !(path.Length >= 3 && Fs_IsSep(path.Data[2]));
+#else
+  (void)path;
+  return false;
+#endif
+}
+
+static StrView Fs_AbsoluteForPermission(Arena* arena, StrView path,
+                                        bool* safe) {
+  if (path.Length == 0) {
+    *safe = false;
+    return StrView{};
+  }
+  for (u32 i = 0; i < path.Length; i++) {
+    if (path.Data[i] == '\0') *safe = false;
+  }
+#if defined(_WIN32)
+  // GetFullPathNameA also resolves drive-relative and rooted paths in the
+  // same way the process will interpret them. The former remains unsafe for
+  // workspace classification and is rejected by the caller.
+  return Fs_RealPath(arena, path);
+#else
+  if (Fs_PathIsAbsolute(path)) return StrView_Dup(arena, path);
+  char cwd[4096];
+  if (!getcwd(cwd, sizeof(cwd))) {
+    *safe = false;
+    return StrView_Dup(arena, path);
+  }
+  return Fs_Join(arena, SV(cwd), path);
+#endif
+}
+
+static StrView Fs_CanonicalExisting(Arena* arena, StrView path, bool* ok) {
+  *ok = false;
+#if defined(_WIN32)
+  const char* native = StrView_DupCStr(arena, path);
+  HANDLE handle = CreateFileA(
+      native, FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+  if (handle == INVALID_HANDLE_VALUE) return StrView{};
+
+  DWORD need = GetFinalPathNameByHandleA(handle, nullptr, 0,
+                                         FILE_NAME_NORMALIZED);
+  if (!need) {
+    CloseHandle(handle);
+    return StrView{};
+  }
+  char* finalPath = (char*)ArenaAlloc(arena, (usize)need + 1, 1);
+  DWORD length = GetFinalPathNameByHandleA(handle, finalPath, need + 1,
+                                            FILE_NAME_NORMALIZED);
+  CloseHandle(handle);
+  if (!length || length > need) return StrView{};
+
+  StrView result{finalPath, length};
+  if (result.Length >= 8 && result.Data[0] == '\\' &&
+      result.Data[1] == '\\' && result.Data[2] == '?' &&
+      result.Data[3] == '\\' && result.Data[4] == 'U' &&
+      result.Data[5] == 'N' && result.Data[6] == 'C' &&
+      result.Data[7] == '\\') {
+    StrBuf normalized = StrBuf_Make(arena, result.Length);
+    StrBuf_AppendCStr(&normalized, "\\\\");
+    StrBuf_Append(&normalized, StrView{result.Data + 8, result.Length - 8});
+    result = StrBuf_View(&normalized);
+  } else if (result.Length >= 7 && result.Data[0] == '\\' &&
+             result.Data[1] == '\\' && result.Data[2] == '?' &&
+             result.Data[3] == '\\' && result.Data[5] == ':') {
+    result = StrView{result.Data + 4, result.Length - 4};
+  }
+  *ok = true;
+  return result;
+#else
+  char resolved[4096];
+  const char* native = StrView_DupCStr(arena, path);
+  if (!realpath(native, resolved)) return StrView{};
+  *ok = true;
+  return StrView_Dup(arena, SV(resolved));
+#endif
+}
+
+static bool Fs_NextSegment(StrView s, u32* pos, StrView* seg);
+
+static bool Fs_PathHasNul(StrView path) {
+  for (u32 i = 0; i < path.Length; i++)
+    if (path.Data[i] == '\0') return true;
+  return false;
+}
+
+static void Fs_PopPermissionComponent(StrBuf* path) {
+  u32 rootLength = Fs_RootLength(StrBuf_View(path));
+  u32 end = path->Length;
+  while (end > rootLength && Fs_IsSep(path->Data[end - 1])) end--;
+  if (end <= rootLength) {
+    path->Length = rootLength;
+    path->Data[path->Length] = '\0';
+    return;
+  }
+  u32 slash = end;
+  while (slash > rootLength && !Fs_IsSep(path->Data[slash - 1])) slash--;
+  if (slash <= rootLength) {
+    path->Length = rootLength;
+  } else {
+    path->Length = slash;
+  }
+  path->Data[path->Length] = '\0';
+}
+
+static bool Fs_IsDot(StrView segment) {
+  return StrView_EqCStr(segment, ".");
+}
+
+static bool Fs_IsDotDot(StrView segment) {
+  return StrView_EqCStr(segment, "..");
+}
+
+bool Fs_PathContained(StrView root, StrView path) {
+  if (root.Length == 0 || path.Length == 0) return false;
+  u32 rootLength = Fs_RootLength(root);
+  u32 rootEnd = root.Length;
+  while (rootEnd > rootLength && Fs_IsSep(root.Data[rootEnd - 1])) rootEnd--;
+  if (rootEnd == rootLength && rootEnd > 1 &&
+      Fs_IsSep(root.Data[rootEnd - 1]))
+    rootEnd--;
+  if (rootEnd == 0) return false;
+  if (rootEnd == 1 && Fs_IsSep(root.Data[0]))
+    return path.Length > 0 && Fs_IsSep(path.Data[0]);
+  if (path.Length < rootEnd) return false;
+  for (u32 i = 0; i < rootEnd; i++) {
+    if (Fs_PathFold(root.Data[i]) != Fs_PathFold(path.Data[i])) return false;
+  }
+  if (path.Length == rootEnd)
+    return !(rootEnd < root.Length && rootEnd <= rootLength);
+  return Fs_IsSep(path.Data[rootEnd]);
+}
+
+struct FsCanonicalPermissionPath {
+  StrView Path;
+  bool Complete;
+  bool Safe;
+};
+
+static FsCanonicalPermissionPath Fs_CanonicalizePermissionAbsolute(
+    Arena* arena, StrView absolute, bool safeInput) {
+  FsCanonicalPermissionPath result = {};
+  if (absolute.Length == 0) return result;
+
+  StrBuf current = StrBuf_Make(arena, absolute.Length + 16);
+  u32 rootLength = Fs_RootLength(absolute);
+  for (u32 i = 0; i < rootLength && i < absolute.Length; i++) {
+    char c = absolute.Data[i];
+    StrBuf_AppendChar(&current, Fs_IsSep(c) ? '/' : c);
+  }
+
+  bool complete = true;
+  bool safe = safeInput;
+  bool unresolved = false;
+  u32 pos = rootLength;
+  StrView segment = {};
+  while (Fs_NextSegment(absolute, &pos, &segment)) {
+    if (Fs_IsDot(segment)) continue;
+    if (Fs_IsDotDot(segment)) {
+      if (unresolved) safe = false;
+      Fs_PopPermissionComponent(&current);
+      continue;
+    }
+
+    if (unresolved) {
+      StrView next = Fs_Join(arena, StrBuf_View(&current), segment);
+      StrBuf_Clear(&current);
+      StrBuf_Append(&current, next);
+      continue;
+    }
+
+    StrView candidate = Fs_Join(arena, StrBuf_View(&current), segment);
+    if (candidate.Length >= 4096 || Fs_PathHasNul(candidate)) {
+      unresolved = true;
+      complete = false;
+      safe = false;
+      StrBuf_Clear(&current);
+      StrBuf_Append(&current, candidate);
+      continue;
+    }
+    FsStat stat = Fs_Stat(candidate);
+    if (!stat.Exists) {
+      unresolved = true;
+      complete = false;
+      StrBuf_Clear(&current);
+      StrBuf_Append(&current, candidate);
+      continue;
+    }
+
+    bool existingOk = false;
+    StrView canonical = Fs_CanonicalExisting(arena, candidate, &existingOk);
+    if (!existingOk || canonical.Length == 0) {
+      unresolved = true;
+      complete = false;
+      safe = false;
+      StrBuf_Clear(&current);
+      StrBuf_Append(&current, candidate);
+      continue;
+    }
+    StrBuf_Clear(&current);
+    StrBuf_Append(&current, canonical);
+  }
+
+  if (absolute.Length == rootLength) {
+    bool existingOk = false;
+    StrView canonical = Fs_CanonicalExisting(arena, absolute, &existingOk);
+    if (existingOk && canonical.Length) {
+      StrBuf_Clear(&current);
+      StrBuf_Append(&current, canonical);
+    } else {
+      complete = false;
+      safe = false;
+    }
+  }
+
+  result.Path = StrBuf_View(&current);
+  result.Complete = complete;
+  result.Safe = safe;
+  return result;
+}
+
+FsPermissionTarget Fs_ResolvePermissionTarget(Arena* arena,
+                                              StrView workingDirectory,
+                                              StrView target) {
+  FsPermissionTarget result = {};
+  if (!arena || workingDirectory.Length == 0 || target.Length == 0) return result;
+  if (workingDirectory.Length > 16384 || target.Length > 16384) return result;
+
+  bool rootSafe = true;
+  StrView rootAbsolute =
+      Fs_AbsoluteForPermission(arena, workingDirectory, &rootSafe);
+  if (!rootAbsolute.Length) return result;
+
+  bool targetSafe = true;
+  StrView targetAbsolute = target;
+  if (!Fs_PathIsAbsolute(target)) {
+    if (Fs_IsDriveRelative(target)) targetSafe = false;
+    targetAbsolute = Fs_Join(arena, rootAbsolute, target);
+  }
+  targetAbsolute =
+      Fs_AbsoluteForPermission(arena, targetAbsolute, &targetSafe);
+  if (!targetAbsolute.Length) return result;
+
+  FsCanonicalPermissionPath rootPath =
+      Fs_CanonicalizePermissionAbsolute(arena, rootAbsolute, rootSafe);
+  FsCanonicalPermissionPath targetPath =
+      Fs_CanonicalizePermissionAbsolute(arena, targetAbsolute, targetSafe);
+  result.Path = targetPath.Path;
+  bool safe = rootPath.Safe && targetPath.Safe;
+  result.Contained =
+      safe && rootPath.Complete && Fs_IsDir(rootPath.Path) &&
+      Fs_PathContained(rootPath.Path, targetPath.Path);
+  return result;
+}
+
+bool Fs_DescribeMutationPermission(Arena* arena, const ToolArgs* args,
+                                   StrView workingDirectory,
+                                   StrView actionPrefix,
+                                   StrView grantPrefix,
+                                   ToolPermissionInfo* out, StrBuf* err) {
+  StrView path = ToolArgs_GetStr(args, "path");
+  if (!path.Length) {
+    StrBuf_AppendCStr(err, "missing 'path' argument");
+    return false;
+  }
+
+  FsPermissionTarget target =
+      Fs_ResolvePermissionTarget(arena, workingDirectory, path);
+  StrView display = target.Path.Length ? target.Path : path;
+  u32 room = actionPrefix.Length < 2048u ? 2048u - actionPrefix.Length : 0;
+  u32 displayLength = ClankerMin(display.Length, room);
+  if (actionPrefix.Length > 2048u) actionPrefix.Length = 2048u;
+  StrBuf action = StrBuf_Make(arena, actionPrefix.Length + displayLength + 1);
+  StrBuf_Append(&action, actionPrefix);
+  StrBuf_Append(&action, StrView{display.Data, displayLength});
+  out->Action = StrBuf_View(&action);
+  if (display.Length + grantPrefix.Length <= 8192u) {
+    StrBuf key = StrBuf_Make(arena, grantPrefix.Length + display.Length + 1);
+    StrBuf_Append(&key, grantPrefix);
+    StrBuf_Append(&key, display);
+    out->GrantKey = StrBuf_View(&key);
+  }
+  out->AutoAllow = target.Contained;
+  return true;
 }
 
 StrView Fs_Parent(StrView path) {

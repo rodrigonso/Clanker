@@ -87,6 +87,139 @@ static StrView Args1(Arena* a, const char* k, const char* v) {
   return StrBuf_View(&b);
 }
 
+static bool DescribeToolPermission(Arena* a, const Tool& tool,
+                                   StrView argsJson, StrView workingDirectory,
+                                   ToolPermissionInfo* out, StrBuf* err) {
+  JsonValue* root = Json_ParseCopy(a, argsJson);
+  if (!root) {
+    StrBuf_AppendCStr(err, "invalid JSON");
+    return false;
+  }
+  StrBuf canonical = StrBuf_Make(a, argsJson.Length + 32);
+  Json_WriteValue(&canonical, root);
+  ToolArgs args = {root, StrBuf_View(&canonical)};
+  if (!tool.DescribePermission) return false;
+  return tool.DescribePermission(tool.Ctx, a, &args, workingDirectory, out, err);
+}
+
+static void TestToolPermissions(Arena* a) {
+  Tool read = ReadTool();
+  Tool ls = LsTool();
+  Tool find = FindTool();
+  Tool grep = GrepTool();
+  Tool ask = AskUserTool();
+  CHECK_ALL(read.PermissionEffect == ToolPermissionEffect::Inspection,
+            ls.PermissionEffect == ToolPermissionEffect::Inspection,
+            find.PermissionEffect == ToolPermissionEffect::Inspection,
+            grep.PermissionEffect == ToolPermissionEffect::Inspection,
+            ask.PermissionEffect == ToolPermissionEffect::UserInteraction);
+
+  const char* root = "clanker_tool_permission_root";
+  Fs_MkdirP(a, SV("clanker_tool_permission_root/sub"));
+  StrView workingDirectory = Fs_RealPath(a, SV(root));
+
+  Tool write = WriteTool();
+  Tool edit = EditTool();
+  CHECK_ALL(write.PermissionEffect == ToolPermissionEffect::Sensitive,
+            edit.PermissionEffect == ToolPermissionEffect::Sensitive,
+            write.DescribePermission != nullptr,
+            edit.DescribePermission != nullptr);
+
+  ToolPermissionInfo inside = {};
+  StrBuf insideErr = StrBuf_Make(a, 64);
+  CHECK(DescribeToolPermission(
+      a, write, SV("{\"path\":\"sub/../new.txt\",\"content\":\"x\"}"),
+      workingDirectory, &inside, &insideErr));
+  CHECK_ALL(inside.AutoAllow, inside.Action.Length > 0,
+            inside.Action.Length <= 2048, inside.GrantKey.Length > 0,
+            inside.GrantKey.Length <= 8192);
+
+  ToolPermissionInfo sameTarget = {};
+  StrBuf sameTargetErr = StrBuf_Make(a, 64);
+  CHECK(DescribeToolPermission(
+      a, write, SV("{\"path\":\"./new.txt\",\"content\":\"different\"}"),
+      workingDirectory, &sameTarget, &sameTargetErr));
+  CHECK(StrView_Eq(inside.GrantKey, sameTarget.GrantKey));
+
+  ToolPermissionInfo missingTail = {};
+  StrBuf missingTailErr = StrBuf_Make(a, 64);
+  CHECK(DescribeToolPermission(
+      a, edit, SV("{\"path\":\"new/dir/file.txt\",\"edits\":[]}"),
+      workingDirectory, &missingTail, &missingTailErr));
+  CHECK(missingTail.AutoAllow);
+
+  ToolPermissionInfo outside = {};
+  StrBuf outsideErr = StrBuf_Make(a, 64);
+  CHECK(DescribeToolPermission(
+      a, write, SV("{\"path\":\"../outside.txt\",\"content\":\"x\"}"),
+      workingDirectory, &outside, &outsideErr));
+  CHECK(!outside.AutoAllow);
+
+  CHECK(Fs_PathContained(workingDirectory, workingDirectory));
+  CHECK(Fs_PathContained(workingDirectory,
+                         Fs_Join(a, workingDirectory, SV("sub"))));
+  CHECK(!Fs_PathContained(workingDirectory,
+                          Fs_Join(a, Fs_Parent(workingDirectory),
+                                  SV("sibling"))));
+
+  Tool shell = ShellTool();
+  ToolPermissionInfo command = {};
+  StrBuf commandErr = StrBuf_Make(a, 64);
+  CHECK(DescribeToolPermission(a, shell, SV("{\"command\":\"  git   status  \"}"),
+                               workingDirectory, &command, &commandErr));
+  CHECK_ALL(command.AutoAllow,
+            StrView_Eq(command.Action, SVL("Run git status")),
+            StrView_Eq(command.GrantKey, SVL("shell\ngit status")));
+
+  ToolPermissionInfo chain = {};
+  StrBuf chainErr = StrBuf_Make(a, 64);
+  CHECK(DescribeToolPermission(
+      a, shell, SV("{\"command\":\"git status && git diff\"}"),
+      workingDirectory, &chain, &chainErr));
+  CHECK(chain.AutoAllow);
+
+  const char* reviewerCommands[] = {
+      "git status && rm -rf x", "git status | head", "git status > out",
+      "git status; git diff", "git status &", "git status $(pwd)",
+      "git status 'x'", "git diff --output=changed.txt",
+      "git show --ext-diff", "unknown-command", "git branch"};
+  for (u32 i = 0; i < (u32)(sizeof(reviewerCommands) / sizeof(reviewerCommands[0]));
+       i++) {
+    StrBuf json = StrBuf_Make(a, 128);
+    StrBuf_AppendCStr(&json, "{\"command\":\"");
+    StrBuf_AppendCStr(&json, reviewerCommands[i]);
+    StrBuf_AppendCStr(&json, "\"}");
+    ToolPermissionInfo rejected = {};
+    StrBuf rejectedErr = StrBuf_Make(a, 64);
+    CHECK(DescribeToolPermission(a, shell, StrBuf_View(&json),
+                                 workingDirectory, &rejected, &rejectedErr));
+    CHECK(!rejected.AutoAllow);
+  }
+
+  ToolPermissionInfo help = {};
+  StrBuf helpErr = StrBuf_Make(a, 64);
+  CHECK(DescribeToolPermission(a, shell, SV("{\"command\":\"python --version\"}"),
+                               workingDirectory, &help, &helpErr));
+  CHECK(help.AutoAllow);
+
+  ToolPermissionInfo gitHelp = {};
+  StrBuf gitHelpErr = StrBuf_Make(a, 64);
+  CHECK(DescribeToolPermission(a, shell,
+                               SV("{\"command\":\"git --version\"}"),
+                               workingDirectory, &gitHelp, &gitHelpErr));
+  CHECK(gitHelp.AutoAllow);
+
+  ToolPermissionInfo branch = {};
+  StrBuf branchErr = StrBuf_Make(a, 64);
+  CHECK(DescribeToolPermission(
+      a, shell, SV("{\"command\":\"git branch --show-current\"}"),
+      workingDirectory, &branch, &branchErr));
+  CHECK(branch.AutoAllow);
+
+  CLANKER_RMDIR("clanker_tool_permission_root/sub");
+  CLANKER_RMDIR(root);
+}
+
 // ---- read ----------------------------------------------------------------
 
 static void TestRead(Arena* a) {
@@ -568,6 +701,10 @@ static void TestAskUser(Arena* a) {
                    &err3));
     StrBuf err4 = StrBuf_Make(a, 128);
     CHECK(!RunTool(tool, a, SVL("{\"choices\":[\"a\"]}"), &result, &err4));
+    StrBuf err5 = StrBuf_Make(a, 128);
+    CHECK(!RunTool(tool, a,
+                   SVL("{\"permission_request_id\":\"pending\",\"question\":\"q\"}"),
+                   &result, &err5));
     CHECK(fake.Calls == 0);
   }
 
@@ -577,6 +714,7 @@ static void TestAskUser(Arena* a) {
 
 void TestTools() {
   Arena a = ArenaCreate();
+  TestToolPermissions(&a);
   TestRead(&a);
   TestShell(&a);
   TestShellOverflow(&a);

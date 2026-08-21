@@ -11,6 +11,7 @@ struct FakeCommandContext {
   int SessionsCalls;
   int ResumeCalls;
   int TrustCalls;
+  int PermissionsCalls;
   int ReloadCalls;
   int DebugCalls;
   int RoundedCalls;
@@ -110,6 +111,21 @@ AppCommandHandlerResult Reload(void* user, const AppCommandUx* ux,
   return {AppCommandHandlerStatus::Success, SVL("Prompt reloaded.")};
 }
 
+AppCommandHandlerResult Permissions(void* user, const AppCommandUx* ux,
+                                    StrView arguments) {
+  (void)ux;
+  FakeCommandContext* ctx = (FakeCommandContext*)user;
+  ctx->PermissionsCalls++;
+  ctx->LastArguments = arguments;
+  if (arguments.Length && !StrView_Eq(arguments, SVL("ask")) &&
+      !StrView_Eq(arguments, SVL("auto")) &&
+      !StrView_Eq(arguments, SVL("yolo")) &&
+      !StrView_Eq(arguments, SVL("reset")))
+    return {AppCommandHandlerStatus::Failed,
+            SVL("Usage: /permissions [ask|auto|yolo|reset]")};
+  return {AppCommandHandlerStatus::Success, SVL("permissions updated")};
+}
+
 AppCommandHandlerResult Debug(void* user, const AppCommandUx* ux,
                               StrView arguments) {
   (void)ux;
@@ -151,36 +167,57 @@ bool PromptTemplate(void* user, const AppCommandUx* ux, StrView name,
 }
 
 void TestParse() {
-  CHECK_ALL(AppCommandSpec_Count() == 17,
+  CHECK_ALL(AppCommandSpec_Count() == 18,
             AppCommandSpec_At(AppCommandSpec_Count()) == nullptr,
             AppCommandSpec_At(0)->Kind == AppCommandKind::Auth,
             StrView_EqCStr(AppCommandSpec_At(0)->Name, "auth"),
             AppCommandSpec_At(0)->Alias.Length == 0,
             AppCommandSpec_At(0)->Arguments ==
                 AppCommandArgumentPolicy::None,
-            AppCommandSpec_At(13)->Kind == AppCommandKind::Debug,
-            AppCommandSpec_At(13)->Arguments ==
+            AppCommandSpec_At(12)->Kind == AppCommandKind::Permissions,
+            StrView_EqCStr(AppCommandSpec_At(12)->Name, "permissions"),
+            AppCommandSpec_At(12)->Arguments ==
                 AppCommandArgumentPolicy::Optional,
-            AppCommandSpec_At(14)->Kind == AppCommandKind::Rounded,
-            StrView_EqCStr(AppCommandSpec_At(14)->Name, "rounded"),
+            AppCommandSpec_At(14)->Kind == AppCommandKind::Debug,
             AppCommandSpec_At(14)->Arguments ==
                 AppCommandArgumentPolicy::Optional,
-            AppCommandSpec_At(15)->Kind == AppCommandKind::Skill,
-            StrView_EqCStr(AppCommandSpec_At(15)->Name, "skill"),
+            AppCommandSpec_At(15)->Kind == AppCommandKind::Rounded,
+            StrView_EqCStr(AppCommandSpec_At(15)->Name, "rounded"),
             AppCommandSpec_At(15)->Arguments ==
                 AppCommandArgumentPolicy::Optional,
-            AppCommandSpec_At(16)->Kind == AppCommandKind::Exit,
-            StrView_EqCStr(AppCommandSpec_At(16)->Alias, "quit"),
-            AppCommandSpec_At(16)->Description.Length != 0,
+            AppCommandSpec_At(16)->Kind == AppCommandKind::Skill,
+            StrView_EqCStr(AppCommandSpec_At(16)->Name, "skill"),
+            AppCommandSpec_At(16)->Arguments ==
+                AppCommandArgumentPolicy::Optional,
+            AppCommandSpec_At(17)->Kind == AppCommandKind::Exit,
+            StrView_EqCStr(AppCommandSpec_At(17)->Alias, "quit"),
+            AppCommandSpec_At(17)->Description.Length != 0,
             StrView_EqCStr(AppCommand_Usage(AppCommandKind::Resume),
                            "Usage: /resume [session-id]"),
             StrView_EqCStr(AppCommand_Usage(AppCommandKind::Debug),
                            "Usage: /debug [on|off]"),
+            StrView_EqCStr(
+                AppCommand_Usage(AppCommandKind::Permissions),
+                "Usage: /permissions [ask|auto|yolo|reset]"),
             StrView_EqCStr(AppCommand_Usage(AppCommandKind::Rounded),
                            "Usage: /rounded [on|off]"),
             StrView_EqCStr(AppCommand_Usage(AppCommandKind::Skill),
                            "Usage: /skill:<name> [instructions]"),
             AppCommand_Usage(AppCommandKind::Unknown).Length == 0);
+
+  u32 permissionsIndex = AppCommandSpec_Count();
+  for (u32 i = 0; i < AppCommandSpec_Count(); i++) {
+    const AppCommandSpec* spec = AppCommandSpec_At(i);
+    if (spec->Kind == AppCommandKind::Permissions) permissionsIndex = i;
+  }
+  CHECK_ALL(permissionsIndex == 12,
+            AppCommandSpec_At(permissionsIndex)->Alias.Length == 0,
+            AppCommandSpec_At(permissionsIndex)->Arguments ==
+                AppCommandArgumentPolicy::Optional,
+            StrView_Eq(AppCommand_Parse(SVL("/permissions")).Name,
+                       AppCommandSpec_At(permissionsIndex)->Name),
+            AppCommand_Parse(SVL("/permissions")).Kind ==
+                AppCommandSpec_At(permissionsIndex)->Kind);
 
   AppCommand plain = AppCommand_Parse(SVL("  hello  "));
   CHECK(plain.Kind == AppCommandKind::NotCommand);
@@ -211,6 +248,9 @@ void TestParse() {
       {SVL("/compact"), AppCommandKind::Compact},
       {SVL("/compact keep the parser work"), AppCommandKind::Compact},
       {SVL("/trust"), AppCommandKind::Trust},
+      {SVL("/permissions"), AppCommandKind::Permissions},
+      {SVL("/permissions auto"), AppCommandKind::Permissions},
+      {SVL("/permissions reset"), AppCommandKind::Permissions},
       {SVL("/reload"), AppCommandKind::Reload},
       {SVL("/debug"), AppCommandKind::Debug},
       {SVL("/rounded"), AppCommandKind::Rounded},
@@ -273,6 +313,7 @@ void TestDispatch() {
   handlers.Sessions = Sessions;
   handlers.Resume = Resume;
   handlers.Trust = Trust;
+  handlers.Permissions = Permissions;
   handlers.Reload = Reload;
   handlers.Debug = Debug;
   handlers.Rounded = Rounded;
@@ -326,6 +367,10 @@ void TestDispatch() {
   CHECK(quit.Handled && quit.Action == AppLoopAction::Exit);
 
   AppCommand_Dispatch(SVL("/trust"), &handlers, &ux);
+  AppCommand_Dispatch(SVL("/permissions auto"), &handlers, &ux);
+  CHECK_ALL(ctx.PermissionsCalls == 1,
+            StrView_EqCStr(ctx.LastArguments, "auto"),
+            StrView_EqCStr(ctx.LastNotice, "permissions updated"));
   AppCommand_Dispatch(SVL("/reload"), &handlers, &ux);
   CHECK_ALL(ctx.TrustCalls == 1, ctx.ReloadCalls == 1);
 
@@ -362,8 +407,12 @@ void TestDispatch() {
   CHECK_ALL(ctx.ReloadCalls == 1, ctx.Errors == 5,
             StrView_Contains(ctx.LastError, "Usage: /reload"));
 
+  AppCommand_Dispatch(SVL("/permissions nope"), &handlers, &ux);
+  CHECK_ALL(ctx.PermissionsCalls == 2, ctx.Errors == 6,
+            StrView_Contains(ctx.LastError, "Usage: /permissions"));
+
   AppCommandDispatchResult unknown = AppCommand_Dispatch(SVL(" /unknown "), &handlers, &ux);
-  CHECK_ALL(unknown.Handled && unknown.Action == AppLoopAction::Continue, ctx.Errors == 6,
+  CHECK_ALL(unknown.Handled && unknown.Action == AppLoopAction::Continue, ctx.Errors == 7,
             StrView_Contains(ctx.LastError, "Unknown slash command"));
 
   AppCommandDispatchResult skill =
@@ -371,27 +420,27 @@ void TestDispatch() {
   CHECK_ALL(skill.Handled && skill.Action == AppLoopAction::Continue,
             ctx.SkillCalls == 1,
             StrView_EqCStr(ctx.LastSkillName, "code-review"),
-            StrView_EqCStr(ctx.LastArguments, "be terse"), ctx.Errors == 6);
+            StrView_EqCStr(ctx.LastArguments, "be terse"), ctx.Errors == 7);
 
   AppCommandDispatchResult bareSkill =
       AppCommand_Dispatch(SVL("/skill"), &handlers, &ux);
   CHECK_ALL(bareSkill.Handled && bareSkill.Action == AppLoopAction::Continue,
-            ctx.SkillCalls == 1, ctx.Errors == 7,
+            ctx.SkillCalls == 1, ctx.Errors == 8,
             StrView_Contains(ctx.LastError, "Usage: /skill:<name>"));
 
   AppCommand_Dispatch(SVL("/skill: do it"), &handlers, &ux);
-  CHECK_ALL(ctx.SkillCalls == 1, ctx.Errors == 8,
+  CHECK_ALL(ctx.SkillCalls == 1, ctx.Errors == 9,
             StrView_Contains(ctx.LastError, "Usage: /skill:<name>"));
 
   ctx.SkillResult = {AppCommandHandlerStatus::Failed, SVL("Unknown skill: nope")};
   AppCommand_Dispatch(SVL("/skill:nope"), &handlers, &ux);
-  CHECK_ALL(ctx.SkillCalls == 2, ctx.Errors == 9,
+  CHECK_ALL(ctx.SkillCalls == 2, ctx.Errors == 10,
             StrView_EqCStr(ctx.LastError, "Unknown skill: nope"));
 
   AppCommandHandlers noSkill = handlers;
   noSkill.Skill = nullptr;
   AppCommand_Dispatch(SVL("/skill:code-review"), &noSkill, &ux);
-  CHECK_ALL(ctx.SkillCalls == 2, ctx.Errors == 10,
+  CHECK_ALL(ctx.SkillCalls == 2, ctx.Errors == 11,
             StrView_Contains(ctx.LastError, "Skills are unavailable"));
 
   ctx.TemplateName = SVL("ship");
@@ -400,18 +449,18 @@ void TestDispatch() {
   AppCommandDispatchResult tmpl =
       AppCommand_Dispatch(SVL("  /ship  fast  now "), &handlers, &ux);
   CHECK_ALL(tmpl.Handled && tmpl.Action == AppLoopAction::Continue,
-            ctx.TemplateCalls == 1, ctx.Errors == 10,
+            ctx.TemplateCalls == 1, ctx.Errors == 11,
             StrView_EqCStr(ctx.LastTemplateName, "ship"),
             StrView_EqCStr(ctx.LastArguments, "fast  now"));
 
   AppCommandDispatchResult declined =
       AppCommand_Dispatch(SVL("/nosuchthing"), &handlers, &ux);
-  CHECK_ALL(declined.Handled, ctx.TemplateCalls == 1, ctx.Errors == 11,
+  CHECK_ALL(declined.Handled, ctx.TemplateCalls == 1, ctx.Errors == 12,
             StrView_Contains(ctx.LastError, "Unknown slash command"));
 
   ctx.TemplateResult = {AppCommandHandlerStatus::Failed, SVL("Template broke.")};
   AppCommand_Dispatch(SVL("/ship"), &handlers, &ux);
-  CHECK_ALL(ctx.TemplateCalls == 2, ctx.Errors == 12,
+  CHECK_ALL(ctx.TemplateCalls == 2, ctx.Errors == 13,
             StrView_EqCStr(ctx.LastError, "Template broke."));
 
   ctx.TemplateName = SVL("reload");
@@ -422,7 +471,7 @@ void TestDispatch() {
   ctx.TemplateName = SVL("");
   int callsBeforeBare = ctx.TemplateCalls;
   AppCommand_Dispatch(SVL("/"), &handlers, &ux);
-  CHECK_ALL(ctx.TemplateCalls == callsBeforeBare, ctx.Errors == 13,
+  CHECK_ALL(ctx.TemplateCalls == callsBeforeBare, ctx.Errors == 14,
             StrView_Contains(ctx.LastError, "Unknown slash command"));
 }
 

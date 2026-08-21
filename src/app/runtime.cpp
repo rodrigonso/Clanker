@@ -112,12 +112,14 @@ static bool RuntimeAskUserImpl(void* user, Arena* arena,
   // `false`, not Declined: nobody saw the question, so the caller must be free
   // to carry on rather than treat it as a refusal.
   if (!rt || !rt->Interactive || request->Question.Length == 0) return false;
+  StrView category =
+      request->Category.Length ? request->Category : SVL("Question");
 
   if (request->ChoiceCount) {
     u32 selected = 0;
     RuntimeInputResult result =
         RuntimeSelect(rt, request->Question, request->Choices,
-                      request->ChoiceCount, &selected, 0, SVL("Question"));
+                      request->ChoiceCount, &selected, 0, category);
     if (result != RuntimeInputResult::Confirmed) {
       out->Status = AgentAskStatus::Declined;
       return true;
@@ -133,7 +135,7 @@ static bool RuntimeAskUserImpl(void* user, Arena* arena,
   // question is not rendered twice in the same panel.
   RuntimeInputResult result =
       RuntimeReadText(rt, arena, request->Question, SVL("Your answer"), StrView{},
-                      &answer, SVL("Question"));
+                      &answer, category);
   // An empty confirmation is an answer the model cannot use, so it counts as a
   // dismissal rather than a blank reply.
   if (result != RuntimeInputResult::Confirmed || TrimAscii(answer).Length == 0) {
@@ -227,6 +229,14 @@ bool RuntimePersistSettings(InteractiveRuntime* rt) {
   settings.Compaction = rt->Harness->Config.Compaction;
   settings.Retry = rt->Harness->Config.Retry;
   settings.TurnLimit = rt->Harness->Config.TurnLimit;
+  settings.PermissionMode = rt->PermissionModeOverridden
+                                ? rt->PersistedPermissionMode
+                                : rt->PermissionMode;
+  settings.PermissionReviewerModel =
+      rt->PermissionReviewerModel.Length
+          ? rt->PermissionReviewerModel
+          : AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL;
+  settings.YoloAcknowledged = rt->YoloAcknowledged;
   settings.Rounded = rt->Rounded;
   if (rt->Prompt) {
     settings.Skills = rt->Prompt->SettingsSkillPaths;
@@ -235,6 +245,18 @@ bool RuntimePersistSettings(InteractiveRuntime* rt) {
   bool saved = AppSettings_Save(&scratch, rt->SettingsPath, &settings);
   ArenaRelease(&scratch);
   return saved;
+}
+
+bool RuntimeRefreshPermissionReviewer(InteractiveRuntime* rt) {
+  if (!rt || !rt->Harness || !rt->Spec || !rt->Spec->CreateModel)
+    return false;
+  if (!rt->PermissionReviewerModel.Length)
+    rt->PermissionReviewerModel = AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL;
+  Model reviewer = rt->Spec->CreateModel(
+      rt->Mem, rt->Spec, rt->PermissionReviewerModel);
+  if (!reviewer.Id.Length || !Model_MetadataIsValid(&reviewer)) return false;
+  rt->Harness->Config.PermissionReviewerModel = reviewer;
+  return true;
 }
 
 AppCommandDispatchResult RuntimeDispatchCommand(InteractiveRuntime* rt, StrView input,

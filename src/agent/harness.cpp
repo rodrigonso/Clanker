@@ -62,6 +62,15 @@ SessionResult CloneHarnessEvent(Arena* arena, const AgentHarnessEvent* source,
     case AgentHarnessEventKind::TransientRetryEnd:
       clone.Retry.Error = StrView_Dup(arena, source->Retry.Error);
       break;
+    case AgentHarnessEventKind::TransientPermissionReviewStart:
+    case AgentHarnessEventKind::TransientPermissionReviewEnd:
+      clone.PermissionReview.ToolName =
+          StrView_Dup(arena, source->PermissionReview.ToolName);
+      clone.PermissionReview.Model =
+          StrView_Dup(arena, source->PermissionReview.Model);
+      clone.PermissionReview.Rationale =
+          StrView_Dup(arena, source->PermissionReview.Rationale);
+      break;
     case AgentHarnessEventKind::TransientQueueUpdate:
     case AgentHarnessEventKind::TransientCancelRequested:
     case AgentHarnessEventKind::TransientEventsDropped:
@@ -526,6 +535,28 @@ void AgentHarness_PublishRetry(AgentHarness* harness, AgentHarnessEventKind kind
   PublishToWatchers(harness, &event);
 }
 
+void AgentHarness_PublishPermissionReviewStart(AgentHarness* harness,
+                                               StrView toolName,
+                                               StrView model) {
+  AgentHarnessEvent event = {};
+  event.Kind = AgentHarnessEventKind::TransientPermissionReviewStart;
+  event.PermissionReview.ToolName = toolName;
+  event.PermissionReview.Model = model;
+  PublishToWatchers(harness, &event);
+}
+
+void AgentHarness_PublishPermissionReviewEnd(
+    AgentHarness* harness, StrView toolName, StrView model,
+    AgentPermissionReviewOutcome outcome, StrView rationale) {
+  AgentHarnessEvent event = {};
+  event.Kind = AgentHarnessEventKind::TransientPermissionReviewEnd;
+  event.PermissionReview.ToolName = toolName;
+  event.PermissionReview.Model = model;
+  event.PermissionReview.Outcome = outcome;
+  event.PermissionReview.Rationale = rationale;
+  PublishToWatchers(harness, &event);
+}
+
 void AgentHarness_PublishQueueUpdate(AgentHarness* harness) {
   AgentHarnessEvent event = {};
   event.Kind = AgentHarnessEventKind::TransientQueueUpdate;
@@ -558,6 +589,12 @@ SessionResult AgentHarness_Init(AgentHarness* harness, SessionLog log,
   harness->Queues.Steering = Array_Make<Message>(&harness->Queued, 4);
   harness->Queues.FollowUp = Array_Make<Message>(&harness->Queued, 4);
   harness->Queues.NextTurn = Array_Make<Message>(&harness->Queued, 4);
+  AgentPermissionReviewer reviewer = {};
+  reviewer.User = harness;
+  reviewer.Review = AgentDriver_ReviewPermission;
+  AgentPermissionEngine_Init(&harness->Permissions, config->PermissionMode,
+                             config->WorkingDirectory,
+                             &harness->Config.AskUser, reviewer);
 
   if (config->ToolCount) {
     harness->RuntimeTools = ArenaPushArray(&harness->Runtime, ToolRuntime, config->ToolCount);
@@ -610,6 +647,7 @@ SessionResult AgentHarness_Close(AgentHarness* harness) {
     CloseRegisteredWatchers(harness);
   }
   SessionLog_Close(&harness->Log);
+  AgentPermissionEngine_Close(&harness->Permissions);
   Mutex_Destroy(&harness->StateLock);
   Mutex_Destroy(&harness->WatcherLock);
   ArenaRelease(&harness->Runtime);
@@ -809,7 +847,9 @@ SessionResult AgentHarness_Run(AgentHarness* harness, StrView prompt) {
     Atomic_StoreI32(&harness->AbortFlag, 0);
   }
 
+  AgentPermissionEngine_BeginRun(&harness->Permissions);
   SessionResult result = AgentDriver_Run(harness, prompt);
+  AgentPermissionEngine_EndRun(&harness->Permissions);
 
   {
     ScopedLock lock(&harness->StateLock);
@@ -818,7 +858,43 @@ SessionResult AgentHarness_Run(AgentHarness* harness, StrView prompt) {
       harness->Faulted = true;
     CompleteAgentTurnLocked(harness, AgentTurnKind::Run, &result);
   }
+
   return result;
+}
+
+AgentPermissionMode AgentHarness_GetPermissionMode(AgentHarness* harness) {
+  return harness ? AgentPermissionEngine_GetMode(&harness->Permissions)
+                 : AgentPermissionMode::Auto;
+}
+
+AgentPermissionMode AgentHarness_SetPermissionMode(AgentHarness* harness,
+                                                   AgentPermissionMode mode) {
+  if (!harness) return mode;
+  return AgentPermissionEngine_SetMode(&harness->Permissions, mode);
+}
+
+AgentPermissionMode AgentHarness_CyclePermissionMode(AgentHarness* harness) {
+  if (!harness) return AgentPermissionMode::Auto;
+  return AgentPermissionEngine_CycleMode(&harness->Permissions);
+}
+
+AgentPermissionMode AgentHarness_ResetPermissions(AgentHarness* harness) {
+  if (!harness) return AgentPermissionMode::Ask;
+  return AgentPermissionEngine_Reset(&harness->Permissions);
+}
+
+u32 AgentHarness_PermissionGrantCount(AgentHarness* harness) {
+  return harness ? AgentPermissionEngine_GrantCount(&harness->Permissions) : 0;
+}
+
+bool AgentHarness_ResolvePermissionRequest(AgentHarness* harness, Arena* arena,
+                                           StrView requestId,
+                                           volatile i32* abort,
+                                           StrView* outMessage,
+                                           StrBuf* error) {
+  return harness &&
+         AgentPermission_ResolveRequest(&harness->Permissions, arena, requestId,
+                                        abort, outMessage, error);
 }
 
 SessionResult AgentHarness_Compact(AgentHarness* harness, StrView instructions) {

@@ -71,6 +71,12 @@ struct InteractiveRuntime {
   bool TrustCoversProjectResources;
   ProjectTrustOverride TrustOverride;
   DefaultProjectTrust DefaultTrust;
+  AgentPermissionMode PermissionMode = AgentPermissionMode::Auto;
+  AgentPermissionMode PersistedPermissionMode = AgentPermissionMode::Auto;
+  StrView PermissionReviewerModel = AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL;
+  bool YoloAcknowledged = false;
+  // Keeps a one-run CLI mode from leaking into unrelated settings saves.
+  bool PermissionModeOverridden = false;
   bool Rounded = true;
   PromptContext* Prompt;
   PromptContextOptions PromptOptions;
@@ -155,6 +161,7 @@ void InteractiveRuntime_Release(InteractiveRuntime* rt);
 void RuntimeSetPromptOptions(InteractiveRuntime* rt,
                              const PromptContextOptions* options);
 bool RuntimePersistSettings(InteractiveRuntime* rt);
+bool RuntimeRefreshPermissionReviewer(InteractiveRuntime* rt);
 
 // Dispatches one slash command, recycling the previous command's result
 // storage first. Every caller must go through this rather than

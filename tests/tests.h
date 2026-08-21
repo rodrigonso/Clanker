@@ -14,6 +14,7 @@ void TestTypes();
 void TestJson();
 void TestSession();
 void TestHarness();
+void TestPermissions();
 void TestCompaction();
 void TestEventJson();
 void TestResponses();

@@ -145,7 +145,7 @@ void TestRequestBasics() {
 void TestRequestTools() {
   Arena arena = ArenaCreate();
   Model model = TestModel();
-  ToolDef tools[2] = {};
+  ToolDef tools[3] = {};
   tools[0].Name = SVL("read");
   tools[0].Description = SVL("read a file");
   tools[0].ParamsJsonSchema =
@@ -154,13 +154,17 @@ void TestRequestTools() {
   tools[1].Name = SVL("broken");
   tools[1].Description = SVL("bad schema");
   tools[1].ParamsJsonSchema = SVL("not json");
+  tools[2].Name = SVL("permission_decision");
+  tools[2].Description = SVL("Return the automatic permission review decision.");
+  tools[2].ParamsJsonSchema =
+      SVL("{\"type\":\"object\",\"additionalProperties\":false}");
 
   Message messages[] = {Message_User(&arena, SVL("go"))};
   LlmContext context = {};
   context.Messages = messages;
   context.MessageCount = 1;
   context.Tools = tools;
-  context.ToolCount = 2;
+  context.ToolCount = 3;
   StreamOptions options = {};
   options.Profile.Effort = ModelEffort::High;
 
@@ -170,7 +174,8 @@ void TestRequestTools() {
   // reasoning effort in one request, which chat-completions rejects.
   CHECK_ALL(Contains(body, "\"reasoning\":{\"effort\":\"high\""),
             Contains(body, "\"tool_choice\":\"auto\""),
-            Contains(body, "\"parallel_tool_calls\":true"));
+            Contains(body, "\"parallel_tool_calls\":true"),
+            Contains(body, "\"strict\":false"));
   // Responses declares a function tool flat, not nested under "function".
   CHECK_ALL(Contains(body, "{\"type\":\"function\",\"name\":\"read\""),
             Contains(body, "\"strict\":false"),
@@ -182,6 +187,26 @@ void TestRequestTools() {
                      ":{\"type\":\"string\"}}}"),
             Contains(body,
                      "\"parameters\":{\"type\":\"object\",\"properties\":{}}"));
+
+  StreamOptions reviewer = {};
+  reviewer.Request.ToolChoice = LlmToolChoice::NamedFunction;
+  reviewer.Request.ToolName = SVL("permission_decision");
+  reviewer.Request.StrictTools = true;
+  reviewer.Request.DisableParallelToolCalls = true;
+  StrBuf reviewerRequest =
+      Responses_BuildRequest(&arena, &model, &context, &reviewer);
+  StrView reviewerBody = StrBuf_View(&reviewerRequest);
+  CHECK_ALL(
+      Contains(reviewerBody,
+               "\"tool_choice\":{\"type\":\"function\","
+               "\"name\":\"permission_decision\"}"),
+      Contains(reviewerBody,
+               "\"type\":\"function\",\"name\":\"permission_decision\""),
+      Contains(reviewerBody, "\"parallel_tool_calls\":false"),
+      Contains(reviewerBody, "\"strict\":true"),
+      !Contains(reviewerBody, "\"tool_choice\":\"auto\""),
+      !Contains(reviewerBody, "\"parallel_tool_calls\":true"),
+      !Contains(reviewerBody, "\"strict\":false"));
 
   // A turn with no tools still declares the rest of its shape.
   context.ToolCount = 0;

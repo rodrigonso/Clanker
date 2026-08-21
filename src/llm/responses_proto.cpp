@@ -571,9 +571,19 @@ StrBuf Responses_BuildRequest(Arena* arena, const Model* model,
     StrBuf_AppendCStr(&out, ",\"summary\":\"auto\"}");
   }
 
+  LlmRequestControls request =
+      options ? options->Request : LlmRequestControls{};
+  StrBuf_AppendCStr(&out, ",\"include\":[\"reasoning.encrypted_content\"],");
+  if (request.ToolChoice == LlmToolChoice::NamedFunction) {
+    StrBuf_AppendCStr(&out, "\"tool_choice\":{\"type\":\"function\",\"name\":");
+    Json_WriteString(&out, request.ToolName);
+    StrBuf_AppendChar(&out, '}');
+  } else {
+    StrBuf_AppendCStr(&out, "\"tool_choice\":\"auto\"");
+  }
+  StrBuf_AppendCStr(&out, ",\"parallel_tool_calls\":");
   StrBuf_AppendCStr(&out,
-                    ",\"include\":[\"reasoning.encrypted_content\"],"
-                    "\"tool_choice\":\"auto\",\"parallel_tool_calls\":true");
+                    request.DisableParallelToolCalls ? "false" : "true");
 
   if (context->ToolCount) {
     StrBuf_AppendCStr(&out, ",\"tools\":[");
@@ -587,7 +597,8 @@ StrBuf Responses_BuildRequest(Arena* arena, const Model* model,
       StrBuf_AppendCStr(&out, ",\"parameters\":");
       WriteCanonicalObject(&out, tool->ParamsJsonSchema,
                            SVL("{\"type\":\"object\",\"properties\":{}}"));
-      StrBuf_AppendCStr(&out, ",\"strict\":false}");
+      StrBuf_AppendCStr(&out, ",\"strict\":");
+      StrBuf_AppendCStr(&out, request.StrictTools ? "true}" : "false}");
     }
     StrBuf_AppendChar(&out, ']');
   }

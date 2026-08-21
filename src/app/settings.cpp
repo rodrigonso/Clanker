@@ -169,6 +169,32 @@ AppSettingsLoadResult AppSettings_Load(Arena* a, StrView path, AppSettings* out)
       !ReadStringArray(a, root, "promptTemplates", &promptTemplates))
     return AppSettingsLoadResult::Malformed;
 
+  AgentPermissionMode permissionMode = AgentPermissionMode::Auto;
+  JsonValue* permissionModeValue = Json_Get(root, "permissionMode");
+  if (permissionModeValue) {
+    if (!Json_IsString(permissionModeValue) ||
+        !AgentPermissionMode_Parse(permissionModeValue->Str, &permissionMode))
+      return AppSettingsLoadResult::Malformed;
+  }
+
+  StrView permissionReviewerModel = AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL;
+  JsonValue* permissionReviewerValue =
+      Json_Get(root, "permissionReviewerModel");
+  if (permissionReviewerValue) {
+    if (!Json_IsString(permissionReviewerValue) ||
+        !permissionReviewerValue->Str.Length)
+      return AppSettingsLoadResult::Malformed;
+    permissionReviewerModel = permissionReviewerValue->Str;
+  }
+
+  bool yoloAcknowledged = false;
+  JsonValue* yoloAcknowledgedValue = Json_Get(root, "yoloAcknowledged");
+  if (yoloAcknowledgedValue) {
+    if (yoloAcknowledgedValue->Kind != JsonKind::Bool)
+      return AppSettingsLoadResult::Malformed;
+    yoloAcknowledged = yoloAcknowledgedValue->Bool;
+  }
+
   out->Provider = provider->Str;
   out->Model = model->Str;
   out->DefaultTrust = defaultTrust;
@@ -176,6 +202,9 @@ AppSettingsLoadResult AppSettings_Load(Arena* a, StrView path, AppSettings* out)
   out->Compaction = compaction;
   out->Retry = retry;
   out->TurnLimit = turnLimit;
+  out->PermissionMode = permissionMode;
+  out->PermissionReviewerModel = permissionReviewerModel;
+  out->YoloAcknowledged = yoloAcknowledged;
   out->Rounded = rounded;
   out->Skills = skills;
   out->PromptTemplates = promptTemplates;
@@ -185,12 +214,15 @@ AppSettingsLoadResult AppSettings_Load(Arena* a, StrView path, AppSettings* out)
 bool AppSettings_Save(Arena* a, StrView path, const AppSettings* settings) {
   StrView trust = DefaultProjectTrust_Name(settings->DefaultTrust);
   StrView effort = ModelEffort_Name(settings->Profile.Effort);
+  StrView permissionMode = AgentPermissionMode_Name(settings->PermissionMode);
   if (!trust.Length ||
+      !permissionMode.Length ||
+      !settings->PermissionReviewerModel.Length ||
       (settings->Profile.Effort != ModelEffort::None && !effort.Length))
     return false;
   StrBuf content = StrBuf_Make(
       a, settings->Provider.Length + settings->Model.Length + trust.Length +
-             effort.Length + 128);
+             effort.Length + settings->PermissionReviewerModel.Length + 192);
   StrBuf_AppendCStr(&content, "{\"provider\":");
   Json_WriteString(&content, settings->Provider);
   StrBuf_AppendCStr(&content, ",\"model\":");
@@ -242,6 +274,12 @@ bool AppSettings_Save(Arena* a, StrView path, const AppSettings* settings) {
   StrBuf_AppendCStr(&content, ",\"maxTurns\":");
   StrBuf_AppendU64(&content, settings->TurnLimit.MaxTurns);
   StrBuf_AppendChar(&content, '}');
+  StrBuf_AppendCStr(&content, ",\"permissionMode\":");
+  Json_WriteString(&content, permissionMode);
+  StrBuf_AppendCStr(&content, ",\"permissionReviewerModel\":");
+  Json_WriteString(&content, settings->PermissionReviewerModel);
+  StrBuf_AppendCStr(&content, ",\"yoloAcknowledged\":");
+  StrBuf_AppendCStr(&content, settings->YoloAcknowledged ? "true" : "false");
   StrBuf_AppendCStr(&content, ",\"rounded\":");
   StrBuf_AppendCStr(&content, settings->Rounded ? "true" : "false");
   WriteStringArray(&content, "skills", &settings->Skills);

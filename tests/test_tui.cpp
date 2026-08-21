@@ -12,6 +12,21 @@ namespace {
 
 bool g_displayDrainsOk;
 
+struct PermissionCycleState {
+  TuiPermissionMode Mode;
+};
+
+TuiPermissionMode CyclePermission(void* user) {
+  PermissionCycleState* state = (PermissionCycleState*)user;
+  state->Mode =
+      state->Mode == TuiPermissionMode::Ask
+          ? TuiPermissionMode::Auto
+          : state->Mode == TuiPermissionMode::Auto
+                ? TuiPermissionMode::Yolo
+                : TuiPermissionMode::Ask;
+  return state->Mode;
+}
+
 // The assistant turn's completion reaches the TUI as the durable record the
 // harness appends, not as a transient event.
 AgentHarnessEvent AssistantRecordEvent(SessionRecord* record, const Message* message) {
@@ -434,7 +449,7 @@ void TestTui() {
     CHECK(FrameHash(&tf) == 14406110976847255100ull);
 
     Tui_ComposeFrame(&tf, 28, 15);
-    CHECK(FrameHash(&tf) == 18067228642383294040ull);
+    CHECK(FrameHash(&tf) == 8416906020120365460ull);
     Tui_Stop(&tf);
     ArenaRelease(&af);
   }
@@ -446,7 +461,7 @@ void TestTui() {
     LineModel_AddNotice(&tf.Model, EntryKind::Info, SVL("fixture transcript"));
     Feed(&tf, "hello");
     Tui_ComposeFrame(&tf, 20, 12);
-    CHECK(FrameHash(&tf) == 8604892137943206150ull);
+    CHECK(FrameHash(&tf) == 13420198605997514494ull);
     Tui_Stop(&tf);
     ArenaRelease(&af);
   }
@@ -492,7 +507,7 @@ void TestTui() {
     CHECK(Tui_UpdateDebugOverlay(&ot, TuiToggleAction::Toggle));
     SeedPerf(&ot);
     Tui_ComposeFrame(&ot, 60, 24, 1000);
-    CHECK(FrameHash(&ot) == 1526713118616935166ull);
+    CHECK(FrameHash(&ot) == 3627595641934507782ull);
 
     CHECK_ALL(ScreenContains(&ot, "debug"),
               ScreenContains(&ot, "58.8"),     // 1e7 / 17000us, in tenths
@@ -559,6 +574,19 @@ void TestTui() {
   ev.Kind = AgentHarnessEventKind::TransientRetryEnd;
   TuiBridge_HarnessEvent(&t, &ev);
   CHECK_ALL(t.State == TuiState::Thinking, !t.Sess.RetryStatus.Length);
+
+  ev = {};
+  ev.Kind = AgentHarnessEventKind::TransientPermissionReviewStart;
+  ev.PermissionReview.ToolName = SVL("shell");
+  ev.PermissionReview.Model = SVL("reviewer");
+  TuiBridge_HarnessEvent(&t, &ev);
+  CHECK_ALL(t.State == TuiState::PermissionReview,
+            StrView_Eq(t.Sess.StateTool, SVL("shell")));
+  ev.Kind = AgentHarnessEventKind::TransientPermissionReviewEnd;
+  ev.PermissionReview.Outcome = AgentPermissionReviewOutcome::Allow;
+  TuiBridge_HarnessEvent(&t, &ev);
+  CHECK_ALL(t.State == TuiState::Thinking,
+            !t.Sess.StateTool.Length);
 
   // The assistant entry is begun lazily on the first text delta, so a turn that
   // streams no text (tool-only) renders no assistant header at all.
@@ -2112,6 +2140,14 @@ void TestTui() {
     CHECK(tm.Sess.ModalCategory.Length == 0);
     Feed(&tm, "\x1b");
 
+    CHECK(Tui_BeginSelection(&tm, SVL("Allow this action?\n\nRun git push"),
+                             options, 3, 0, SVL("Permission")));
+    Tui_ComposeFrame(&tm, 76, 18);
+    CHECK_ALL(!StrView_Contains(tm.Sess.ModalTitle, "\n"),
+              ScreenContains(&tm, "Allow this action?"),
+              ScreenContains(&tm, "Run git push"));
+    Feed(&tm, "\x1b");
+
     // The answer field is a composer-style bordered box, not a reversed bar:
     // the caret sits inside a border on an unfilled row.
     CHECK(Tui_BeginTextEntry(&tm, SVL("How many?"), SVL("Your answer"),
@@ -2356,6 +2392,46 @@ void TestTui() {
                   0x250c);
     Tui_Stop(&tsq);
     ArenaRelease(&ac);
+  }
+
+  {
+    Arena ap = ArenaCreate();
+    TuiOpts opts = {};
+    opts.ModelName = SVL("mode-model");
+    opts.Color = false;
+    opts.Permission = TuiPermissionMode::Ask;
+    Tui permissions;
+    Tui_InitModel(&permissions, &ap, opts);
+    PermissionCycleState cycle = {TuiPermissionMode::Ask};
+    permissions.Agent.User = &cycle;
+    permissions.Agent.CyclePermission = CyclePermission;
+
+    Tui_ComposeFrame(&permissions, 80, 12, 1000);
+    Feed(&permissions, "\x1b[Z");
+    TuiSubmission changed = {};
+    CHECK(Tui_WaitForSubmit(&permissions, &changed));
+    CHECK_ALL(changed.Kind == TuiSubmissionKind::PermissionMode,
+              changed.Permission == TuiPermissionMode::Auto,
+              permissions.Permission == TuiPermissionMode::Auto);
+    Tui_ComposeFrame(&permissions, 80, 12, 1100);
+    CHECK(ScreenRowContains(&permissions, 11, "auto"));
+
+    Feed(&permissions, "\x1b[Z");
+    CHECK(Tui_WaitForSubmit(&permissions, &changed));
+    CHECK_ALL(changed.Kind == TuiSubmissionKind::PermissionMode,
+              changed.Permission == TuiPermissionMode::Yolo,
+              permissions.YoloWarningActive);
+    for (u64 now = 2000; now <= 6000; now += 1000)
+      Tui_ComposeFrame(&permissions, 80, 12, now);
+    TuiSubmission acknowledged = {};
+    CHECK(Tui_WaitForSubmit(&permissions, &acknowledged));
+    CHECK_ALL(
+        acknowledged.Kind == TuiSubmissionKind::PermissionAcknowledged,
+        permissions.YoloAcknowledged, !permissions.YoloWarningActive,
+        ScreenRowContains(&permissions, 11, "YOLO"));
+
+    Tui_Stop(&permissions);
+    ArenaRelease(&ap);
   }
 
   CHECK(g_displayDrainsOk);

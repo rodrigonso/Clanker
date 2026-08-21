@@ -25,8 +25,11 @@ Tool GrepTool();
 // knows about the renderer; the tool itself never does. A zero-initialized
 // context means nobody is there to ask, and the tool reports that rather than
 // blocking.
+struct AgentPermissionEngine;
+
 struct AskUserToolContext {
   AgentAskUser Ask;
+  AgentPermissionEngine* Permissions;
 };
 
 Tool AskUserTool(AskUserToolContext* context = nullptr);

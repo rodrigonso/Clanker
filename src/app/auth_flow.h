@@ -14,6 +14,9 @@ struct RuntimeSelection {
   AgentCompactionPolicy Compaction;
   AgentRetryPolicy Retry;
   AgentTurnLimitPolicy TurnLimit;
+  AgentPermissionMode PermissionMode = AgentPermissionMode::Auto;
+  StrView PermissionReviewerModel = AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL;
+  bool YoloAcknowledged = false;
   bool Rounded = true;
   Array<StrView> Skills;
   Array<StrView> PromptTemplates;

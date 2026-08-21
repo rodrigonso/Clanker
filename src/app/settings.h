@@ -5,6 +5,7 @@
 #include "base/array.h"
 #include "base/basics.h"
 #include "base/str.h"
+#include "agent/permissions.h"
 #include "app/project_trust.h"
 #include "llm/types.h"
 
@@ -16,6 +17,9 @@ struct AppSettings {
   AgentCompactionPolicy Compaction;
   AgentRetryPolicy Retry = AgentRetryPolicy_Default();
   AgentTurnLimitPolicy TurnLimit = AgentTurnLimitPolicy_Default();
+  AgentPermissionMode PermissionMode = AgentPermissionMode::Auto;
+  StrView PermissionReviewerModel = AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL;
+  bool YoloAcknowledged = false;
   bool Rounded = true;
   Array<StrView> Skills;
   Array<StrView> PromptTemplates;

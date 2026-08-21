@@ -5,6 +5,8 @@
 #include "llm/types.h"
 #include "session/replay.h"
 
+struct AgentPermissionGate;
+
 enum class ToolExecution : u8 { Parallel, Sequential };
 
 struct ToolOutcome {
@@ -191,6 +193,7 @@ struct AgentToolBatchResult {
 void AgentToolBatch_Prepare(Arena* arena, const ToolRuntime* tools, u32 toolCount,
                             const Message* assistant, ToolExecution execution,
                             volatile i32* abort, const AgentToolHooks* hooks,
+                            const AgentPermissionGate* permissions,
                             AgentToolBatchPlan* out);
 void AgentToolBatch_Run(Arena* arena, AgentToolBatchPlan* plan,
                         u32 maxParallelTools, const AgentToolHooks* hooks,

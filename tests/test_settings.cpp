@@ -40,7 +40,11 @@ void TestSettings() {
         AppSettingsLoadResult::Success);
   CHECK_ALL(loaded.DefaultTrust == DefaultProjectTrust::Ask,
             loaded.Profile.Effort == ModelEffort::None,
-            loaded.Profile.ContextWindow == 0, loaded.Rounded);
+            loaded.Profile.ContextWindow == 0, loaded.Rounded,
+            loaded.PermissionMode == AgentPermissionMode::Auto,
+            StrView_Eq(loaded.PermissionReviewerModel,
+                       AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL),
+            !loaded.YoloAcknowledged);
   // An absent compaction block leaves the built-in defaults in place.
   CHECK_ALL(loaded.Compaction.Enabled,
             loaded.Compaction.ReserveTokens ==
@@ -226,6 +230,31 @@ void TestSettings() {
 
   CHECK(ConfigFile_WriteAtomic(
       &a, SV(path),
+      SVL("{\"provider\":\"anthropic\",\"model\":\"bad\","
+          "\"permissionMode\":\"always\"}")));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+        AppSettingsLoadResult::Malformed);
+  CHECK(ConfigFile_WriteAtomic(
+      &a, SV(path),
+      SVL("{\"provider\":\"anthropic\",\"model\":\"bad\","
+          "\"permissionMode\":true}")));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+        AppSettingsLoadResult::Malformed);
+  CHECK(ConfigFile_WriteAtomic(
+      &a, SV(path),
+      SVL("{\"provider\":\"anthropic\",\"model\":\"bad\","
+          "\"permissionReviewerModel\":\"\"}")));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+        AppSettingsLoadResult::Malformed);
+  CHECK(ConfigFile_WriteAtomic(
+      &a, SV(path),
+      SVL("{\"provider\":\"anthropic\",\"model\":\"bad\","
+          "\"yoloAcknowledged\":\"yes\"}")));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+        AppSettingsLoadResult::Malformed);
+
+  CHECK(ConfigFile_WriteAtomic(
+      &a, SV(path),
       SVL("{\"provider\":\"anthropic\",\"model\":\"legacy\","
           "\"rounded\":false}")));
   CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
@@ -247,6 +276,9 @@ void TestSettings() {
   saved.Retry.MaxDelayMs = 3000;
   saved.TurnLimit.Enabled = true;
   saved.TurnLimit.MaxTurns = 42;
+  saved.PermissionMode = AgentPermissionMode::Yolo;
+  saved.PermissionReviewerModel = SVL("z-ai/glm-5.2");
+  saved.YoloAcknowledged = true;
   CHECK(AppSettings_Save(&a, SV(path), &saved));
   CHECK(AppSettings_Load(&a, SV(path), &loaded) == AppSettingsLoadResult::Success);
   CHECK_ALL(StrView_Eq(loaded.Provider, saved.Provider),
@@ -259,6 +291,9 @@ void TestSettings() {
   CHECK_ALL(loaded.Retry.Enabled, loaded.Retry.MaxRetries == 5,
             loaded.Retry.BaseDelayMs == 250, loaded.Retry.MaxDelayMs == 3000);
   CHECK_ALL(loaded.TurnLimit.Enabled, loaded.TurnLimit.MaxTurns == 42);
+  CHECK_ALL(loaded.PermissionMode == AgentPermissionMode::Yolo,
+            StrView_EqCStr(loaded.PermissionReviewerModel, "z-ai/glm-5.2"),
+            loaded.YoloAcknowledged);
 
   saved.Rounded = false;
   CHECK(AppSettings_Save(&a, SV(path), &saved));

@@ -147,5 +147,6 @@ Tool FindTool() {
       "\"limit\":{\"type\":\"number\",\"description\":\"Maximum number of results (default: 1000)\"}},"
       "\"required\":[\"pattern\"]}");
   t.Execute = FindExec;
+  t.PermissionEffect = ToolPermissionEffect::Inspection;
   return t;
 }

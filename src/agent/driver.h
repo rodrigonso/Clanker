@@ -15,6 +15,10 @@ SessionResult AgentDriver_Run(AgentHarness* harness, StrView prompt);
 // never persisted, so it applies to this compaction only.
 SessionResult AgentDriver_Compact(AgentHarness* harness, StrView instructions);
 
+bool AgentDriver_ReviewPermission(
+    void* user, Arena* arena, const AgentPermissionReviewRequest* request,
+    volatile i32* abort, AgentPermissionReviewResult* out);
+
 // Internal seams shared by harness.cpp and driver.cpp.
 
 // Normalizes a hook's result into a HookError, keeping the hook's own message
@@ -65,4 +69,10 @@ void AgentHarness_PublishToolEnd(AgentHarness* harness, StrView toolCallId,
 void AgentHarness_PublishRetry(AgentHarness* harness, AgentHarnessEventKind kind,
                                RetryLayer layer, u32 attempt, u32 maxAttempts,
                                u32 delayMs, StrView error);
+void AgentHarness_PublishPermissionReviewStart(AgentHarness* harness,
+                                               StrView toolName,
+                                               StrView model);
+void AgentHarness_PublishPermissionReviewEnd(
+    AgentHarness* harness, StrView toolName, StrView model,
+    AgentPermissionReviewOutcome outcome, StrView rationale);
 void AgentHarness_PublishQueueUpdate(AgentHarness* harness);

@@ -9,6 +9,7 @@
 #include "app/plain_select.h"
 #include "app/session_switch.h"
 #include "app/settings.h"
+#include "app/tui_bridge.h"
 #include "base/config_file.h"
 #include "base/sysinfo.h"
 #include "session/metadata.h"
@@ -426,10 +427,11 @@ static AppCommandHandlerResult HandleForkCommand(
     if (SessionResult_IsOk(forked))
       forked = SessionReducer_Reduce(&scratch, records.Data, records.Count,
                                      &forkState);
-    if (SessionResult_IsOk(forked))
+    if (SessionResult_IsOk(forked)) {
       forked =
           RuntimeSwitchToLog(rt, forkLog, &forkInfo, &forkState, ux);
-    else
+    }
+    if (!SessionResult_IsOk(forked))
       SessionLog_Close(&forkLog);
   }
   ArenaRelease(&scratch);
@@ -441,6 +443,70 @@ static AppCommandHandlerResult HandleCompactCommand(
   InteractiveRuntime* rt = (InteractiveRuntime*)user;
   return CommandResult(AgentHarness_Compact(rt->Harness, arguments),
                        SVL("session compacted"));
+}
+
+static AppCommandHandlerResult HandlePermissionsCommand(
+    void* user, const AppCommandUx*, StrView arguments) {
+  InteractiveRuntime* rt = (InteractiveRuntime*)user;
+  if (!rt->Harness)
+    return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
+                                   SVL("Permission controls are unavailable.")};
+
+  if (!arguments.Length) {
+    AgentPermissionMode mode = AgentHarness_GetPermissionMode(rt->Harness);
+    StrView reviewer = rt->Harness->Config.PermissionReviewerModel.Id;
+    if (!reviewer.Length) reviewer = rt->PermissionReviewerModel;
+    StrBuf report = StrBuf_Make(&rt->CommandMem, reviewer.Length + 128);
+    StrBuf_AppendCStr(&report, "Permission mode: ");
+    StrBuf_Append(&report, AgentPermissionMode_Name(mode));
+    StrBuf_AppendCStr(&report, "\nPermission reviewer model: ");
+    StrBuf_Append(&report, reviewer.Length ? reviewer : SVL("(none)"));
+    StrBuf_AppendCStr(&report, "\nSession grants: ");
+    StrBuf_AppendU64(&report, AgentHarness_PermissionGrantCount(rt->Harness));
+    return AppCommandHandlerResult{AppCommandHandlerStatus::Success,
+                                   StrBuf_View(&report)};
+  }
+
+  AgentPermissionMode mode = AgentPermissionMode::Ask;
+  bool reset = StrView_Eq(arguments, SVL("reset"));
+  if (reset) {
+    mode = AgentHarness_ResetPermissions(rt->Harness);
+  } else if (AgentPermissionMode_Parse(arguments, &mode)) {
+    AgentHarness_SetPermissionMode(rt->Harness, mode);
+  } else {
+    return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
+                                   AppCommand_Usage(AppCommandKind::Permissions)};
+  }
+
+  rt->PermissionMode = mode;
+  rt->PersistedPermissionMode = mode;
+  rt->PermissionModeOverridden = false;
+  if (rt->TuiView)
+    Tui_SetPermissionMode(rt->TuiView,
+                          TuiBridge_ToTuiPermissionMode(mode),
+                          rt->YoloAcknowledged);
+  if (!RuntimePersistSettings(rt)) {
+    StrBuf message =
+        StrBuf_Make(&rt->CommandMem, rt->SettingsPath.Length + 96);
+    StrBuf_AppendCStr(&message,
+                      "Permission mode changed, but settings could not be "
+                      "saved to ");
+    StrBuf_Append(&message, rt->SettingsPath);
+    StrBuf_AppendChar(&message, '.');
+    return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
+                                   StrBuf_View(&message)};
+  }
+
+  StrBuf message = StrBuf_Make(&rt->CommandMem, 64);
+  if (reset) {
+    StrBuf_AppendCStr(&message, "Permissions reset; mode is ask.");
+  } else {
+    StrBuf_AppendCStr(&message, "Permission mode set to ");
+    StrBuf_Append(&message, AgentPermissionMode_Name(mode));
+    StrBuf_AppendChar(&message, '.');
+  }
+  return AppCommandHandlerResult{AppCommandHandlerStatus::Success,
+                                 StrBuf_View(&message)};
 }
 
 static AppCommandHandlerResult HandleTrustCommand(
@@ -519,6 +585,9 @@ static AppCommandHandlerResult HandleReloadCommand(
   AgentCompactionPolicy compaction = AgentCompactionPolicy_Default();
   AgentRetryPolicy retry = AgentRetryPolicy_Default();
   AgentTurnLimitPolicy turnLimit = AgentTurnLimitPolicy_Default();
+  AgentPermissionMode permissionMode = AgentPermissionMode::Auto;
+  StrView permissionReviewerModel = AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL;
+  bool yoloAcknowledged = false;
   bool rounded = rt->Rounded;
   AppSettings settings = {};
   AppSettingsLoadResult settingsResult =
@@ -528,6 +597,9 @@ static AppCommandHandlerResult HandleReloadCommand(
     compaction = settings.Compaction;
     retry = settings.Retry;
     turnLimit = settings.TurnLimit;
+    permissionMode = settings.PermissionMode;
+    permissionReviewerModel = settings.PermissionReviewerModel;
+    yoloAcknowledged = settings.YoloAcknowledged;
     rounded = settings.Rounded;
   } else if (settingsResult == AppSettingsLoadResult::Malformed ||
              settingsResult == AppSettingsLoadResult::ReadFailure) {
@@ -568,6 +640,18 @@ static AppCommandHandlerResult HandleReloadCommand(
     return result;
   }
 
+  rt->PermissionReviewerModel =
+      StrView_Dup(rt->Mem, permissionReviewerModel.Length
+                              ? permissionReviewerModel
+                              : AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL);
+  if (!RuntimeRefreshPermissionReviewer(rt)) {
+    PromptContext_Release(&next);
+    ArenaRelease(&scratch);
+    return AppCommandHandlerResult{
+        AppCommandHandlerStatus::Failed,
+        SVL("Permission reviewer could not be configured.")};
+  }
+
   PromptContext previous = *rt->Prompt;
   *rt->Prompt = next;
   RuntimeSetPromptOptions(rt, &options);
@@ -575,11 +659,19 @@ static AppCommandHandlerResult HandleReloadCommand(
   rt->Harness->Config.Compaction = compaction;
   rt->Harness->Config.Retry = retry;
   rt->Harness->Config.TurnLimit = turnLimit;
+  AgentHarness_SetPermissionMode(rt->Harness, permissionMode);
+  rt->PermissionMode = permissionMode;
+  rt->PersistedPermissionMode = permissionMode;
+  rt->PermissionModeOverridden = false;
+  rt->YoloAcknowledged = yoloAcknowledged;
   rt->DefaultTrust = defaultTrust;
   rt->ProjectTrusted = trust.Trusted;
   rt->HasProjectResources = hasProjectResources;
   rt->Rounded = rounded;
   if (rt->TuiView) {
+    Tui_SetPermissionMode(rt->TuiView,
+                          TuiBridge_ToTuiPermissionMode(permissionMode),
+                          yoloAcknowledged);
     Tui_UpdateRounded(rt->TuiView, rounded ? TuiToggleAction::Enable
                                            : TuiToggleAction::Disable);
     u32 catalogCount = 0;
@@ -685,7 +777,6 @@ bool RuntimeResetSession(InteractiveRuntime* rt, const AppCommandUx* ux) {
     EmitCommandError(ux, selected.Message);
     return false;
   }
-
   EmitCommandNotice(ux, SVL("session cleared"));
   return true;
 }
@@ -796,6 +887,7 @@ AppCommandHandlers RuntimeCommandHandlers(InteractiveRuntime* rt) {
   handlers.Checkout = HandleCheckoutCommand;
   handlers.Fork = HandleForkCommand;
   handlers.Compact = HandleCompactCommand;
+  handlers.Permissions = HandlePermissionsCommand;
   handlers.Reload = HandleReloadCommand;
   if (rt->TuiView) handlers.Debug = HandleDebugCommand;
   if (rt->TuiView) handlers.Rounded = HandleRoundedCommand;

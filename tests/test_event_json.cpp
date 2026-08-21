@@ -126,6 +126,24 @@ void TestTransientShapes(Arena* arena) {
             StrView_Contains(line, "\"layer\":\"assistant_turn\""),
             StrView_Contains(line, "\"delayMs\":250"));
 
+  AgentHarnessEvent review = {};
+  review.Kind = AgentHarnessEventKind::TransientPermissionReviewStart;
+  review.PermissionReview.ToolName = SVL("shell");
+  review.PermissionReview.Model = SVL("z-ai/glm-5.2");
+  line = WriteEvent(arena, &review, &wrote);
+  CHECK_ALL(
+      wrote, IsValidEventLine(arena, line, "permission_review_start"),
+      StrView_Contains(line, "\"tool\":\"shell\""),
+      StrView_Contains(line, "\"model\":\"z-ai/glm-5.2\""));
+
+  review.Kind = AgentHarnessEventKind::TransientPermissionReviewEnd;
+  review.PermissionReview.Outcome = AgentPermissionReviewOutcome::Ask;
+  review.PermissionReview.Rationale = SVL("needs approval");
+  line = WriteEvent(arena, &review, &wrote);
+  CHECK_ALL(wrote, IsValidEventLine(arena, line, "permission_review_end"),
+            StrView_Contains(line, "\"outcome\":\"ask\""),
+            StrView_Contains(line, "\"rationale\":\"needs approval\""));
+
   AgentHarnessEvent queue = {};
   queue.Kind = AgentHarnessEventKind::TransientQueueUpdate;
   queue.Queue.SteerCount = 1;

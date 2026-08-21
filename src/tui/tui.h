@@ -20,10 +20,12 @@
 // running agent arrive as TuiAgentHooks, and progress arrives as ordinary
 // calls, so `clanker_tui` does not link `clanker_agent`.
 
-// What the controller asks of whatever is driving it. All three are invoked
+// What the controller asks of whatever is driving it. All callbacks are invoked
 // while the TUI lock is held, which fixes the lock order as
 // `Tui::Lock -> (whatever the implementation takes)`; an implementation must
 // not call back into the TUI.
+enum class TuiPermissionMode : u8 { Ask, Auto, Yolo };
+
 struct TuiAgentHooks {
   void* User;
   // Queue `text` as a steering message for the turn already in flight. Returns
@@ -34,18 +36,33 @@ struct TuiAgentHooks {
   bool (*RequestCancel)(void* user);
   // True while the driver still owns the session.
   bool (*IsBusy)(void* user);
+  // Atomically cycle the live permission mode and return the new value.
+  TuiPermissionMode (*CyclePermission)(void* user);
 };
 
-enum class TuiState : u8 { Idle, Thinking, Streaming, Tool, Retry };
+enum class TuiState : u8 {
+  Idle,
+  Thinking,
+  Streaming,
+  Tool,
+  Retry,
+  PermissionReview,
+};
 
 enum class TuiModalKind : u8 { None, Select, Text };
 enum class TuiModalResult : u8 { None, Pending, Confirmed, Back, Cancelled };
 
-enum class TuiSubmissionKind : u8 { Prompt, Command };
+enum class TuiSubmissionKind : u8 {
+  Prompt,
+  Command,
+  PermissionMode,
+  PermissionAcknowledged,
+};
 
 struct TuiSubmission {
   TuiSubmissionKind Kind;
   StrView Text;
+  TuiPermissionMode Permission;
 };
 
 enum class TuiDisplayEventKind : u8 {
@@ -113,6 +130,8 @@ struct TuiSessionStrings {
 struct TuiOpts {
   StrView ModelName = {};
   ModelRequestProfile Profile = {};
+  TuiPermissionMode Permission = TuiPermissionMode::Auto;
+  bool YoloAcknowledged = false;
   bool Color = true;
   bool Rounded = true;
   const TuiCommandSpec* Commands = nullptr;
@@ -175,6 +194,11 @@ struct Tui {
   u64 SpinnerStartMs;
   StrView ModelName;
   ModelRequestProfile Profile;
+  TuiPermissionMode Permission;
+  bool YoloAcknowledged;
+  bool YoloWarningActive;
+  u32 YoloWarningVisibleMs;
+  u64 YoloWarningLastFrameMs;
   u32 QueuedCount;  // messages queued (steer/followUp/nextTurn) per last queue_update
   TuiCommandSpec* Commands;
   u32 CommandCount;
@@ -304,6 +328,8 @@ bool Tui_UpdateRounded(Tui* t, TuiToggleAction action);
 void Tui_SetCommands(Tui* t, const TuiCommandSpec* commands, u32 count);
 void Tui_SetModelProfile(Tui* t, StrView modelName,
                          ModelRequestProfile profile);
+void Tui_SetPermissionMode(Tui* t, TuiPermissionMode mode,
+                          bool yoloAcknowledged);
 void Tui_BeginOperation(Tui* t, StrView label);
 void Tui_SetOperationStatus(Tui* t, StrView status);
 // End the operation and atomically return whether cancellation was requested.
@@ -347,6 +373,8 @@ void Tui_TurnEnded(Tui* t);
 void Tui_RetryStarted(Tui* t, bool providerLevel, u32 delayMs, u32 attempt,
                       u32 maxAttempts);
 void Tui_RetryEnded(Tui* t);
+void Tui_PermissionReviewStarted(Tui* t, StrView toolName);
+void Tui_PermissionReviewEnded(Tui* t);
 void Tui_SetQueuedCount(Tui* t, u32 count);
 // Progress updates were skipped to keep up; the transcript is still complete.
 void Tui_NoticeDroppedEvents(Tui* t, u32 count);

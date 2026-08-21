@@ -104,6 +104,23 @@ void WakeInput(Tui* t) {
   Wake(t);
 }
 
+void SetPermissionMode(Tui* t, TuiPermissionMode mode,
+                       bool yoloAcknowledged) {
+  bool enteringYolo =
+      mode == TuiPermissionMode::Yolo &&
+      t->Permission != TuiPermissionMode::Yolo;
+  t->Permission = mode;
+  t->YoloAcknowledged = yoloAcknowledged;
+  if (enteringYolo && !yoloAcknowledged) {
+    t->YoloWarningActive = true;
+    t->YoloWarningVisibleMs = 0;
+    t->YoloWarningLastFrameMs = 0;
+  } else if (mode != TuiPermissionMode::Yolo || yoloAcknowledged) {
+    t->YoloWarningActive = false;
+    t->YoloWarningLastFrameMs = 0;
+  }
+}
+
 bool HasQueuedDisplayEvents(const Tui* t) {
   return t->DisplayHead < t->DisplayEvents.Count;
 }
@@ -669,6 +686,29 @@ void ComposeAtSize(Tui* t, u16 cols, u16 rows, u64 nowMs) {
     Screen_Resize(&t->Scr, cols, rows);
   }
   AdvanceCopyNotice(t, nowMs);
+  if (t->YoloWarningActive) {
+    bool visible = cols >= 6 && rows >= 6 &&
+                   t->Permission == TuiPermissionMode::Yolo &&
+                   t->ModalResult != TuiModalResult::Pending &&
+                   !t->OperationActive && !t->CopyNoticeActive;
+    if (t->YoloWarningLastFrameMs && nowMs >= t->YoloWarningLastFrameMs &&
+        visible) {
+      u64 elapsed = nowMs - t->YoloWarningLastFrameMs;
+      u32 step = elapsed > 1000 ? 1000 : (u32)elapsed;
+      t->YoloWarningVisibleMs += step;
+    }
+    t->YoloWarningLastFrameMs = nowMs;
+    if (t->YoloWarningVisibleMs >= 4000) {
+      TuiSubmission acknowledged = {};
+      acknowledged.Kind = TuiSubmissionKind::PermissionAcknowledged;
+      acknowledged.Permission = TuiPermissionMode::Yolo;
+      if (QPush(t, acknowledged)) {
+        t->YoloAcknowledged = true;
+        t->YoloWarningActive = false;
+        Cond_Signal(&t->SubmitCv);
+      }
+    }
+  }
   if (cols < 6 || rows < 6) {
     ViewportAnchor anchor = CaptureViewportAnchor(t);
     ResetScrollbar(t);
@@ -1225,6 +1265,26 @@ void HandleKey(Tui* t, const Key& k) {
     return;
   }
 
+  if (k.Kind == KeyKind::Tab && k.Shift && t->Agent.CyclePermission) {
+    TuiPermissionMode mode =
+        t->Agent.CyclePermission(t->Agent.User);
+    SetPermissionMode(t, mode, t->YoloAcknowledged);
+    TuiSubmission changed = {};
+    changed.Kind = TuiSubmissionKind::PermissionMode;
+    changed.Permission = mode;
+    if (QPush(t, changed))
+      Cond_Signal(&t->SubmitCv);
+    else {
+      TuiDisplayEvent* display =
+          QueueDisplayEvent(t, TuiDisplayEventKind::Error);
+      SetDisplayPayload(
+          t, display,
+          SVL("Permission mode changed for this run, but could not be queued for persistence."));
+    }
+    Wake(t);
+    return;
+  }
+
   StrView commandQuery = {};
   if (CommandPaletteQuery(t, &commandQuery)) {
     u32 matchCount = CommandMatchCount(t, commandQuery);
@@ -1568,6 +1628,7 @@ void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts) {
   t->Color = opts.Color;
   t->ModelName = StrView_Dup(mem, opts.ModelName);
   t->Profile = opts.Profile;
+  SetPermissionMode(t, opts.Permission, opts.YoloAcknowledged);
   t->CommandMem = ArenaCreate((usize)64 << 20);
   t->CommandMemUp = true;
   SetCommandsUnlocked(t, opts.Commands, opts.CommandCount);
@@ -1819,6 +1880,14 @@ void Tui_SetModelProfile(Tui* t, StrView modelName,
   Mutex_Unlock(&t->Lock);
 }
 
+void Tui_SetPermissionMode(Tui* t, TuiPermissionMode mode,
+                           bool yoloAcknowledged) {
+  Mutex_Lock(&t->Lock);
+  SetPermissionMode(t, mode, yoloAcknowledged);
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+}
+
 void Tui_BeginOperation(Tui* t, StrView label) {
   Mutex_Lock(&t->Lock);
   if (t->Stop || t->Quit) {
@@ -1996,6 +2065,23 @@ void Tui_RetryEnded(Tui* t) {
   Mutex_Lock(&t->Lock);
   t->Sess.RetryStatus = {};
   if (t->State == TuiState::Retry) t->State = TuiState::Thinking;
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+}
+
+void Tui_PermissionReviewStarted(Tui* t, StrView toolName) {
+  Mutex_Lock(&t->Lock);
+  t->Sess.StateTool = StrView_Dup(&t->SessionMem, toolName);
+  t->State = TuiState::PermissionReview;
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+}
+
+void Tui_PermissionReviewEnded(Tui* t) {
+  Mutex_Lock(&t->Lock);
+  t->Sess.StateTool = {};
+  if (t->State == TuiState::PermissionReview)
+    t->State = t->AgentRunning ? TuiState::Thinking : TuiState::Idle;
   Wake(t);
   Mutex_Unlock(&t->Lock);
 }

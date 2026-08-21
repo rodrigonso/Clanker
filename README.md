@@ -148,6 +148,7 @@ ctest --preset vs2026-debug
 ./build/clanker -p "hi"                # set OPENROUTER_API_KEY
 ./build/clanker                        # full-screen TUI; /model picks a live model
 ./build/clanker -m z-ai/glm-4.6 -p "summarize README.md"
+./build/clanker --permission-mode ask -p "review the working tree"
 ./build/clanker --mode json -p "summarize README.md"   # NDJSON event stream
 ./build/clanker --continue             # most recent session for this project
 ./build/clanker --resume SESSION_ID     # exact ID, including sessions from other projects
@@ -463,11 +464,41 @@ never spawned. `matcher` narrows the gate by tool name in the usual way, so a
 tool no command matches costs nothing. Every gated call pays one process spawn,
 bounded by that command's `timeout`.
 
-Clanker ships **no permission policy of its own** — no rules file, no path guards,
-no dangerous-command patterns, no approval prompt. This is the same posture as
-pi, which states plainly that it "does not include a built-in permission system"
-and has "no permission popups. Run in a container, or build your own confirmation
-flow." The gate is the mechanism; the policy is yours. A minimal one:
+Clanker includes a built-in permission policy for tool calls. Select one of three
+modes with `--permission-mode` for a single run, or `/permissions` inside an
+interactive session:
+
+- **Ask** runs inspection tools directly and prompts before writes, edits,
+  shell commands, and unknown tools.
+- **Auto** also admits workspace-local writes/edits and a narrow reversible
+  shell allowlist. Every other action goes to the configured reviewer model,
+  which is an extra billed request. A non-allow becomes a failed tool result
+  carrying an opaque request ID; the model must pass that exact ID to
+  `ask_user` to open the real approval prompt.
+- **Yolo** bypasses the built-in checks and reviewer, but not external
+  `PreToolUse` hooks. An unacknowledged Yolo activation warns prominently.
+
+`Always for this session` approvals are held in memory and last only for the
+current harness session. `/permissions reset` clears those grants and restores
+Ask. New installations default to Auto with reviewer `z-ai/glm-5.2`; both the
+global `permissionMode` and `permissionReviewerModel` are configurable in
+`~/.clanker/settings.json`. `/permissions` reports the active mode, reviewer,
+and grant count. In the TUI, **Shift+Tab** cycles
+`ask -> auto -> yolo -> ask`; the footer shows the active mode. JSON print mode
+emits `permission_review_start` and `permission_review_end` around billed
+review calls.
+
+These controls are separate from project trust and `PreToolUse` hooks. Project
+trust decides whether prompt-resource files are loaded; tool permissions decide
+whether a tool call is admitted; `PreToolUse` is an independent external gate
+that can still block a call. Clanker provides no sandbox: approved tools run
+with the process user's filesystem and OS privileges. In headless mode there is
+no human approval path, so Ask and an unavailable Auto reviewer fail closed.
+This feature does not attempt filesystem sandboxing, persistent built-in rule
+files, or network isolation.
+
+The external hook gate remains available for policies that need those controls.
+A minimal one:
 
 ```sh
 #!/bin/sh
@@ -671,6 +702,8 @@ Interactive commands:
 - `/compact` — durably summarize the active branch (compaction also runs
   automatically; see Compaction above).
 - `/trust` — save project trust for a future Clanker process.
+- `/permissions [ask|auto|yolo|reset]` — inspect or change tool permissions;
+  `reset` clears session grants and restores Ask.
 - `/reload` — transactionally reload settings and prompt context while idle.
 - `/debug [on|off]` — toggle the performance overlay described under
   Debug overlay below. TUI only.
@@ -691,8 +724,8 @@ Commands entered during a TUI turn run afterward; ordinary text still steers the
 active turn.
 
 The selected provider/model, explicit effort/context preferences,
-`defaultProjectTrust` policy, and the `rounded` UI style are written
-atomically to `~/.clanker/settings.json`.
+`defaultProjectTrust` policy, permission mode and reviewer model, and the
+`rounded` UI style are written atomically to `~/.clanker/settings.json`.
 New sessions use built-in defaults, then settings, then the runtime-only `-m`
 override. Resumed sessions restore their durable provider/model ancestry; `-m`
 adds a new durable model selection. Direct IDs are exact opaque durable IDs.

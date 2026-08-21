@@ -206,6 +206,7 @@ static bool ParseCsi(KeyDecoder* d, Key* out) {
     case 'D': k = KeyKind::Left; break;
     case 'H': k = KeyKind::Home; break;
     case 'F': k = KeyKind::End; break;
+    case 'Z': k = KeyKind::Tab; break;  // legacy xterm BackTab
     case '~':
       switch (p[0]) {
         case 1:
@@ -223,6 +224,7 @@ static bool ParseCsi(KeyDecoder* d, Key* out) {
 
   Clear(out);
   out->Kind = k;
+  if (fin == 'Z') out->Shift = true;
   if (mod >= 2) {
     ApplyMods(mod, out);
     if (out->Ctrl && k == KeyKind::Left) out->Kind = KeyKind::WordLeft;

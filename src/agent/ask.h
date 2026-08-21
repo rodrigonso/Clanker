@@ -24,6 +24,8 @@ enum class AgentAskStatus : u8 {
 
 struct AgentAskRequest {
   StrView Question;
+  // Empty uses the renderer's ordinary question category.
+  StrView Category;
   // Optional fixed choices. An empty list asks for free text instead.
   const StrView* Choices;
   u32 ChoiceCount;

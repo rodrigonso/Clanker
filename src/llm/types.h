@@ -441,10 +441,23 @@ struct ProviderAuth {
   StrView Token;  // empty only when the endpoint allows anonymous access
 };
 
+enum class LlmToolChoice : u8 { Auto, NamedFunction };
+
+// Wire-level controls shared by providers that advertise function tools.
+// Zero initialization preserves the normal request shape: automatic tool
+// choice, parallel calls enabled, and non-strict schemas.
+struct LlmRequestControls {
+  LlmToolChoice ToolChoice;
+  StrView ToolName;  // used when ToolChoice is NamedFunction
+  bool StrictTools;
+  bool DisableParallelToolCalls;
+};
+
 struct StreamOptions {
   ProviderAuth Auth;
   i32 MaxTokens;            // 0 => use model default
   ModelRequestProfile Profile;
+  LlmRequestControls Request;
   volatile i32* Abort;     // non-zero => abort in progress
   // Opt-in transport-level HTTP retry policy for this request (transport
   // failures and HTTP 408/409/429/5xx). Null (the default) disables it, so

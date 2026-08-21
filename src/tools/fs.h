@@ -15,6 +15,29 @@ bool Fs_IsDir(StrView path);
 bool Fs_MkdirP(Arena* arena, StrView path);
 StrView Fs_RealPath(Arena* arena, StrView path);
 
+struct FsPermissionTarget {
+  StrView Path;
+  bool Contained;
+};
+
+// Canonicalizes existing path components, retaining missing trailing
+// components so callers can classify a future write without treating it as an
+// existing path. Ambiguous paths are never classified as contained.
+FsPermissionTarget Fs_ResolvePermissionTarget(Arena* arena,
+                                              StrView workingDirectory,
+                                              StrView target);
+struct ToolArgs;
+struct ToolPermissionInfo;
+bool Fs_DescribeMutationPermission(Arena* arena, const ToolArgs* args,
+                                   StrView workingDirectory,
+                                   StrView actionPrefix,
+                                   StrView grantPrefix,
+                                   ToolPermissionInfo* out, StrBuf* err);
+
+// Inclusive, separator-aware containment check for already canonicalized
+// paths. On Windows this comparison is case-insensitive.
+bool Fs_PathContained(StrView root, StrView path);
+
 // Path utilities are pure string operations. Fs_Ext returns a raw slice of the
 // original path and does not lowercase.
 //

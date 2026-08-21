@@ -87,6 +87,8 @@ static void PrintHelp() {
       "Clanker - a tiny memory-efficient coding agent\n\n"
       "Usage: clanker [options]\n"
       "  -m <model>        Override the configured model for this run only\n"
+      "  --permission-mode <ask|auto|yolo>\n"
+      "                    Override tool permissions for this run only\n"
       "  -p <prompt>       Run a single prompt and exit (print mode)\n"
       "  --mode <text|json>\n"
       "                    Print-mode output: human text (default) or an\n"
@@ -119,9 +121,8 @@ static void PrintHelp() {
      "OPENROUTER_API_KEY environment variable.\n"
       "Interactive commands: /session, /name, /sessions, /resume, /tree,\n"
       "/checkout, /fork, /compact, /trust, /reload, /debug, /auth, /model,\n"
-      "/skill:<name>, /clear, /exit.\n");
+      "/permissions, /skill:<name>, /clear, /exit.\n");
 }
-
 
 // Plain line REPL (non-TTY / fallback): the original fgets loop.
 static void RunPlainRepl(InteractiveRuntime* rt) {
@@ -211,6 +212,8 @@ static void RunTuiRepl(InteractiveRuntime* rt) {
   TuiOpts opts;
   opts.ModelName = rt->CurrentModel.Id;
   opts.Profile = rt->Harness->Config.Stream.Profile;
+  opts.Permission = TuiBridge_ToTuiPermissionMode(rt->PermissionMode);
+  opts.YoloAcknowledged = rt->YoloAcknowledged;
   opts.Color = (getenv("NO_COLOR") == nullptr);
   opts.Rounded = rt->Rounded;
   u32 catalogCount = 0;
@@ -257,6 +260,26 @@ static void RunTuiRepl(InteractiveRuntime* rt) {
     MaybeCompactTuiSession(rt, &tui);
     TuiSubmission submission = {};
     if (!Tui_WaitForSubmit(&tui, &submission)) break;
+    if (submission.Kind == TuiSubmissionKind::PermissionMode) {
+      AgentPermissionMode mode =
+          TuiBridge_FromTuiPermissionMode(submission.Permission);
+      rt->PermissionMode = mode;
+      rt->PersistedPermissionMode = mode;
+      rt->PermissionModeOverridden = false;
+      if (!RuntimePersistSettings(rt))
+        EmitCommandError(
+            &commandUx,
+            SVL("Permission mode changed, but settings could not be saved."));
+      continue;
+    }
+    if (submission.Kind == TuiSubmissionKind::PermissionAcknowledged) {
+      rt->YoloAcknowledged = true;
+      if (!RuntimePersistSettings(rt))
+        EmitCommandError(
+            &commandUx,
+            SVL("Yolo acknowledgement could not be saved."));
+      continue;
+    }
     if (submission.Kind == TuiSubmissionKind::Command) {
       AppCommandDispatchResult command =
           RuntimeDispatchCommand(rt, submission.Text, &handlers, &commandUx);
@@ -286,6 +309,8 @@ static void RunTuiRepl(InteractiveRuntime* rt) {
 int main(int argc, char** argv) {
   Arena arena = ArenaCreate((usize)2 << 30);
   const char* modelOverride = nullptr;
+  AgentPermissionMode permissionModeOverride = AgentPermissionMode::Auto;
+  bool hasPermissionModeOverride = false;
   const char* onePrompt = nullptr;
   bool jsonMode = false;
   const char* logoutProvider = nullptr;
@@ -315,6 +340,23 @@ int main(int argc, char** argv) {
         return 1;
       }
       modelOverride = argv[++i];
+    } else if (strcmp(argv[i], "--permission-mode") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr,
+                "error: --permission-mode requires ask, auto, or yolo\n");
+        ArenaRelease(&arena);
+        return 1;
+      }
+      if (!AgentPermissionMode_Parse(SV(argv[++i]),
+                                     &permissionModeOverride)) {
+        fprintf(stderr,
+                "error: unknown permission mode '%s' (expected ask, auto, or "
+                "yolo)\n",
+                argv[i]);
+        ArenaRelease(&arena);
+        return 1;
+      }
+      hasPermissionModeOverride = true;
     } else if (strcmp(argv[i], "-p") == 0) {
       if (i + 1 >= argc) {
         fprintf(stderr, "error: -p requires a prompt\n");
@@ -501,6 +543,14 @@ int main(int argc, char** argv) {
     ArenaRelease(&arena);
     return 1;
   }
+  AgentPermissionMode persistedPermissionMode = selected.PermissionMode;
+  if (hasPermissionModeOverride)
+    selected.PermissionMode = permissionModeOverride;
+  if ((onePrompt || !Term_IsInteractive()) &&
+      selected.PermissionMode == AgentPermissionMode::Yolo &&
+      !selected.YoloAcknowledged) {
+    fprintf(stderr, "YOLO enabled: Clanker permission checks disabled\n");
+  }
 
   StrView workingDirectory = Sys_CurrentDir(&arena);
   if (!workingDirectory.Length) {
@@ -584,6 +634,18 @@ int main(int argc, char** argv) {
             "warning: saved effort/context preferences are unsupported by model "
             "'%.*s'; using model defaults where needed\n",
             (int)model.Id.Length, model.Id.Data);
+  }
+  StrView reviewerId = selected.PermissionReviewerModel.Length
+                           ? selected.PermissionReviewerModel
+                           : AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL;
+  Model permissionReviewerModel =
+      selected.Spec->CreateModel(&arena, selected.Spec, reviewerId);
+  if (!permissionReviewerModel.Id.Length ||
+      !Model_MetadataIsValid(&permissionReviewerModel)) {
+    fprintf(stderr, "error: could not configure the permission reviewer model\n");
+    sessions.Close(sessions.Ctx);
+    ArenaRelease(&arena);
+    return 1;
   }
   FileLock_Init();
   // Repointed whenever the durable session changes, so shell overflow logs
@@ -672,6 +734,9 @@ int main(int argc, char** argv) {
   harnessConfig.Compaction = selected.Compaction;
   harnessConfig.Retry = selected.Retry;
   harnessConfig.TurnLimit = selected.TurnLimit;
+  harnessConfig.PermissionMode = selected.PermissionMode;
+  harnessConfig.PermissionReviewerModel = permissionReviewerModel;
+  harnessConfig.WorkingDirectory = workingDirectory;
   // Overrides whatever settings.json configured. 0 means "never stop to ask".
   if (hasMaxTurnsOverride) {
     harnessConfig.TurnLimit.Enabled = maxTurnsOverride != 0;
@@ -774,6 +839,8 @@ int main(int argc, char** argv) {
         harness.Config.ModelInfo = model;
         harness.Config.ProviderImpl = restored->CreateProvider(&arena, restored);
         harness.Config.Stream.Profile = profile;
+        harness.Config.PermissionReviewerModel =
+            restored->CreateModel(&arena, restored, reviewerId);
         if (modelOverride) {
           SessionResult overridden = AgentHarness_SetModel(
               &harness, model, harness.Config.ProviderImpl, profile);
@@ -823,6 +890,11 @@ int main(int argc, char** argv) {
   runtime.Spec = selected.Spec;
   runtime.CurrentModel = model;
   runtime.PreferredProfile = preference;
+  runtime.PermissionMode = selected.PermissionMode;
+  runtime.PersistedPermissionMode = persistedPermissionMode;
+  runtime.PermissionReviewerModel = reviewerId;
+  runtime.YoloAcknowledged = selected.YoloAcknowledged;
+  runtime.PermissionModeOverridden = hasPermissionModeOverride;
   runtime.Harness = &harness;
   runtime.Sessions = &sessions;
   runtime.JsonlSessions = noSession ? nullptr : &jsonlRepository;
@@ -849,6 +921,7 @@ int main(int argc, char** argv) {
   // tool and the turn-limit prompt -- go through the same callback so a
   // question looks identical whichever one raised it.
   askContext.Ask = RuntimeAskUser(&runtime);
+  askContext.Permissions = &harness.Permissions;
   harness.Config.AskUser = askContext.Ask;
   // External lifecycle hooks. The config is read regardless of `--no-session`
   // because it also carries the PreToolUse gate, and a policy deciding whether

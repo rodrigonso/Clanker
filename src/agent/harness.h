@@ -4,6 +4,7 @@
 #include "agent/compaction.h"
 #include "agent/harness_event.h"
 #include "agent/hooks.h"
+#include "agent/permissions.h"
 #include "agent/primitives.h"
 #include "session/reducer.h"
 #include "session/repository.h"
@@ -30,6 +31,12 @@ struct AgentHarnessConfig {
   // How the harness reaches the user mid-run. Null means nobody is there to
   // ask, which every caller must tolerate.
   AgentAskUser AskUser;
+  // Built-in tool admission. The CLI supplies Auto plus a dedicated reviewer;
+  // Yolo is the embedding default so a zero-initialized legacy config preserves
+  // its previous "run every tool" behavior.
+  AgentPermissionMode PermissionMode = AgentPermissionMode::Yolo;
+  Model PermissionReviewerModel;
+  StrView WorkingDirectory;
   void* AuthUser;
   AgentResolveAuthFn ResolveAuth;
 };
@@ -82,6 +89,7 @@ struct AgentHarness {
   Array<SessionRecord> Records;
   SessionReduction Reduction;
   AgentHarnessQueues Queues;
+  AgentPermissionEngine Permissions;
 
   // Set with Atomic_StoreI32 and read with Atomic_LoadI32; see base/thread.h.
   // The pointer is handed to providers and tools, which poll it the same way.
@@ -133,6 +141,17 @@ SessionResult AgentHarness_Fork(Arena* arena, AgentHarness* harness,
                                 DurableId requestedSessionId, StrView label,
                                 SessionLog* outLog, SessionInfo* outInfo);
 SessionResult AgentHarness_RequestCancel(AgentHarness* harness);
+
+AgentPermissionMode AgentHarness_GetPermissionMode(AgentHarness* harness);
+AgentPermissionMode AgentHarness_SetPermissionMode(AgentHarness* harness,
+                                                   AgentPermissionMode mode);
+AgentPermissionMode AgentHarness_CyclePermissionMode(AgentHarness* harness);
+AgentPermissionMode AgentHarness_ResetPermissions(AgentHarness* harness);
+u32 AgentHarness_PermissionGrantCount(AgentHarness* harness);
+bool AgentHarness_ResolvePermissionRequest(AgentHarness* harness, Arena* arena,
+                                           StrView requestId,
+                                           volatile i32* abort,
+                                           StrView* outMessage, StrBuf* error);
 
 // Memory-only queues: each call appends to the in-process queue and returns
 // once it is recorded there (no session-log append, no durable record).

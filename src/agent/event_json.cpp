@@ -22,6 +22,27 @@ StrView RetryLayerName(RetryLayer layer) {
                                             : SVL("provider_request");
 }
 
+StrView PermissionReviewOutcomeName(AgentPermissionReviewOutcome outcome) {
+  switch (outcome) {
+    case AgentPermissionReviewOutcome::Allow: return SVL("allow");
+    case AgentPermissionReviewOutcome::Ask: return SVL("ask");
+    case AgentPermissionReviewOutcome::Unavailable: return SVL("unavailable");
+  }
+  return SVL("unavailable");
+}
+
+void WritePermissionReview(JsonWriter* w, const AgentHarnessEvent* event) {
+  JsonWrite_String(w, "tool", event->PermissionReview.ToolName);
+  JsonWrite_String(w, "model", event->PermissionReview.Model);
+  if (event->Kind == AgentHarnessEventKind::TransientPermissionReviewEnd) {
+    JsonWrite_String(
+        w, "outcome",
+        PermissionReviewOutcomeName(event->PermissionReview.Outcome));
+    if (event->PermissionReview.Rationale.Length)
+      JsonWrite_String(w, "rationale", event->PermissionReview.Rationale);
+  }
+}
+
 // Tool results are content arrays; a JSON consumer wants the text. Image blocks
 // are skipped rather than base64-inlined into an event stream.
 void WriteToolContent(JsonWriter* w, const ToolResult* result) {
@@ -140,6 +161,14 @@ bool AgentEventJson_Write(StrBuf* out, const AgentHarnessEvent* event) {
     case AgentHarnessEventKind::TransientRetryEnd:
       JsonWrite_String(&w, "type", SVL("retry_end"));
       WriteRetry(&w, event);
+      break;
+    case AgentHarnessEventKind::TransientPermissionReviewStart:
+      JsonWrite_String(&w, "type", SVL("permission_review_start"));
+      WritePermissionReview(&w, event);
+      break;
+    case AgentHarnessEventKind::TransientPermissionReviewEnd:
+      JsonWrite_String(&w, "type", SVL("permission_review_end"));
+      WritePermissionReview(&w, event);
       break;
     case AgentHarnessEventKind::TransientQueueUpdate:
       JsonWrite_String(&w, "type", SVL("queue_update"));

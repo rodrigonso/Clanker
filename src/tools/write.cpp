@@ -69,6 +69,16 @@ static bool WriteExec(void* ctx, Arena* arena, StrView id,
   return ok;
 }
 
+static bool WriteDescribePermission(void* ctx, Arena* arena,
+                                    const ToolArgs* args,
+                                    StrView workingDirectory,
+                                    ToolPermissionInfo* out, StrBuf* err) {
+  (void)ctx;
+  return Fs_DescribeMutationPermission(
+      arena, args, workingDirectory, SVL("Write file "), SVL("write\n"), out,
+      err);
+}
+
 constexpr StrView kWritePromptGuidelines[] = {
     SVL("Use write only for new files or complete rewrites.")};
 
@@ -85,5 +95,7 @@ Tool WriteTool() {
       "\"description\":\"Content to write to the file\"}},\"required\":[\"path\",\"content\"]}");
   t.Execute = WriteExec;
   t.ExecMode = ToolExecMode::Default;
+  t.PermissionEffect = ToolPermissionEffect::Sensitive;
+  t.DescribePermission = WriteDescribePermission;
   return t;
 }

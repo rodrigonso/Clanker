@@ -76,7 +76,9 @@ void PutScaled(char* buf, u32 cap, u32* len, u64 v) {
 void FormatStatus(Tui* t, char* left, u32 leftCap, u32* ll, char* right,
                   u32 rightCap, u32* rl, u16 cols) {
   *ll = 0;
-  if (t->CopyNoticeActive) {
+  if (t->YoloWarningActive) {
+    Put(left, leftCap, ll, "YOLO enabled: Clanker permission checks disabled");
+  } else if (t->CopyNoticeActive) {
     Put(left, leftCap, ll, "copied ");
     PutNum(left, leftCap, ll, t->CopyNoticeChars);
     Put(left, leftCap, ll, t->CopyNoticeChars == 1 ? " char" : " chars");
@@ -103,6 +105,11 @@ void FormatStatus(Tui* t, char* left, u32 leftCap, u32* ll, char* right,
       Put(left, leftCap, ll, "retrying ");
       for (u32 i = 0; i < t->Sess.RetryStatus.Length && *ll < leftCap - 1; i++)
         left[(*ll)++] = t->Sess.RetryStatus.Data[i];
+    } else if (t->State == TuiState::PermissionReview) {
+      Put(left, leftCap, ll, "reviewing ");
+      for (u32 i = 0; i < t->Sess.StateTool.Length && *ll < leftCap - 1; i++)
+        left[(*ll)++] = t->Sess.StateTool.Data[i];
+      Put(left, leftCap, ll, " permission");
     } else if (t->State == TuiState::Streaming) {
       Put(left, leftCap, ll, "responding");
     } else {
@@ -113,8 +120,26 @@ void FormatStatus(Tui* t, char* left, u32 leftCap, u32* ll, char* right,
   *rl = 0;
   u32 rightLimit = cols;
   if (rightLimit > rightCap - 1) rightLimit = rightCap - 1;
-  u32 rightCells =
-      PutViewCells(right, rightCap, rl, t->ModelName, rightLimit);
+  StrView permission =
+      t->Permission == TuiPermissionMode::Yolo
+          ? SVL("YOLO")
+          : t->Permission == TuiPermissionMode::Ask ? SVL("ask")
+                                                    : SVL("auto");
+  u32 permissionCells = TextWidth(permission);
+  u32 modelCells = TextWidth(t->ModelName);
+  bool showPermission =
+      *ll + permissionCells + modelCells + 4 <= rightLimit;
+  u32 rightCells = 0;
+  if (showPermission) {
+    rightCells =
+        PutViewCells(right, rightCap, rl, permission, rightLimit);
+    Put(right, rightCap, rl, " \xc2\xb7 ");
+    rightCells += 3;
+  }
+  rightCells += PutViewCells(right, rightCap, rl, t->ModelName,
+                             rightLimit > rightCells
+                                 ? rightLimit - rightCells
+                                 : 0);
 
   char usage[64] = {};
   u32 usageLength = 0;

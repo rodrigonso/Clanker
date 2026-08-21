@@ -102,5 +102,6 @@ Tool LsTool() {
       "to list (default: current directory)\"},\"limit\":{\"type\":\"number\",\"description\":"
       "\"Maximum number of entries to return (default: 500)\"}}}");
   t.Execute = LsExec;
+  t.PermissionEffect = ToolPermissionEffect::Inspection;
   return t;
 }

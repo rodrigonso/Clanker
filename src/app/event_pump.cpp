@@ -57,6 +57,13 @@ void ReplSink(void* user, const AgentHarnessEvent* ev) {
               ev->Retry.DelayMs, ev->Retry.Attempt, ev->Retry.MaxAttempts,
               (int)ev->Retry.Error.Length, ev->Retry.Error.Data);
       break;
+    case AgentHarnessEventKind::TransientPermissionReviewStart:
+      fprintf(stderr, "\nreviewing %.*s permission with %.*s\n",
+              (int)ev->PermissionReview.ToolName.Length,
+              ev->PermissionReview.ToolName.Data,
+              (int)ev->PermissionReview.Model.Length,
+              ev->PermissionReview.Model.Data);
+      break;
     default:
       break;
   }
