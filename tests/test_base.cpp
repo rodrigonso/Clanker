@@ -86,6 +86,14 @@ void TestStr() {
   CHECK_ALL(StrView_EqCStr(v, "hello world123"),
             StrView_Eq(SVL("abc"), SV("abc")),
             !StrView_Eq(SVL("abc"), SV("abd")));
+  CHECK_ALL(
+      StrView_ContainsInsensitiveAscii(SVL("Alpha Beta"), SVL("PHa")),
+      StrView_ContainsInsensitiveAscii(SVL("Alpha Beta"), SVL("BETA")),
+      StrView_ContainsInsensitiveAscii(SVL("Alpha Beta"), StrView{}),
+      !StrView_ContainsInsensitiveAscii(SVL("Alpha Beta"), SVL("gamma")),
+      !StrView_ContainsInsensitiveAscii(SVL("short"), SVL("longer")),
+      StrView_ContainsInsensitiveAscii(SVL("caf\xc3\xa9"), SVL("\xc3\xa9")),
+      !StrView_ContainsInsensitiveAscii(SVL("caf\xc3\xa9"), SVL("\xc3\x89")));
 
   StrBuf neg = StrBuf_Make(&a, 4);
   StrBuf_AppendI64(&neg, -42);

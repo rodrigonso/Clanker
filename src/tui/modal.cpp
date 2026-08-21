@@ -5,6 +5,59 @@
 
 namespace TuiInternal {
 
+bool ModalOptionMatches(const Tui* t, u32 optionIndex) {
+  if (!t || optionIndex >= t->Sess.ModalOptionCount) return false;
+  return StrView_ContainsInsensitiveAscii(
+      t->Sess.ModalOptions[optionIndex], LineEdit_Text(&t->ModalEdit));
+}
+
+u32 ModalMatchCount(const Tui* t) {
+  u32 count = 0;
+  for (u32 i = 0; i < t->Sess.ModalOptionCount; i++)
+    if (ModalOptionMatches(t, i)) count++;
+  return count;
+}
+
+bool ModalMatchAt(const Tui* t, u32 matchIndex, u32* optionIndex) {
+  for (u32 i = 0; i < t->Sess.ModalOptionCount; i++) {
+    if (!ModalOptionMatches(t, i)) continue;
+    if (matchIndex == 0) {
+      if (optionIndex) *optionIndex = i;
+      return true;
+    }
+    matchIndex--;
+  }
+  return false;
+}
+
+void ResetModalMatches(Tui* t) {
+  t->ModalSelected = 0;
+  t->ModalFirst = 0;
+}
+
+void PaintModalEdit(const UiNode* node, UiCanvas* canvas, Tui* t, u16 textX,
+                    u16 textEnd, u16 editY, Style edit) {
+  StrView text = LineEdit_Text(&t->ModalEdit);
+  u32 avail = textEnd > textX ? (u32)(textEnd - textX) : 0;
+  u32 cursorW = TextWidth(StrView{text.Data, LineEdit_Cursor(&t->ModalEdit)});
+  u32 skip = 0;
+  u32 offset = 0;
+  if (avail && cursorW >= avail) {
+    u32 want = cursorW - avail + 1;
+    while (offset < text.Length && skip < want)
+      skip += CharCellWidth(Utf8Decode(text, &offset));
+  }
+  UiCanvas_PutTextClipped(canvas, textX, editY,
+                          StrView{text.Data + offset, text.Length - offset},
+                          edit, textEnd);
+  u16 cursorX = (u16)(textX + (cursorW - skip));
+  if (avail == 0)
+    cursorX = textX;
+  else if (cursorX >= textEnd)
+    cursorX = (u16)(textEnd - 1);
+  UiCanvas_SetCursor(canvas, node->Id, true, cursorX, editY);
+}
+
 void PaintModalNode(UiContext*, const UiNode* node, UiCanvas* canvas) {
   ModalComponentData* data = (ModalComponentData*)node->User;
   Tui* t = data->Controller;
@@ -13,10 +66,12 @@ void PaintModalNode(UiContext*, const UiNode* node, UiCanvas* canvas) {
     return;
 
   u16 panelW = data->Cols > 76 ? 72 : (u16)(data->Cols - 2);
-  u16 desiredH =
-      t->ModalKind == TuiModalKind::Select
-          ? (u16)((t->Sess.ModalOptionCount < 12 ? t->Sess.ModalOptionCount : 12) + 3)
-          : 7;
+  u32 matchCount =
+      t->ModalKind == TuiModalKind::Select ? ModalMatchCount(t) : 0;
+  u32 selectRows = matchCount ? matchCount : 1;
+  u16 desiredH = t->ModalKind == TuiModalKind::Select
+                     ? (u16)((selectRows < 12 ? selectRows : 12) + 3)
+                     : 7;
   u16 panelH = desiredH < data->TopBorderY ? desiredH : data->TopBorderY;
   if (panelH < 4) return;
   u16 x0 = 1;
@@ -48,17 +103,28 @@ void PaintModalNode(UiContext*, const UiNode* node, UiCanvas* canvas) {
 
   if (t->ModalKind == TuiModalKind::Select) {
     u32 visible = panelH > 3 ? panelH - 3 : 1;
+    if (matchCount == 0) {
+      ResetModalMatches(t);
+      Style empty = panel;
+      empty.Attr |= ATTR_DIM;
+      UiCanvas_PutTextClipped(canvas, (u16)(x0 + 2), (u16)(y0 + 2),
+                              SVL("No matching options"), empty,
+                              (u16)(x1 - 1));
+      UiCanvas_SetCursor(canvas, node->Id, false, 0, 0);
+      return;
+    }
+    if (t->ModalSelected >= matchCount) t->ModalSelected = 0;
     if (t->ModalSelected < t->ModalFirst) t->ModalFirst = t->ModalSelected;
-    if (t->ModalSelected >= t->ModalFirst + visible)
+    if (visible && t->ModalSelected >= t->ModalFirst + visible)
       t->ModalFirst = t->ModalSelected - visible + 1;
-    u32 maxFirst =
-        t->Sess.ModalOptionCount > visible ? t->Sess.ModalOptionCount - visible : 0;
+    u32 maxFirst = matchCount > visible ? matchCount - visible : 0;
     if (t->ModalFirst > maxFirst) t->ModalFirst = maxFirst;
     for (u32 row = 0; row < visible; row++) {
-      u32 index = t->ModalFirst + row;
-      if (index >= t->Sess.ModalOptionCount) break;
+      u32 matchIndex = t->ModalFirst + row;
+      u32 optionIndex = 0;
+      if (!ModalMatchAt(t, matchIndex, &optionIndex)) break;
       u16 y = (u16)(y0 + 2 + row);
-      bool selected = index == t->ModalSelected;
+      bool selected = matchIndex == t->ModalSelected;
       Style option = panel;
       if (selected) option.Attr |= ATTR_REVERSE;
       if (selected)
@@ -70,7 +136,7 @@ void PaintModalNode(UiContext*, const UiNode* node, UiCanvas* canvas) {
           selected ? SVL("\xe2\x80\xba ") : SVL("  "), option,
           (u16)(x1 - 1));
       UiCanvas_PutTextClipped(canvas, (u16)(x0 + 4), y,
-                              t->Sess.ModalOptions[index], option,
+                              t->Sess.ModalOptions[optionIndex], option,
                               (u16)(x1 - 1));
     }
     UiCanvas_SetCursor(canvas, node->Id, false, 0, 0);
@@ -108,27 +174,9 @@ void PaintModalNode(UiContext*, const UiNode* node, UiCanvas* canvas) {
     textEnd = (u16)(x1 - 2);
   }
 
-  StrView text = LineEdit_Text(&t->ModalEdit);
-  u32 avail = textEnd > textX ? (u32)(textEnd - textX) : 0;
-  u32 cursorW = TextWidth(StrView{text.Data, LineEdit_Cursor(&t->ModalEdit)});
   // One row, so the field pans horizontally to keep the caret visible rather
   // than wrapping the way the composer does.
-  u32 skip = 0;
-  u32 offset = 0;
-  if (avail && cursorW >= avail) {
-    u32 want = cursorW - avail + 1;
-    while (offset < text.Length && skip < want)
-      skip += CharCellWidth(Utf8Decode(text, &offset));
-  }
-  UiCanvas_PutTextClipped(canvas, textX, editY,
-                          StrView{text.Data + offset, text.Length - offset},
-                          edit, textEnd);
-  u16 cursorX = (u16)(textX + (cursorW - skip));
-  if (avail == 0)
-    cursorX = textX;
-  else if (cursorX >= textEnd)
-    cursorX = (u16)(textEnd - 1);
-  UiCanvas_SetCursor(canvas, node->Id, true, cursorX, editY);
+  PaintModalEdit(node, canvas, t, textX, textEnd, editY, edit);
 }
 
 void FinishModal(Tui* t, TuiModalResult result) {
@@ -153,19 +201,59 @@ void RequestStopLocked(Tui* t) {
 }
 
 void HandleSelectKey(Tui* t, const Key& k) {
+  u32 matchCount = ModalMatchCount(t);
   switch (k.Kind) {
+    case KeyKind::Char:
+      if (!k.Alt && k.Codepoint >= 0x20) {
+        LineEdit_InsertChar(&t->ModalEdit, k.Codepoint);
+        ResetModalMatches(t);
+      }
+      break;
     case KeyKind::Up:
       if (t->ModalSelected > 0) t->ModalSelected--;
       break;
     case KeyKind::Down:
-      if (t->ModalSelected + 1 < t->Sess.ModalOptionCount) t->ModalSelected++;
+      if (t->ModalSelected + 1 < matchCount) t->ModalSelected++;
       break;
     case KeyKind::Home: t->ModalSelected = 0; break;
     case KeyKind::End:
-      if (t->Sess.ModalOptionCount) t->ModalSelected = t->Sess.ModalOptionCount - 1;
+      if (matchCount) t->ModalSelected = matchCount - 1;
       break;
-    case KeyKind::Enter: FinishModal(t, TuiModalResult::Confirmed); break;
-    case KeyKind::Backspace: FinishModal(t, TuiModalResult::Back); break;
+    case KeyKind::Left: LineEdit_Left(&t->ModalEdit); break;
+    case KeyKind::Right: LineEdit_Right(&t->ModalEdit); break;
+    case KeyKind::WordLeft: LineEdit_WordLeft(&t->ModalEdit); break;
+    case KeyKind::WordRight: LineEdit_WordRight(&t->ModalEdit); break;
+    case KeyKind::Delete:
+      LineEdit_Delete(&t->ModalEdit);
+      ResetModalMatches(t);
+      break;
+    case KeyKind::CtrlW:
+      LineEdit_DeleteWordBack(&t->ModalEdit);
+      ResetModalMatches(t);
+      break;
+    case KeyKind::CtrlU:
+      LineEdit_KillToStart(&t->ModalEdit);
+      ResetModalMatches(t);
+      break;
+    case KeyKind::CtrlK:
+      LineEdit_KillToEnd(&t->ModalEdit);
+      ResetModalMatches(t);
+      break;
+    case KeyKind::Enter: {
+      u32 optionIndex = 0;
+      if (!ModalMatchAt(t, t->ModalSelected, &optionIndex)) break;
+      t->ModalSelected = optionIndex;
+      FinishModal(t, TuiModalResult::Confirmed);
+      break;
+    }
+    case KeyKind::Backspace:
+      if (LineEdit_Empty(&t->ModalEdit))
+        FinishModal(t, TuiModalResult::Back);
+      else {
+        LineEdit_Backspace(&t->ModalEdit);
+        ResetModalMatches(t);
+      }
+      break;
     case KeyKind::Escape: FinishModal(t, TuiModalResult::Cancelled); break;
     case KeyKind::CtrlC:
       if (t->OperationActive) Atomic_StoreI32(&t->OperationAbortFlag, 1);
@@ -223,6 +311,7 @@ bool Tui_BeginSelection(Tui* t, StrView title, const StrView* options, u32 optio
     return false;
   }
   Ui_CancelPointer(&t->Ui);
+  LineEdit_Clear(&t->ModalEdit);
   t->Sess.ModalOptions = ArenaPushArray(&t->SessionMem, StrView, optionCount);
   for (u32 i = 0; i < optionCount; i++)
     t->Sess.ModalOptions[i] = StrView_Dup(&t->SessionMem, options[i]);

@@ -655,10 +655,10 @@ selectors such as `/auth` and `/model` require a TTY.
 
 Interactive commands:
 
-- `/auth` — store an API key for a provider, then choose a model.
-- `/model` — choose a provider and a live-discovered, fallback, or manual model
-  ID, then choose the effort and context tier when that model exposes those
-  controls. Fixed context windows are displayed without an unnecessary prompt.
+- `/auth` — store an OpenRouter API key, then choose a model.
+- `/model` — choose a live-discovered or manual OpenRouter model ID, then choose
+  the effort and context tier when that model exposes those controls. Fixed
+  context windows are displayed without an unnecessary prompt.
 - `/session` — inspect the current title, IDs, project, status, times, model,
   counts, token categories, and fork ancestry.
 - `/name [title]` — set the current session name; an empty TUI value or
@@ -680,11 +680,12 @@ Interactive commands:
   effort, and context selection.
 - `/exit` (or `/quit`) — close Clanker and return to the shell.
 
-In the TUI, typing `/` opens a prefix-filtered command flyout over the content
-directly above the composer. Provider, model, and manual-entry choices drill down
-as pages in the same surface. Use Up/Down to select, Enter to continue or run the
-command, Backspace on an empty page to go back, or Escape to dismiss the current
-choice.
+In the TUI, typing `/` opens a command flyout over the content directly above
+the composer. Its query matches command names, aliases, and descriptions using
+case-insensitive substrings. In every selection page, typing silently filters
+the complete displayed option labels without showing a query field. Use Up/Down
+to select, Enter to continue or run the command, Backspace to edit the hidden
+query (or go back when it is empty), or Escape to dismiss the current choice.
 
 Commands entered during a TUI turn run afterward; ordinary text still steers the
 active turn.

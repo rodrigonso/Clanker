@@ -32,9 +32,26 @@ bool IsSlashCommand(StrView line) {
   return i < line.Length && line.Data[i] == '/';
 }
 
+u8 CommandMatchTier(const TuiCommandSpec& command, StrView query) {
+  bool exactName =
+      command.Name.Length == query.Length &&
+      StrView_ContainsInsensitiveAscii(command.Name, query);
+  bool exactAlias =
+      command.Alias.Length == query.Length &&
+      StrView_ContainsInsensitiveAscii(command.Alias, query);
+  if (exactName || exactAlias) return 0;
+  if (StrView_ContainsInsensitiveAscii(command.Name, query) ||
+      (command.Alias.Length &&
+       StrView_ContainsInsensitiveAscii(command.Alias, query)))
+    return 1;
+  if (command.Description.Length &&
+      StrView_ContainsInsensitiveAscii(command.Description, query))
+    return 2;
+  return 3;
+}
+
 bool CommandMatches(const TuiCommandSpec& command, StrView query) {
-  return StrView_StartsWith(command.Name, query) ||
-         (command.Alias.Length && StrView_StartsWith(command.Alias, query));
+  return CommandMatchTier(command, query) < 3;
 }
 
 u32 CommandMatchCount(const Tui* t, StrView query) {
@@ -45,10 +62,12 @@ u32 CommandMatchCount(const Tui* t, StrView query) {
 }
 
 const TuiCommandSpec* CommandMatchAt(const Tui* t, StrView query, u32 matchIndex) {
-  for (u32 i = 0; i < t->CommandCount; i++) {
-    if (!CommandMatches(t->Commands[i], query)) continue;
-    if (matchIndex == 0) return &t->Commands[i];
-    matchIndex--;
+  for (u8 tier = 0; tier < 3; tier++) {
+    for (u32 i = 0; i < t->CommandCount; i++) {
+      if (CommandMatchTier(t->Commands[i], query) != tier) continue;
+      if (matchIndex == 0) return &t->Commands[i];
+      matchIndex--;
+    }
   }
   return nullptr;
 }

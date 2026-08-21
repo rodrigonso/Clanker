@@ -43,6 +43,21 @@ inline char Ascii_ToLower(char c) {
   return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
 }
 
+inline bool StrView_ContainsInsensitiveAscii(StrView haystack, StrView needle) {
+  if (needle.Length == 0) return true;
+  if (needle.Length > haystack.Length) return false;
+  for (u32 i = 0; i + needle.Length <= haystack.Length; i++) {
+    u32 k = 0;
+    for (; k < needle.Length; k++) {
+      if (Ascii_ToLower(haystack.Data[i + k]) !=
+          Ascii_ToLower(needle.Data[k]))
+        break;
+    }
+    if (k == needle.Length) return true;
+  }
+  return false;
+}
+
 inline StrView StrView_Trim(StrView s) {
   u32 first = 0;
   while (first < s.Length && Ascii_IsSpace(s.Data[first])) first++;

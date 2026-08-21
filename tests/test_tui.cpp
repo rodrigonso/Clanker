@@ -1027,13 +1027,13 @@ void TestTui() {
     ArenaRelease(&an);
   }
 
-  // Slash input opens a prefix-filtered command palette. Arrow keys select a
-  // command, Enter submits its canonical name, and Escape dismisses the flyout
-  // without modifying the composer.
+  // Slash input opens a case-insensitive substring-filtered command palette.
+  // Arrow keys select a command, Enter submits its canonical name, and Escape
+  // dismisses the flyout without modifying the composer.
   {
     Arena ap = ArenaCreate();
     TuiCommandSpec commands[] = {
-        {SVL("login"), {}, SVL("Sign in")},
+        {SVL("login"), {}, SVL("Model sign in")},
         {SVL("model"), {}, SVL("Change model")},
         {SVL("name"), {}, SVL("Name session")},
         {SVL("clear"), {}, SVL("Clear conversation")},
@@ -1056,9 +1056,17 @@ void TestTui() {
     CHECK_ALL(paletteSubmission.Kind == TuiSubmissionKind::Command,
               StrView_Eq(paletteSubmission.Text, SVL("/clear")));
 
-    Feed(&tp, "/q\r");
+    Feed(&tp, "/ui\r");
     CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
     CHECK(StrView_Eq(paletteSubmission.Text, SVL("/exit")));
+
+    Feed(&tp, "/DEL\r");
+    CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
+    CHECK(StrView_Eq(paletteSubmission.Text, SVL("/model")));
+
+    Feed(&tp, "/versa\r");
+    CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
+    CHECK(StrView_Eq(paletteSubmission.Text, SVL("/clear")));
 
     Feed(&tp, "/unknown\r");
     CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
@@ -1080,11 +1088,11 @@ void TestTui() {
 
     CHECK(Tui_ClearSession(&tp));
     CHECK_ALL(tp.CommandCount == 5, !tp.CommandPaletteDismissed);
-    Feed(&tp, "/c\r");
+    Feed(&tp, "/cle\r");
     CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
     CHECK(StrView_Eq(paletteSubmission.Text, SVL("/clear")));
 
-    Feed(&tp, "/n\r");
+    Feed(&tp, "/nam\r");
     CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
     CHECK(StrView_Eq(paletteSubmission.Text, SVL("/name")));
 
@@ -2011,6 +2019,42 @@ void TestTui() {
     TuiModalResult result = Tui_GetModalResult(&tm, &selected, nullptr);
     CHECK_ALL(result == TuiModalResult::Confirmed, selected == 2,
               LineEdit_Empty(&tm.Edit));
+
+    StrView filterOptions[] = {
+        SVL("Alpha"), SVL("Beta"), SVL("Alphabet soup"), SVL("Gamma")};
+    CHECK(Tui_BeginSelection(&tm, SVL("Filter"), filterOptions, 4));
+    Feed(&tm, "PH");
+    CHECK_ALL(StrView_Eq(LineEdit_Text(&tm.ModalEdit), SVL("PH")),
+              Tui_GetModalResult(&tm, nullptr, nullptr) ==
+                  TuiModalResult::Pending);
+    Tui_ComposeFrame(&tm, 40, 14);
+    CHECK_ALL(!ScreenContains(&tm, "PH"), ScreenContains(&tm, "Alpha"),
+              ScreenContains(&tm, "Alphabet soup"),
+              !ScreenContains(&tm, "Beta"), !tm.Scr.CursorVisible);
+    Feed(&tm, "\x1b[B\r");
+    result = Tui_GetModalResult(&tm, &selected, nullptr);
+    CHECK_ALL(result == TuiModalResult::Confirmed, selected == 2);
+
+    CHECK(Tui_BeginSelection(&tm, SVL("Filter"), filterOptions, 4));
+    Feed(&tm, "be\x7f");
+    CHECK_ALL(Tui_GetModalResult(&tm, nullptr, nullptr) ==
+                  TuiModalResult::Pending,
+              StrView_Eq(LineEdit_Text(&tm.ModalEdit), SVL("b")));
+    Feed(&tm, "\x7f");
+    CHECK_ALL(Tui_GetModalResult(&tm, nullptr, nullptr) ==
+                  TuiModalResult::Pending,
+              LineEdit_Empty(&tm.ModalEdit));
+    Feed(&tm, "\x7f");
+    CHECK(Tui_GetModalResult(&tm, nullptr, nullptr) == TuiModalResult::Back);
+
+    CHECK(Tui_BeginSelection(&tm, SVL("Filter"), filterOptions, 4));
+    Feed(&tm, "zzz\r");
+    CHECK(Tui_GetModalResult(&tm, nullptr, nullptr) ==
+          TuiModalResult::Pending);
+    Tui_ComposeFrame(&tm, 40, 14);
+    CHECK_ALL(ScreenContains(&tm, "No matching options"),
+              !tm.Scr.CursorVisible);
+    Feed(&tm, "\x1b");
 
     CHECK(Tui_BeginSelection(&tm, SVL("Cancel"), options, 3, 1));
     Feed(&tm, "\x1b");
