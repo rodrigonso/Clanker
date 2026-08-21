@@ -58,8 +58,8 @@ Model TestModel() {
   Model model = {};
   model.Id = SVL("test-model");
   model.Name = SVL("Test Model");
-  model.Provider = SVL("openai");
-  model.BaseUrl = SVL("https://api.openai.com");
+  model.Provider = SVL("openrouter");
+  model.BaseUrl = SVL("https://openrouter.ai/api/v1");
   model.ContextWindow = 200000;
   model.Reasoning = true;
   model.EffortMask = MODEL_EFFORT_ALL_MASK;
@@ -72,11 +72,10 @@ Model TestModel() {
 void TestUrls() {
   Arena arena = ArenaCreate();
   CHECK(StrView_EqCStr(
-      Responses_Url(&arena, SVL("https://api.openai.com"), "responses"),
-      "https://api.openai.com/v1/responses"));
-  // A gateway addressed through OPENAI_BASE_URL usually publishes an address
-  // that already ends in /v1; appending a second one is the most common way to
-  // get a 404 here.
+      Responses_Url(&arena, SVL("https://openrouter.ai/api/v1"), "responses"),
+      "https://openrouter.ai/api/v1/responses"));
+  // OpenRouter's address already ends in /v1; appending a second one is the
+  // most common way to get a 404 here.
   CHECK(StrView_EqCStr(
       Responses_Url(&arena, SVL("https://gateway.test/api/v1"), "models"),
       "https://gateway.test/api/v1/models"));
@@ -199,7 +198,7 @@ void TestRequestMessageShapes() {
   Array_Push(&withImage.Content, Content_Image(SVL("QUJD"), SVL("image/png")));
 
   Message assistant = Message_AssistantEmpty(&arena);
-  assistant.Provider = SVL("openai");
+  assistant.Provider = SVL("openrouter");
   assistant.Model = SVL("test-model");
   Content thinking = Content_Thinking(SVL("summary text"));
   thinking.Signature =
@@ -223,7 +222,7 @@ void TestRequestMessageShapes() {
   // Reasoning with no signature cannot be reconstructed, so the turn carries
   // nothing the server can act on.
   Message thinkingOnly = Message_AssistantEmpty(&arena);
-  thinkingOnly.Provider = SVL("openai");
+  thinkingOnly.Provider = SVL("openrouter");
   thinkingOnly.Model = SVL("test-model");
   Array_Push(&thinkingOnly.Content, Content_Thinking(SVL("mulling")));
 
@@ -477,37 +476,40 @@ void TestStreamEdgeCases() {
 
 void TestModelsCatalog() {
   Arena arena = ArenaCreate();
-  const Model known[] = {
-      {SVL("gpt-known"), SVL("Known Model"), SVL("p"), {}, 128000, 8000, true,
-       MODEL_EFFORT_STANDARD_MASK, ModelEffort::Medium},
-  };
   ResponsesEndpoint endpoint = {};
-  endpoint.Id = SVL("p");
+  endpoint.Id = SVL("openrouter");
   endpoint.BaseUrl = SVL("https://example.test");
-  endpoint.FallbackModels = known;
-  endpoint.FallbackModelCount = 1;
 
   ProviderModelList list = {};
   CHECK(Responses_ParseModelsResponse(
       &arena, &endpoint,
-      SVL("{\"data\":[{\"id\":\"gpt-known\"},{\"id\":\"gpt-known-preview\"},"
-          "{\"id\":\"text-embedding-3\"},{\"id\":\"tts-1\"},"
-          "{\"id\":\"gpt-audio\"},{\"id\":\"claude-opus\"},"
-          "{\"id\":\"o3-pro\",\"context_window\":32768}]}"),
+      SVL("{\"data\":["
+          "{\"id\":\"anthropic/known\",\"name\":\"Known Model\","
+          "\"context_length\":128000,\"supported_parameters\":[\"tools\","
+          "\"reasoning\"],\"reasoning\":{\"supported_efforts\":[\"low\","
+          "\"max\"],\"default_effort\":\"max\"}},"
+          "{\"id\":\"qwen/text\",\"context_window\":32768,"
+          "\"supported_parameters\":[\"tools\"]},"
+          "{\"id\":\"vendor/audio\",\"supported_parameters\":[\"tools\"],"
+          "\"architecture\":{\"input_modalities\":[\"audio\"],"
+          "\"output_modalities\":[\"text\"]}},"
+          "{\"id\":\"vendor/no-tools\",\"supported_parameters\":[]}"
+          "]}"),
       &list));
-  CHECK_ALL(list.Status == ProviderModelListStatus::Success, list.Count == 3);
-  CHECK_ALL(StrView_EqCStr(list.Models[0].Id, "gpt-known"),
+  CHECK_ALL(list.Status == ProviderModelListStatus::Success, list.Count == 2);
+  CHECK_ALL(StrView_EqCStr(list.Models[0].Id, "anthropic/known"),
             StrView_EqCStr(list.Models[0].Name, "Known Model"),
             list.Models[0].ContextWindow == 128000,
-            list.Models[0].EffortMask == MODEL_EFFORT_STANDARD_MASK);
-  // A prefix match inherits capabilities but keeps its own ID as its name.
-  CHECK_ALL(StrView_EqCStr(list.Models[1].Id, "gpt-known-preview"),
-            StrView_EqCStr(list.Models[1].Name, "gpt-known-preview"),
-            list.Models[1].ContextWindow == 128000);
-  // Families the endpoint cannot serve never reach the picker.
-  CHECK_ALL(StrView_EqCStr(list.Models[2].Id, "o3-pro"),
-            list.Models[2].ContextWindow == 32768,
-            list.Models[2].EffortMask == 0);
+            Model_SupportsEffort(&list.Models[0], ModelEffort::Low),
+            !Model_SupportsEffort(&list.Models[0], ModelEffort::Medium),
+            Model_SupportsEffort(&list.Models[0], ModelEffort::Max),
+            list.Models[0].DefaultEffort == ModelEffort::Max,
+            Model_MetadataIsValid(&list.Models[0]));
+  CHECK_ALL(StrView_EqCStr(list.Models[1].Id, "qwen/text"),
+            StrView_EqCStr(list.Models[1].Name, "qwen/text"),
+            list.Models[1].ContextWindow == 32768,
+            !list.Models[1].Reasoning, list.Models[1].EffortMask == 0,
+            Model_MetadataIsValid(&list.Models[1]));
 
   ProviderModelList bad = {};
   CHECK(!Responses_ParseModelsResponse(&arena, &endpoint, SVL("[]"), &bad));

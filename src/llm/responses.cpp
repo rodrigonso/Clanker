@@ -205,7 +205,7 @@ ProviderModelList Responses_ListModelsWithFetch(
   ProviderModelList parsed = {};
   if (!Responses_ParseModelsResponse(arena, endpoint, response.Body, &parsed))
     return parsed;
-  return ProviderModelList_Merge(arena, parsed, nullptr, 0);
+  return parsed;
 }
 
 ProviderModelList Responses_ListModels(Arena* arena,

@@ -25,14 +25,12 @@ struct ProviderSpec {
   StrView Name;
   StrView DefaultModel;
   const char* ApiKeyEnvVar;
-  // The Responses endpoint this provider talks to. Every provider has one,
-  // since the Responses API is the only protocol this build speaks.
+  // The OpenRouter Responses endpoint. It is the only provider transport this
+  // build supports.
   const ResponsesEndpoint* Endpoint;
   ProviderFactoryFn CreateProvider;
   ProviderModelFactoryFn CreateModel;
   ProviderListModelsFn ListModels;
-  const Model* FallbackModels;
-  u32 FallbackModelCount;
 };
 
 // Stable process-lifetime registry entries. At returns nullptr out of range.

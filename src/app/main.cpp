@@ -116,7 +116,7 @@ static void PrintHelp() {
       "  --logout PROV     Remove stored credentials for a provider\n"
      "  --help            Show this help\n\n"
       "Auth: run `/auth` inside the TUI to store an API key, or set the\n"
-      "provider's API key environment variable (for example OPENAI_API_KEY).\n"
+     "OPENROUTER_API_KEY environment variable.\n"
       "Interactive commands: /session, /name, /sessions, /resume, /tree,\n"
       "/checkout, /fork, /compact, /trust, /reload, /debug, /auth, /model,\n"
       "/skill:<name>, /clear, /exit.\n");

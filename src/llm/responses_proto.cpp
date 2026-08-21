@@ -453,46 +453,53 @@ bool OnParseLine(void* user, StrView line) {
 
 // ---- model metadata -----------------------------------------------------
 
-// Families the Responses endpoint serves, minus the modalities that cannot
-// serve an agent turn.
-bool IsResponsesModelId(StrView id) {
-  StrView candidate = id;
-  if (candidate.Length > 3 && candidate.Data[0] == 'f' &&
-      candidate.Data[1] == 't' && candidate.Data[2] == ':')
-    candidate = StrView{candidate.Data + 3, candidate.Length - 3};
-  bool supportedFamily = StrView_StartsWith(candidate, SVL("gpt-")) ||
-                         StrView_StartsWith(candidate, SVL("o1")) ||
-                         StrView_StartsWith(candidate, SVL("o3")) ||
-                         StrView_StartsWith(candidate, SVL("o4")) ||
-                         StrView_StartsWith(candidate, SVL("codex-")) ||
-                         StrView_StartsWith(candidate, SVL("computer-use-"));
-  if (!supportedFamily) return false;
-  const char* incompatible[] = {
-      "audio",    "embedding", "image",      "moderation",
-      "realtime", "search",    "transcribe", "tts",
-  };
-  for (u32 i = 0; i < sizeof(incompatible) / sizeof(incompatible[0]); i++) {
-    if (StrView_Contains(candidate, incompatible[i])) return false;
+bool JsonArrayHasString(JsonValue* values, const char* expected) {
+  if (!Json_IsArray(values)) return false;
+  for (u32 i = 0; i < values->Count; i++) {
+    JsonValue* value = values->Items[i];
+    if (Json_IsString(value) && Eq(value->Str, expected)) return true;
   }
-  return true;
+  return false;
 }
 
-void ApplyKnownModelMetadata(Model* model, const ResponsesEndpoint* endpoint) {
-  if (!endpoint || !endpoint->FallbackModels) return;
-  for (u32 i = 0; i < endpoint->FallbackModelCount; i++) {
-    const Model* known = &endpoint->FallbackModels[i];
-    if (!StrView_StartsWith(model->Id, known->Id)) continue;
-    model->ContextWindow = known->ContextWindow;
-    model->MaxTokens = known->MaxTokens;
-    model->Reasoning = known->Reasoning;
-    model->EffortMask = known->EffortMask;
-    model->DefaultEffort = known->DefaultEffort;
-    model->ContextWindowOptionCount = known->ContextWindowOptionCount;
-    for (u32 j = 0; j < known->ContextWindowOptionCount; j++)
-      model->ContextWindowOptions[j] = known->ContextWindowOptions[j];
-    if (StrView_Eq(model->Id, known->Id)) model->Name = known->Name;
-    return;
+bool IsAgentModel(JsonValue* value) {
+  JsonValue* parameters = Json_Get(value, "supported_parameters");
+  if (!JsonArrayHasString(parameters, "tools")) return false;
+
+  JsonValue* architecture = Json_Get(value, "architecture");
+  if (!Json_IsObject(architecture)) return true;
+  JsonValue* inputs = Json_Get(architecture, "input_modalities");
+  JsonValue* outputs = Json_Get(architecture, "output_modalities");
+  return (!Json_IsArray(inputs) || JsonArrayHasString(inputs, "text")) &&
+         (!Json_IsArray(outputs) || JsonArrayHasString(outputs, "text"));
+}
+
+// OpenRouter owns these facts. If the catalog does not advertise a capability
+// Clanker does not infer it from the model id.
+void ApplyAdvertisedCapabilities(Model* model, JsonValue* value) {
+  if (!model || !Json_IsObject(value)) return;
+  JsonValue* parameters = Json_Get(value, "supported_parameters");
+  model->Reasoning = JsonArrayHasString(parameters, "reasoning");
+  model->EffortMask = 0;
+  model->DefaultEffort = ModelEffort::None;
+  if (!model->Reasoning) return;
+
+  JsonValue* reasoning = Json_Get(value, "reasoning");
+  JsonValue* efforts = Json_Get(reasoning, "supported_efforts");
+  if (Json_IsArray(efforts)) {
+    for (u32 i = 0; i < efforts->Count; i++) {
+      JsonValue* entry = efforts->Items[i];
+      ModelEffort effort = ModelEffort::None;
+      if (Json_IsString(entry) && ModelEffort_Parse(entry->Str, &effort))
+        model->EffortMask |= ModelEffort_Bit(effort);
+    }
   }
+
+  ModelEffort defaultEffort = ModelEffort::None;
+  if (ModelEffort_Parse(Json_GetStr(reasoning, "default_effort"),
+                        &defaultEffort) &&
+      Model_SupportsEffort(model, defaultEffort))
+    model->DefaultEffort = defaultEffort;
 }
 
 }  // namespace
@@ -527,7 +534,6 @@ Model Responses_Model(Arena* arena, const ResponsesEndpoint* endpoint,
   model.Name = modelId;
   model.Provider = endpoint ? endpoint->Id : StrView{};
   model.BaseUrl = ResponsesEndpoint_ResolveBaseUrl(arena, endpoint);
-  ApplyKnownModelMetadata(&model, endpoint);
   return model;
 }
 
@@ -668,15 +674,17 @@ bool Responses_ParseModelsResponse(Arena* arena,
       out->Error = SVL("the models response contains a model without an ID");
       return false;
     }
-    if (!IsResponsesModelId(id)) continue;
+    if (!IsAgentModel(value)) continue;
 
     Model model = Responses_Model(arena, endpoint, StrView_Dup(arena, id));
-    // OpenAI publishes neither, but a gateway addressed through the base-URL
-    // override usually does.
     u32 contextWindow = (u32)Json_GetInt(value, "context_length", 0);
     if (!contextWindow)
       contextWindow = (u32)Json_GetInt(value, "context_window", 0);
     if (contextWindow) model.ContextWindow = contextWindow;
+    // A max-output figure is deliberately not read from the catalog: it is the
+    // model's ceiling rather than a budget for this turn, and naming a ceiling
+    // makes a metered gateway reserve credit for the whole of it.
+    ApplyAdvertisedCapabilities(&model, value);
     StrView name = Json_GetStr(value, "name");
     if (name.Length) model.Name = StrView_Dup(arena, name);
     out->Models[out->Count++] = model;

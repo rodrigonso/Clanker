@@ -1,79 +1,14 @@
 #include "app/provider_registry.h"
 
-// Every provider here speaks the same protocol; only the endpoint data differs.
-// Adding a vendor is adding a row, not a wire implementation -- provided that
-// vendor serves the Responses API, which is the only protocol this build
-// speaks.
+// Clanker has one provider: OpenRouter. Its live catalog owns model
+// availability and capabilities; this registry contains no model table.
 
 namespace {
 
-// ---- OpenAI --------------------------------------------------------------
-// Effort tiers are advertised per model because the Responses API accepts the
-// full range and the models differ in how far up it they go.
-const Model OPENAI_MODELS[] = {
-    {
-        SVL("gpt-5.6-sol"),
-        SVL("GPT-5.6-Sol"),
-        SVL("openai"),
-        SVL("https://api.openai.com"),
-        272000,
-        0,
-        true,
-        MODEL_EFFORT_ALL_MASK,
-        ModelEffort::Low,
-    },
-    {
-        SVL("gpt-5.6-terra"),
-        SVL("GPT-5.6-Terra"),
-        SVL("openai"),
-        SVL("https://api.openai.com"),
-        272000,
-        0,
-        true,
-        MODEL_EFFORT_ALL_MASK,
-        ModelEffort::Medium,
-    },
-    {
-        SVL("gpt-5.6-luna"),
-        SVL("GPT-5.6-Luna"),
-        SVL("openai"),
-        SVL("https://api.openai.com"),
-        272000,
-        0,
-        true,
-        MODEL_EFFORT_THROUGH_MAX_MASK,
-        ModelEffort::Medium,
-    },
-    {
-        SVL("gpt-5.5"),
-        SVL("GPT-5.5"),
-        SVL("openai"),
-        SVL("https://api.openai.com"),
-        272000,
-        0,
-        true,
-        MODEL_EFFORT_STANDARD_MASK | ModelEffort_Bit(ModelEffort::XHigh),
-        ModelEffort::Medium,
-    },
-    {
-        SVL("gpt-5.2"),
-        SVL("GPT-5.2"),
-        SVL("openai"),
-        SVL("https://api.openai.com"),
-        272000,
-        0,
-        true,
-        MODEL_EFFORT_STANDARD_MASK | ModelEffort_Bit(ModelEffort::XHigh),
-        ModelEffort::Medium,
-    },
-};
-
-const ResponsesEndpoint OPENAI_ENDPOINT = {
-    SVL("openai"),
-    SVL("https://api.openai.com"),
-    "OPENAI_BASE_URL",
-    OPENAI_MODELS,
-    (u32)(sizeof(OPENAI_MODELS) / sizeof(OPENAI_MODELS[0])),
+const ResponsesEndpoint OPENROUTER_ENDPOINT = {
+    SVL("openrouter"),
+    SVL("https://openrouter.ai/api/v1"),
+    "OPENROUTER_BASE_URL",
 };
 
 Provider CreateResponsesProvider(Arena* arena, const ProviderSpec* spec) {
@@ -98,16 +33,14 @@ ProviderModelList ListResponsesModels(Arena* arena, const ProviderSpec* spec,
 
 const ProviderSpec PROVIDERS[] = {
     {
-        SVL("openai"),
-        SVL("OpenAI"),
-        SVL("gpt-5.6-sol"),
-        "OPENAI_API_KEY",
-        &OPENAI_ENDPOINT,
+        SVL("openrouter"),
+        SVL("OpenRouter"),
+        SVL("openrouter/auto"),
+        "OPENROUTER_API_KEY",
+        &OPENROUTER_ENDPOINT,
         CreateResponsesProvider,
         CreateResponsesModel,
         ListResponsesModels,
-        OPENAI_MODELS,
-        (u32)(sizeof(OPENAI_MODELS) / sizeof(OPENAI_MODELS[0])),
     },
 };
 

@@ -25,10 +25,7 @@ MODELS = {
     "canary": "anthropic/claude-sonnet-4-6",
     "full": "anthropic/claude-opus-4-8",
 }
-PROVIDER_KEYS = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    "openai": "OPENAI_API_KEY",
-}
+PROVIDER_KEY = "OPENROUTER_API_KEY"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -173,10 +170,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.gate != "oracle":
         binary = _binary_path(parser, args.clanker_binary, args.dry_run)
         model = model or MODELS[args.gate]
-        provider = model.split("/", 1)[0].split("-", 1)[0].lower()
-        key = PROVIDER_KEYS.get(provider)
-        if not args.dry_run and key and not os.environ.get(key):
-            parser.error(f"{key} is not set")
+        if not args.dry_run and not os.environ.get(PROVIDER_KEY):
+            parser.error(f"{PROVIDER_KEY} is not set")
 
     pier = shutil.which("pier")
     if not pier and not args.dry_run:

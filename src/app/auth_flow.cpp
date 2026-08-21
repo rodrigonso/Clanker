@@ -262,8 +262,7 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
 
   ProviderModelList models = {};
   if (live.Status == ProviderModelListStatus::Success) {
-    models = ProviderModelList_Merge(&scratch, live, spec->FallbackModels,
-                                     spec->FallbackModelCount);
+    models = live;
   } else {
     StrBuf message = StrBuf_Make(&scratch, spec->Name.Length + live.Error.Length + 144);
     StrBuf_AppendCStr(&message, "Live model discovery ");
@@ -275,20 +274,13 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
       StrBuf_AppendCStr(&message, ": ");
       StrBuf_Append(&message, live.Error);
     }
-    if (spec->FallbackModelCount)
-      StrBuf_AppendCStr(&message,
-                       ". Using provider fallback models; manual model-ID entry is also available.");
-    else
-      StrBuf_AppendCStr(&message, ". Manual model-ID entry remains available.");
+    StrBuf_AppendCStr(&message, ". Manual model-ID entry remains available.");
     if (live.Status == ProviderModelListStatus::Failed)
       EmitCommandError(ux, StrBuf_View(&message));
     else
       EmitCommandNotice(ux, StrBuf_View(&message));
 
-    ProviderModelList empty = {};
-    empty.Status = ProviderModelListStatus::Success;
-    models = ProviderModelList_Merge(&scratch, empty, spec->FallbackModels,
-                                     spec->FallbackModelCount);
+    models.Status = ProviderModelListStatus::Success;
   }
 
   u32 optionCount = models.Count + 1;

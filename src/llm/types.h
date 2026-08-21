@@ -296,9 +296,8 @@ inline bool Model_SupportsContextWindow(const Model* model,
 inline bool Model_MetadataIsValid(const Model* model) {
   if (!model ||
       (model->EffortMask & ~MODEL_EFFORT_ALL_MASK) != 0 ||
-      (model->EffortMask == 0
-           ? model->DefaultEffort != ModelEffort::None
-           : !Model_SupportsEffort(model, model->DefaultEffort)) ||
+      (model->DefaultEffort != ModelEffort::None &&
+       !Model_SupportsEffort(model, model->DefaultEffort)) ||
       model->ContextWindowOptionCount >
           MODEL_CONTEXT_WINDOW_OPTION_CAPACITY)
     return false;

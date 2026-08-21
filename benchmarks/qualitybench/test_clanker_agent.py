@@ -141,8 +141,8 @@ def _record(role: str, usage: dict | None = None) -> str:
             "stopReason": "stop",
             "usage": usage,
             "errorMessage": "",
-            "model": "claude-sonnet-4-6",
-            "provider": "anthropic",
+            "model": "anthropic/claude-sonnet-4-6",
+            "provider": "openrouter",
         }
     return json.dumps(
         {
@@ -176,8 +176,7 @@ def _usage(**kwargs) -> dict:
 def main() -> int:
     # The adapter refuses to construct without a provider key, since the
     # container has no other credential path.
-    os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
-    os.environ.setdefault("OPENAI_API_KEY", "test-key")
+    os.environ.setdefault("OPENROUTER_API_KEY", "test-key")
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -224,19 +223,19 @@ def main() -> int:
         check("version", agent._version.startswith("sha256:"), True)
 
         settings = json.loads(agent._settings_json())
-        check("provider", settings["provider"], "anthropic")
-        check("model", settings["model"], "claude-sonnet-4-6")
+        check("provider", settings["provider"], "openrouter")
+        check("model", settings["model"], "anthropic/claude-sonnet-4-6")
         check("trust", settings["defaultProjectTrust"], "always")
 
         openai_agent = ClankerAgent(
             logs_dir=logs,
-            model_name="openai-api/gpt-5.6-sol",
+            model_name="openai/gpt-5.6-sol",
             clanker_binary=str(binary),
             effort="xhigh",
         )
         openai_settings = json.loads(openai_agent._settings_json())
-        check("openai provider", openai_settings["provider"], "openai")
-        check("openai model", openai_settings["model"], "gpt-5.6-sol")
+        check("gateway provider", openai_settings["provider"], "openrouter")
+        check("namespaced model", openai_settings["model"], "openai/gpt-5.6-sol")
         check("effort", openai_settings.get("effort"), "xhigh")
         check(
             "safe retry block by default",
@@ -305,14 +304,14 @@ def main() -> int:
         except ValueError:
             pass
 
-        # Likewise for a provider clanker does not implement.
+        # OpenRouter model IDs are always namespaced.
         try:
             ClankerAgent(
                 logs_dir=logs,
-                model_name="google/gemini-3-pro",
+                model_name="not-a-model",
                 clanker_binary=str(binary),
             )._settings_json()
-            failures.append("bad provider: expected ValueError, got none")
+            failures.append("bad model id: expected ValueError, got none")
         except ValueError:
             pass
 
@@ -329,26 +328,26 @@ def main() -> int:
         # Regression: DeepSWE tasks are air-gapped, so an empty allowlist means
         # every model call fails with no route to host.
         check(
-            "allowlist anthropic",
+            "allowlist openrouter",
             agent.network_allowlist().domains,
-            ["api.anthropic.com"],
+            ["openrouter.ai"],
         )
         check(
-            "allowlist openai",
+            "allowlist namespaced openai model",
             openai_agent.network_allowlist().domains,
-            ["api.openai.com"],
+            ["openrouter.ai"],
         )
 
         gateway = ClankerAgent(
             logs_dir=logs,
-            model_name="openai-api/gpt-5.6-sol",
+            model_name="openai/gpt-5.6-sol",
             clanker_binary=str(binary),
         )
-        gateway._extra_env["OPENAI_BASE_URL"] = "https://gateway.internal/v1"
+        gateway._extra_env["OPENROUTER_BASE_URL"] = "https://gateway.internal/v1"
         check(
             "allowlist honours base url",
             gateway.network_allowlist().domains,
-            ["api.openai.com", "gateway.internal"],
+            ["gateway.internal", "openrouter.ai"],
         )
 
         # Regression: the binary upload used to live in install(), which Pier
@@ -374,7 +373,7 @@ def main() -> int:
 
         # Regression: a missing provider key must fail at construction, before
         # a sandbox is built and a task started.
-        saved = os.environ.pop("ANTHROPIC_API_KEY")
+        saved = os.environ.pop("OPENROUTER_API_KEY")
         try:
             ClankerAgent(
                 logs_dir=logs,
@@ -385,7 +384,7 @@ def main() -> int:
         except ValueError:
             pass
         finally:
-            os.environ["ANTHROPIC_API_KEY"] = saved
+            os.environ["OPENROUTER_API_KEY"] = saved
 
         for failure in failures:
             print(f"FAIL {failure}")

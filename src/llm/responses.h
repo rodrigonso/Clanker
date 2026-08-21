@@ -6,28 +6,24 @@
 #include "llm/types.h"
 #include "net/http.h"
 
-// OpenAI Responses protocol: `POST <base>/v1/responses` with an SSE stream of
-// typed `response.*` events.
+// OpenRouter's Responses endpoint: `POST <base>/responses` with an SSE stream
+// of typed `response.*` events. The default base already ends in "/v1".
 //
-// This is the only wire protocol Clanker speaks. It is the endpoint OpenAI's
-// reasoning models expect for tool use -- chat-completions rejects function
-// tools combined with a reasoning effort -- and it is the only one that lets a
-// turn hand its reasoning back on the next request, which is what keeps a
+// This is the only wire protocol Clanker speaks. OpenRouter translates it for
+// upstream vendors while preserving function tools and reasoning items, which
+// lets a turn hand its reasoning back on the next request and keeps a
 // multi-step tool loop coherent.
 //
 // Request building and SSE parsing are transport-independent so both can be
 // covered offline against recorded fixtures; the HTTP glue lives in
 // responses.cpp.
 
-// One Responses endpoint. `BaseUrlEnvVar`, when set and non-empty in the
-// environment, replaces `BaseUrl` at model-creation time -- which is what lets
-// a single build target a gateway or a proxy without a rebuild.
+// `BaseUrlEnvVar`, when set and non-empty in the environment, replaces
+// `BaseUrl` at model-creation time for an OpenRouter-compatible mirror.
 struct ResponsesEndpoint {
   StrView Id;       // provider id recorded on messages and in settings.json
-  StrView BaseUrl;  // endpoint root; "/v1/responses" is appended
+  StrView BaseUrl;  // endpoint root; the versioned responses path is joined
   const char* BaseUrlEnvVar;
-  const Model* FallbackModels;
-  u32 FallbackModelCount;
 };
 
 // Resolved endpoint root, honoring `BaseUrlEnvVar`. Trailing '/' is stripped so

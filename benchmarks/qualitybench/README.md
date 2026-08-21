@@ -49,7 +49,7 @@ uv tool install --force "git+https://github.com/datacurve-ai/pier"
 git clone https://github.com/datacurve-ai/deep-swe
 
 modal token new                # Pier refuses to start without one
-export ANTHROPIC_API_KEY=...   # or OPENAI_API_KEY, matching --model
+export OPENROUTER_API_KEY=...
 ```
 
 DeepSWE tasks declare `memory_mb = 8192` and `storage_mb = 20480` each, so on a

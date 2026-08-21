@@ -76,6 +76,10 @@ void TestTypes() {
   Model invalid = model;
   invalid.DefaultEffort = ModelEffort::Medium;
   CHECK(!Model_MetadataIsValid(&invalid));
+  Model noDefault = model;
+  noDefault.DefaultEffort = ModelEffort::None;
+  CHECK_ALL(Model_MetadataIsValid(&noDefault),
+            Model_DefaultEffort(&noDefault) == ModelEffort::None);
   invalid = model;
   invalid.ContextWindowOptions[1] = invalid.ContextWindowOptions[0];
   CHECK(!Model_MetadataIsValid(&invalid));

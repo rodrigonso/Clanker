@@ -145,9 +145,9 @@ ctest --preset vs2026-debug
 ## Run
 
 ```sh
-./build/clanker -p "hi"                # set OPENAI_API_KEY
-./build/clanker                        # full-screen TUI; /model picks provider + model
-./build/clanker -m gpt-5.6-sol -p "summarize README.md"
+./build/clanker -p "hi"                # set OPENROUTER_API_KEY
+./build/clanker                        # full-screen TUI; /model picks a live model
+./build/clanker -m z-ai/glm-4.6 -p "summarize README.md"
 ./build/clanker --mode json -p "summarize README.md"   # NDJSON event stream
 ./build/clanker --continue             # most recent session for this project
 ./build/clanker --resume SESSION_ID     # exact ID, including sessions from other projects
@@ -735,33 +735,28 @@ in `~/.clanker/settings.json`; `/reload` applies edits made to the file.
 
 ## Providers
 
-Clanker speaks exactly one wire protocol: OpenAI's Responses API
-(`POST <base>/v1/responses`, SSE `response.*` events). A provider is
-a row in `src/app/provider_registry.cpp` carrying an ID, a default model, an
-API-key env var, and a `ResponsesEndpoint` — a base URL, a base-URL override env
-var, and an optional table of known-model metadata. Adding a compatible vendor
-is adding a row.
+Clanker supports one provider: OpenRouter. It speaks the Responses API shape
+(`POST <base>/responses`, SSE `response.*` events), while OpenRouter translates
+that protocol for the upstream model vendor.
 
 | Provider | Default base URL | API key env | Base URL env |
 | --- | --- | --- | --- |
-| `openai` | `https://api.openai.com` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
+| `openrouter` | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` | `OPENROUTER_BASE_URL` |
 
-`OPENAI_BASE_URL` is the escape hatch for anything else that implements the
-Responses shape — vLLM, Azure-style gateways, and pass-through proxies such as
-LiteLLM or OpenRouter's Responses surface.
+`openrouter/auto` is the bootstrap default. It is OpenRouter's stable automatic
+router, not a compiled model-availability table.
 
 ```sh
-OPENAI_BASE_URL=https://my-gateway.internal/v1 \
-OPENAI_API_KEY=... \
-  ./build/clanker -m gpt-5.6-sol -p "summarize README.md"
+OPENROUTER_API_KEY=... \
+  ./build/clanker -m anthropic/claude-sonnet-4.5 -p "summarize README.md"
 ```
 
-A base URL that already ends in `/v1` is not given a second one, which is how
-gateways and local servers usually publish their address. `/model` discovers
-live models from `GET <base>/v1/models`, skips IDs that name a
-non-conversational modality (embeddings, audio, image, moderation) or a family
-the endpoint does not serve, and merges the result with the provider's
-known-model table so context windows and effort support survive discovery.
+`/model` fetches OpenRouter's live `GET /api/v1/models` catalog. Models enter
+the picker only when the catalog advertises tool use; advertised modalities
+must also include text input and text output. Context windows, reasoning
+support, and reasoning-effort tiers come from that response. Clanker has no
+compiled model list and never infers capabilities from model IDs. If discovery
+is unavailable, manual model-ID entry remains available.
 
 Why Responses and not Chat Completions: the models Clanker targets reject
 `reasoning_effort` alongside function tools on `/v1/chat/completions`, and Chat
@@ -773,14 +768,13 @@ turns.
 Deliberate limits:
 
 - **No OAuth.** Subscription tokens (ChatGPT, Claude Pro/Max) are issued for
-  endpoints this build does not speak. API keys are the only credential:
-  `/auth` stores one, and there is no browser flow.
+  other services. An OpenRouter API key is the only credential: `/auth` stores
+  one, and there is no browser flow.
 - **Reasoning replay is model-scoped.** Encrypted reasoning and item IDs are
   only valid for the model that produced them, so a mid-session model switch
   drops prior reasoning and regenerates IDs rather than replaying stale ones.
-- **No non-Responses vendors.** Anything that only implements Chat Completions
-  — Ollama, llama.cpp, LM Studio, Anthropic's compatibility endpoint — needs a
-  proxy in front of it.
+- **No direct vendor transports.** Model reach and routing are whatever the
+  current OpenRouter catalog and account expose.
 
 ## Authentication
 
@@ -788,8 +782,8 @@ Credentials are stored in `~/.clanker/auth.json` (atomic writes, restricted
 perms). The resolved token is cached in the running app; storing a key, provider
 changes, and `/reload` invalidate or replace the cache.
 
-- **API key** — run `/auth` in the TUI, set `OPENAI_API_KEY`, or store a key in
-  `auth.json`. A credential is always required.
+- **API key** — run `/auth` in the TUI, set `OPENROUTER_API_KEY`, or store a key
+  in `auth.json`. A credential is always required.
 
 Resolution priority: stored api_key → env var. `--logout <provider>` removes
 credentials.
