@@ -8,6 +8,15 @@
 // list. Well above anything a real question needs.
 static constexpr u32 ASK_USER_MAX_CHOICES = 16;
 
+// Every schema property is optional and nullable, so a model that fills the
+// unused half of the call with explicit nulls still clears argument validation.
+// A null is "not supplied"; the real exclusivity is enforced below, where it
+// can be explained.
+static const JsonValue* AskUserArg(const ToolArgs* args, const char* key) {
+  const JsonValue* value = ToolArgs_Get(args, key);
+  return value && value->Kind != JsonKind::Null ? value : nullptr;
+}
+
 static bool AskUserExec(void* ctx, Arena* arena, StrView id, const ToolArgs* args,
                         volatile i32* abort, const ToolUpdateSink* updates,
                         ToolResult* out, StrBuf* err) {
@@ -16,14 +25,14 @@ static bool AskUserExec(void* ctx, Arena* arena, StrView id, const ToolArgs* arg
 
   const AskUserToolContext* context = (const AskUserToolContext*)ctx;
   const JsonValue* permissionIdValue =
-      ToolArgs_Get(args, "permission_request_id");
+      AskUserArg(args, "permission_request_id");
   if (permissionIdValue) {
     if (!Json_IsString(permissionIdValue) ||
         permissionIdValue->Str.Length == 0) {
       StrBuf_AppendCStr(err, "'permission_request_id' must be a non-empty string");
       return false;
     }
-    if (ToolArgs_Get(args, "question") || ToolArgs_Get(args, "choices")) {
+    if (AskUserArg(args, "question") || AskUserArg(args, "choices")) {
       StrBuf_AppendCStr(
           err, "'permission_request_id' is mutually exclusive with 'question' "
                "and 'choices'");
@@ -48,14 +57,16 @@ static bool AskUserExec(void* ctx, Arena* arena, StrView id, const ToolArgs* arg
 
   StrView question = ToolArgs_GetStr(args, "question");
   if (question.Length == 0) {
-    StrBuf_AppendCStr(err, "missing 'question' argument");
+    StrBuf_AppendCStr(err,
+                      "missing 'question' argument; to answer a denied tool "
+                      "call, pass 'permission_request_id' instead");
     return false;
   }
 
   StrView choices[ASK_USER_MAX_CHOICES] = {};
   u32 choiceCount = 0;
-  const JsonValue* rawChoices = ToolArgs_Get(args, "choices");
-  if (rawChoices && rawChoices->Kind != JsonKind::Null) {
+  const JsonValue* rawChoices = AskUserArg(args, "choices");
+  if (rawChoices) {
     if (!Json_IsArray(rawChoices)) {
       StrBuf_AppendCStr(err, "'choices' must be an array of strings");
       return false;
@@ -120,14 +131,14 @@ Tool AskUserTool(AskUserToolContext* context) {
   t.PromptSnippet = SVL("Ask the user a question when a decision is ambiguous");
   Tool_SetPromptGuidelines(&t, kAskUserPromptGuidelines);
   t.ParamsJsonSchema = SVL(
-      "{\"oneOf\":[{\"type\":\"object\",\"properties\":{\"question\":{\"type\":\"string\","
-      "\"description\":\"The question to put to the user\"},\"choices\":{\"type\":"
-      "\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Optional fixed "
-      "answers to choose from; omit to ask for free-form text\"}},\"required\":[\"question\"],"
-      "\"additionalProperties\":false},{\"type\":\"object\",\"properties\":{"
-      "\"permission_request_id\":{\"type\":\"string\",\"description\":\"Permission request ID "
-      "returned by a denied tool call\"}},\"required\":[\"permission_request_id\"],"
-      "\"additionalProperties\":false}]}");
+      "{\"type\":\"object\",\"properties\":{\"question\":{\"type\":[\"string\","
+      "\"null\"],\"description\":\"The question to put to the user; required "
+      "unless permission_request_id is set\"},\"choices\":{\"type\":[\"array\","
+      "\"null\"],\"items\":{\"type\":\"string\"},\"description\":\"Optional fixed "
+      "answers to choose from; omit to ask for free-form text\"},"
+      "\"permission_request_id\":{\"type\":[\"string\",\"null\"],\"description\":"
+      "\"Permission request ID returned by a denied tool call; send it on its "
+      "own, with no question or choices\"}},\"additionalProperties\":false}");
   // A batch runs in parallel by default, and there is only one user and one
   // modal: two concurrent questions would race for it.
   t.ExecMode = ToolExecMode::Sequential;

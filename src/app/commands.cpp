@@ -842,6 +842,18 @@ static bool HandlePromptTemplateCommand(void* user, const AppCommandUx*,
   return true;
 }
 
+// Which commands the TUI may act on from the input thread. `/clear` is here for
+// the cancellation only: the reset itself swaps the session log and still runs
+// on the main loop, once the turn it cancelled unwinds.
+static TuiCommandInline InlineActionFor(AppCommandKind kind) {
+  switch (kind) {
+    case AppCommandKind::Debug: return TuiCommandInline::Debug;
+    case AppCommandKind::Exit: return TuiCommandInline::Stop;
+    case AppCommandKind::Clear: return TuiCommandInline::CancelTurn;
+    default: return TuiCommandInline::None;
+  }
+}
+
 TuiCommandSpec* RuntimeCommandCatalog(InteractiveRuntime* rt, Arena* arena,
                                       u32* count) {
   u32 staticCount = AppCommandSpec_Count();
@@ -854,7 +866,8 @@ TuiCommandSpec* RuntimeCommandCatalog(InteractiveRuntime* rt, Arena* arena,
     const AppCommandSpec* command = AppCommandSpec_At(i);
     if (command->Kind == AppCommandKind::Skill) continue;
     commands[n++] =
-        TuiCommandSpec{command->Name, command->Alias, command->Description};
+        TuiCommandSpec{command->Name, command->Alias, command->Description,
+                       InlineActionFor(command->Kind)};
   }
   for (u32 i = 0; i < skillCount; i++) {
     const Skill& skill = rt->Prompt->Skills.Skills.Data[i];

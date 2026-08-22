@@ -70,30 +70,47 @@ void PaintModalEdit(const UiNode* node, UiCanvas* canvas, Tui* t, u16 textX,
   UiCanvas_SetCursor(canvas, node->Id, true, cursorX, editY);
 }
 
+// Two borders, a title, and one row of content is the least worth painting. The
+// panel is carved out of the transcript, so it also never grows past half the
+// screen, nor past the maximum.
+constexpr u16 kModalMinHeight = 4;
+constexpr u16 kModalMaxHeight = 16;
+
+u16 ModalPanelHeight(const Tui* t, u16 rows) {
+  if (!t || t->ModalKind == TuiModalKind::None ||
+      t->ModalResult != TuiModalResult::Pending)
+    return 0;
+  // The status row, the sticky context line, and one transcript row are not the
+  // panel's to take.
+  if (rows < kModalMinHeight + 3) return 0;
+  u32 matches = ModalMatchCount(t);
+  u32 desired =
+      t->ModalKind == TuiModalKind::Select ? (matches ? matches : 1) + 3 : 7;
+  u16 cap = (u16)(rows / 2);
+  if (cap < kModalMinHeight) cap = kModalMinHeight;
+  if (cap > kModalMaxHeight) cap = kModalMaxHeight;
+  if (cap > (u16)(rows - 3)) cap = (u16)(rows - 3);
+  return desired < cap ? (u16)desired : cap;
+}
+
 void PaintModalNode(UiContext*, const UiNode* node, UiCanvas* canvas) {
   ModalComponentData* data = (ModalComponentData*)node->User;
   Tui* t = data->Controller;
   if (t->ModalKind == TuiModalKind::None ||
-      t->ModalResult != TuiModalResult::Pending || data->TopBorderY < 4)
+      t->ModalResult != TuiModalResult::Pending ||
+      data->Height < kModalMinHeight || data->Width < 8)
     return;
 
-  u16 panelW = data->Cols > 76 ? 72 : (u16)(data->Cols - 2);
   u32 matchCount =
       t->ModalKind == TuiModalKind::Select ? ModalMatchCount(t) : 0;
-  u32 selectRows = matchCount ? matchCount : 1;
-  u16 desiredH = t->ModalKind == TuiModalKind::Select
-                     ? (u16)((selectRows < 12 ? selectRows : 12) + 3)
-                     : 7;
-  u16 panelH = desiredH < data->TopBorderY ? desiredH : data->TopBorderY;
-  if (panelH < 4) return;
-  u16 x0 = 1;
-  u16 y0 = (u16)(data->TopBorderY - panelH);
-  u16 x1 = (u16)(x0 + panelW - 1);
-  u16 y1 = (u16)(data->TopBorderY - 1);
+  u16 panelH = data->Height;
+  u16 x0 = data->X;
+  u16 y0 = data->Y;
+  u16 x1 = (u16)(x0 + data->Width - 1);
+  u16 y1 = (u16)(y0 + panelH - 1);
   bool compactText = t->ModalKind == TuiModalKind::Text && panelH < 5;
   Style panel = TuiSt(t, 252, ATTR_NONE);
-  UiRect panelRect{x0, y0, (u16)(x1 - x0 + 1),
-                   (u16)(y1 - y0 + 1)};
+  UiRect panelRect{x0, y0, data->Width, panelH};
   UiCanvas_Fill(canvas, panelRect, panel);
   UiCanvas_DrawBorder(canvas, panelRect, panel);
 

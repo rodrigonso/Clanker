@@ -93,10 +93,15 @@ void RebuildTranscriptLocked(Tui* t, const Message* messages, u32 count,
 
 struct ModalComponentData {
   Tui* Controller;
-  u16 Cols;
-  u16 TopBorderY;
+  u16 X;
+  u16 Y;
+  u16 Width;
+  u16 Height;
 };
 
+// The panel takes the composer's rows instead of floating over them, so layout
+// needs its height first. 0 means no panel, which leaves the composer in place.
+u16 ModalPanelHeight(const Tui* t, u16 rows);
 
 void PaintModalNode(UiContext*, const UiNode* node, UiCanvas* canvas);
 void FinishModal(Tui* t, TuiModalResult result);

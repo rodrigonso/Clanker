@@ -107,6 +107,27 @@ Custom components receive assigned geometry and a clipped, local-coordinate
 `LineModel::Rounded`, rebuilding retained transcript rows so existing bullets
 change in place.
 
+### Modal Panel
+
+A pending modal (`Tui_BeginSelection`, `Tui_BeginTextEntry`, and the permission
+prompts that build on them) *replaces* the composer rather than floating over
+it. `ComposeAtSize` asks `ModalPanelHeight` for the row count, omits the
+composer border and `Ui_TextInput` entirely, and anchors the panel at the rows
+the composer would have used: full terminal width, bottom border on the row
+above the status bar.
+
+`ModalPanelHeight` derives the desired height from the content -- one row per
+matching option for a selection, a fixed three-row answer box for text entry,
+plus borders and title -- then clamps it to half the terminal, itself bounded to
+`[4, 16]` rows, and to whatever is left after reserving the status row, the
+context line, and one transcript row. It returns `0` when that leaves fewer
+than four rows, which keeps the composer in place on terminals too short to
+paint a panel at all.
+
+Focus needs no special handling when the composer node disappears: `Ui_Dispatch`
+falls back to the first focusable node, and `Ui_Paint` hides the cursor unless a
+painted component requests it.
+
 ## Stream Reveal
 
 Providers deliver assistant text at wildly different cadences. Some endpoints
@@ -254,6 +275,31 @@ Deliberate divergences from pi:
 
 Rendering reaches assistant entries only. User echo, info, error and tool rows
 stay plain text.
+
+## Command Submission
+
+Slash commands are pushed onto a 64-slot queue and executed by the main loop,
+which owns the runtime state they mutate. For the length of a turn that loop is
+inside the agent run, so a queued command does not execute until the turn ends;
+the composer reports it as `Queued command: ...` rather than appearing to do
+nothing. Ordinary prompt text does not queue -- it steers the live run directly
+from the input thread.
+
+Three commands would be useless under that rule, so `TuiCommandSpec::Inline`
+lets the catalog mark what the input thread may do immediately:
+
+- `/debug` toggles the overlay in place. It touches only `Perf.Visible`, so
+  nothing in a running turn can observe it and it never reaches the queue.
+- `/exit` cancels the running turn and stops, matching Ctrl+D rather than
+  waiting for a turn it was meant to interrupt.
+- `/clear` cancels the running turn but still queues. The reset swaps the
+  session log, which cannot happen underneath a turn that is appending to it,
+  so only the cancellation is immediate; the loop performs the reset once the
+  turn unwinds.
+
+Argument forms the dispatcher would reject resolve to no inline action and are
+queued unchanged, so usage errors keep coming from the one place that owns the
+argument policy.
 
 ## Diagnostics
 

@@ -99,10 +99,22 @@ struct TuiToolUpdateSlot {
 
 enum { TUI_TOOL_UPDATE_SLOT_COUNT = 64 };
 
+// What the TUI may do the moment a command is submitted, rather than leaving it
+// to the main loop, which sits inside the agent turn for its whole duration.
+// Actions name a TUI-local effect, not an app command, so the app decides which
+// of its commands map onto them.
+enum class TuiCommandInline : u8 {
+  None,        // queue only
+  Debug,       // toggle the performance overlay
+  Stop,        // quit; nothing is queued
+  CancelTurn,  // cancel a running turn, then queue as usual
+};
+
 struct TuiCommandSpec {
   StrView Name;
   StrView Alias;
   StrView Description;
+  TuiCommandInline Inline = TuiCommandInline::None;
 };
 
 // Strings whose storage belongs to SessionMem and which nothing rebuilds when

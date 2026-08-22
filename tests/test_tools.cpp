@@ -708,6 +708,36 @@ static void TestAskUser(Arena* a) {
     CHECK(fake.Calls == 0);
   }
 
+  // A `oneOf` parameter schema invites models to fill the unused branch with
+  // explicit nulls. A null key is not an argument, so neither form may be
+  // rejected for carrying one.
+  {
+    fake = FakeAsk{};
+    fake.Reply = AgentAskStatus::Answered;
+    fake.ReplyText = SVL("sqlite");
+    ToolResult result = {};
+    StrBuf err = StrBuf_Make(a, 128);
+    CHECK(RunTool(tool, a,
+                  SVL("{\"question\":\"Which database?\",\"choices\":null,"
+                      "\"permission_request_id\":null}"),
+                  &result, &err));
+    CHECK_ALL(fake.Calls == 1, fake.SeenChoiceCount == 0,
+              StrView_Eq(fake.SeenQuestion, SVL("Which database?")));
+    CHECK(result.Content.Count == 1);
+    CHECK(StrView_Eq(result.Content.Data[0].Text, SVL("sqlite")));
+
+    // The permission branch reaches the engine rather than tripping the
+    // mutual-exclusion check on its own null siblings.
+    fake = FakeAsk{};
+    StrBuf idErr = StrBuf_Make(a, 128);
+    CHECK(!RunTool(tool, a,
+                   SVL("{\"permission_request_id\":\"abc\",\"question\":null,"
+                       "\"choices\":null}"),
+                   &result, &idErr));
+    CHECK(StrView_Contains(StrBuf_View(&idErr), "no permission engine"));
+    CHECK(fake.Calls == 0);
+  }
+
   // A batch must not put two questions on screen at once.
   CHECK(tool.ExecMode == ToolExecMode::Sequential);
 }

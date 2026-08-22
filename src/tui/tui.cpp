@@ -754,6 +754,11 @@ void ComposeAtSize(Tui* t, u16 cols, u16 rows, u64 nowMs) {
   u16 bottomBorderY = (u16)(statusY - 1);
   u16 inputTop = (u16)(bottomBorderY - inputH);
   u16 topBorderY = (u16)(inputTop - 1);
+
+  // A modal replaces the composer rather than floating above it: keys are going
+  // to the modal, so a visible composer would only advertise the wrong target.
+  u16 modalH = ModalPanelHeight(t, rows);
+
   StrView commandQuery = {};
   bool commandPalette = CommandPaletteQuery(t, &commandQuery);
   u32 commandMatches = commandPalette ? CommandMatchCount(t, commandQuery) : 0;
@@ -764,7 +769,10 @@ void ComposeAtSize(Tui* t, u16 cols, u16 rows, u64 nowMs) {
     u16 desired = (u16)(visible + 3);
     if (topBorderY >= 4) paletteH = desired < topBorderY ? desired : topBorderY;
   }
-  u16 cwdY = (u16)(topBorderY - 1);
+  // The bottom block is either the composer box or the modal panel standing in
+  // for it; the sticky context line sits above whichever it is.
+  u16 blockTopY = modalH ? (u16)(statusY - modalH) : topBorderY;
+  u16 cwdY = (u16)(blockTopY - 1);
   // Leave a blank row between the transcript and the sticky context line when
   // the terminal is tall enough to retain at least one transcript row.
   u16 paneH = cwdY > 1 ? (u16)(cwdY - 1) : cwdY;  // rows [0, paneH)
@@ -817,33 +825,35 @@ void ComposeAtSize(Tui* t, u16 cols, u16 rows, u64 nowMs) {
 
   BuildCwdComponent(t, cwdY, cols);
 
-  UiBorderProps inputBorder = {};
-  inputBorder.Layout =
-      Positioned(0, topBorderY, cols, (u16)(inputH + 2));
-  inputBorder.StyleValue = TuiSt(t, 250, ATTR_NONE);
-  Ui_BeginBorder(&t->Ui, Ui_Key(SVL("composer-border")), inputBorder);
-  Ui_EndContainer(&t->Ui);
+  if (!modalH) {
+    UiBorderProps inputBorder = {};
+    inputBorder.Layout =
+        Positioned(0, topBorderY, cols, (u16)(inputH + 2));
+    inputBorder.StyleValue = TuiSt(t, 250, ATTR_NONE);
+    Ui_BeginBorder(&t->Ui, Ui_Key(SVL("composer-border")), inputBorder);
+    Ui_EndContainer(&t->Ui);
 
-  t->InputUi.Edit = &t->Edit;
-  t->InputUi.FirstRow = firstRow;
-  UiTextInputProps inputProps = {};
-  inputProps.Layout =
-      Positioned(1, inputTop, (u16)(cols - 2), inputH);
-  inputProps.State = &t->InputUi;
-  inputProps.TextStyle = StyleDefault();
-  inputProps.SelectionStyle =
-      t->Color ? StyleMake(COL_DEFAULT, SELECTION_BG, ATTR_NONE)
-               : StyleMake(COL_DEFAULT, COL_DEFAULT, ATTR_UNDERLINE);
-  inputProps.WrapWidth = textW;
-  inputProps.InsetLeft = 1;
-  inputProps.InsetRight = 1;
-  inputProps.OnSubmit = ComposerSubmit;
-  inputProps.OnChange = ComposerChanged;
-  inputProps.OnInteract = ComposerInteract;
-  inputProps.OnUpBoundary = ComposerHistoryPrevious;
-  inputProps.OnDownBoundary = ComposerHistoryNext;
-  inputProps.User = t;
-  Ui_TextInput(&t->Ui, Ui_Key(SVL("composer-input")), inputProps);
+    t->InputUi.Edit = &t->Edit;
+    t->InputUi.FirstRow = firstRow;
+    UiTextInputProps inputProps = {};
+    inputProps.Layout =
+        Positioned(1, inputTop, (u16)(cols - 2), inputH);
+    inputProps.State = &t->InputUi;
+    inputProps.TextStyle = StyleDefault();
+    inputProps.SelectionStyle =
+        t->Color ? StyleMake(COL_DEFAULT, SELECTION_BG, ATTR_NONE)
+                 : StyleMake(COL_DEFAULT, COL_DEFAULT, ATTR_UNDERLINE);
+    inputProps.WrapWidth = textW;
+    inputProps.InsetLeft = 1;
+    inputProps.InsetRight = 1;
+    inputProps.OnSubmit = ComposerSubmit;
+    inputProps.OnChange = ComposerChanged;
+    inputProps.OnInteract = ComposerInteract;
+    inputProps.OnUpBoundary = ComposerHistoryPrevious;
+    inputProps.OnDownBoundary = ComposerHistoryNext;
+    inputProps.User = t;
+    Ui_TextInput(&t->Ui, Ui_Key(SVL("composer-input")), inputProps);
+  }
 
   BuildStatusComponents(t, statusY, cols);
 
@@ -866,12 +876,11 @@ void ComposeAtSize(Tui* t, u16 cols, u16 rows, u64 nowMs) {
     Ui_Leaf(&t->Ui, paletteNode);
   }
 
-  if (t->ModalKind != TuiModalKind::None &&
-      t->ModalResult == TuiModalResult::Pending) {
+  if (modalH) {
     ModalComponentData* modalData =
         (ModalComponentData*)Ui_FrameAlloc(
             &t->Ui, sizeof(ModalComponentData), alignof(ModalComponentData));
-    *modalData = ModalComponentData{t, cols, topBorderY};
+    *modalData = ModalComponentData{t, 0, blockTopY, cols, modalH};
     UiNodeDesc modalNode = {};
     modalNode.Kind = UiNodeKind::Custom;
     modalNode.Key = Ui_Key(SVL("modal"));
@@ -901,11 +910,107 @@ void QueueUserDisplayLocked(Tui* t, StrView line) {
   t->Follow = true;
 }
 
+// Splits `/name arguments` the way AppCommand_Parse does, so the inline
+// decision and the dispatcher's are never made from different readings.
+static StrView CommandToken(StrView line, StrView* outArguments) {
+  *outArguments = StrView{};
+  u32 i = 0;
+  while (i < line.Length && Ascii_IsSpace(line.Data[i])) i++;
+  if (i >= line.Length || line.Data[i] != '/') return StrView{};
+  i++;
+  u32 nameStart = i;
+  while (i < line.Length && !Ascii_IsSpace(line.Data[i])) i++;
+  StrView name{line.Data + nameStart, i - nameStart};
+  while (i < line.Length && Ascii_IsSpace(line.Data[i])) i++;
+  u32 end = line.Length;
+  while (end > i && Ascii_IsSpace(line.Data[end - 1])) end--;
+  if (end > i) *outArguments = StrView{line.Data + i, end - i};
+  return name;
+}
+
+struct TuiInlineCommand {
+  TuiCommandInline Action;
+  bool DebugEnable;
+};
+
+// Resolves what may run on this thread. Argument forms the dispatcher would
+// reject resolve to None, so the main loop still reports the usage error and
+// the inline path never owns a second copy of that policy.
+static TuiInlineCommand InlineCommandFor(const Tui* t, StrView line) {
+  TuiInlineCommand result = {TuiCommandInline::None, false};
+  StrView arguments = {};
+  StrView name = CommandToken(line, &arguments);
+  if (!name.Length) return result;
+
+  const TuiCommandSpec* command = nullptr;
+  for (u32 i = 0; i < t->CommandCount && !command; i++) {
+    const TuiCommandSpec& candidate = t->Commands[i];
+    if (StrView_Eq(candidate.Name, name) ||
+        (candidate.Alias.Length && StrView_Eq(candidate.Alias, name)))
+      command = &candidate;
+  }
+  if (!command) return result;
+
+  switch (command->Inline) {
+    case TuiCommandInline::None:
+      break;
+    case TuiCommandInline::Debug:
+      if (!arguments.Length)
+        result.DebugEnable = !t->Perf.Visible;
+      else if (StrView_Eq(arguments, SVL("on")))
+        result.DebugEnable = true;
+      else if (StrView_Eq(arguments, SVL("off")))
+        result.DebugEnable = false;
+      else
+        return result;
+      result.Action = TuiCommandInline::Debug;
+      break;
+    case TuiCommandInline::Stop:
+    case TuiCommandInline::CancelTurn:
+      if (!arguments.Length) result.Action = command->Inline;
+      break;
+  }
+  return result;
+}
+
+// Mirrors the double-escape path, including the AbortFlag fallback.
+static void RequestCancelLocked(Tui* t) {
+  if (!t->Agent.RequestCancel || !t->Agent.RequestCancel(t->Agent.User))
+    Atomic_StoreI32(&t->AbortFlag, 1);
+}
+
 void DoSubmit(Tui* t) {
   StrView line = LineEdit_Submit(&t->Edit);
   ResetCommandPalette(t);
   if (line.Length == 0) return;
   if (IsSlashCommand(line)) {
+    TuiInlineCommand immediate = InlineCommandFor(t, line);
+    if (immediate.Action == TuiCommandInline::Debug) {
+      if (!t->Perf.Visible && immediate.DebugEnable) t->Perf.LastRssSampleMs = 0;
+      t->Perf.Visible = immediate.DebugEnable;
+      TuiDisplayEvent* display =
+          QueueDisplayEvent(t, TuiDisplayEventKind::Notice);
+      SetDisplayPayload(t, display,
+                        immediate.DebugEnable ? SVL("performance overlay on")
+                                              : SVL("performance overlay off"));
+      t->Follow = true;
+      Wake(t);
+      return;
+    }
+    if (immediate.Action == TuiCommandInline::Stop) {
+      // Quitting has to cancel first: the loop that would observe Quit is
+      // parked inside the agent run until the turn it is driving finishes.
+      if (t->AgentRunning) RequestCancelLocked(t);
+      RequestStopLocked(t);
+      return;
+    }
+    // Only the cancellation happens here; the command itself still runs on the
+    // main loop. `/clear` swaps the session log, which cannot happen under a
+    // turn appending to it, so this just unblocks the loop that will reset once
+    // the turn unwinds.
+    bool cancelling =
+        immediate.Action == TuiCommandInline::CancelTurn && t->AgentRunning;
+    if (cancelling) RequestCancelLocked(t);
     if (!QPush(t, TuiSubmission{TuiSubmissionKind::Command, line})) {
       TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::Error);
       SetDisplayPayload(t, display, SVL("Submission queue is full; command was not queued."));
@@ -914,9 +1019,12 @@ void DoSubmit(Tui* t) {
       return;
     }
     if (t->AgentRunning) {
+      StrView prefix = cancelling ? SVL("Cancelling the current turn, then: ")
+                                  : SVL("Queued command: ");
       TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::Notice);
-      display->Payload = StrBuf_Make(&t->SessionMem, line.Length + 24);
-      StrBuf_AppendCStr(&display->Payload, "Queued command: ");
+      display->Payload =
+          StrBuf_Make(&t->SessionMem, line.Length + prefix.Length + 1);
+      StrBuf_Append(&display->Payload, prefix);
       StrBuf_Append(&display->Payload, line);
       t->Follow = true;
       Wake(t);
@@ -1609,6 +1717,7 @@ static void SetCommandsUnlocked(Tui* t, const TuiCommandSpec* commands,
     t->Commands[i].Alias = StrView_Dup(&t->CommandMem, commands[i].Alias);
     t->Commands[i].Description =
         StrView_Dup(&t->CommandMem, commands[i].Description);
+    t->Commands[i].Inline = commands[i].Inline;
   }
 }
 

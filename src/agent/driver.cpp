@@ -855,6 +855,12 @@ SessionResult ContinueRun(AgentHarness* harness, DurableId* ioHead, AgentRunStat
 
 }  // namespace
 
+// max_output_tokens covers reasoning tokens too, and reviewer models are
+// typically reasoning-capable: a budget sized for the tool call alone is spent
+// before the call is ever emitted.
+static constexpr i32 kReviewMaxTokens = 4096;
+static constexpr u32 kReviewRationaleMax = 160;
+
 bool AgentDriver_ReviewPermission(
     void* user, Arena* arena, const AgentPermissionReviewRequest* request,
     volatile i32* abort, AgentPermissionReviewResult* out) {
@@ -921,7 +927,7 @@ bool AgentDriver_ReviewPermission(
   inputRequest.ProviderImpl = harness->Config.ProviderImpl;
   inputRequest.ModelInfo = &harness->Config.PermissionReviewerModel;
   inputRequest.Context = &context;
-  inputRequest.Options.MaxTokens = 512;
+  inputRequest.Options.MaxTokens = kReviewMaxTokens;
   inputRequest.Options.Request.ToolChoice = LlmToolChoice::NamedFunction;
   inputRequest.Options.Request.ToolName = decisionTool.Name;
   inputRequest.Options.Request.StrictTools = true;
@@ -934,11 +940,12 @@ bool AgentDriver_ReviewPermission(
   if (!reviewed.Ok || reviewed.Assistant.Stop != StopReason::ToolUse)
     return unavailable();
 
+  // Prose alongside the call is ignored rather than fatal: the decision lives
+  // entirely in the tool arguments, and a preamble is common enough that
+  // rejecting it throws away sound reviews.
   const Content* call = nullptr;
   for (u32 i = 0; i < reviewed.Assistant.Content.Count; i++) {
     const Content* content = &reviewed.Assistant.Content.Data[i];
-    if (content->Kind == ContentKind::Text && content->Text.Length)
-      return unavailable();
     if (content->Kind != ContentKind::ToolCall) continue;
     if (call || !StrView_Eq(content->ToolName, decisionTool.Name))
       return unavailable();
@@ -946,7 +953,9 @@ bool AgentDriver_ReviewPermission(
   }
   if (!call) return unavailable();
   JsonValue* root = Json_Parse(arena, call->ToolArgsJson);
-  if (!Json_IsObject(root) || root->MemberCount != 4) return unavailable();
+  // Only the four fields below are read, so extra members from a provider
+  // without strict schema enforcement are harmless.
+  if (!Json_IsObject(root)) return unavailable();
   StrView decision = Json_GetStr(root, "decision");
   StrView risk = Json_GetStr(root, "risk");
   StrView authorization = Json_GetStr(root, "authorization");
@@ -959,9 +968,17 @@ bool AgentDriver_ReviewPermission(
                             StrView_Eq(authorization, SVL("low")) ||
                             StrView_Eq(authorization, SVL("medium")) ||
                             StrView_Eq(authorization, SVL("high"));
-  if (!validRisk || !validAuthorization || !rationale.Length ||
-      rationale.Length > 160)
+  if (!validRisk || !validAuthorization || !rationale.Length)
     return unavailable();
+  // `maxLength` is advisory to most models, and the rationale is display text,
+  // so trim rather than discard a valid decision. Backing off continuation
+  // bytes keeps the cut off the middle of a character.
+  if (rationale.Length > kReviewRationaleMax) {
+    rationale.Length = kReviewRationaleMax;
+    while (rationale.Length &&
+           ((u8)rationale.Data[rationale.Length] & 0xC0) == 0x80)
+      rationale.Length--;
+  }
   AgentPermissionReviewOutcome outcome = AgentPermissionReviewOutcome::Ask;
   if (StrView_Eq(decision, SVL("allow"))) {
     out->Decision = AgentPermissionReviewDecision::Allow;

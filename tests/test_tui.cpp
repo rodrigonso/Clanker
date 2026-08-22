@@ -446,10 +446,10 @@ void TestTui() {
     StrView options[] = {SVL("first"), SVL("second"), SVL("third")};
     CHECK(Tui_BeginSelection(&tf, SVL("Choose"), options, 3, 1));
     Tui_ComposeFrame(&tf, 20, 12);
-    CHECK(FrameHash(&tf) == 14406110976847255100ull);
+    CHECK(FrameHash(&tf) == 12204567153565103577ull);
 
     Tui_ComposeFrame(&tf, 28, 15);
-    CHECK(FrameHash(&tf) == 8416906020120365460ull);
+    CHECK(FrameHash(&tf) == 17708961903760271098ull);
     Tui_Stop(&tf);
     ArenaRelease(&af);
   }
@@ -949,6 +949,102 @@ void TestTui() {
     CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
     MemoryRepository_Destroy(&memory);
     ArenaRelease(&a2);
+  }
+
+  // Commands the catalog marks inline act on the input thread instead of
+  // waiting for the main loop, which is inside the agent run for the whole
+  // turn. Argument forms the dispatcher would reject stay queued.
+  {
+    Arena ai = ArenaCreate();
+    ScriptProvider script = {};
+    MemoryRepository memory = {};
+    AgentHarness harness = {};
+    CHECK(InitTestHarness(&ai, &memory, &harness, &script));
+
+    TuiCommandSpec commands[] = {
+        {SVL("debug"), {}, SVL("Toggle overlay"), TuiCommandInline::Debug},
+        {SVL("clear"), {}, SVL("New session"), TuiCommandInline::CancelTurn},
+        {SVL("exit"), SVL("quit"), SVL("Exit"), TuiCommandInline::Stop},
+        {SVL("model"), {}, SVL("Change model")},
+    };
+    TuiOpts oi;
+    oi.ModelName = SVL("m");
+    oi.Color = false;
+    oi.Commands = commands;
+    oi.CommandCount = 4;
+    Tui ti;
+    Tui_InitModel(&ti, &ai, oi);
+    ti.Agent = TuiBridge_AgentHooks(&harness);
+
+    // /debug resolves entirely here: the overlay flips and nothing is queued,
+    // even though a turn owns the main loop.
+    ti.AgentRunning = true;
+    CHECK(!ti.Perf.Visible);
+    Feed(&ti, "/debug\r");
+    CHECK_ALL(ti.Perf.Visible, ti.QCount == 0);
+    DrainDisplay(&ti);
+    CHECK(AnyRow(&ai, &ti, "performance overlay on"));
+    Feed(&ti, "/debug off\r");
+    CHECK_ALL(!ti.Perf.Visible, ti.QCount == 0);
+    Feed(&ti, "/debug on\r");
+    CHECK_ALL(ti.Perf.Visible, ti.QCount == 0);
+    Feed(&ti, "/debug off\r");
+
+    // An argument the dispatcher rejects is left for it to report.
+    Feed(&ti, "/debug sideways\r");
+    CHECK_ALL(!ti.Perf.Visible, ti.QCount == 1);
+    TuiSubmission rejected = {};
+    CHECK(Tui_WaitForSubmit(&ti, &rejected));
+    CHECK(StrView_Eq(rejected.Text, SVL("/debug sideways")));
+
+    // /clear cancels the turn from here, but the reset itself still queues:
+    // it swaps the session log, which cannot happen under a live turn.
+    harness.Running = true;
+    Feed(&ti, "/clear\r");
+    CHECK_ALL(Atomic_LoadI32(&harness.AbortFlag) == 1, ti.QCount == 1);
+    DrainDisplay(&ti);
+    CHECK(AnyRow(&ai, &ti, "Cancelling the current turn"));
+    TuiSubmission cleared = {};
+    CHECK(Tui_WaitForSubmit(&ti, &cleared));
+    CHECK_ALL(cleared.Kind == TuiSubmissionKind::Command,
+              StrView_Eq(cleared.Text, SVL("/clear")));
+
+    // Idle, there is nothing to cancel and the loop is already waiting, so the
+    // command queues with no notice at all.
+    harness.Running = false;
+    Atomic_StoreI32(&harness.AbortFlag, 0);
+    ti.AgentRunning = false;
+    u32 entriesBeforeIdleClear = ti.Model.Entries.Count;
+    Feed(&ti, "/clear\r");
+    CHECK_ALL(Atomic_LoadI32(&harness.AbortFlag) == 0, ti.QCount == 1);
+    DrainDisplay(&ti);
+    CHECK(ti.Model.Entries.Count == entriesBeforeIdleClear);
+    CHECK(Tui_WaitForSubmit(&ti, &cleared));
+
+    // A command with no inline action keeps the old queue-and-notice path.
+    ti.AgentRunning = true;
+    Feed(&ti, "/model\r");
+    CHECK(ti.QCount == 1);
+    DrainDisplay(&ti);
+    CHECK(AnyRow(&ai, &ti, "Queued command:"));
+    CHECK(Tui_WaitForSubmit(&ti, &cleared));
+
+    // /exit cancels the turn holding the loop and stops without queueing.
+    harness.Running = true;
+    Feed(&ti, "/exit now\r");  // argument policy is None; dispatcher's problem
+    CHECK_ALL(ti.QCount == 1, !ti.Quit);
+    CHECK(Tui_WaitForSubmit(&ti, &cleared));
+    Feed(&ti, "/quit\r");
+    CHECK_ALL(Atomic_LoadI32(&harness.AbortFlag) == 1, ti.QCount == 0,
+              ti.Quit, ti.Stop);
+    TuiSubmission none = {};
+    CHECK(!Tui_WaitForSubmit(&ti, &none));
+
+    Tui_Stop(&ti);
+    harness.Running = false;
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    MemoryRepository_Destroy(&memory);
+    ArenaRelease(&ai);
   }
 
   // Double Escape clears an idle composer or cancels an active agent turn. The
@@ -2165,6 +2261,36 @@ void TestTui() {
     CHECK(ruleAboveCaret);
     Feed(&tm, "\x1b");
     Tui_ComposeFrame(&tm, 20, 12);
+
+    // The panel stands in for the composer instead of floating over it: no
+    // composer node, every column, bottom border on the composer's old row.
+    CHECK(Tui_BeginSelection(&tm, SVL("Choose"), options, 3));
+    Tui_ComposeFrame(&tm, 40, 20);
+    u16 panelBottom = (u16)(tm.Scr.Rows - 2);
+    u16 panelTop = (u16)(panelBottom - 5);  // two borders, title, three options
+    CHECK_ALL(ComposerNode(&tm) == nullptr,
+              Screen_BackAt(&tm.Scr, 0, panelTop).Ch == 0x256d,
+              Screen_BackAt(&tm.Scr, 39, panelTop).Ch == 0x256e,
+              Screen_BackAt(&tm.Scr, 0, panelBottom).Ch == 0x2570,
+              Screen_BackAt(&tm.Scr, 39, panelBottom).Ch == 0x256f,
+              ScreenRowContains(&tm, (u16)(panelTop + 1), "Choose"),
+              ScreenRowContains(&tm, (u16)(panelTop + 2), "first"));
+    Feed(&tm, "\x1b");
+
+    // Content decides the height, but never past half the screen: fourteen
+    // options want seventeen rows and get ten.
+    StrView crowded[14] = {};
+    for (u32 i = 0; i < 14; i++) crowded[i] = SVL("opt");
+    CHECK(Tui_BeginSelection(&tm, SVL("Crowded"), crowded, 14));
+    Tui_ComposeFrame(&tm, 40, 20);
+    CHECK_ALL(Screen_BackAt(&tm.Scr, 0, (u16)(panelBottom - 9)).Ch == 0x256d,
+              Screen_BackAt(&tm.Scr, 0, panelBottom).Ch == 0x2570);
+    Feed(&tm, "\x1b");
+
+    // Dismissing it hands the rows back to the composer.
+    Tui_ComposeFrame(&tm, 40, 20);
+    CHECK_ALL(ComposerNode(&tm) != nullptr,
+              Screen_BackAt(&tm.Scr, 0, panelBottom).Ch == 0x2570);
 
     Tui_OpenCommandPalette(&tm);
     CHECK_ALL(StrView_Eq(LineEdit_Text(&tm.Edit), SVL("/")),
