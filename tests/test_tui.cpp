@@ -561,6 +561,34 @@ void TestTui() {
   TuiBridge_HarnessEvent(&t, &ev);
   CHECK(t.State == TuiState::Thinking);
 
+  // A turn almost always starts with the prompt line still queued, so the
+  // transition has to travel through the queue rather than be dropped: the
+  // status must reach "thinking", not sit on "ready" until the first token.
+  {
+    Arena as = ArenaCreate();
+    Tui ts;
+    InitHeadlessTui(&ts, &as, false);
+
+    CHECK(Tui_AcceptPrompt(&ts, SVL("do a thing")));
+    CHECK_ALL(ts.AgentRunning, Tui_HasPendingDisplay(&ts),
+              ts.State == TuiState::Idle);
+
+    AgentHarnessEvent started = {};
+    started.Kind = AgentHarnessEventKind::TransientAgentStart;
+    TuiBridge_HarnessEvent(&ts, &started);
+    CHECK(ts.State == TuiState::Idle);  // still behind the user's own line
+
+    DrainDisplay(&ts);
+    CHECK(ts.State == TuiState::Thinking);
+    Tui_ComposeFrame(&ts, 60, 12);
+    u16 statusRow = (u16)(ts.Scr.Rows - 1);
+    CHECK_ALL(ScreenRowContains(&ts, statusRow, "thinking"),
+              !ScreenRowContains(&ts, statusRow, "ready"));
+
+    Tui_Stop(&ts);
+    ArenaRelease(&as);
+  }
+
   ev = {};
   ev.Kind = AgentHarnessEventKind::TransientRetryStart;
   ev.Retry.Layer = RetryLayer::AssistantTurn;

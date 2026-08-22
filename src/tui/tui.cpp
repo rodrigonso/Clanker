@@ -379,6 +379,7 @@ void ApplyDisplayEvent(Tui* t, const TuiDisplayEvent& ev) {
       if (t->Model.HasAssistant) LineModel_EndAssistant(&t->Model);
       LineModel_AddNotice(&t->Model, EntryKind::Error, DisplayPayload(ev));
       break;
+    case TuiDisplayEventKind::AgentStart:
     case TuiDisplayEventKind::AgentEnd:
       t->State = t->AgentRunning ? TuiState::Thinking : TuiState::Idle;
       break;
@@ -2067,7 +2068,10 @@ void Tui_TurnStarted(Tui* t) {
   t->Sess.RetryStatus = {};
   t->LastEscapeMs = 0;
   t->EscapeArmed = false;
-  if (!Tui_HasPendingDisplay(t)) t->State = TuiState::Thinking;
+  if (Tui_HasPendingDisplay(t))
+    QueueDisplayEvent(t, TuiDisplayEventKind::AgentStart);
+  else
+    t->State = TuiState::Thinking;
   t->Spinner = 0;
   t->SpinnerStartMs = 0;
   TuiPerf_TurnStarted(&t->Perf, MonotonicMicros());

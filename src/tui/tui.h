@@ -74,6 +74,7 @@ enum class TuiDisplayEventKind : u8 {
   User,
   Notice,
   Error,
+  AgentStart,
   AgentEnd,
 };
 
