@@ -1,6 +1,6 @@
-#include <stdio.h>
 #include <string.h>
 
+#include "base/file_io.h"
 #include "json/json.h"
 #include "tools/diff.h"
 #include "tools/filelock.h"
@@ -28,20 +28,6 @@ static void Edit_AppendPathErr(StrBuf* err, const char* prefix, StrView path, co
   StrBuf_AppendCStr(err, suffix);
 }
 
-static StrView Edit_NormalizeLf(Arena* arena, StrView s) {
-  StrBuf b = StrBuf_Make(arena, s.Length + 1);
-  for (u32 i = 0; i < s.Length; i++) {
-    char c = s.Data[i];
-    if (c == '\r') {
-      if (i + 1 < s.Length && s.Data[i + 1] == '\n') i++;
-      StrBuf_AppendChar(&b, '\n');
-    } else {
-      StrBuf_AppendChar(&b, c);
-    }
-  }
-  return StrBuf_View(&b);
-}
-
 static bool Edit_IsCrlf(StrView s) {
   for (u32 i = 0; i < s.Length; i++) {
     if (s.Data[i] == '\r' && i + 1 < s.Length && s.Data[i + 1] == '\n') return true;
@@ -67,34 +53,6 @@ static StrView Edit_PrependBom(Arena* arena, StrView s) {
   StrBuf_AppendCStr(&b, "\xEF\xBB\xBF");
   StrBuf_Append(&b, s);
   return StrBuf_View(&b);
-}
-
-static bool Edit_ReadFile(Arena* arena, StrView path, StrView* out) {
-  const char* p = StrView_DupCStr(arena, path);
-  FILE* f = fopen(p, "rb");
-  if (!f) return false;
-
-  StrBuf file = StrBuf_Make(arena, 8192);
-  char buf[8192];
-  size_t n = 0;
-  while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
-    StrBuf_Append(&file, StrView{buf, (u32)n});
-  }
-  bool ok = ferror(f) == 0;
-  fclose(f);
-  if (!ok) return false;
-  *out = StrBuf_View(&file);
-  return true;
-}
-
-static bool Edit_WriteFile(Arena* arena, StrView path, StrView content) {
-  const char* p = StrView_DupCStr(arena, path);
-  FILE* f = fopen(p, "wb");
-  if (!f) return false;
-  bool ok = true;
-  if (content.Length && fwrite(content.Data, 1, content.Length, f) != content.Length) ok = false;
-  if (fclose(f) != 0) ok = false;
-  return ok;
 }
 
 static u32 Edit_FindAllExact(StrView hay, StrView needle, u32* firstStart) {
@@ -412,7 +370,7 @@ bool EditExec(void* ctx, Arena* arena, StrView id, const ToolArgs* args,
   StrView body = {};
   bool crlf = false;
   StrView originalLF = {};
-  if (!Edit_ReadFile(arena, path, &fileBytes)) {
+  if (File_ReadAll(arena, path, &fileBytes) != FileIoResult::Success) {
     Edit_AppendPathErr(err, "Could not edit file: ", path, ".");
     goto done;
   }
@@ -422,11 +380,11 @@ bool EditExec(void* ctx, Arena* arena, StrView id, const ToolArgs* args,
   body = fileBytes;
   if (hasBom) body = StrView{fileBytes.Data + 3, fileBytes.Length - 3};
   crlf = Edit_IsCrlf(body);
-  originalLF = Edit_NormalizeLf(arena, body);
+  originalLF = StrView_NormalizeLf(arena, body);
 
   for (u32 i = 0; i < edits.Count; i++) {
-    edits.Data[i].OldText = Edit_NormalizeLf(arena, edits.Data[i].OldText);
-    edits.Data[i].NewText = Edit_NormalizeLf(arena, edits.Data[i].NewText);
+    edits.Data[i].OldText = StrView_NormalizeLf(arena, edits.Data[i].OldText);
+    edits.Data[i].NewText = StrView_NormalizeLf(arena, edits.Data[i].NewText);
   }
 
   {
@@ -487,7 +445,7 @@ bool EditExec(void* ctx, Arena* arena, StrView id, const ToolArgs* args,
 
     StrView writeBytes = crlf ? Edit_RestoreCrlf(arena, newLF) : newLF;
     if (hasBom) writeBytes = Edit_PrependBom(arena, writeBytes);
-    if (!Edit_WriteFile(arena, path, writeBytes)) {
+    if (File_WriteAll(arena, path, writeBytes) != FileIoResult::Success) {
       Edit_AppendPathErr(err, "Could not edit file: ", path, ".");
       goto done;
     }

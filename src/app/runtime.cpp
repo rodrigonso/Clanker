@@ -48,18 +48,6 @@ void EmitCommandError(const AppCommandUx* ux, StrView message) {
   if (message.Length && ux && ux->Error) ux->Error(ux->User, message);
 }
 
-static bool IsAsciiSpace(char c) {
-  return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
-}
-
-StrView TrimAscii(StrView value) {
-  u32 first = 0;
-  while (first < value.Length && IsAsciiSpace(value.Data[first])) first++;
-  u32 last = value.Length;
-  while (last > first && IsAsciiSpace(value.Data[last - 1])) last--;
-  return StrView{value.Data ? value.Data + first : nullptr, last - first};
-}
-
 RuntimeInputResult RuntimeSelect(InteractiveRuntime* rt, StrView title,
                                  const StrView* options, u32 optionCount,
                                  u32* selected, u32 initialSelection,
@@ -138,7 +126,7 @@ static bool RuntimeAskUserImpl(void* user, Arena* arena,
                       &answer, category);
   // An empty confirmation is an answer the model cannot use, so it counts as a
   // dismissal rather than a blank reply.
-  if (result != RuntimeInputResult::Confirmed || TrimAscii(answer).Length == 0) {
+  if (result != RuntimeInputResult::Confirmed || StrView_Trim(answer).Length == 0) {
     out->Status = AgentAskStatus::Declined;
     return true;
   }

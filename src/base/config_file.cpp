@@ -3,6 +3,8 @@
 #include <errno.h>
 #include <stdio.h>
 
+#include "base/file_io.h"
+
 #if defined(_WIN32)
 #include <direct.h>
 #include <windows.h>
@@ -14,26 +16,10 @@
 static u32 g_configTempCounter;
 
 ConfigFileReadResult ConfigFile_ReadAll(Arena* a, StrView path, StrView* out) {
-  *out = StrView{nullptr, 0};
-  StrBuf p = StrBuf_Make(a, path.Length + 1);
-  StrBuf_Append(&p, path);
-
-  errno = 0;
-  FILE* f = fopen(StrBuf_CStr(&p), "rb");
-  if (!f) return errno == ENOENT ? ConfigFileReadResult::Missing : ConfigFileReadResult::Failure;
-
-  StrBuf b = StrBuf_Make(a, 4096);
-  char chunk[4096];
-  size_t n = 0;
-  while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0) {
-    StrBuf_Append(&b, StrView{chunk, (u32)n});
-  }
-  bool ok = ferror(f) == 0;
-  if (fclose(f) != 0) ok = false;
-  if (!ok) return ConfigFileReadResult::Failure;
-
-  *out = StrBuf_View(&b);
-  return ConfigFileReadResult::Success;
+  FileIoResult result = File_ReadAll(a, path, out);
+  if (result == FileIoResult::Success) return ConfigFileReadResult::Success;
+  if (result == FileIoResult::Missing) return ConfigFileReadResult::Missing;
+  return ConfigFileReadResult::Failure;
 }
 
 bool ConfigFile_EnsureParentDir(Arena* a, StrView path) {
@@ -43,13 +29,12 @@ bool ConfigFile_EnsureParentDir(Arena* a, StrView path) {
   }
   if (slash <= 0) return true;
 
-  StrBuf dir = StrBuf_Make(a, (u32)slash + 1);
-  StrBuf_Append(&dir, StrView{path.Data, (u32)slash});
+  const char* dir = StrView_DupCStr(a, StrView{path.Data, (u32)slash});
   errno = 0;
 #if defined(_WIN32)
-  int result = _mkdir(StrBuf_CStr(&dir));
+  int result = _mkdir(dir);
 #else
-  int result = mkdir(StrBuf_CStr(&dir), 0700);
+  int result = mkdir(dir, 0700);
 #endif
   return result == 0 || errno == EEXIST;
 }
@@ -57,8 +42,7 @@ bool ConfigFile_EnsureParentDir(Arena* a, StrView path) {
 bool ConfigFile_WriteAtomic(Arena* a, StrView path, StrView content) {
   if (!ConfigFile_EnsureParentDir(a, path)) return false;
 
-  StrBuf destination = StrBuf_Make(a, path.Length + 1);
-  StrBuf_Append(&destination, path);
+  const char* destination = StrView_DupCStr(a, path);
   StrBuf temporary = StrBuf_Make(a, path.Length + 48);
   StrBuf_Append(&temporary, path);
   StrBuf_AppendCStr(&temporary, ".tmp-");
@@ -90,13 +74,13 @@ bool ConfigFile_WriteAtomic(Arena* a, StrView path, StrView content) {
   }
 
 #if defined(_WIN32)
-  if (!MoveFileExA(StrBuf_CStr(&temporary), StrBuf_CStr(&destination),
+  if (!MoveFileExA(StrBuf_CStr(&temporary), destination,
                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
     remove(StrBuf_CStr(&temporary));
     return false;
   }
 #else
-  if (rename(StrBuf_CStr(&temporary), StrBuf_CStr(&destination)) != 0) {
+  if (rename(StrBuf_CStr(&temporary), destination) != 0) {
     remove(StrBuf_CStr(&temporary));
     return false;
   }

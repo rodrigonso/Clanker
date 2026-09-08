@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "base/file_io.h"
 #include "base/sysinfo.h"
 #include "base/thread.h"
 #include "json/json.h"
@@ -46,21 +47,10 @@ struct ToolManagerScopedLock {
 };
 
 bool ToolManager_IsTruthy(const char* value) {
-  if (!value || !*value) return false;
-  if (strcmp(value, "1") == 0) return true;
-  const char* expected[] = {"true", "yes"};
-  for (u32 word = 0; word < 2; word++) {
-    const char* p = value;
-    const char* q = expected[word];
-    while (*p && *q) {
-      char a = *p >= 'A' && *p <= 'Z' ? (char)(*p - 'A' + 'a') : *p;
-      if (a != *q) break;
-      p++;
-      q++;
-    }
-    if (!*p && !*q) return true;
-  }
-  return false;
+  StrView text = SV(value);
+  return StrView_Eq(text, SVL("1")) ||
+         StrView_EqInsensitiveAscii(text, SVL("true")) ||
+         StrView_EqInsensitiveAscii(text, SVL("yes"));
 }
 
 bool ToolManager_IsOffline() {
@@ -143,15 +133,6 @@ StrView ToolManager_LocalRipgrepPath(Arena* arena) {
 #else
   return Fs_Join(arena, dir, SVL("rg"));
 #endif
-}
-
-bool ToolManager_WriteFile(Arena* arena, StrView path, StrView content) {
-  const char* native = StrView_DupCStr(arena, path);
-  FILE* file = fopen(native, "wb");
-  bool ok = file && (content.Length == 0 ||
-                     fwrite(content.Data, 1, content.Length, file) == content.Length);
-  if (file && fclose(file) != 0) ok = false;
-  return ok;
 }
 
 void ToolManager_RemoveTree(Arena* arena, StrView root) {
@@ -305,7 +286,7 @@ StrView ToolManager_DownloadRipgrep(Arena* arena, volatile i32* abort, StrBuf* e
   StrBuf_AppendU64(&extractName, MonotonicMillis());
   StrView extractDir = Fs_Join(arena, binDir, StrBuf_View(&extractName));
   if (!Fs_MkdirP(arena, extractDir) ||
-      !ToolManager_WriteFile(arena, archivePath, archive.Body)) {
+      File_WriteAll(arena, archivePath, archive.Body) != FileIoResult::Success) {
     StrBuf_AppendCStr(err, "failed to stage the ripgrep download");
     const char* archiveNative = StrView_DupCStr(arena, archivePath);
     remove(archiveNative);
@@ -412,6 +393,52 @@ StrView ToolManager_DownloadRipgrep(Arena* arena, volatile i32* abort, StrBuf* e
 
 }  // namespace
 
+StrView ToolManager_FindBundledRipgrep(Arena* arena, StrView executablePath) {
+#if defined(_WIN32)
+  if (!ToolManager_IsAbsoluteWindowsPath(executablePath)) return StrView{};
+#else
+  if (!executablePath.Length || executablePath.Data[0] != '/') return StrView{};
+#endif
+  u32 parentLength = executablePath.Length;
+  while (parentLength) {
+    char c = executablePath.Data[parentLength - 1];
+#if defined(_WIN32)
+    if (c == '/' || c == '\\') break;
+#else
+    if (c == '/') break;
+#endif
+    parentLength--;
+  }
+  if (!parentLength || parentLength == executablePath.Length) return StrView{};
+  // Keep the separator so executables at a filesystem root never fall back
+  // to looking for a relative "rg" in the working directory.
+  StrView directory{executablePath.Data, parentLength};
+  Arena scratch = ArenaCreate();
+#if defined(_WIN32)
+  StrView candidate = Fs_Join(&scratch, directory, SVL("rg.exe"));
+  int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, candidate.Data,
+                                   (int)candidate.Length, nullptr, 0);
+  bool found = false;
+  if (length > 0) {
+    wchar_t* native = ArenaPushArray(&scratch, wchar_t, (u32)length + 1);
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, candidate.Data,
+                            (int)candidate.Length, native, length) == length) {
+      native[length] = 0;
+      DWORD attributes = GetFileAttributesW(native);
+      found = attributes != INVALID_FILE_ATTRIBUTES &&
+              !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+    }
+  }
+#else
+  StrView candidate = Fs_Join(&scratch, directory, SVL("rg"));
+  FsStat stat = Fs_Stat(candidate);
+  bool found = stat.Exists && !stat.IsDir;
+#endif
+  StrView result = found ? StrView_Dup(arena, candidate) : StrView{};
+  ArenaRelease(&scratch);
+  return result;
+}
+
 StrView ToolManager_EnsureRipgrep(Arena* arena, volatile i32* abort, StrBuf* err) {
   const char* overridePath = getenv("CLANKER_RG_PATH");
   if (overridePath && *overridePath) {
@@ -421,6 +448,12 @@ StrView ToolManager_EnsureRipgrep(Arena* arena, volatile i32* abort, StrBuf* err
     StrBuf_Append(err, path);
     return StrView{};
   }
+
+  Arena scratch = ArenaCreate();
+  StrView bundled = ToolManager_FindBundledRipgrep(
+      arena, Sys_ExecutablePath(&scratch));
+  ArenaRelease(&scratch);
+  if (bundled.Length) return bundled;
 
   StrView localPath = ToolManager_LocalRipgrepPath(arena);
   if (Fs_Exists(localPath)) return localPath;

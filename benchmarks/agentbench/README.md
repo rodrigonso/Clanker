@@ -196,8 +196,7 @@ reading `JCODE_MEMORY_ENABLED` out of `/proc/<pid>/environ`, which is why
 
 ```bash
 # clanker, built for Linux (stock flags; libcurl is vendored, OpenSSL is not)
-cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build-linux --target clanker
+bash tools/build.sh --build-dir out/build-linux --config Release
 
 # the others
 npm install -g @earendil-works/pi-coding-agent @anthropic-ai/claude-code opencode-ai

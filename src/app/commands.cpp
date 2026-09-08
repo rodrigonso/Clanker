@@ -105,7 +105,7 @@ static AppCommandHandlerResult HandleNameCommand(
       return AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled,
                                      SVL("Session name unchanged.")};
     }
-    name = TrimAscii(entered);
+    name = StrView_Trim(entered);
   } else if (StrView_Eq(arguments, SVL("--clear"))) {
     name = {};
   }

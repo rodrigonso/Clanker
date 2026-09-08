@@ -6,11 +6,6 @@
 
 namespace {
 
-bool IsAsciiWhitespace(u8 c) {
-  return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' ||
-         c == '\v';
-}
-
 bool IsContinuation(u8 c) { return (c & 0xC0u) == 0x80u; }
 
 u32 Utf8ScalarLength(const char* data, u32 remaining) {
@@ -105,7 +100,7 @@ StrView SessionMetadata_FlattenDisplayText(Arena* arena, StrView text,
     u8 c = (u8)text.Data[i];
     if (c < 0x80u) {
       i++;
-      if (IsAsciiWhitespace(c)) {
+      if (Ascii_IsSpace((char)c)) {
         if (result.Length) pendingSpace = true;
         continue;
       }

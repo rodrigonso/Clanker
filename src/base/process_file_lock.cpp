@@ -12,13 +12,12 @@ ProcessFileLockStatus ProcessFileLock_TryAcquire(Arena* scratch, StrView path,
                                                  ProcessFileLock* out) {
   if (!scratch || !out || path.Length == 0) return ProcessFileLockStatus::IoError;
   *out = ProcessFileLock{};
-  StrBuf native = StrBuf_Make(scratch, path.Length + 1);
-  StrBuf_Append(&native, path);
+  const char* native = StrView_DupCStr(scratch, path);
   // DELETE access plus FILE_FLAG_DELETE_ON_CLOSE ties the sentinel file's
   // lifetime to the handle, so the kernel removes it even if this process is
   // killed. A leftover file from an older build is opened and then cleaned up
   // the same way.
-  HANDLE handle = CreateFileA(StrBuf_CStr(&native),
+  HANDLE handle = CreateFileA(native,
                               GENERIC_READ | GENERIC_WRITE | DELETE, 0, nullptr,
                               OPEN_ALWAYS,
                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE,
@@ -49,8 +48,7 @@ void ProcessFileLock_Release(ProcessFileLock* lock, StrView path) {
 
 bool ProcessFileLock_IsHeld(Arena* scratch, StrView path) {
   if (!scratch || path.Length == 0) return false;
-  StrBuf native = StrBuf_Make(scratch, path.Length + 1);
-  StrBuf_Append(&native, path);
+  const char* native = StrView_DupCStr(scratch, path);
   // GENERIC_READ is required: an access-free or FILE_READ_ATTRIBUTES open
   // bypasses the sharing check entirely and reports a held lock as free.
   // Requesting read access means this open is refused while a holder -- which
@@ -63,7 +61,7 @@ bool ProcessFileLock_IsHeld(Arena* scratch, StrView path) {
   // FILE_FLAG_DELETE_ON_CLOSE), where an acquirer racing this handful of
   // instructions can see a spurious Busy and retry.
   HANDLE handle =
-      CreateFileA(StrBuf_CStr(&native), GENERIC_READ,
+      CreateFileA(native, GENERIC_READ,
                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                   nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (handle == INVALID_HANDLE_VALUE) {
@@ -102,9 +100,7 @@ ProcessFileLockStatus ProcessFileLock_TryAcquire(Arena* scratch, StrView path,
                                                  ProcessFileLock* out) {
   if (!scratch || !out || path.Length == 0) return ProcessFileLockStatus::IoError;
   *out = ProcessFileLock{};
-  StrBuf native = StrBuf_Make(scratch, path.Length + 1);
-  StrBuf_Append(&native, path);
-  const char* target = StrBuf_CStr(&native);
+  const char* target = StrView_DupCStr(scratch, path);
 
   // A releasing holder unlinks the sentinel while it still holds the lock, so
   // an open() that raced with it can land on an inode that is no longer the

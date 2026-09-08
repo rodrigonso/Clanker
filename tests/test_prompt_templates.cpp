@@ -302,6 +302,91 @@ void TestDiscovery(Arena* a) {
                            "project only"));
 }
 
+void TestFileLoading(Arena* a) {
+  StrView dir = SVL("clanker_prompt_template_test/files");
+  StrView other = Fs_Join(a, dir, SVL("other"));
+  CHECK(Fs_MkdirP(a, other));
+  StrView first = Fs_Join(a, dir, SVL("first.txt"));
+  StrView invalid = Fs_Join(a, dir, SVL(".md"));
+  StrView large = Fs_Join(a, dir, SVL("large.md"));
+  StrView conflict = Fs_Join(a, other, SVL("first.txt"));
+  StrView limit = Fs_Join(a, dir, SVL("limit.md"));
+  StrView missing = Fs_Join(a, dir, SVL("missing.md"));
+  CHECK(WriteFile(a, first,
+                  SVL("---\ndescription: First file\nargument-hint: <path>\n"
+                      "---\nBody $1")));
+  CHECK(WriteFile(a, invalid, SVL("No name")));
+  CHECK(WriteFile(a, conflict, SVL("Losing file")));
+
+  const u32 maxBytes = 1u << 20;
+  char* content = ArenaPushArray(a, char, maxBytes + 1);
+  memset(content, 'x', maxBytes + 1);
+  CHECK(WriteFile(a, large, StrView{content, maxBytes + 1}));
+  CHECK(WriteFile(a, limit, StrView{content, maxBytes}));
+
+#if !defined(_WIN32)
+  StrView alias = Fs_Join(a, dir, SVL("alias.md"));
+  CHECK(symlink("first.txt", StrView_DupCStr(a, alias)) == 0);
+#endif
+  StrView paths[] = {
+      first, Fs_Join(a, dir, SVL("./first.txt")),
+      invalid, Fs_Join(a, dir, SVL("./.md")),
+      large, Fs_Join(a, dir, SVL("./large.md")),
+      conflict, conflict, limit, missing, missing,
+#if !defined(_WIN32)
+      alias,
+#endif
+  };
+  PromptTemplateLoadOptions options = {};
+  options.NoPromptTemplates = true;
+  options.ExplicitPaths = paths;
+  options.ExplicitPathCount = (u32)(sizeof(paths) / sizeof(paths[0]));
+  PromptTemplateSet set = {};
+  PromptTemplates_Load(a, &options, &set);
+  CHECK_ALL(set.Templates.Count == 2, set.Diagnostics.Count == 5);
+  const PromptTemplate* firstTemplate =
+      PromptTemplates_Find(&set, SVL("first.txt"));
+  const PromptTemplate* limitTemplate = PromptTemplates_Find(&set, SVL("limit"));
+  CHECK_ALL(firstTemplate != nullptr, limitTemplate != nullptr);
+  if (firstTemplate && limitTemplate) {
+    CHECK_ALL(firstTemplate == &set.Templates.Data[0],
+              limitTemplate == &set.Templates.Data[1],
+              StrView_EqCStr(firstTemplate->Description, "First file"),
+              StrView_EqCStr(firstTemplate->ArgumentHint, "<path>"),
+              Fs_PathEquals(firstTemplate->FilePath, Fs_RealPath(a, first)),
+              StrView_EqCStr(PromptTemplates_Expand(a, firstTemplate, SVL("ok")),
+                             "Body ok"),
+              StrView_Eq(limitTemplate->Content, StrView{content, maxBytes}));
+    if (set.Diagnostics.Count == 5) {
+      StrBuf collision = StrBuf_Make(a, 128 + firstTemplate->FilePath.Length);
+      StrBuf_AppendCStr(&collision,
+                        "prompt template 'first.txt' is already defined by ");
+      StrBuf_Append(&collision, firstTemplate->FilePath);
+      CHECK_ALL(
+          Fs_PathEquals(set.Diagnostics.Data[0].Path, Fs_RealPath(a, invalid)),
+          StrView_EqCStr(set.Diagnostics.Data[0].Message,
+                         "prompt template has no usable name"),
+          Fs_PathEquals(set.Diagnostics.Data[1].Path, Fs_RealPath(a, large)),
+          StrView_EqCStr(set.Diagnostics.Data[1].Message,
+                         "prompt template exceeds the 1 MiB limit"),
+          Fs_PathEquals(set.Diagnostics.Data[2].Path, Fs_RealPath(a, conflict)),
+          StrView_Eq(set.Diagnostics.Data[2].Message, StrBuf_View(&collision)));
+      for (u32 i = 3; i < 5; i++)
+        CHECK_ALL(StrView_Eq(set.Diagnostics.Data[i].Path, missing),
+                  StrView_EqCStr(set.Diagnostics.Data[i].Message,
+                                 "prompt template path does not exist"));
+    }
+  }
+  const StrView files[] = {first, invalid, large, conflict, limit};
+  for (u32 i = 0; i < sizeof(files) / sizeof(files[0]); i++)
+    remove(StrView_DupCStr(a, files[i]));
+#if !defined(_WIN32)
+  remove(StrView_DupCStr(a, alias));
+#endif
+  RemoveDir(StrView_DupCStr(a, other));
+  RemoveDir(StrView_DupCStr(a, dir));
+}
+
 void Cleanup() {
   const char* files[] = {
       "clanker_prompt_template_test/agent/prompts/shared.md",
@@ -333,6 +418,7 @@ void TestPromptTemplates() {
   TestSubstitute(&a);
   TestParseFile(&a);
   TestDiscovery(&a);
+  TestFileLoading(&a);
   Cleanup();
   ArenaRelease(&a);
 }

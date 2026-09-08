@@ -120,11 +120,11 @@ bool ConcurrentAlwaysAsk(void*, Arena*, const AgentAskRequest*,
 
 struct DecisionThread {
   AgentPermissionEngine* Engine;
-  const Tool* Tool;
+  const ::Tool* Tool;
   StrView ArgsJson;
   volatile i32* Abort;
   AgentPermissionDecision Decision;
-  Arena Arena;
+  ::Arena Arena;
 };
 
 void DecideThread(void* user) {

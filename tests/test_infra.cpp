@@ -82,6 +82,19 @@ static void TestFsPaths(Arena* a) {
                            "a/b/c.txt"),
             StrView_EqCStr(Fs_Relativize(a, SVL("src"), SVL("src/x/y.ts")),
                            "x/y.ts"));
+  CHECK_ALL(StrView_EqCStr(Fs_Join(a, SVL("src"), SVL("/absolute")), "/absolute"),
+            StrView_EqCStr(Fs_Join(a, SVL("src/"), SVL("/absolute")), "/absolute"),
+            StrView_EqCStr(Fs_Join(a, SVL("src/"), SVL("child")), "src/child"),
+            StrView_EqCStr(Fs_Join(a, SVL("src"), StrView{}), "src"),
+            StrView_EqCStr(Fs_Join(a, StrView{}, SVL("child")), "child"),
+            StrView_EqCStr(Fs_Relativize(a, SVL("src/"), SVL("src")), "."),
+            StrView_EqCStr(Fs_Relativize(a, SVL("src"), SVL("src-other/x")),
+                           "src-other/x"));
+#if defined(_WIN32)
+  CHECK(StrView_EqCStr(Fs_Relativize(a, SVL("SRC\\"), SVL("src\\x")), "x"));
+#else
+  CHECK(StrView_EqCStr(Fs_Relativize(a, SVL("SRC/"), SVL("src/x")), "src/x"));
+#endif
 }
 
 static void TestFileLock() {

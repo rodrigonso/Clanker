@@ -1,188 +1,128 @@
 #requires -Version 5.0
 <#
 .SYNOPSIS
-    Configures and builds Clanker with CMake + Ninja using the Visual Studio toolchain.
-
+    Configures and builds Clanker with CMake and the Visual Studio toolchain.
 .DESCRIPTION
-    Locates a Visual Studio installation (via vswhere), sets up the vcvars64
-    environment, and runs `cmake` configure + build. libcurl is fetched
-    automatically by CMake's FetchContent on first configure.
-
-.PARAMETER Config
-    CMake build type: Release (default), Debug, RelWithDebInfo, or MinSizeRel.
-
-.PARAMETER BuildDir
-    Build directory (default: build), relative to the repo root unless absolute.
-
-.PARAMETER Target
-    Optional specific target to build (e.g. clanker, clanker_tests). Builds clanker by default.
-
-.PARAMETER Clean
-    Delete the build directory before configuring for a fresh build.
-
-.PARAMETER Test
-    Build and run the test harness (clanker_tests) after a successful build.
-
-.PARAMETER TestArgs
-    Arguments forwarded to clanker_tests, e.g. suite names, --list, or --filter.
-    Implies -Test. With no arguments the full offline sweep runs.
-
-.EXAMPLE
-    .\tools\build.ps1
-.EXAMPLE
-    .\tools\build.ps1 -Config Debug -Test
-.EXAMPLE
-    .\tools\build.ps1 -Test -TestArgs json,session
-.EXAMPLE
-    .\tools\build.ps1 -Target clanker -Clean
+    build.bat accepts the same options. Core-only builds never fetch networking
+    dependencies. Tests remain offline unless explicitly selected otherwise.
 #>
-[CmdletBinding()]
+[CmdletBinding(PositionalBinding = $false)]
 param(
     [ValidateSet('Release', 'Debug', 'RelWithDebInfo', 'MinSizeRel')]
     [string]$Config = 'Release',
-    [string]$BuildDir = 'build',
-    [ValidatePattern('^[A-Za-z0-9_.:+-]+$')]
+    [string]$BuildDir,
+    [ValidateSet('clanker', 'clanker_core', 'clanker_agent', 'clanker_tests', 'clanker_core_example')]
     [string]$Target,
     [switch]$Clean,
     [switch]$Test,
-    [Parameter(ValueFromRemainingArguments = $true)]
+    [switch]$CoreOnly,
+    [switch]$Examples,
+    [string]$InstallPrefix,
+    [switch]$Package,
+    [string]$CurlArchive,
+    [string]$RgExecutable,
+    [string[]]$RgLicense,
+    [switch]$Help,
     [string[]]$TestArgs
 )
 
-# Passing -TestArgs alone implies -Test.
-if ($TestArgs -and -not $Test) { $Test = $true }
-
 $ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+if ($Help) {
+    Write-Output @'
+usage: build.bat [-Config Release|Debug|RelWithDebInfo|MinSizeRel]
+       [-CoreOnly] [-Examples] [-Test] [-TestArgs session,tools]
+       [-BuildDir path] [-Target name] [-Clean] [-InstallPrefix path]
+       [-Package] [-RgExecutable path -RgLicense path1,path2]
+       [-CurlArchive path]
+Requires Visual Studio C++ tools, CMake 3.24+ and Ninja (included with
+Visual Studio's C++ CMake tools). -Clean rebuilds without deleting the cache.
+'@
+    return
+}
+function Invoke-Checked([string]$Exe, [string[]]$Arguments) {
+    & $Exe @Arguments
+    if ($LASTEXITCODE -ne 0) { throw "$Exe failed (exit $LASTEXITCODE)." }
+}
+if ($TestArgs) {
+    $TestArgs = @($TestArgs | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '--' })
+    $Test = $true
+}
+if ($RgLicense) { $RgLicense = @($RgLicense | ForEach-Object { $_ -split ';|,' }) }
+if ($Package -and ($CoreOnly -or $Config -eq 'Debug')) {
+    throw '-Package requires a non-Debug CLI build.'
+}
+if ($CoreOnly -and $Target -eq 'clanker') { throw '-CoreOnly cannot build the CLI.' }
+if (-not $Target) { $Target = if ($CoreOnly) { 'clanker_core' } else { 'clanker' } }
+if ($Target -eq 'clanker_agent') { $Target = 'clanker_core' }
+if ($Package -or ($InstallPrefix -and -not $CoreOnly)) { $Target = 'clanker' }
+if (-not $BuildDir) { $BuildDir = if ($CoreOnly) { 'out\core' } else { 'build' } }
 $root = Split-Path -Parent $PSScriptRoot
+$build = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($BuildDir)) {
+    $BuildDir
+} else { Join-Path $root $BuildDir }))
+. (Join-Path $PSScriptRoot 'package.ps1')
+Assert-DistributionOptions
 
-$vsInstallerDir = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer'
+$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+if (-not (Test-Path -LiteralPath $vswhere)) { throw 'Install the Visual Studio Desktop development with C++ workload.' }
+$vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+if (-not $vs) {
+    $vs = & $vswhere -latest -prerelease -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+}
+if (-not $vs) { throw 'Visual Studio C++ build tools were not found.' }
+$cmakeTools = Join-Path $vs 'Common7\IDE\CommonExtensions\Microsoft\CMake'
+$env:PATH = "$(Join-Path $cmakeTools 'CMake\bin');$(Join-Path $cmakeTools 'Ninja');$(Split-Path -Parent $vswhere);$env:PATH"
+$cmake = (Get-Command cmake.exe -ErrorAction Stop).Source
+Get-Command ninja.exe -ErrorAction Stop | Out-Null
+$vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+$environment = & $env:ComSpec /d /c "call `"$vcvars`" >nul && set"
+if ($LASTEXITCODE -ne 0) { throw 'Visual Studio toolchain initialization failed.' }
+foreach ($line in $environment) {
+    if ($line -match '^([^=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], 'Process') }
+}
+$toolBin = Join-Path $env:VCToolsInstallDir 'bin\Hostx64\x64'
 
-function Find-VsInstall {
-    $vswhere = Join-Path $vsInstallerDir 'vswhere.exe'
-    if (-not (Test-Path $vswhere)) {
-        throw "vswhere.exe not found at '$vswhere'. Install Visual Studio (with the C++ workload) or the Build Tools."
+New-Item -ItemType Directory -Force $build | Out-Null
+$lock = [IO.File]::Open((Join-Path $build '.clanker-build.lock'), 'OpenOrCreate', 'ReadWrite', 'None')
+try {
+    $buildTests = $Test -or $Target -eq 'clanker_tests'
+    $buildExample = $Examples -or $Target -eq 'clanker_core_example'
+    $configure = @('-S', $root, '-B', $build, '-G', 'Ninja',
+        "-DCMAKE_BUILD_TYPE=$Config",
+        "-DCLANKER_BUILD_CLI=$(-not $CoreOnly)",
+        "-DCLANKER_BUILD_TESTS=$buildTests",
+        "-DCLANKER_BUILD_EXAMPLES=$buildExample")
+    if (-not $CoreOnly -and $PSBoundParameters.ContainsKey('CurlArchive')) {
+        if ($CurlArchive) { $CurlArchive = [IO.Path]::GetFullPath($CurlArchive) }
+        $configure += "-DCLANKER_CURL_ARCHIVE:FILEPATH=$CurlArchive"
     }
-    $vcTools = 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'
-    # Prefer a stable install; fall back to prerelease (Insiders/Preview).
-    foreach ($pre in @(@(), @('-prerelease'))) {
-        $path = & $vswhere -latest @pre -products * -requires $vcTools -property installationPath 2>$null |
-            Select-Object -First 1
-        if ($path -and (Test-Path $path)) { return $path }
+    Invoke-Checked $cmake $configure
+    $targets = @($Target)
+    if ($buildTests) { $targets += 'clanker_tests' }
+    if ($buildExample) { $targets += 'clanker_core_example' }
+    if ($InstallPrefix) { $targets += 'clanker_core' }
+    $arguments = @('--build', $build, '--config', $Config, '--parallel',
+        '--target') + @($targets | Select-Object -Unique)
+    if ($Clean) { $arguments += '--clean-first' }
+    Invoke-Checked $cmake $arguments
+
+    if ($Test) { Invoke-Checked (Join-Path $build 'clanker_tests.exe') $TestArgs }
+    if ($Examples) { Invoke-Checked (Join-Path $build 'examples\core\clanker_core_example.exe') @() }
+    if ($InstallPrefix -or $Package) {
+        if (-not $CoreOnly) {
+            $curlInfo = [IO.File]::ReadAllLines((Join-Path $build 'clanker-curl.txt'))
+            $curlSource = $curlInfo[0]
+            $curlVersion = $curlInfo[1]
+        }
+        if ($InstallPrefix) {
+            $prefix = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($InstallPrefix)) {
+                $InstallPrefix
+            } else { Join-Path $root $InstallPrefix }))
+            Invoke-Checked $cmake @('--install', $build, '--config', $Config, '--prefix', $prefix, '--component', 'sdk')
+            if (-not $CoreOnly) { Install-Runtime $prefix }
+        }
+        if ($Package) { Package-Clanker }
     }
-    throw "No Visual Studio install with the C++ toolchain (VC.Tools.x86.x64) was found."
-}
-
-$vsPath = Find-VsInstall
-$vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
-if (-not (Test-Path $vcvars)) {
-    throw "vcvars64.bat not found at '$vcvars'."
-}
-Write-Host "Visual Studio: $vsPath" -ForegroundColor Cyan
-
-# Resolve the build directory (absolute paths are honored as-is).
-$buildPath = if ([System.IO.Path]::IsPathRooted($BuildDir)) { $BuildDir } else { Join-Path $root $BuildDir }
-
-if ($Clean -and (Test-Path $buildPath)) {
-    Write-Host "Cleaning $buildPath" -ForegroundColor Yellow
-    Remove-Item -Recurse -Force $buildPath
-}
-
-function Get-CMakeCacheValue {
-    param(
-        [string]$CachePath,
-        [string]$Name
-    )
-    $match = Select-String -Path $CachePath -Pattern "^$([regex]::Escape($Name)):[^=]+=(.*)$" |
-        Select-Object -First 1
-    if ($match -and $match.Matches.Count -gt 0) {
-        return $match.Matches[0].Groups[1].Value
-    }
-    return $null
-}
-
-$cachePath = Join-Path $buildPath 'CMakeCache.txt'
-$ninjaPath = Join-Path $buildPath 'build.ninja'
-$needsConfigure = -not (Test-Path $cachePath) -or -not (Test-Path $ninjaPath)
-if (-not $needsConfigure) {
-    $cachedSource = Get-CMakeCacheValue $cachePath 'CMAKE_HOME_DIRECTORY'
-    if ($cachedSource -and
-        -not [System.IO.Path]::GetFullPath($cachedSource).Equals(
-            [System.IO.Path]::GetFullPath($root),
-            [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "Build directory '$buildPath' belongs to '$cachedSource'. Choose another -BuildDir or use -Clean."
-    }
-
-    $cachedGenerator = Get-CMakeCacheValue $cachePath 'CMAKE_GENERATOR'
-    if ($cachedGenerator -ne 'Ninja') {
-        throw "Build directory '$buildPath' uses generator '$cachedGenerator'. Use -Clean to recreate it with Ninja."
-    }
-
-    $cachedConfig = Get-CMakeCacheValue $cachePath 'CMAKE_BUILD_TYPE'
-    $needsConfigure = $cachedConfig -ne $Config
-}
-
-# Directories to prepend to PATH *before* invoking vcvars64:
-#   - the VS Installer dir, because vcvars64.bat calls `vswhere` unqualified
-#   - the VS-bundled CMake/Ninja, so a standalone install isn't required
-# All prepends must happen in ONE `set` before vcvars: cmd expands %PATH% at parse
-# time for the whole `&&` chain, so a second `set ...%PATH%...` placed after vcvars
-# would discard the compiler paths that vcvars adds.
-$prepend = @($vsInstallerDir)
-foreach ($p in @(
-        (Join-Path $vsPath 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin'),
-        (Join-Path $vsPath 'Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja'))) {
-    if (Test-Path $p) { $prepend += $p }
-}
-
-$targets = [System.Collections.Generic.List[string]]::new()
-$targets.Add($(if ($Target) { $Target } else { 'clanker' }))
-if ($Test -and -not $targets.Contains('clanker_tests')) {
-    $targets.Add('clanker_tests')
-}
-
-$cmakeExe = Join-Path $vsPath 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
-if (-not (Test-Path $cmakeExe)) {
-    $cmakeExe = (Get-Command cmake -ErrorAction Stop).Source
-}
-
-$hasBuildWork = $true
-if (-not $needsConfigure) {
-    $dryRunArgs = @('--build', $buildPath, '--target') + $targets + @('--', '-n')
-    $dryRunOutput = & $cmakeExe @dryRunArgs 2>&1
-    $hasBuildWork = $LASTEXITCODE -ne 0 -or
-        -not ($dryRunOutput -match '^ninja: no work to do\.$')
-}
-
-# Build a single cmd.exe invocation so the vcvars64 environment persists across steps.
-$steps = @(
-    "set `"PATH=$($prepend -join ';');%PATH%`"",
-    "call `"$vcvars`" >nul")
-if ($needsConfigure) {
-    $steps += "cmake -S `"$root`" -B `"$buildPath`" -G Ninja -DCMAKE_BUILD_TYPE=$Config"
-}
-$steps += "cmake --build `"$buildPath`" --target $($targets -join ' ')"
-
-$action = if ($needsConfigure) { 'Configuring + building' } else { 'Building' }
-Write-Host "$action ($Config): $($targets -join ', ')" -ForegroundColor Cyan
-if ($hasBuildWork) {
-    & $env:ComSpec /c ($steps -join ' && ')
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Build failed (exit $LASTEXITCODE)." -ForegroundColor Red
-        exit $LASTEXITCODE
-    }
-} else {
-    $dryRunOutput | Write-Output
-}
-Write-Host "Build succeeded -> $buildPath" -ForegroundColor Green
-
-if ($Test) {
-    $tests = Join-Path $buildPath 'clanker_tests.exe'
-    $suiteLabel = if ($TestArgs) { $TestArgs -join ' ' } else { 'all offline suites' }
-    Write-Host "Running tests ($suiteLabel)..." -ForegroundColor Cyan
-    if ($TestArgs) { & $tests @TestArgs } else { & $tests }
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Tests failed (exit $LASTEXITCODE)." -ForegroundColor Red
-        exit $LASTEXITCODE
-    }
-    Write-Host "Tests passed." -ForegroundColor Green
-}
+    Write-Host "Ready: $build"
+} finally { $lock.Dispose() }

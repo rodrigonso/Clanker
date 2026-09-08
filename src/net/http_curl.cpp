@@ -12,21 +12,6 @@ CURL* g_curl;
 Mutex g_lock;
 bool g_initialized;
 
-// Case-insensitive ASCII equality (header names are ASCII per RFC 7230).
-bool EqCI(StrView a, const char* b) {
-  u32 bl = 0;
-  while (b[bl]) bl++;
-  if (a.Length != bl) return false;
-  for (u32 i = 0; i < bl; i++) {
-    char c = a.Data[i];
-    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-    char d = b[i];
-    if (d >= 'A' && d <= 'Z') d = (char)(d - 'A' + 'a');
-    if (c != d) return false;
-  }
-  return true;
-}
-
 StrView Trim(StrView s) {
   while (s.Length && (s.Data[0] == ' ' || s.Data[0] == '\t')) {
     s.Data++;
@@ -137,18 +122,18 @@ void HttpRetryMeta_ParseHeaderLine(HttpRetryMeta* meta, StrView line) {
   if (colon >= line.Length) return;
   StrView name = Trim(StrView{line.Data, colon});
   StrView value = Trim(StrView{line.Data + colon + 1, line.Length - colon - 1});
-  if (EqCI(name, "x-should-retry")) {
-    if (EqCI(value, "true")) {
+  if (StrView_EqInsensitiveAscii(name, SVL("x-should-retry"))) {
+    if (StrView_EqInsensitiveAscii(value, SVL("true"))) {
       meta->HasShouldRetry = true;
       meta->ShouldRetry = true;
-    } else if (EqCI(value, "false")) {
+    } else if (StrView_EqInsensitiveAscii(value, SVL("false"))) {
       meta->HasShouldRetry = true;
       meta->ShouldRetry = false;
     }
-  } else if (EqCI(name, "retry-after-ms")) {
+  } else if (StrView_EqInsensitiveAscii(name, SVL("retry-after-ms"))) {
     u64 ms;
     if (ParseU64(value, &ms)) meta->RetryAfterMs = (i64)ms;
-  } else if (EqCI(name, "retry-after")) {
+  } else if (StrView_EqInsensitiveAscii(name, SVL("retry-after"))) {
     if (meta->RetryAfterMs < 0) {  // retry-after-ms already claimed priority
       u64 secs;
       if (ParseU64(value, &secs)) meta->RetryAfterMs = (i64)(secs * 1000);
@@ -272,15 +257,6 @@ HttpResponse Http_Fetch(Arena* arena, const HttpRequest* req, volatile i32* abor
 }
 
 // ---- provider-request (transport-level) retry policy -----------------------
-
-HttpRetryPolicy HttpRetryPolicy_Default() {
-  HttpRetryPolicy p = {};
-  p.Enabled = false;
-  p.MaxRetries = 2;
-  p.BaseDelayMs = 500;
-  p.MaxDelayMs = 8000;
-  return p;
-}
 
 bool HttpStatus_IsRetryable(i32 status) {
   if (status == 408 || status == 409 || status == 429) return true;

@@ -190,7 +190,7 @@ static AppCommandHandlerResult RunApiKeyEntry(InteractiveRuntime* rt,
       return AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled,
                                      SVL("Authentication cancelled.")};
     }
-    entered = TrimAscii(entered);
+    entered = StrView_Trim(entered);
     if (entered.Length) break;
     EmitCommandError(ux, SVL("An API key is required."));
   }
@@ -358,7 +358,7 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
           return RuntimeModelChoice{RuntimeChoiceStatus::Cancelled, Model{},
                                     StrView{}};
         }
-        entered = TrimAscii(entered);
+        entered = StrView_Trim(entered);
         if (entered.Length) {
           chosen = spec->CreateModel(rt->Mem, spec, entered);
           break;

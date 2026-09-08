@@ -1,0 +1,42 @@
+# group|name|function|source (without .cpp)|tag|description
+core|arena|TestArena|test_base|TagDefault|arena allocator
+core|array|TestArray|test_base|TagDefault|dynamic array
+core|str|TestStr|test_base|TagDefault|string views and builders
+core|hostinfo|TestHostInfo|test_base|TagDefault|host/system info
+core|file_io|TestFileIo|test_file_io|TagDefault|binary whole-file I/O
+core|types|TestTypes|test_types|TagDefault|core type invariants
+core|json|TestJson|test_json|TagDefault|json parser and writer
+core|session|TestSession|test_session|TagDefault|durable sessions and replay
+core|harness|TestHarness|test_harness|TagDefault|agent harness loop
+core|permissions|TestPermissions|test_permissions|TagDefault|built-in tool permissions
+core|compaction|TestCompaction|test_compaction|TagDefault|compaction policy and cut points
+core|event_json|TestEventJson|test_event_json|TagDefault|NDJSON agent event stream
+cli|responses|TestResponses|test_responses|TagDefault|OpenAI Responses protocol and SSE
+cli|tools|TestTools|test_tools|TagDefault|tool implementations
+cli|tool_select|TestToolSelect|test_tool_select|TagDefault|--tools/--exclude-tools selection
+cli|infra|TestInfra|test_infra|TagDefault|glob, diff, fs, locks
+core|crypto|TestCrypto|test_crypto|TagDefault|base64
+cli|auth|TestAuth|test_auth|TagDefault|credential store and resolution
+cli|command|TestCommand|test_command|TagDefault|slash command parsing
+cli|app|TestApp|test_app|TagDefault|app runtime, session keys, trust menu
+cli|hooks|TestHooks|test_hooks|TagDefault|external lifecycle hooks
+cli|prompt_context|TestPromptContext|test_prompt_context|TagDefault|system prompt and project context
+cli|prompt_templates|TestPromptTemplates|test_prompt_templates|TagDefault|user-defined slash command templates
+cli|project_trust|TestProjectTrust|test_project_trust|TagDefault|hierarchical project trust
+cli|provider_registry|TestProviderRegistry|test_provider_registry|TagDefault|provider registry
+cli|settings|TestSettings|test_settings|TagDefault|settings load/save
+cli|skills|TestSkills|test_skills|TagDefault|agent skills discovery and prompt block
+core|thread|TestThread|test_thread|TagDefault|threads and sync
+cli|keys|TestKeys|test_keys|TagDefault|key decoding
+cli|screen|TestScreen|test_screen|TagDefault|screen buffer and diffing
+cli|markdown|TestMarkdown|test_markdown|TagDefault|markdown rendering
+cli|sanitize|TestSanitize|test_sanitize|TagDefault|output sanitization
+cli|stream_reveal|TestStreamReveal|test_stream_reveal|TagDefault|streaming reveal
+cli|linemodel|TestLineModel|test_linemodel|TagDefault|line model and wrapping
+cli|lineedit|TestLineEdit|test_lineedit|TagDefault|multi-line editor
+cli|ui|TestUi|test_ui|TagDefault|frame-built terminal components
+cli|ui_widgets|TestUiWidgets|test_ui_widgets|TagDefault|reusable terminal widgets
+cli|ui_demo|TestUiDemo|test_ui_demo|TagDefault|standalone component screen
+cli|tui|TestTui|test_tui|TagDefault|headless TUI controller
+cli|http|TestHttp|test_http|TagDefault|HTTP transport and retry policy
+cli|http_live|TestHttpLive|test_http|TagNetwork|live TLS/HTTP request (network)

@@ -94,6 +94,32 @@ void TestStr() {
       !StrView_ContainsInsensitiveAscii(SVL("short"), SVL("longer")),
       StrView_ContainsInsensitiveAscii(SVL("caf\xc3\xa9"), SVL("\xc3\xa9")),
       !StrView_ContainsInsensitiveAscii(SVL("caf\xc3\xa9"), SVL("\xc3\x89")));
+  CHECK_ALL(
+      StrView_EqInsensitiveAscii(SVL("Retry-After"), SVL("retry-after")),
+      StrView_EqInsensitiveAscii(StrView{}, StrView{}),
+      !StrView_EqInsensitiveAscii(SVL("true"), SVL("true ")),
+      !StrView_EqInsensitiveAscii(SVL("false"), SVL("true")),
+      StrView_EqInsensitiveAscii(SVL("A\0B"), SVL("a\0b")),
+      !StrView_EqInsensitiveAscii(SVL("\xc3\xa9"), SVL("\xc3\x89")),
+      StrView_Eq(StrView_Trim(SVL(" \t\r\n\f\vtext \t\r\n\f\v")), SVL("text")),
+      StrView_Trim(StrView{}).Data == nullptr);
+  CHECK(StrView_EqCStr(StrView_Trim(SVL("  hello \t\r\n")), "hello"));
+  CHECK(StrView_EqCStr(StrView_Trim(SVL("hello")), "hello"));
+  CHECK(StrView_Trim(SVL("   ")).Length == 0);
+  CHECK(StrView_Trim(StrView{}).Length == 0);
+  CHECK(StrView_EqCStr(StrView_Trim(SVL("  a b  ")), "a b"));
+
+  usize mark = a.Used;
+  StrView lf = SVL("already\nnormalized\n");
+  CHECK_ALL(StrView_NormalizeLf(&a, lf).Data == lf.Data,
+            StrView_NormalizeLf(&a, StrView{}).Data == nullptr);
+  CHECK(a.Used == mark);
+  StrView normalized = StrView_NormalizeLf(&a, SVL("a\r\nb\rc\n\r\r\n"));
+  CHECK_ALL(StrView_Eq(normalized, SVL("a\nb\nc\n\n\n")),
+            normalized.Data[normalized.Length] == '\0',
+            StrView_Eq(StrView_NormalizeLf(&a, SVL("a\0\r\nb")), SVL("a\0\nb")));
+  const char bounded[] = {'x', '\r', 'y'};
+  CHECK(StrView_NormalizeLf(&a, StrView{bounded, 1}).Data == bounded);
 
   StrBuf neg = StrBuf_Make(&a, 4);
   StrBuf_AppendI64(&neg, -42);
@@ -168,6 +194,21 @@ void TestHostInfo() {
   // when it resolves, returns a clean single-line name (may be empty off-repo).
   StrView cwd = Sys_CurrentDir(&a);
   CHECK(cwd.Length > 0);
+  StrView executable = Sys_ExecutablePath(&a);
+  CHECK(executable.Length > 0);
+  if (executable.Length) {
+    CHECK(executable.Data[executable.Length] == 0);
+#if defined(_WIN32)
+    CHECK((executable.Length >= 3 && executable.Data[1] == ':') ||
+          executable.Data[0] == '\\');
+#else
+    CHECK(executable.Data[0] == '/');
+#endif
+    // Discovery must not start resolving argv[0] relative to the new cwd.
+    CHECK(Sys_SetCurrentDir(SVL("..")));
+    CHECK(StrView_Eq(Sys_ExecutablePath(&a), executable));
+    CHECK(Sys_SetCurrentDir(cwd));
+  }
   CHECK_ALL(Sys_SetCurrentDir(cwd),
             !Sys_SetCurrentDir(SVL("clanker-directory-that-does-not-exist")));
   bool hasSep = false;

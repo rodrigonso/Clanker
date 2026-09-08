@@ -6,19 +6,29 @@ allocates less and copies less.
 
 ## Commands
 
-Build and test through the repo scripts rather than invoking CMake directly:
+Build and test through the repo scripts. They are thin wrappers around CMake:
 
 ```powershell
-.\tools\build.ps1                            # build clanker (Release)
-.\tools\build.ps1 -Config Debug              # debug build
-.\tools\build.ps1 -Test -TestArgs session,tools  # build + run named suites
-.\tools\build.ps1 -Test                      # full offline sweep
+.\build.bat                                 # build clanker (Release)
+.\build.bat -Config Debug                   # debug build
+.\build.bat -Test -TestArgs session,tools    # build + run named suites
+.\build.bat -Test                           # full offline sweep
+.\build.bat -CoreOnly -Examples -Test        # no networking dependencies
 .\tools\run.ps1 -- -p "summarize README.md"  # build, then run; Clanker flags after --
 ```
 
-Suites are named in `tests/test_main.cpp` (`session`, `harness`, `compaction`,
+On Linux/macOS use `bash tools/build.sh --test`, or
+`bash tools/build.sh --core-only --examples --test` for the core SDK.
+Core-only builds default to `out/core`; use distinct build directories when
+sharing a checkout between operating systems. `-InstallPrefix` /
+`--install-prefix` installs the SDK and enabled CLI; `-Package` / `--package`
+creates a CLI archive.
+
+Targets and sources are defined in the root `CMakeLists.txt`; only the pinned
+CLI dependency policy lives in `cmake/curl.cmake`. Suites are registered in
+`tests/suites.txt` (`session`, `harness`, `compaction`,
 `tools`, `infra`, `prompt_context`, ...). Run the narrowest suite that covers
-your change; use `.\tools\build.ps1 -Test` before declaring a change finished.
+your change; use `.\build.bat -Test` before declaring a change finished.
 Network-tagged suites only run with `--all` and are not part of a normal pass.
 
 For ad-hoc scripts, `write` them to a temp file (e.g. the OS temp directory or

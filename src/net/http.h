@@ -1,6 +1,7 @@
 #pragma once
 #include "base/arena.h"
 #include "base/str.h"
+#include "llm/retry.h"
 
 // Thin streaming HTTP client abstraction. The implementation (http_curl.cpp)
 // uses libcurl. Response bytes are delivered to the sink as they arrive
@@ -113,34 +114,6 @@ HttpResponse Http_Fetch(Arena* arena, const HttpRequest* req, volatile i32* abor
 // begun forwarding to the sink (HttpResult::BodyStarted) -- see
 // Http_StreamWithRetryDeps.
 // =============================================================================
-
-enum class HttpRetryEventKind : u8 {
-  Start,
-  End,
-};
-
-struct HttpRetryEvent {
-  HttpRetryEventKind Kind;
-  u32 Attempt;     // 1 for the first retry
-  u32 MaxRetries;
-  u32 DelayMs;
-  i32 Status;
-  StrView Error;   // transport error or buffered non-success response body
-};
-
-typedef void (*HttpRetryEventFn)(void* user, const HttpRetryEvent* event);
-
-struct HttpRetryPolicy {
-  bool Enabled;    // default-off; caller opts in
-  u32 MaxRetries;  // retry attempts allowed after the first try (default 2)
-  u32 BaseDelayMs;  // initial backoff before doubling (default 500ms)
-  u32 MaxDelayMs;   // clamps both server-supplied and computed backoff delays (default 8000ms)
-  void* EventUser;
-  HttpRetryEventFn OnEvent;
-};
-
-// Enabled=false, MaxRetries=2, BaseDelayMs=500, MaxDelayMs=8000.
-HttpRetryPolicy HttpRetryPolicy_Default();
 
 // Pure classification: is `status` one of the transport-retryable HTTP codes
 // (408, 409, 429, 5xx)? Transport failures (status < 0) are handled by the

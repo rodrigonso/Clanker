@@ -3,7 +3,7 @@
 #include "agent/compaction.h"
 #include "base/thread.h"
 #include "json/json.h"
-#include "net/http.h"
+#include "llm/retry.h"
 
 namespace {
 

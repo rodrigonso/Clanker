@@ -1,26 +1,17 @@
 #include "llm/retry.h"
 
-// Case-insensitive "does haystack contain needle" (needle is lowercase ASCII).
-static bool ContainsCI(StrView hay, const char* needle) {
-  u32 nl = 0;
-  while (needle[nl]) nl++;
-  if (nl == 0) return true;
-  if (nl > hay.Length) return false;
-  for (u32 i = 0; i + nl <= hay.Length; i++) {
-    u32 k = 0;
-    for (; k < nl; k++) {
-      char c = hay.Data[i + k];
-      if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-      if (c != needle[k]) break;
-    }
-    if (k == nl) return true;
-  }
-  return false;
+HttpRetryPolicy HttpRetryPolicy_Default() {
+  HttpRetryPolicy policy = {};
+  policy.Enabled = false;
+  policy.MaxRetries = 2;
+  policy.BaseDelayMs = 500;
+  policy.MaxDelayMs = 8000;
+  return policy;
 }
 
 static bool ContainsAny(StrView hay, const char* const* needles, u32 count) {
   for (u32 i = 0; i < count; i++)
-    if (ContainsCI(hay, needles[i])) return true;
+    if (StrView_ContainsInsensitiveAscii(hay, SV(needles[i]))) return true;
   return false;
 }
 
@@ -54,4 +45,3 @@ bool IsRetryableError(StrView errorMessage) {
     return false;
   return ContainsAny(errorMessage, RETRYABLE, (u32)(sizeof(RETRYABLE) / sizeof(RETRYABLE[0])));
 }
-

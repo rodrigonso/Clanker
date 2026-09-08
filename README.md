@@ -93,26 +93,58 @@ tests/     single CLI test harness (suite selection via args; offline by default
 
 ## Build
 
-Requires CMake (3.20+) and a C++17 compiler. libcurl is vendored automatically
-via a checksummed release archive (Schannel on Windows, system TLS elsewhere).
-The release archive is cached under `out/fetchcontent/`.
+`build.bat` and `tools/build.sh` are thin wrappers around **CMake 3.24+**.
+The root `CMakeLists.txt` owns source lists, compiler settings, targets, and SDK
+installation. A single `cmake/curl.cmake` helper configures the CLI dependency;
+release packaging stays in separate scripts.
 
-The `grep` tool uses a system `rg` when available. Otherwise it downloads the
-current ripgrep release to `~/.clanker/bin`; set `CLANKER_OFFLINE=1` to disable tool
-downloads or `CLANKER_RG_PATH` to select an existing binary explicitly.
+Windows requires the Visual Studio Desktop development with C++ workload,
+including the Windows SDK and C++ CMake tools (CMake and Ninja). The script
+locates and initializes the x64 toolchain automatically; no developer prompt
+is needed. Linux/macOS require CMake, a C++17 toolchain, and Make or Ninja.
+Linux CLI builds also need OpenSSL development files (for example,
+`libssl-dev` on Debian/Ubuntu).
 
-```sh
-cmake -S . -B build -G Ninja
-cmake --build build
-cmake --build build --target clanker_tests
-ctest --test-dir build
+The CLI builds a SHA256-pinned static libcurl using its upstream CMake build.
+Downloaded sources and dependency build outputs stay in the selected build
+directory under `_deps/`. HTTPS uses Schannel on Windows, SecureTransport on
+macOS, and OpenSSL on Linux, with the host certificate trust store.
+Core-only builds never fetch or build networking dependencies.
+
+```bat
+build.bat                                  REM Release CLI
+build.bat -Config Debug                     REM Debug CLI
+build.bat -Test                             REM full offline sweep
+build.bat -Test -TestArgs session,tools      REM selected suites
+build.bat -CoreOnly -Examples -Test          REM dependency-free core
 ```
 
-On Windows with the VS toolchain, run the commands from a `vcvars64` shell (or
-use the VS-bundled CMake/Ninja). `tools\build.ps1` builds only the `clanker`
-executable by default, skips redundant configure passes, and accepts `-Test` to
-build and run the unit tests. `tools\run.ps1` builds incrementally and then
-launches the executable in your current directory:
+The same options work with `.\tools\build.ps1` from PowerShell.
+
+The `grep` tool honors `CLANKER_RG_PATH` first, then checks for a bundled `rg`
+beside the running executable, the `~/.clanker/bin` cache, and PATH. Otherwise
+it downloads the current ripgrep release to `~/.clanker/bin`; set
+`CLANKER_OFFLINE=1` to disable tool downloads.
+
+```sh
+bash tools/build.sh              # Linux/macOS CLI
+bash tools/build.sh --test       # build + offline suites
+```
+
+CMake handles incremental and parallel builds, including header dependencies.
+`-Clean` / `--clean` rebuilds without deleting the build directory or downloaded
+sources. `-CurlArchive` / `--curl-archive` accepts an offline copy of the archive;
+its SHA256 must match the pin in `cmake/curl.cmake`. Use separate build
+directories when changing compilers or sharing a checkout across platforms.
+
+The build exposes three options: `CLANKER_BUILD_CLI` (on by default),
+`CLANKER_BUILD_TESTS`, and `CLANKER_BUILD_EXAMPLES` (both off by default).
+The corresponding targets are `clanker`, `clanker_core`, `clanker_tests`, and
+`clanker_core_example`. One private object target shares CLI code with its
+tests; there is no hierarchy of component libraries or CPack configuration.
+
+`tools\run.ps1` builds incrementally and then launches the executable in your
+current directory:
 
 ```powershell
 .\tools\run.ps1                       # build, then start the TUI
@@ -123,24 +155,126 @@ launches the executable in your current directory:
 Put `--` before Clanker's short options: without it PowerShell binds `-c` to
 `run.ps1`'s own `-Config`.
 
-### Visual Studio 2026
+### Dependency-free core SDK
 
-Open the repository folder in Visual Studio 2026. The checked-in `.vsconfig`
-declares the Desktop development with C++ and CMake components, and Visual
-Studio will discover the `vs2026-x64` configure preset automatically. Select
-`clanker.exe` as the startup target and choose Debug or Release in the toolbar.
-The debugger starts Clanker with the repository root as its working directory.
-
-The same presets can be used from a Developer PowerShell:
+The core contains the agent loop, permissions, compaction, JSON, memory and
+durable session repositories, filesystem helpers, and platform primitives.
+It uses only the C runtime and OS APIs: **no libcurl, OpenSSL, ripgrep,
+JavaScript runtime, or dependency downloads**. Providers and tools are supplied
+by the embedding application. The bundled provider, tools, terminal UI, and
+application settings are CLI features, not part of this SDK.
 
 ```powershell
-cmake --preset vs2026-x64
-cmake --build --preset vs2026-debug
-
-# Optional offline tests:
-cmake --build --preset vs2026-debug-tests
-ctest --preset vs2026-debug
+.\tools\build.ps1 -CoreOnly -Examples -Test -InstallPrefix .\out\sdk
 ```
+
+```sh
+bash tools/build.sh --core-only --examples --test --install-prefix "$PWD/out/sdk"
+```
+
+Core-only builds default to `out/core`; use a separate `--build-dir`/`-BuildDir`
+when sharing a checkout between operating systems. Both modes use the same
+`clanker_tests` runner; a core-only build registers just its 14 core suites.
+`--examples`/`-Examples` also runs the offline provider-injection example.
+
+Installation supplies `include/clanker` and a single static core archive under
+`lib`: `clanker_core.lib` on Windows, `libclanker_core.a` on Unix. Debug archives
+have a `d` suffix so Debug and Release can coexist. Consumers use their own build
+system; no generated project or package-manager integration is required.
+
+[`examples/core/main.cpp`](examples/core/main.cpp) creates an in-memory session,
+injects a local `Provider::Stream`, runs the harness, and reads its resulting
+transcript without making any network requests. To compile it against the
+installed SDK, use an x64 Visual Studio Developer Command Prompt:
+
+```bat
+cl /nologo /std:c++17 /MD /GR- /EHs-c- /Iout\sdk\include\clanker ^
+  examples\core\main.cpp /Foout\consumer.obj /Feout\consumer.exe ^
+  /link out\sdk\lib\clanker_core.lib psapi.lib bcrypt.lib
+out\consumer.exe
+```
+
+On Linux/macOS:
+
+```sh
+c++ -std=c++17 -fno-exceptions -fno-rtti -Iout/sdk/include/clanker \
+  -c examples/core/main.cpp -o out/consumer.o
+cc out/consumer.o out/sdk/lib/libclanker_core.a -pthread -lm -o out/consumer
+./out/consumer
+```
+
+The provider owns its context; returned messages must use the arena passed to
+`Stream`, and streaming slices need only remain valid during the callback.
+Keep configuration backing storage alive for the harness lifetime. Close the
+harness before its repository and release caller-owned arenas afterward.
+Embedding defaults differ intentionally from the CLI: turn limits and compaction
+are disabled, and tools are admitted in Yolo mode unless configured otherwise.
+The example selects Ask explicitly and registers no tools.
+
+This is an early C++ source API, not a stable ABI. Rebuild the SDK and consumers
+together with compatible compiler/runtime settings when upgrading.
+
+### CLI distribution
+
+The CLI keeps libcurl and platform TLS. The build scripts produce a
+relocatable runtime-only ZIP on Windows or TGZ on Linux/macOS, plus a companion
+SHA256 checksum, under the build directory's `packages` folder. SDK headers
+and libraries are not included in these CLI archives.
+
+```powershell
+.\tools\build.ps1 -Package
+.\tools\build.ps1 -InstallPrefix .\out\install
+```
+
+To include ripgrep rather than require PATH or a first-use download, supply a
+target-platform binary and its matching upstream notices. No dependency is
+downloaded during packaging:
+
+```powershell
+.\tools\build.ps1 -Package -RgExecutable C:\deps\ripgrep\rg.exe `
+  -RgLicense C:\deps\ripgrep\COPYING,C:\deps\ripgrep\LICENSE-MIT,C:\deps\ripgrep\UNLICENSE
+```
+
+Use the complete notice set for the particular binary, including any bundled
+optional dependencies. Explicit `CLANKER_RG_PATH` still overrides bundled rg.
+Discovery follows the actual executable location, not the working directory,
+so moving the extracted directory does not require reconfiguration.
+
+Linux release archives require **static OpenSSL**, plus its matching license
+notices; normal source builds and local installs may use dynamic system OpenSSL.
+Use `--openssl-prefix` for an OpenSSL installation outside the standard paths:
+
+```sh
+bash tools/build.sh --build-dir out/release --package \
+  --static-openssl --openssl-license /absolute/openssl/LICENSE.txt \
+  --rg-executable /absolute/ripgrep/rg \
+  --rg-license /absolute/ripgrep/COPYING \
+  --rg-license /absolute/ripgrep/LICENSE-MIT \
+  --rg-license /absolute/ripgrep/UNLICENSE
+```
+
+The packaging step rejects Debug configurations and unresolved or non-system
+runtime dependencies. Windows archives include the redistributable release
+VC runtime and use Windows 10+ for UCRT and the certificate store. Linux archives
+still depend on the OS loader, libc and certificate trust store: build on the
+oldest supported distribution, not an arbitrary newer glibc host. Custom OpenSSL
+provider modules, FIPS configurations, and CA bundles are not packaged. macOS
+uses system frameworks; its packaging path remains provisional without a Mac
+runner, signing, or notarization. Existing Windows ANSI filesystem/process
+operations still require ASCII installation and workspace paths.
+
+Each archive contains `share/clanker/DISTRIBUTION.txt` and dependency notices.
+Extract the whole directory tree and add its `bin` directory to PATH. These
+scripts do not sign, publish, or include user configuration or session data.
+**Public redistribution remains blocked by the missing project `LICENSE` file**;
+local archive generation warns about this rather than inventing a license grant.
+
+### Visual Studio
+
+The checked-in `.vsconfig` declares the Desktop development with C++ workload
+and CMake tools. Open the folder in Visual Studio to use its CMake integration,
+or build with `build.bat -Config Debug` and launch or attach the debugger to
+`build\clanker.exe`. There are no project-specific CMake presets to maintain.
 
 ## Run
 
@@ -840,11 +974,11 @@ Suites tagged `network` (currently `http_live`, a live TLS/HTTP request that rep
 the old `clanker_http_smoke` binary) are skipped by default, so a bare run stays
 offline and deterministic. Request one by name or with `--all`; point it at a
 local server with `CLANKER_TEST_HTTP_URL`. Exit code is 0 on success, 1 on test
-failure, 2 on a usage error. `ctest` runs the offline sweep as the `unit` test;
-the `network` test is registered but disabled by default.
+failure, 2 on a usage error.
 
-Adding a suite is a new `tests/test_*.cpp`, a declaration in `tests/tests.h`, and
-one row in the `kSuites` table in `tests/test_main.cpp`.
+Adding a suite is a new `tests/test_*.cpp` and one row in `tests/suites.txt`.
+That registration supplies the source file, function declaration, and runner
+entry. Mark CLI-only suites `cli`; the core build includes only `core` rows.
 
 The default run is network-free and key-free: the loop runs against the
 scripted provider in `tests/script_provider.h`, the Responses request
@@ -852,6 +986,11 @@ builder and SSE parser against recorded fixtures, and the TUI via pure units
 (key decoder, differential-renderer diff, markdown, line-wrapping, the
 multi-line editor) plus a headless controller test driving the
 event→transcript mapping. Live full-screen rendering is verified manually.
+
+On WSL, run filesystem-sensitive suites from a Linux filesystem working
+directory. Windows-mounted directories may not honor POSIX mode bits, causing
+the settings permission assertion to fail even when the Linux implementation
+is correct.
 
 ## JSON mode
 

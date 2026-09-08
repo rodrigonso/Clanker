@@ -25,10 +25,6 @@ const MarkdownPalette kDarkPalette = {
     /*TableBorder*/ 244,
 };
 
-Style Tint(bool color, u8 fg, u8 attr) {
-  return Style{color ? fg : COL_DEFAULT, COL_DEFAULT, attr};
-}
-
 // Recolour `base` while keeping the attributes it already carries, so a
 // blockquote's italic survives an inline code span inside it.
 Style Recolour(Style base, bool color, u8 fg, u8 extraAttr) {

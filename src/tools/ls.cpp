@@ -32,12 +32,13 @@ bool LsExec(void* ctx, Arena* arena, StrView id, const ToolArgs* args,
   i64 limit = ToolArgs_GetInt(args, "limit", 500);
   if (limit <= 0) limit = 500;
 
-  if (!Fs_Exists(path)) {
+  FsStat stat = Fs_Stat(path);
+  if (!stat.Exists) {
     StrBuf_AppendCStr(err, "Path not found: ");
     StrBuf_Append(err, path);
     return false;
   }
-  if (!Fs_IsDir(path)) {
+  if (!stat.IsDir) {
     StrBuf_AppendCStr(err, "Not a directory: ");
     StrBuf_Append(err, path);
     return false;

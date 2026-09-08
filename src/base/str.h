@@ -43,6 +43,13 @@ inline char Ascii_ToLower(char c) {
   return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
 }
 
+inline bool StrView_EqInsensitiveAscii(StrView a, StrView b) {
+  if (a.Length != b.Length) return false;
+  for (u32 i = 0; i < a.Length; i++)
+    if (Ascii_ToLower(a.Data[i]) != Ascii_ToLower(b.Data[i])) return false;
+  return true;
+}
+
 inline bool StrView_ContainsInsensitiveAscii(StrView haystack, StrView needle) {
   if (needle.Length == 0) return true;
   if (needle.Length > haystack.Length) return false;
@@ -222,6 +229,23 @@ inline const char* StrView_DupCStr(Arena* arena, StrView s) {
   if (s.Length) memcpy(dst, s.Data, s.Length);
   dst[s.Length] = '\0';
   return dst;
+}
+
+// CRLF and lone CR become LF. Already-normalized input is borrowed unchanged.
+inline StrView StrView_NormalizeLf(Arena* arena, StrView s) {
+  if (!s.Length || !memchr(s.Data, '\r', s.Length)) return s;
+  char* dst = (char*)ArenaAlloc(arena, s.Length + 1, 1);
+  u32 length = 0;
+  for (u32 i = 0; i < s.Length; i++) {
+    char c = s.Data[i];
+    if (c == '\r') {
+      if (i + 1 < s.Length && s.Data[i + 1] == '\n') i++;
+      c = '\n';
+    }
+    dst[length++] = c;
+  }
+  dst[length] = '\0';
+  return StrView{dst, length};
 }
 
 // Value of one hex digit, or -1 when `c` is not one.

@@ -1,5 +1,4 @@
-#include <stdio.h>
-
+#include "base/file_io.h"
 #include "crypto/base64.h"
 #include "json/json.h"
 #include "tools/fs.h"
@@ -27,13 +26,6 @@ static StrView Read_SelectLines(StrView content, u32 startLine0, u32 endLine0) {
   return StrView{content.Data + start, end - start};
 }
 
-static u32 Read_LineByteLen(StrView content, u32 line0) {
-  u32 start = Read_LineStart(content, line0);
-  u32 end = start;
-  while (end < content.Length && content.Data[end] != '\n') end++;
-  return end - start;
-}
-
 static void Read_AppendNoticePrefix(StrBuf* b) {
   if (b->Length > 0) StrBuf_AppendCStr(b, "\n\n");
 }
@@ -51,23 +43,15 @@ static bool ReadExec(void* ctx, Arena* arena, StrView id, const ToolArgs* args,
     return false;
   }
 
-  const char* p = StrView_DupCStr(arena, path);
-  FILE* f = fopen(p, "rb");
-  if (!f) {
-    StrBuf_AppendCStr(err, "cannot open file: ");
+  StrView bytes = {};
+  FileIoResult read = File_ReadAll(arena, path, &bytes);
+  if (read != FileIoResult::Success) {
+    StrBuf_AppendCStr(err, read == FileIoResult::IoError
+                             ? "failed to read file: " : "cannot open file: ");
     StrBuf_Append(err, path);
     return false;
   }
 
-  StrBuf file = StrBuf_Make(arena, 8192);
-  char buf[8192];
-  size_t n = 0;
-  while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
-    StrBuf_Append(&file, StrView{buf, (u32)n});
-  }
-  fclose(f);
-
-  StrView bytes = StrBuf_View(&file);
   u32 sniffLen = ClankerMin(bytes.Length, 16u);
   StrView mime = Img_SniffMime((const byte*)bytes.Data, sniffLen);
   if (mime.Length == 0) mime = Img_MimeForExt(Fs_Ext(path));
@@ -113,21 +97,15 @@ static bool ReadExec(void* ctx, Arena* arena, StrView id, const ToolArgs* args,
   StrBuf_Append(&result, tr.Content);
 
   u32 startLine1 = startLine0 + 1;
-  if (tr.Truncated && !tr.ByBytes) {
+  if (tr.Truncated) {
+    u32 firstLineBytes = 0;
+    if (tr.ByBytes && tr.OutputLines <= 1) {
+      while (firstLineBytes < selected.Length &&
+             selected.Data[firstLineBytes] != '\n')
+        firstLineBytes++;
+    }
     Read_AppendNoticePrefix(&result);
-    StrBuf_AppendCStr(&result, "[Showing lines ");
-    StrBuf_AppendU64(&result, startLine1);
-    StrBuf_AppendChar(&result, '-');
-    StrBuf_AppendU64(&result, startLine1 + tr.OutputLines - 1u);
-    StrBuf_AppendCStr(&result, " of ");
-    StrBuf_AppendU64(&result, totalLines);
-    StrBuf_AppendCStr(&result, ". Use offset=");
-    StrBuf_AppendU64(&result, startLine1 + tr.OutputLines);
-    StrBuf_AppendCStr(&result, " to continue.]");
-  } else if (tr.Truncated && tr.ByBytes) {
-    u32 firstLineBytes = Read_LineByteLen(bytes, startLine0);
-    if (tr.OutputLines <= 1 && firstLineBytes > TRUNC_MAX_BYTES) {
-      Read_AppendNoticePrefix(&result);
+    if (firstLineBytes > TRUNC_MAX_BYTES) {
       StrBuf_AppendCStr(&result, "[Line ");
       StrBuf_AppendU64(&result, startLine1);
       StrBuf_AppendCStr(&result, " is ");
@@ -140,16 +118,18 @@ static bool ReadExec(void* ctx, Arena* arena, StrView id, const ToolArgs* args,
       StrBuf_Append(&result, path);
       StrBuf_AppendCStr(&result, " | head -c 51200]");
     } else {
-      Read_AppendNoticePrefix(&result);
       StrBuf_AppendCStr(&result, "[Showing lines ");
       StrBuf_AppendU64(&result, startLine1);
       StrBuf_AppendChar(&result, '-');
       StrBuf_AppendU64(&result, startLine1 + tr.OutputLines - 1u);
       StrBuf_AppendCStr(&result, " of ");
       StrBuf_AppendU64(&result, totalLines);
-      StrBuf_AppendCStr(&result, " (");
-      Trunc_AppendKb(&result, TRUNC_MAX_BYTES);
-      StrBuf_AppendCStr(&result, " limit). Use offset=");
+      if (tr.ByBytes) {
+        StrBuf_AppendCStr(&result, " (");
+        Trunc_AppendKb(&result, TRUNC_MAX_BYTES);
+        StrBuf_AppendCStr(&result, " limit)");
+      }
+      StrBuf_AppendCStr(&result, ". Use offset=");
       StrBuf_AppendU64(&result, startLine1 + tr.OutputLines);
       StrBuf_AppendCStr(&result, " to continue.]");
     }

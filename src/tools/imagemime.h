@@ -23,18 +23,11 @@ inline StrView Img_SniffMime(const byte* d, u32 n) {
 
 // `ext` is a file extension slice including the leading dot, any case.
 inline StrView Img_MimeForExt(StrView ext) {
-  char b[8];
-  if (ext.Length == 0 || ext.Length >= (u32)sizeof(b)) return StrView{nullptr, 0};
-  for (u32 i = 0; i < ext.Length; i++) {
-    char c = ext.Data[i];
-    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-    b[i] = c;
-  }
-  StrView e{b, ext.Length};
-  if (StrView_EqCStr(e, ".png")) return SVL("image/png");
-  if (StrView_EqCStr(e, ".jpg") || StrView_EqCStr(e, ".jpeg")) return SVL("image/jpeg");
-  if (StrView_EqCStr(e, ".gif")) return SVL("image/gif");
-  if (StrView_EqCStr(e, ".webp")) return SVL("image/webp");
-  if (StrView_EqCStr(e, ".bmp")) return SVL("image/bmp");
+  if (StrView_EqInsensitiveAscii(ext, SVL(".png"))) return SVL("image/png");
+  if (StrView_EqInsensitiveAscii(ext, SVL(".jpg")) ||
+      StrView_EqInsensitiveAscii(ext, SVL(".jpeg"))) return SVL("image/jpeg");
+  if (StrView_EqInsensitiveAscii(ext, SVL(".gif"))) return SVL("image/gif");
+  if (StrView_EqInsensitiveAscii(ext, SVL(".webp"))) return SVL("image/webp");
+  if (StrView_EqInsensitiveAscii(ext, SVL(".bmp"))) return SVL("image/bmp");
   return StrView{nullptr, 0};
 }

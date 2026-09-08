@@ -1,6 +1,6 @@
-#include <stdio.h>
 #include <string.h>
 
+#include "base/file_io.h"
 #include "base/thread.h"
 #include "json/json.h"
 #include "tools/exec.h"
@@ -121,16 +121,7 @@ static StrView Grep_FormatPath(GrepFormatter* formatter, StrView filePath) {
 }
 
 static Array<StrView> Grep_NormalizeAndSplit(Arena* arena, StrView content) {
-  StrBuf normalized = StrBuf_Make(arena, content.Length + 1);
-  for (u32 i = 0; i < content.Length; i++) {
-    char c = content.Data[i];
-    if (c == '\r') {
-      if (i + 1u < content.Length && content.Data[i + 1u] == '\n') i++;
-      StrBuf_AppendChar(&normalized, '\n');
-    } else {
-      StrBuf_AppendChar(&normalized, c);
-    }
-  }
+  StrView normalized = StrView_NormalizeLf(arena, content);
 
   Array<StrView> lines = Array_Make<StrView>(arena, 64);
   u32 start = 0;
@@ -150,18 +141,9 @@ static GrepFileCacheEntry* Grep_GetFile(GrepFormatter* formatter, StrView path) 
 
   GrepFileCacheEntry entry = {};
   entry.Path = path;
-  const char* native = StrView_DupCStr(formatter->Mem, path);
-  FILE* file = fopen(native, "rb");
-  if (file) {
-    StrBuf content = StrBuf_Make(formatter->Mem, 8192);
-    char chunk[8192];
-    size_t read = 0;
-    while ((read = fread(chunk, 1, sizeof(chunk), file)) > 0)
-      StrBuf_Append(&content, StrView{chunk, (u32)read});
-    entry.ReadOk = ferror(file) == 0;
-    if (fclose(file) != 0) entry.ReadOk = false;
-    if (entry.ReadOk) entry.Lines = Grep_NormalizeAndSplit(formatter->Mem, StrBuf_View(&content));
-  }
+  StrView content = {};
+  entry.ReadOk = File_ReadAll(formatter->Mem, path, &content) == FileIoResult::Success;
+  if (entry.ReadOk) entry.Lines = Grep_NormalizeAndSplit(formatter->Mem, content);
   Array_Push(&formatter->Cache, entry);
   return &formatter->Cache.Data[formatter->Cache.Count - 1u];
 }

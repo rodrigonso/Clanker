@@ -1,5 +1,4 @@
-#include <stdio.h>
-
+#include "base/file_io.h"
 #include "base/thread.h"
 #include "json/json.h"
 #include "tools/filelock.h"
@@ -20,19 +19,10 @@ static bool Write_DoLocked(Arena* arena, StrView path, StrView content, volatile
     return false;
   }
 
-  const char* p = StrView_DupCStr(arena, path);
-  FILE* f = fopen(p, "wb");
-  if (!f) {
-    StrBuf_AppendCStr(err, "cannot open file for writing: ");
-    StrBuf_Append(err, path);
-    return false;
-  }
-
-  usize written = fwrite(content.Data, 1, content.Length, f);
-  bool ok = written == (usize)content.Length;
-  if (fclose(f) != 0) ok = false;
-  if (!ok) {
-    StrBuf_AppendCStr(err, "failed to write file: ");
+  FileIoResult written = File_WriteAll(arena, path, content);
+  if (written != FileIoResult::Success) {
+    StrBuf_AppendCStr(err, written == FileIoResult::IoError
+                             ? "failed to write file: " : "cannot open file for writing: ");
     StrBuf_Append(err, path);
     return false;
   }

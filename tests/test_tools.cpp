@@ -4,10 +4,14 @@
 
 #include "base/arena.h"
 #include "base/str.h"
+#include "base/sysinfo.h"
+#include "base/thread.h"
 #include "check.h"
 #include "tools/exec.h"
 #include "tools/fs.h"
+#include "tools/imagemime.h"
 #include "tools/tools.h"
+#include "tools/tools_manager.h"
 #include "tools/truncate.h"
 #include "tests.h"
 
@@ -75,6 +79,58 @@ static void SetTestEnv(const char* name, const char* value) {
 static bool CaptureChunk(void* user, StrView chunk) {
   StrBuf_Append((StrBuf*)user, chunk);
   return true;
+}
+
+static void TestBundledRipgrep(Arena* a) {
+  StrView cwd = Sys_CurrentDir(a);
+  StrBuf rootName = StrBuf_Make(a, 64);
+  StrBuf_AppendCStr(&rootName, "out/clanker-rg-discovery-");
+  StrBuf_AppendU64(&rootName, MonotonicMillis());
+  StrView root = Fs_Join(a, cwd, StrBuf_View(&rootName));
+  StrView bin = Fs_Join(a, root, SVL("bin"));
+  StrView elsewhere = Fs_Join(a, root, SVL("elsewhere"));
+  CHECK(Fs_MkdirP(a, bin));
+  CHECK(Fs_MkdirP(a, elsewhere));
+#if defined(_WIN32)
+  StrView rgName = SVL("rg.exe");
+#else
+  StrView rgName = SVL("rg");
+#endif
+  StrView executable = Fs_Join(a, bin, SVL("clanker"));
+  StrView bundled = Fs_Join(a, bin, rgName);
+  StrView decoy = Fs_Join(a, elsewhere, rgName);
+  MakeFile(StrView_DupCStr(a, decoy), "not the bundled tool");
+  CHECK(Sys_SetCurrentDir(elsewhere));
+  CHECK(ToolManager_FindBundledRipgrep(a, executable).Length == 0);
+  CHECK(ToolManager_FindBundledRipgrep(a, SVL("clanker")).Length == 0);
+  CHECK(ToolManager_FindBundledRipgrep(a, StrView{}).Length == 0);
+  CHECK(ToolManager_FindBundledRipgrep(a, SVL("/")).Length == 0);
+  CHECK(ToolManager_FindBundledRipgrep(a, SVL("C:\\")).Length == 0);
+  MakeFile(StrView_DupCStr(a, bundled), "bundled tool");
+  CHECK(Fs_PathEquals(ToolManager_FindBundledRipgrep(a, executable), bundled));
+
+  // An explicit missing override must fail, not silently use another rg.
+  const char* previousRaw = getenv("CLANKER_RG_PATH");
+  StrView previous = previousRaw ? StrView_Dup(a, SV(previousRaw)) : StrView{};
+  SetTestEnv("CLANKER_RG_PATH", StrView_DupCStr(a, decoy));
+  StrBuf err = StrBuf_Make(a, 128);
+  CHECK(Fs_PathEquals(ToolManager_EnsureRipgrep(a, nullptr, &err), decoy));
+  CHECK(err.Length == 0);
+  StrView missing = Fs_Join(a, root, SVL("missing-rg"));
+  SetTestEnv("CLANKER_RG_PATH", StrView_DupCStr(a, missing));
+  CHECK(ToolManager_EnsureRipgrep(a, nullptr, &err).Length == 0);
+  CHECK(StrView_Contains(StrBuf_View(&err), "CLANKER_RG_PATH does not exist"));
+  SetTestEnv("CLANKER_RG_PATH", previousRaw ? StrView_DupCStr(a, previous) : nullptr);
+
+  CHECK(Sys_SetCurrentDir(cwd));
+  remove(StrView_DupCStr(a, bundled));
+  CHECK(Fs_MkdirP(a, bundled));
+  CHECK(ToolManager_FindBundledRipgrep(a, executable).Length == 0);
+  CLANKER_RMDIR(StrView_DupCStr(a, bundled));
+  remove(StrView_DupCStr(a, decoy));
+  CLANKER_RMDIR(StrView_DupCStr(a, bin));
+  CLANKER_RMDIR(StrView_DupCStr(a, elsewhere));
+  CLANKER_RMDIR(StrView_DupCStr(a, root));
 }
 
 static StrView Args1(Arena* a, const char* k, const char* v) {
@@ -223,6 +279,19 @@ static void TestToolPermissions(Arena* a) {
 // ---- read ----------------------------------------------------------------
 
 static void TestRead(Arena* a) {
+  const struct {
+    StrView Extension;
+    StrView Mime;
+  } images[] = {
+      {SVL(".png"), SVL("image/png")}, {SVL(".PNG"), SVL("image/png")},
+      {SVL(".jpg"), SVL("image/jpeg")}, {SVL(".JpEg"), SVL("image/jpeg")},
+      {SVL(".GIF"), SVL("image/gif")}, {SVL(".WeBp"), SVL("image/webp")},
+      {SVL(".BMP"), SVL("image/bmp")}, {StrView{}, StrView{}},
+      {SVL(".png-extra"), StrView{}}, {SVL(".svg"), StrView{}},
+  };
+  for (u32 i = 0; i < sizeof(images) / sizeof(images[0]); i++)
+    CHECK(StrView_Eq(Img_MimeForExt(images[i].Extension), images[i].Mime));
+
   const char* path = "clanker_tool_read_test.txt";
   MakeFile(path, "line1\nline2\n");
 
@@ -241,6 +310,13 @@ static void TestRead(Arena* a) {
   ToolResult o3 = {};
   StrBuf e3 = StrBuf_Make(a, 32);
   CHECK(!RunTool(rt, a, SV("{\"path\":\"no_such_file_xyz.txt\"}"), &o3, &e3));
+
+  // POSIX can open a directory as a FILE but must not report a failed read as
+  // a successful empty file.
+  ToolResult directoryResult = {};
+  StrBuf directoryError = StrBuf_Make(a, 64);
+  CHECK(!RunTool(rt, a, SVL("{\"path\":\".\"}"), &directoryResult, &directoryError));
+  CHECK_ALL(directoryResult.Content.Count == 0, directoryError.Length > 0);
 
   // offset + limit window with a continuation notice
   const char* p2 = "clanker_tool_read_ol.txt";
@@ -273,6 +349,59 @@ static void TestRead(Arena* a) {
             StrView_EqCStr(o5.Content.Data[1].ImageMimeType, "image/png"),
             o5.Content.Data[1].ImageData.Length > 0);
   remove(pimg);
+}
+
+static void TestReadTruncation(Arena* a) {
+  struct ReadCase {
+    u32 LineBytes;
+    u32 Lines;
+    u32 Offset;
+    u32 Limit;
+    u32 KeptBytes;
+    const char* Notice;
+  };
+  const ReadCase cases[] = {
+      {1, 2001, 1, 0, 4000,
+       "\n\n[Showing lines 1-2000 of 2001. Use offset=2001 to continue.]"},
+      {1023, 60, 2, 0, 51200,
+       "\n\n[Showing lines 2-51 of 60 (50.0KB limit). Use offset=52 to continue.]"},
+      {61440, 3, 2, 1, 51200,
+       "\n\n[Line 2 is 60.0KB, exceeds 50.0KB limit. Use shell: sed -n '2p' "
+       "clanker_tool_read_truncation.txt | head -c 51200]"},
+  };
+  const char* path = "clanker_tool_read_truncation.txt";
+  for (u32 i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    const ReadCase& test = cases[i];
+    StrBuf input = StrBuf_Make(a, (test.LineBytes + 1) * test.Lines + 1);
+    for (u32 line = 0; line < test.Lines; line++) {
+      for (u32 column = 0; column < test.LineBytes; column++)
+        StrBuf_AppendChar(&input, 'x');
+      StrBuf_AppendChar(&input, '\n');
+    }
+    MakeFile(path, input.Data);
+    StrBuf args = StrBuf_Make(a, 128);
+    StrBuf_AppendCStr(&args, "{\"path\":\"clanker_tool_read_truncation.txt\",\"offset\":");
+    StrBuf_AppendU64(&args, test.Offset);
+    StrBuf_AppendCStr(&args, ",\"limit\":");
+    StrBuf_AppendU64(&args, test.Limit);
+    StrBuf_AppendChar(&args, '}');
+    ToolResult out = {};
+    StrBuf err = StrBuf_Make(a, 64);
+    CHECK(RunTool(ReadTool(), a, StrBuf_View(&args), &out, &err));
+    CHECK(out.Content.Count == 1);
+    if (out.Content.Count == 1) {
+      StrView text = out.Content.Data[0].Text;
+      CHECK(text.Length == test.KeptBytes + strlen(test.Notice));
+      if (text.Length >= test.KeptBytes) {
+        CHECK(StrView_Eq(StrView{text.Data, test.KeptBytes},
+                         StrView{input.Data + (test.Offset - 1) * (test.LineBytes + 1),
+                                 test.KeptBytes}));
+        CHECK(StrView_EqCStr(StrView{text.Data + test.KeptBytes,
+                                    text.Length - test.KeptBytes}, test.Notice));
+      }
+    }
+    remove(path);
+  }
 }
 
 // ---- shell ---------------------------------------------------------------
@@ -744,8 +873,10 @@ static void TestAskUser(Arena* a) {
 
 void TestTools() {
   Arena a = ArenaCreate();
+  TestBundledRipgrep(&a);
   TestToolPermissions(&a);
   TestRead(&a);
+  TestReadTruncation(&a);
   TestShell(&a);
   TestShellOverflow(&a);
   TestWrite(&a);

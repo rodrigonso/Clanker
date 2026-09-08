@@ -82,22 +82,9 @@ StrView BlockScalar(Arena* arena, StrView yaml, u32* pos, bool folded) {
 }  // namespace
 
 bool Frontmatter_ParseBool(StrView value) {
-  const char* truthy[] = {"true", "yes", "on"};
-  for (u32 i = 0; i < 3; i++) {
-    StrView candidate = SV(truthy[i]);
-    if (value.Length != candidate.Length) continue;
-    bool match = true;
-    for (u32 j = 0; j < value.Length; j++) {
-      char c = value.Data[j];
-      if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-      if (c != candidate.Data[j]) {
-        match = false;
-        break;
-      }
-    }
-    if (match) return true;
-  }
-  return false;
+  return StrView_EqInsensitiveAscii(value, SVL("true")) ||
+         StrView_EqInsensitiveAscii(value, SVL("yes")) ||
+         StrView_EqInsensitiveAscii(value, SVL("on"));
 }
 
 void Frontmatter_Parse(Arena* arena, StrView content, FrontmatterField* fields,

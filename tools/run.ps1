@@ -4,17 +4,14 @@
     Incrementally builds Clanker and runs the resulting executable.
 
 .DESCRIPTION
-    Delegates the build to tools\build.ps1 (Visual Studio toolchain + CMake/Ninja),
-    which is already incremental: it reconfigures only when the cache is
-    missing or the build type changed, and skips the build entirely when Ninja
-    reports no work to do. Only the `clanker` target is built, so the test
-    harness is not compiled.
+    Delegates the incremental CMake build to tools\build.ps1. Only the
+    `clanker` target is built, so the test harness is not compiled.
 
     The executable runs in your current working directory with stdin/stdout
     left attached, so the full-screen TUI gets a real console.
 
 .PARAMETER Config
-    CMake build type: Release (default), Debug, RelWithDebInfo, or MinSizeRel.
+    Build configuration: Release (default), Debug, RelWithDebInfo, or MinSizeRel.
 
 .PARAMETER BuildDir
     Build directory (default: build), relative to the repo root unless absolute.
@@ -62,7 +59,7 @@ $exe = Join-Path $buildPath 'clanker.exe'
 
 if (-not $NoBuild) {
     & (Join-Path $PSScriptRoot 'build.ps1') -Config $Config -BuildDir $BuildDir -Target clanker
-    # build.ps1 exits non-zero on configure/compile failure; throws otherwise.
+    # A compiler failure must never launch an older executable.
     if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 

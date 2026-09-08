@@ -435,7 +435,7 @@ inline void StreamSink_Emit(const StreamSink& sink, const StreamEvent& ev) {
   if (sink.OnEvent) sink.OnEvent(sink.User, ev);
 }
 
-struct HttpRetryPolicy;  // net/http.h; forward-declared so types.h stays net-independent
+struct HttpRetryPolicy;  // llm/retry.h
 
 struct ProviderAuth {
   StrView Token;  // empty only when the endpoint allows anonymous access

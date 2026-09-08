@@ -1,12 +1,10 @@
 #include "app/prompt_templates.h"
 
 #include "app/frontmatter.h"
-#include "base/config_file.h"
 #include "tools/fs.h"
 
 namespace {
 
-constexpr u64 kMaxTemplateFileBytes = (u64)1 << 20;
 // pi truncates a fallback description at 60 characters and marks the cut.
 constexpr u32 kDescriptionFallbackBytes = 60;
 
@@ -50,39 +48,15 @@ struct LoadContext {
   Array<StrView> SeenPaths;
 };
 
-bool AlreadyVisited(LoadContext* ctx, StrView canonical) {
-  for (u32 i = 0; i < ctx->SeenPaths.Count; i++)
-    if (Fs_PathEquals(ctx->SeenPaths.Data[i], canonical)) return true;
-  return false;
-}
-
 void LoadTemplateFile(LoadContext* ctx, Arena* scratch, StrView path) {
   usize mark = scratch->Used;
   StrView canonical = Fs_RealPath(scratch, path);
   if (!canonical.Length) canonical = path;
-  if (AlreadyVisited(ctx, canonical)) {
-    ArenaRestore(scratch, mark);
-    return;
-  }
-  Array_Push(&ctx->SeenPaths, StrView_Dup(ctx->Mem, canonical));
-
-  FsStat stat = Fs_Stat(canonical);
-  if (!stat.Exists || stat.IsDir) {
-    ArenaRestore(scratch, mark);
-    return;
-  }
-  if (stat.Size > kMaxTemplateFileBytes) {
-    LoadDiagnostic_Add(ctx->Mem, &ctx->Out->Diagnostics, canonical,
-                  SVL("prompt template exceeds the 1 MiB limit"));
-    ArenaRestore(scratch, mark);
-    return;
-  }
-
   StrView content = {};
-  if (ConfigFile_ReadAll(scratch, canonical, &content) !=
-      ConfigFileReadResult::Success) {
-    LoadDiagnostic_Add(ctx->Mem, &ctx->Out->Diagnostics, canonical,
-                  SVL("prompt template could not be read"));
+  if (!Loader_ReadFile(ctx->Mem, scratch, &ctx->SeenPaths,
+                       &ctx->Out->Diagnostics, canonical,
+                       SVL("prompt template exceeds the 1 MiB limit"),
+                       SVL("prompt template could not be read"), &content)) {
     ArenaRestore(scratch, mark);
     return;
   }
@@ -97,7 +71,7 @@ void LoadTemplateFile(LoadContext* ctx, Arena* scratch, StrView path) {
 
   const PromptTemplate* existing = PromptTemplates_Find(ctx->Out, parsed.Name);
   if (existing) {
-    StrBuf message = StrBuf_Make(ctx->Mem, 96 + existing->FilePath.Length);
+    StrBuf message = StrBuf_Make(scratch, 96 + existing->FilePath.Length);
     StrBuf_AppendCStr(&message, "prompt template '");
     StrBuf_Append(&message, parsed.Name);
     StrBuf_AppendCStr(&message, "' is already defined by ");

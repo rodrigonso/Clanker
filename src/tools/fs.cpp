@@ -19,7 +19,7 @@ bool Fs_IsSep(char c) { return c == '/' || c == '\\'; }
 
 char Fs_PathFold(char c) {
 #if defined(_WIN32)
-  if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+  c = Ascii_ToLower(c);
 #endif
   return Fs_IsSep(c) ? '/' : c;
 }
@@ -69,8 +69,6 @@ static bool Fs_PathIsAbsolute(StrView path) {
   return false;
 #endif
 }
-
-static bool Fs_StrEqC(StrView s, const char* c) { return StrView_Eq(s, SV(c)); }
 
 static StrView Fs_NormalizedCopy(Arena* arena, StrView path) {
   StrBuf out = StrBuf_Make(arena, path.Length + 1);
@@ -498,17 +496,12 @@ StrView Fs_Join(Arena* arena, StrView a, StrView b) {
   if (b.Length == 0) return StrView_Dup(arena, a);
   StrBuf out = StrBuf_Make(arena, a.Length + b.Length + 2);
   StrBuf_Append(&out, a);
-  bool aSep = Fs_IsSep(a.Data[a.Length - 1]);
-  bool bSep = Fs_IsSep(b.Data[0]);
-  if (!aSep && !bSep) {
+  if (!Fs_IsSep(a.Data[a.Length - 1])) {
 #if defined(_WIN32)
     StrBuf_AppendChar(&out, '\\');
 #else
     StrBuf_AppendChar(&out, '/');
 #endif
-  } else if (aSep && bSep) {
-    b.Data++;
-    b.Length--;
   }
   StrBuf_Append(&out, b);
   return StrBuf_View(&out);
@@ -530,20 +523,13 @@ static u32 Fs_TrimTrailingSlashLength(StrView s) {
   return n;
 }
 
-static bool Fs_CharEqPath(char a, char b) {
-#if defined(_WIN32)
-  if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
-  if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
-#endif
-  return a == b;
-}
-
 static bool Fs_PathPrefixEq(StrView a, StrView b, u32 n) {
   if (a.Length < n || b.Length < n) return false;
-  for (u32 i = 0; i < n; i++) {
-    if (!Fs_CharEqPath(a.Data[i], b.Data[i])) return false;
-  }
-  return true;
+#if defined(_WIN32)
+  return StrView_EqInsensitiveAscii(StrView{a.Data, n}, StrView{b.Data, n});
+#else
+  return StrView_Eq(StrView{a.Data, n}, StrView{b.Data, n});
+#endif
 }
 
 StrView Fs_Relativize(Arena* arena, StrView root, StrView path) {
@@ -573,7 +559,7 @@ Array<FsEntry> Fs_ListDir(Arena* arena, StrView dir, bool* ok) {
   if (ok) *ok = true;
   for (;;) {
     StrView name = SV(fd.cFileName);
-    if (!Fs_StrEqC(name, ".") && !Fs_StrEqC(name, "..")) {
+    if (!StrView_Eq(name, SVL(".")) && !StrView_Eq(name, SVL(".."))) {
       ULARGE_INTEGER sz;
       sz.LowPart = fd.nFileSizeLow;
       sz.HighPart = fd.nFileSizeHigh;
@@ -594,7 +580,7 @@ Array<FsEntry> Fs_ListDir(Arena* arena, StrView dir, bool* ok) {
     struct dirent* de = readdir(d);
     if (!de) break;
     StrView name = SV(de->d_name);
-    if (Fs_StrEqC(name, ".") || Fs_StrEqC(name, "..")) continue;
+    if (StrView_Eq(name, SVL(".")) || StrView_Eq(name, SVL(".."))) continue;
     StrView full = Fs_Join(arena, dir, name);
     FsStat st = Fs_Stat(full);
     FsEntry e = {};
@@ -796,7 +782,7 @@ static bool Fs_WalkDir(Arena* arena, StrView absDir, StrView relDir, const FsWal
   if (!ok) return true;
   for (u32 i = 0; i < entries.Count; i++) {
     FsEntry e = entries.Data[i];
-    if (e.IsDir && Fs_StrEqC(e.Name, ".git")) continue;
+    if (e.IsDir && StrView_Eq(e.Name, SVL(".git"))) continue;
     StrView abs = Fs_Join(arena, absDir, e.Name);
     StrView rel = Fs_AppendRel(arena, relDir, e.Name);
     if (opts.RespectGitignore && Fs_IsIgnored(&patterns, rel, e.IsDir)) continue;

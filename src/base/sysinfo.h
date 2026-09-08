@@ -15,6 +15,10 @@ u64 CurrentRssBytes();
 // separator stripped. Empty if it cannot be determined.
 StrView Sys_CurrentDir(Arena* a);
 
+// Absolute path of the running executable, not argv[0] or the current directory.
+// UTF-8, null-terminated, and owned by `a`. Empty if discovery fails.
+StrView Sys_ExecutablePath(Arena* a);
+
 // Change the process working directory. Returns false when `path` is empty,
 // missing, not a directory, or cannot be entered.
 bool Sys_SetCurrentDir(StrView path);

@@ -12,6 +12,10 @@
 #else
 #include <sys/stat.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <limits.h>
+#include <mach-o/dyld.h>
+#endif
 #endif
 
 #if defined(_WIN32)
@@ -111,10 +115,7 @@ bool IsAbsPath(StrView p) {
 // Copy `s` into `a` and append a null terminator so the result is usable as a
 // C string (via .Data) while the returned Length excludes the terminator.
 StrView DupCStr(Arena* a, StrView s) {
-  char* dst = (char*)ArenaAlloc(a, s.Length + 1, 1);
-  if (s.Length) memcpy(dst, s.Data, s.Length);
-  dst[s.Length] = '\0';
-  return StrView{dst, s.Length};
+  return StrView{StrView_DupCStr(a, s), s.Length};
 }
 
 // Strip any trailing path separators (view slice only).
@@ -175,15 +176,13 @@ bool StartsWithAt(StrView s, u32 i, StrView pfx) {
   return memcmp(s.Data + i, pfx.Data, pfx.Length) == 0;
 }
 
-char LowerAscii(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c; }
-
 bool HasHomePrefix(StrView path, StrView home) {
   if (home.Length == 0 || path.Length < home.Length) return false;
   for (u32 i = 0; i < home.Length; i++) {
     char pc = path.Data[i], hc = home.Data[i];
 #if defined(_WIN32)
     if (IsSep(pc) && IsSep(hc)) continue;
-    if (LowerAscii(pc) != LowerAscii(hc)) return false;
+    if (Ascii_ToLower(pc) != Ascii_ToLower(hc)) return false;
 #else
     if (pc != hc) return false;
 #endif
@@ -201,6 +200,51 @@ StrView Sys_CurrentDir(Arena* a) {
   if (!getcwd(buf, sizeof(buf))) return StrView{nullptr, 0};
 #endif
   return DupCStr(a, StripTrailingSep(SV(buf)));
+}
+
+StrView Sys_ExecutablePath(Arena* a) {
+  Arena scratch = ArenaCreate();
+  StrView result = {};
+#if defined(_WIN32)
+  for (u32 capacity = 512; capacity <= 32768; capacity *= 2) {
+    wchar_t* path = ArenaPushArray(&scratch, wchar_t, capacity);
+    DWORD length = GetModuleFileNameW(nullptr, path, capacity);
+    if (!length) break;
+    if (length == capacity) continue;
+    int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, path,
+                                    (int)length, nullptr, 0, nullptr, nullptr);
+    if (bytes <= 0) break;
+    char* utf8 = ArenaPushArray(&scratch, char, (u32)bytes + 1);
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, path, (int)length,
+                            utf8, bytes, nullptr, nullptr) != bytes)
+      break;
+    result = DupCStr(a, StrView{utf8, (u32)bytes});
+    break;
+  }
+#elif defined(__linux__)
+  for (u32 capacity = 512; capacity <= 1024 * 1024; capacity *= 2) {
+    char* path = ArenaPushArray(&scratch, char, capacity);
+    ssize_t length = readlink("/proc/self/exe", path, capacity);
+    if (length <= 0) break;
+    if ((usize)length == capacity) continue;
+    result = DupCStr(a, StrView{path, (u32)length});
+    break;
+  }
+#elif defined(__APPLE__)
+  uint32_t capacity = 512;
+  char* path = ArenaPushArray(&scratch, char, capacity);
+  int status = _NSGetExecutablePath(path, &capacity);
+  if (status != 0 && capacity > 0 && capacity <= 1024 * 1024) {
+    path = ArenaPushArray(&scratch, char, capacity);
+    status = _NSGetExecutablePath(path, &capacity);
+  }
+  if (status == 0) {
+    char* resolved = ArenaPushArray(&scratch, char, PATH_MAX);
+    if (realpath(path, resolved)) result = DupCStr(a, SV(resolved));
+  }
+#endif
+  ArenaRelease(&scratch);
+  return result;
 }
 
 bool Sys_SetCurrentDir(StrView path) {

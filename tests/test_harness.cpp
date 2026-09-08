@@ -6,7 +6,7 @@
 #include "base/thread.h"
 #include "check.h"
 #include "script_provider.h"
-#include "net/http.h"
+#include "llm/retry.h"
 #include "session/memory_repository.h"
 #include "session/metadata.h"
 
@@ -3323,6 +3323,9 @@ static void TestHarnessWatchDrainsAfterClose() {
   // Request the close before reading anything, so every event of the run is
   // still sitting in the ring buffer.
   CHECK(SessionResult_IsOk(AgentHarness_WatchRequestClose(&watch)));
+  CHECK_ALL(watch.Closed, !watch.Registered, watch.Owner == nullptr,
+            harness.WatcherCount == 0);
+  CHECK(SessionResult_IsOk(AgentHarness_WatchRequestClose(&watch)));
 
   u32 drained = 0;
   bool sawAgentEnd = false;
@@ -3337,6 +3340,9 @@ static void TestHarnessWatchDrainsAfterClose() {
   CHECK_ALL(drained > 0, sawAgentEnd, next.Status == SessionStatus::InvalidState);
 
   CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
+  CHECK(!watch.Initialized);
+  CHECK(AgentHarness_WatchClose(&watch).Status == SessionStatus::InvalidArgument);
+  CHECK(AgentHarness_WatchClose(nullptr).Status == SessionStatus::InvalidArgument);
   CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
   repository.Close(repository.Ctx);
   ArenaRelease(&arena);

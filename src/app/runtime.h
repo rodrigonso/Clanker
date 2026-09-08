@@ -121,8 +121,6 @@ void TuiCommandError(void* user, StrView message);
 void EmitCommandNotice(const AppCommandUx* ux, StrView message);
 void EmitCommandError(const AppCommandUx* ux, StrView message);
 
-StrView TrimAscii(StrView value);
-
 enum class RuntimeInputResult : u8 { Confirmed, Back, Cancelled };
 enum class RuntimeChoiceStatus : u8 { Selected, Back, Cancelled, Failed };
 

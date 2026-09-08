@@ -147,15 +147,6 @@ void TestTrustChoiceMenu() {
   ArenaRelease(&arena);
 }
 
-void TestTrimAscii() {
-  CHECK(StrView_EqCStr(TrimAscii(SVL("  hello \t\r\n")), "hello"));
-  CHECK(StrView_EqCStr(TrimAscii(SVL("hello")), "hello"));
-  CHECK(TrimAscii(SVL("   ")).Length == 0);
-  CHECK(TrimAscii(StrView{}).Length == 0);
-  // Interior whitespace is preserved; only the edges are trimmed.
-  CHECK(StrView_EqCStr(TrimAscii(SVL("  a b  ")), "a b"));
-}
-
 void TestCommandResultMapping() {
   // A failing SessionResult reports its own message and never the caller's
   // success text -- that mix-up would announce success on a failed command.
@@ -598,6 +589,5 @@ void TestApp() {
   TestRuntimeAskUserNonInteractive();
   TestConfigPaths();
   TestTrustChoiceMenu();
-  TestTrimAscii();
   TestCommandResultMapping();
 }

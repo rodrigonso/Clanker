@@ -273,6 +273,114 @@ void TestDiscovery(Arena* scratch, StrView root) {
   CHECK_ALL(absent.Skills.Count == 0, absent.Diagnostics.Count == 1);
 }
 
+void TestFileLoading(Arena* a, StrView root) {
+  StrView dir = Fs_Join(a, root, SVL("files"));
+  CHECK(Fs_MkdirP(a, dir));
+  StrView first = Fs_Join(a, dir, SVL("first.txt"));
+  StrView invalid = Fs_Join(a, dir, SVL("invalid.md"));
+  StrView large = Fs_Join(a, dir, SVL("large.md"));
+  StrView conflict = Fs_Join(a, dir, SVL("conflict.md"));
+  StrView limit = Fs_Join(a, dir, SVL("limit.md"));
+  StrView missing = Fs_Join(a, dir, SVL("missing.md"));
+  CHECK(ConfigFile_WriteAtomic(
+      a, first, SVL("---\nname: file-first\ndescription: First file\n---\nBody")));
+  CHECK(ConfigFile_WriteAtomic(a, invalid, SVL("Missing description")));
+  CHECK(ConfigFile_WriteAtomic(
+      a, conflict,
+      SVL("---\nname: file-first\ndescription: Losing file\n---\nBody")));
+
+  const u32 maxBytes = 1u << 20;
+  char* content = ArenaPushArray(a, char, maxBytes + 1);
+  memset(content, 'x', maxBytes + 1);
+  StrView header = SVL("---\nname: file-limit\ndescription: Limit file\n---\n");
+  memcpy(content, header.Data, header.Length);
+  CHECK(ConfigFile_WriteAtomic(a, large, StrView{content, maxBytes + 1}));
+  CHECK(ConfigFile_WriteAtomic(a, limit, StrView{content, maxBytes}));
+
+#if !defined(_WIN32)
+  StrView alias = Fs_Join(a, dir, SVL("alias.md"));
+  CHECK(symlink("first.txt", StrView_DupCStr(a, alias)) == 0);
+#endif
+  StrView paths[] = {
+      first, Fs_Join(a, dir, SVL("./first.txt")),
+      invalid, Fs_Join(a, dir, SVL("./invalid.md")),
+      large, Fs_Join(a, dir, SVL("./large.md")),
+      conflict, conflict, limit, missing, missing,
+#if !defined(_WIN32)
+      alias,
+#endif
+  };
+  SkillLoadOptions options = {};
+  options.NoSkills = true;
+  options.ExplicitPaths = paths;
+  options.ExplicitPathCount = (u32)(sizeof(paths) / sizeof(paths[0]));
+  SkillSet set = {};
+  Skills_Load(a, &options, &set);
+  CHECK_ALL(set.Skills.Count == 2, set.Diagnostics.Count == 5);
+  const Skill* firstSkill = Skills_Find(&set, SVL("file-first"));
+  const Skill* limitSkill = Skills_Find(&set, SVL("file-limit"));
+  CHECK_ALL(firstSkill != nullptr, limitSkill != nullptr);
+  if (firstSkill && limitSkill) {
+    CHECK_ALL(firstSkill == &set.Skills.Data[0],
+              limitSkill == &set.Skills.Data[1],
+              StrView_EqCStr(firstSkill->Description, "First file"),
+              StrView_EqCStr(limitSkill->Description, "Limit file"),
+              Fs_PathEquals(firstSkill->FilePath, Fs_RealPath(a, first)),
+              Fs_PathEquals(firstSkill->BaseDir, Fs_RealPath(a, dir)));
+    if (set.Diagnostics.Count == 5) {
+      StrBuf collision = StrBuf_Make(a, 128 + firstSkill->FilePath.Length);
+      StrBuf_AppendCStr(&collision,
+                        "skill name 'file-first' is already defined by ");
+      StrBuf_Append(&collision, firstSkill->FilePath);
+      CHECK_ALL(
+          Fs_PathEquals(set.Diagnostics.Data[0].Path, Fs_RealPath(a, invalid)),
+          StrView_EqCStr(set.Diagnostics.Data[0].Message,
+                         "skill is missing a frontmatter description"),
+          Fs_PathEquals(set.Diagnostics.Data[1].Path, Fs_RealPath(a, large)),
+          StrView_EqCStr(set.Diagnostics.Data[1].Message,
+                         "skill file exceeds the 1 MiB limit"),
+          Fs_PathEquals(set.Diagnostics.Data[2].Path, Fs_RealPath(a, conflict)),
+          StrView_Eq(set.Diagnostics.Data[2].Message, StrBuf_View(&collision)));
+      for (u32 i = 3; i < 5; i++)
+        CHECK_ALL(StrView_Eq(set.Diagnostics.Data[i].Path, missing),
+                  StrView_EqCStr(set.Diagnostics.Data[i].Message,
+                                 "skill path does not exist"));
+    }
+  }
+  const StrView files[] = {first, invalid, large, conflict, limit};
+  for (u32 i = 0; i < sizeof(files) / sizeof(files[0]); i++)
+    remove(StrView_DupCStr(a, files[i]));
+#if !defined(_WIN32)
+  remove(StrView_DupCStr(a, alias));
+#endif
+  RemoveDir(StrView_DupCStr(a, dir));
+}
+
+#if !defined(_WIN32)
+void TestSymlinkCycle(Arena* a, StrView root) {
+  StrView dir = Fs_Join(a, root, SVL("links"));
+  StrView real = Fs_Join(a, dir, SVL("real"));
+  CHECK(WriteSkill(a, real, "---\nname: linked\ndescription: Linked skill\n---\n"));
+  StrView alias = Fs_Join(a, dir, SVL("alias"));
+  StrView loop = Fs_Join(a, dir, SVL("loop"));
+  CHECK(symlink("real", StrView_DupCStr(a, alias)) == 0);
+  CHECK(symlink(".", StrView_DupCStr(a, loop)) == 0);
+  SkillLoadOptions options = {};
+  options.NoSkills = true;
+  options.ExplicitPaths = &dir;
+  options.ExplicitPathCount = 1;
+  SkillSet set = {};
+  Skills_Load(a, &options, &set);
+  CHECK_ALL(set.Skills.Count == 1, set.Diagnostics.Count == 0,
+            Skills_Find(&set, SVL("linked")) != nullptr);
+  remove(StrView_DupCStr(a, alias));
+  remove(StrView_DupCStr(a, loop));
+  remove(StrView_DupCStr(a, Fs_Join(a, real, SVL("SKILL.md"))));
+  RemoveDir(StrView_DupCStr(a, real));
+  RemoveDir(StrView_DupCStr(a, dir));
+}
+#endif
+
 void Cleanup(const char* root) {
   const char* files[] = {
       "clanker_skills_test/agent/skills/outer/SKILL.md",
@@ -317,6 +425,10 @@ void TestSkills() {
   TestPromptBlock(&scratch);
   TestInvocation(&scratch);
   TestDiscovery(&scratch, root);
+  TestFileLoading(&scratch, root);
+#if !defined(_WIN32)
+  TestSymlinkCycle(&scratch, root);
+#endif
 
   Cleanup("clanker_skills_test");
   ArenaRelease(&scratch);

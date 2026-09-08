@@ -801,26 +801,8 @@ SessionResult AgentHarness_WatchRequestClose(AgentHarnessWatch* watch) {
 }
 
 SessionResult AgentHarness_WatchClose(AgentHarnessWatch* watch) {
-  if (!watch || !watch->Initialized) return SessionResult_Invalid("watch close arguments are invalid");
-  AgentHarness* owner = watch->Owner;
-  if (owner) {
-    ScopedLock ownerLock(&owner->WatcherLock);
-    for (u32 i = 0; i < owner->WatcherCount; i++) {
-      if (owner->Watchers[i] != watch) continue;
-      for (u32 j = i + 1; j < owner->WatcherCount; j++) owner->Watchers[j - 1] = owner->Watchers[j];
-      owner->WatcherCount--;
-      break;
-    }
-    ScopedLock watchLock(&watch->Lock);
-    watch->Owner = nullptr;
-    watch->Registered = false;
-    watch->Closed = true;
-    Cond_Broadcast(&watch->Changed);
-  } else {
-    ScopedLock watchLock(&watch->Lock);
-    watch->Closed = true;
-    Cond_Broadcast(&watch->Changed);
-  }
+  SessionResult closed = AgentHarness_WatchRequestClose(watch);
+  if (!SessionResult_IsOk(closed)) return closed;
   {
     ScopedLock watchLock(&watch->Lock);
     if (watch->Waiting)
