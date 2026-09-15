@@ -1,6 +1,6 @@
 # Terminal UI Component Library
 
-`clanker_ui` is an internal, reusable C++17 component library layered over the
+`clanker_ui` is an internal, reusable C++23 component library layered over the
 cell renderer in `clanker_term`. It has no agent, JSON, conversation, provider,
 or application dependencies. The Clanker-specific full-screen application lives
 in `clanker_tui`.

@@ -1,71 +1,53 @@
-"""Process-tree inspection: PSS accounting and ownership.
+"""macOS process-tree inspection: RSS accounting and ownership.
 
-PSS (Proportional Set Size) divides each shared page by the number of
-processes mapping it, so summing it across a tree gives a total that does not
-double-count a shared library. Linux only -- there is no Windows analogue.
+RSS includes shared pages in every process, so a tree total can double-count
+shared libraries. It must not be compared directly with proportional memory
+figures from other operating systems.
 """
 
 from __future__ import annotations
 
+import ctypes
 import os
 import signal
 import socket
+import subprocess
+import sys
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:  # importing Tool at runtime would be circular: tools.py
-    from .tools import Tool  # needs terminate_group and wait_for_socket.
+if TYPE_CHECKING:
+    from .tools import Tool
+
+_proc_pidpath = None
+if sys.platform == "darwin":
+    _libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    _proc_pidpath = _libproc.proc_pidpath
+    _proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    _proc_pidpath.restype = ctypes.c_int
+
+ProcessTable = dict[int, tuple[int, int, int]]
 
 
-def pss_kb(pid: int) -> int:
-    try:
-        with open(f"/proc/{pid}/smaps_rollup") as f:
-            for line in f:
-                if line.startswith("Pss:"):
-                    return int(line.split()[1])
-    except OSError:
-        pass
-    return 0
-
-
-def pss_breakdown(pid: int) -> dict[str, int]:
-    """Per-mapping PSS in KB, keyed by backing file. Used to explain a total
-    rather than just report it -- e.g. how much of Clanker is really OpenSSL."""
-    out: dict[str, int] = {}
-    current = ""
-    try:
-        with open(f"/proc/{pid}/smaps") as f:
-            for line in f:
-                if not line.startswith(" ") and "-" in line.split()[0]:
-                    parts = line.rstrip().split()
-                    current = parts[-1] if len(parts) > 5 else "[anon]"
-                elif line.startswith("Pss:"):
-                    out[current] = out.get(current, 0) + int(line.split()[1])
-    except OSError:
-        pass
-    return out
-
-
-def proc_table() -> dict[int, tuple[int, int]]:
-    """pid -> (ppid, pgid) for every readable process."""
-    out: dict[int, tuple[int, int]] = {}
-    for name in os.listdir("/proc"):
-        if not name.isdigit():
-            continue
+def proc_table() -> ProcessTable:
+    """pid -> (ppid, pgid, RSS in KiB), sampled together with macOS ps."""
+    result = subprocess.run(
+        ["/bin/ps", "-axo", "pid=,ppid=,pgid=,rss="],
+        capture_output=True, text=True, check=True,
+    )
+    out: ProcessTable = {}
+    for line in result.stdout.splitlines():
         try:
-            stat = Path(f"/proc/{name}/stat").read_text()
-            rest = stat[stat.rfind(")") + 2:].split()
-            out[int(name)] = (int(rest[1]), int(rest[2]))
-        except (OSError, ValueError, IndexError):
+            pid, ppid, pgid, rss = map(int, line.split())
+        except ValueError:
             continue
+        out[pid] = (ppid, pgid, rss)
     return out
 
 
-def descendants(roots: list[int]) -> set[int]:
-    table = proc_table()
+def descendants(roots: list[int], table: ProcessTable) -> set[int]:
     children: dict[int, list[int]] = {}
-    for pid, (ppid, _) in table.items():
+    for pid, (ppid, _, _) in table.items():
         children.setdefault(ppid, []).append(pid)
     seen: set[int] = set()
     stack = list(roots)
@@ -78,61 +60,47 @@ def descendants(roots: list[int]) -> set[int]:
     return seen
 
 
-def group_members(pgids: list[int]) -> set[int]:
+def group_members(pgids: list[int], table: ProcessTable) -> set[int]:
     wanted = set(pgids)
-    return {pid for pid, (_, pgid) in proc_table().items() if pgid in wanted}
+    return {pid for pid, (_, pgid, _) in table.items() if pgid in wanted}
 
 
-def tree_pss_mb(roots: list[int], pgids: list[int]) -> tuple[float, int]:
-    """Total PSS over the process tree and process group. Both are needed: a
-    tool may reparent a helper away from its launcher, or spawn a daemon that
-    is not a child at all."""
-    pids = descendants(roots) | group_members(pgids)
+def tree_rss_mb(roots: list[int], pgids: list[int]) -> tuple[float, int]:
+    """Include descendants and helpers reparented within the process group."""
+    table = proc_table()
+    pids = descendants(roots, table) | group_members(pgids, table)
     total = 0
     counted = 0
-    for pid in sorted(pids):
-        kb = pss_kb(pid)
-        if kb:
-            total += kb
+    for pid in pids:
+        row = table.get(pid)
+        if row and row[2] > 0:
+            total += row[2]
             counted += 1
     return round(total / 1024.0, 1), counted
 
 
 def read_exe(pid: int) -> str:
-    try:
-        return os.readlink(f"/proc/{pid}/exe")
-    except OSError:
+    if _proc_pidpath is None:
         return ""
+    buffer = ctypes.create_string_buffer(4096)
+    if _proc_pidpath(pid, buffer, len(buffer)) <= 0:
+        return ""
+    return os.path.realpath(os.fsdecode(buffer.value))
 
 
 def read_cmdline(pid: int) -> str:
     try:
-        with open(f"/proc/{pid}/cmdline", "rb") as f:
-            return f.read().decode("utf-8", "replace").replace("\0", " ").strip()
+        result = subprocess.run(
+            ["/bin/ps", "-ww", "-p", str(pid), "-o", "command="],
+            capture_output=True, text=True, check=False,
+        )
     except OSError:
         return ""
-
-
-def read_environ(pid: int) -> set[str]:
-    """Environment of a running process, as `K=V` entries.
-
-    Two tools can be the same binary and differ only in how they were
-    configured, which neither the exe path nor the cmdline reveals.
-    """
-    try:
-        with open(f"/proc/{pid}/environ", "rb") as f:
-            raw = f.read().decode("utf-8", "replace")
-    except OSError:
-        return set()
-    return {entry for entry in raw.split("\0") if entry}
+    return result.stdout.strip() if result.returncode == 0 else ""
 
 
 def wait_for_socket(path: str, timeout_s: float) -> bool:
-    """Wait until a Unix socket is accepting connections.
-
-    Existence is not readiness: the server binds the path before it listens, so
-    a launcher that only waits for the file races the first client.
-    """
+    """Wait for a Unix socket to accept connections, not merely exist."""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         if os.path.exists(path):
@@ -149,20 +117,17 @@ def wait_for_socket(path: str, timeout_s: float) -> bool:
 
 
 def scan(tools: list["Tool"], exclude_pid: int | None = None) -> dict[str, tuple[float, int]]:
-    """Attribute every running process to a tool. Returns name -> (MB, count).
+    """Attribute matching executable images to tools; return name -> (MiB, count).
 
-    Matching is on the resolved binary rather than a name substring, so the
-    scanner never counts itself or a shell that merely mentions the tool.
+    Live views use one entry per binary. Configuration variants are measured
+    separately by their explicitly owned process trees in measure.
     """
     me = exclude_pid if exclude_pid is not None else os.getpid()
-    totals = {t.name: 0.0 for t in tools}
+    totals = {t.name: 0 for t in tools}
     counts = {t.name: 0 for t in tools}
     reals = {t.name: t.real_binary for t in tools}
 
-    for name in os.listdir("/proc"):
-        if not name.isdigit():
-            continue
-        pid = int(name)
+    for pid, (_, _, rss) in proc_table().items():
         if pid == me:
             continue
         exe = read_exe(pid)
@@ -171,10 +136,10 @@ def scan(tools: list["Tool"], exclude_pid: int | None = None) -> dict[str, tuple
         cmd = read_cmdline(pid)
         for tool in tools:
             if tool.matches(pid, exe, cmd, reals[tool.name]):
-                totals[tool.name] += pss_kb(pid) / 1024.0
+                totals[tool.name] += rss
                 counts[tool.name] += 1
                 break
-    return {n: (round(totals[n], 1), counts[n]) for n in totals}
+    return {n: (round(totals[n] / 1024.0, 1), counts[n]) for n in totals}
 
 
 def terminate_group(pgid: int) -> None:

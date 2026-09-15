@@ -1,7 +1,9 @@
-"""Offline checks for the safe qualitybench runner and job auditor."""
+"""Offline checks for the external oracle runner and historical job auditor."""
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -12,46 +14,49 @@ from run_benchmark import build_command, main as run_main
 
 
 class RunnerTests(unittest.TestCase):
-    def test_canary_uses_request_retries_and_disables_pier_retries(self) -> None:
-        command = build_command(
-            "canary",
-            Path("/tasks"),
-            "modal",
-            4,
-            Path("/clanker"),
-            pier="pier",
-        )
-        self.assertIn("max_retries=8", command)
-        self.assertIn("retry_max_delay_ms=60000", command)
-        self.assertEqual(command[command.index("-r") + 1], "0")
-        self.assertEqual(command[command.index("-n") + 1], "4")
-        self.assertEqual(command[command.index("--n-tasks") + 1], "10")
-        self.assertEqual(command[command.index("--sample-seed") + 1], "0")
+    def test_clanker_gates_are_removed(self) -> None:
+        for gate in ("canary", "full"):
+            with (self.subTest(gate=gate), contextlib.redirect_stderr(io.StringIO()),
+                  self.assertRaises(SystemExit) as raised):
+                run_main([gate, "--dry-run"])
+            self.assertEqual(raised.exception.code, 2)
 
-    def test_full_sweep_requires_cost_acknowledgement(self) -> None:
-        with self.assertRaises(SystemExit) as raised:
-            run_main(["full", "--dry-run", "--clanker-binary", "/clanker"])
-        self.assertEqual(raised.exception.code, 2)
+    def test_clanker_options_are_removed(self) -> None:
+        options = {
+            "--clanker-binary": "clanker",
+            "--model": "example",
+            "--effort": "high",
+            "--max-retries": "1",
+            "--retry-max-delay-ms": "1000",
+            "--confirm-full-sweep": None,
+        }
+        for option, value in options.items():
+            argv = ["oracle", "--dry-run", option]
+            if value is not None:
+                argv.append(value)
+            with (self.subTest(option=option), contextlib.redirect_stderr(io.StringIO()),
+                  self.assertRaises(SystemExit) as raised):
+                run_main(argv)
+            self.assertEqual(raised.exception.code, 2)
 
-    def test_invalid_retry_delay_is_rejected_before_running(self) -> None:
-        with self.assertRaises(SystemExit) as raised:
-            run_main(
-                [
-                    "canary",
-                    "--dry-run",
-                    "--clanker-binary",
-                    "/clanker",
-                    "--retry-max-delay-ms",
-                    "0",
-                ]
-            )
-        self.assertEqual(raised.exception.code, 2)
+    def test_invalid_concurrency_is_rejected_before_running(self) -> None:
+        for value in ("0", "-1"):
+            with (self.subTest(value=value), contextlib.redirect_stderr(io.StringIO()),
+                  self.assertRaises(SystemExit) as raised):
+                run_main(["oracle", "--dry-run", "--concurrency", value])
+            self.assertEqual(raised.exception.code, 2)
 
     def test_oracle_has_no_clanker_agent(self) -> None:
-        command = build_command("oracle", Path("/tasks"), "modal", 8)
+        command = build_command(Path("tasks"), "modal", 8)
         self.assertEqual(command[command.index("--agent") + 1], "oracle")
         self.assertNotIn("--agent-import-path", command)
         self.assertEqual(command[command.index("-r") + 1], "0")
+        self.assertEqual(command[command.index("-n") + 1], "8")
+
+    def test_oracle_dry_run_needs_no_binary_or_harness(self) -> None:
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(run_main(["oracle", "--dry-run"]), 0)
+        self.assertIn("--agent oracle", output.getvalue())
 
 
 class AuditTests(unittest.TestCase):

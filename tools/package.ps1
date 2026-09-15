@@ -17,20 +17,6 @@ function Require-File([string]$Path) {
         throw "Expected a nonempty absolute file path: $Path"
     }
 }
-function Assert-DistributionOptions {
-    if ([bool]$RgExecutable -ne [bool]$RgLicense) { throw '-RgExecutable and -RgLicense must be supplied together.' }
-    if ($RgExecutable) {
-        Require-File $RgExecutable
-        $names = @{}
-        foreach ($path in $RgLicense) {
-            Require-File $path
-            $name = [IO.Path]::GetFileName($path)
-            if ($names.ContainsKey($name)) { throw "Duplicate ripgrep notice filename: $name" }
-            $names[$name] = $true
-        }
-    }
-}
-
 function Copy-Notice([string]$Prefix, [string]$Dependency, [string]$Path) {
     Require-File $Path
     $destination = Join-Path $Prefix "share\clanker\licenses\$Dependency"
@@ -43,58 +29,49 @@ function Install-Runtime([string]$Prefix) {
     New-Item -ItemType Directory -Force $bin | Out-Null
     Copy-Item -LiteralPath (Join-Path $build 'clanker.exe') -Destination $bin -Force
     Copy-Notice $Prefix 'curl' (Join-Path $curlSource 'COPYING')
-    $rgNotice = 'ripgrep is not bundled. Supply rg on PATH or use the existing runtime download policy. CLANKER_OFFLINE=1 disables that download.'
-    if ($RgExecutable) {
-        Copy-Item -LiteralPath $RgExecutable -Destination (Join-Path $bin 'rg.exe') -Force
-        foreach ($path in $RgLicense) { Copy-Notice $Prefix 'ripgrep' $path }
-        $rgNotice = 'ripgrep is bundled beside clanker. CLANKER_RG_PATH overrides it. Its matching upstream notices are in licenses/ripgrep.'
+    Copy-Notice $Prefix 'pcre2' (Join-Path $pcre2Source 'LICENCE.md')
+    Copy-Notice $Prefix 'clanker' (Join-Path $root 'LICENSE')
+    foreach ($dependency in @('pi', 'jcode')) {
+        Copy-Notice $Prefix $dependency (Join-Path $root "licenses\$dependency\LICENSE")
     }
-    $license = Join-Path $root 'LICENSE'
-    $licenseNotice = 'PUBLIC DISTRIBUTION BLOCKER: no project LICENSE exists. This archive is for local use until a maintainer-approved license is provided. No license grant or attribution has been invented.'
-    if (Test-Path -LiteralPath $license -PathType Leaf) {
-        Copy-Notice $Prefix 'clanker' $license
-        $licenseNotice = 'The project license is in licenses/clanker/LICENSE.'
-    } else { Write-Warning $licenseNotice }
+    $notices = Join-Path $root 'THIRD_PARTY_NOTICES.md'
+    Require-File $notices
+    Copy-Item -LiteralPath $notices -Destination (Join-Path $Prefix 'share\clanker') -Force
 
     $version = [IO.File]::ReadAllText((Join-Path $root 'VERSION')).Trim()
     Write-Changed (Join-Path $Prefix 'share\clanker\DISTRIBUTION.txt') @"
 Clanker $version - Windows x86_64
 
-Extract the complete archive and add its bin directory to PATH. Keep the
-directory tree intact when relocating. The core SDK is installed separately.
+Extract the archive and run bin\clanker.exe directly; adding bin to PATH is
+optional. License notices accompany the executable. The core SDK is separate.
 
-$rgNotice
+The grep tool searches in-process and requires no external search executable.
+Normal use does not download or install helper tools, libraries, or runtimes.
 
 libcurl $curlVersion is statically linked; its license is in licenses/curl.
+PCRE2 $pcre2Version (8-bit) is statically linked; its license is in licenses/pcre2.
+PCRE2 source archive SHA256: $pcre2Hash
 HTTPS uses native Schannel and the Windows certificate store. Windows 10 or
-later is required, including the OS Universal CRT. Release VC runtime DLLs
-come only from Visual Studio's redistributable directory and remain subject
-to Microsoft's redistribution terms. Debug runtimes are never packaged.
+later is required. Clanker statically links the release CRT and needs no
+VC runtime DLLs. Debug runtimes are never packaged.
 Existing ANSI filesystem/process operations require ASCII workspace paths.
 No system trust store, user configuration, or session data is copied.
 
-The SHA256 file detects corruption, not publisher identity. These scripts
-do not sign or publish archives. The packager must supply a target-matching
-ripgrep binary with its complete notices, including optional dependencies.
+This is an unsigned preview. Windows may show a publisher/security warning.
+The SHA256 file detects corruption, not publisher identity.
+Local packaging does not sign or publish archives.
 
-$licenseNotice
+The project license is in licenses/clanker/LICENSE.
+Source attribution and dependency scope are in THIRD_PARTY_NOTICES.md.
 "@
     if ($Config -ne 'Debug') { Audit-Runtime $bin }
 }
 
 function Audit-Runtime([string]$Bin) {
     $dumpbin = Join-Path $toolBin 'dumpbin.exe'
-    $redists = @(Get-ChildItem -LiteralPath (Join-Path $vs 'VC\Redist\MSVC') -Directory |
-        Sort-Object Name -Descending |
-        ForEach-Object {
-            $x64 = Join-Path $_.FullName 'x64'
-            if (Test-Path -LiteralPath $x64) {
-                Get-ChildItem -LiteralPath $x64 -Directory -Filter 'Microsoft.VC*.CRT'
-            }
-        })
+    $clanker = Join-Path $Bin 'clanker.exe'
     $queue = [Collections.Generic.Queue[string]]::new()
-    $queue.Enqueue((Join-Path $Bin 'clanker.exe'))
-    if ($RgExecutable) { $queue.Enqueue((Join-Path $Bin 'rg.exe')) }
+    $queue.Enqueue($clanker)
     $seen = @{}
     while ($queue.Count) {
         $binary = $queue.Dequeue()
@@ -109,16 +86,14 @@ function Audit-Runtime([string]$Bin) {
         foreach ($line in $imports) {
             if ($line -notmatch '^\s+([A-Za-z0-9_.+-]+\.dll)\s*$') { continue }
             $name = $Matches[1]
+            if ($binary -eq $clanker -and
+                $name -match '^(msvcp|vcruntime|concrt|vcomp|msvcr|ucrtbase|api-ms-win-crt-)') {
+                throw "Clanker must use the static CRT (/MT): unexpected dependency $name"
+            }
             $local = Join-Path $Bin $name
             if (Test-Path -LiteralPath $local) { $queue.Enqueue($local); continue }
             if ($name -match '^(api-ms-|ext-ms-)') { continue }
-            if ($name -match '^(msvcp|vcruntime|concrt|vcomp|msvcr)[0-9]') {
-                $runtime = @($redists | ForEach-Object { Join-Path $_.FullName $name } |
-                    Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1)
-                if (-not $runtime.Count) { throw "No redistributable release runtime found for $name" }
-                Copy-Item -LiteralPath $runtime[0] -Destination $local -Force
-                $queue.Enqueue($local)
-            } elseif (-not (Test-Path -LiteralPath (Join-Path $env:SystemRoot "System32\$name") -PathType Leaf)) {
+            if (-not (Test-Path -LiteralPath (Join-Path $env:SystemRoot "System32\$name") -PathType Leaf)) {
                 throw "A non-system dependency would escape the archive: $name (from $binary)"
             }
         }

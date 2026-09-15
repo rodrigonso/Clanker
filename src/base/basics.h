@@ -1,4 +1,8 @@
 #pragma once
+#if !defined(_WIN32) && !defined(__APPLE__)
+#error "Clanker supports only Windows and macOS."
+#endif
+
 #include <stddef.h>
 #include <stdint.h>
 #include <time.h>

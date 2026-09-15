@@ -1,0 +1,108 @@
+name: Native CI and unsigned preview drafts
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  native:
+    name: Native ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Official labels: https://github.com/actions/runner-images#available-images
+          - platform: Windows-x86_64
+            runner: windows-2025-vs2026
+          - platform: Darwin-arm64
+            runner: macos-15
+          - platform: Darwin-x86_64
+            runner: macos-15-intel
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '15.0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: source
+      - name: Validate version and tag
+        working-directory: source
+        run: node tools/ci/package.cjs version
+      - name: Test CI package and draft policy
+        working-directory: source
+        run: node --test tools/ci/ci.test.cjs
+      - name: Build and test Windows core with examples
+        if: runner.os == 'Windows'
+        working-directory: source
+        run: .\build.bat -BuildDir out\ci-core -CoreOnly -Examples -Test
+      - name: Build, test and package Windows CLI
+        if: runner.os == 'Windows'
+        working-directory: source
+        run: .\build.bat -BuildDir out\ci-cli -Test -Package
+      - name: Build and test macOS core with examples
+        if: runner.os == 'macOS'
+        working-directory: source
+        run: bash tools/build.sh --build-dir out/ci-core --core-only --examples --test
+      - name: Build, test and package macOS CLI
+        if: runner.os == 'macOS'
+        working-directory: source
+        run: bash tools/build.sh --build-dir out/ci-cli --test --package
+      # The workspace root is outside the checkout at source/. Smoke files stay
+      # in the workspace, not a runner/user temporary directory or home directory.
+      - name: Smoke fresh Windows archive outside source
+        if: runner.os == 'Windows'
+        run: node .\source\tools\ci\package.cjs smoke source source\out\ci-cli\packages Windows-x86_64
+      - name: Smoke fresh macOS archive outside source
+        if: runner.os == 'macOS'
+        env:
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
+        run: node source/tools/ci/package.cjs smoke source source/out/ci-cli/packages "$EXPECTED_PLATFORM"
+      - name: Retain only verified runtime archive and checksum
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: clanker-${{ matrix.platform }}
+          path: |
+            source/out/ci-cli/packages/*.zip
+            source/out/ci-cli/packages/*.tar.gz
+            source/out/ci-cli/packages/*.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  draft:
+    name: Prepare unsigned draft (never publish)
+    needs: native
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: source
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: clanker-*
+          merge-multiple: true
+          path: out/release-assets
+      - name: Validate assets and create or update draft only
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const path = require('node:path');
+            const prepareDraft = require(path.join(process.env.GITHUB_WORKSPACE, 'source', 'tools', 'ci', 'draft.cjs'));
+            await prepareDraft({ github, context, core });

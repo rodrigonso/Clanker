@@ -3,6 +3,7 @@
 #include "base/config_file.h"
 #include "base/file_io.h"
 #include "base/thread.h"
+#include "base/win32_utf8.h"
 #include "check.h"
 #include "tools/fs.h"
 
@@ -56,9 +57,17 @@ void TestFileIo() {
   CHECK(File_WriteAll(&arena, StrBuf_View(&root), SVL("x")) != FileIoResult::Success);
   CHECK(ConfigFile_ReadAll(&arena, StrBuf_View(&root), &bytes) ==
         ConfigFileReadResult::Failure);
-#if defined(__linux__)
-  CHECK(File_WriteAll(&arena, SVL("/dev/full"), SVL("buffered write")) ==
-        FileIoResult::IoError);
+  StrView unicodePath = Fs_Join(&arena, StrBuf_View(&root),
+                                SVL("\xe4\xb8\xad\xf0\x9f\x98\x80.txt"));
+  CHECK(File_WriteAll(&arena, unicodePath, SVL("unicode path")) == FileIoResult::Success);
+  CHECK(File_ReadAll(&arena, unicodePath, &bytes) == FileIoResult::Success);
+  CHECK(StrView_EqCStr(bytes, "unicode path"));
+#if defined(_WIN32)
+  wchar_t native[4096];
+  CHECK(Win32_Path(unicodePath, native, 4096));
+  CHECK(_wremove(native) == 0);
+#else
+  CHECK(remove(StrView_DupCStr(&arena, unicodePath)) == 0);
 #endif
 
   CHECK(remove(StrView_DupCStr(&arena, path)) == 0);

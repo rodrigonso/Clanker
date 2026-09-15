@@ -16,13 +16,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from .proc import read_environ, terminate_group, wait_for_socket
+from .proc import terminate_group, wait_for_socket
 
 HOME = Path.home()
+REPO = Path(__file__).resolve().parents[2]
 
 
 def _env_path(var: str, default: str) -> str:
-    return os.environ.get(var, str(HOME / default))
+    return os.path.expanduser(os.environ.get(var, default))
+
+
+def _binary(var: str, command: str, fallback: Path) -> str:
+    return _env_path(var, shutil.which(command) or str(fallback))
 
 
 @dataclass
@@ -45,7 +50,7 @@ class Launch:
     """What a setup hook contributes beyond the session processes.
 
     A tool that serves its sessions from a separate daemon has to declare that
-    daemon: it is charged for in the PSS total and torn down with the run.
+    daemon: it is charged for in the RSS total and torn down with the run.
     """
     argv: list[str]
     extra_pids: list[int] = field(default_factory=list)
@@ -100,8 +105,8 @@ def _node_script_match(script_name: str):
 
 
 def _jcode_image(resolved: str) -> str:
-    """`jcode` on disk is a small sh launcher that sets LD_LIBRARY_PATH and
-    execs the platform image beside it, so the launcher's path is neither what
+    """`jcode` can be a small sh launcher that execs a platform image beside
+    it, so the launcher's path is neither what
     a running process reports as its exe nor what the install actually weighs.
     """
     directory = os.path.dirname(resolved)
@@ -113,27 +118,6 @@ def _jcode_image(resolved: str) -> str:
         if name.startswith("jcode-") and name.endswith(".bin"):
             return os.path.join(directory, name)
     return resolved
-
-
-def _jcode_match(memory_enabled: bool):
-    """Both jcode variants are the same image -- and so is the daemon serving
-    them -- so the resolved path cannot tell them apart. The environment can.
-
-    An unlabelled jcode, such as one the user is really running, is a
-    default-configuration jcode, which is what the memory-on variant is.
-    """
-    want = f"JCODE_MEMORY_ENABLED={'1' if memory_enabled else '0'}"
-    other = f"JCODE_MEMORY_ENABLED={'0' if memory_enabled else '1'}"
-
-    def match(pid: int, exe: str, cmd: str, real: str) -> bool:
-        if exe != real:
-            return False
-        environ = read_environ(pid)
-        if want in environ:
-            return True
-        return memory_enabled and other not in environ
-
-    return match
 
 
 def _prepare_claude(home: str, cwd: Path) -> None:
@@ -227,8 +211,7 @@ def _setup_jcode(memory_enabled: bool):
             "JCODE_SERVER_OWNER_PID": str(os.getpid()),
             "JCODE_THEME": "dark",
         })
-        # JCODE_MEMORY_ENABLED is not set here: it comes from the entry's static
-        # env, so demo and watch panes carry it too and can be told apart.
+        # JCODE_MEMORY_ENABLED comes from the entry's static environment.
 
         real = HOME / ".jcode"
         for name in _JCODE_AUTH:
@@ -245,7 +228,7 @@ def _setup_jcode(memory_enabled: bool):
         # the environment, is left alone.
         ctx.env.setdefault("ANTHROPIC_API_KEY", "sk-ant-agentbench-placeholder")
 
-        binary = _env_path("JCODE_BIN", ".local/bin/jcode")
+        binary = _binary("JCODE_BIN", "jcode", HOME / ".local/bin/jcode")
         server = subprocess.Popen(
             [binary, *_JCODE_FLAGS, "serve", "--socket", str(socket_path)],
             cwd=str(ctx.cwd), env=ctx.env,
@@ -272,22 +255,18 @@ def _setup_jcode(memory_enabled: bool):
 
 
 def registry() -> dict[str, Tool]:
-    node_bin = _env_path("NODE_BIN", ".local/node/bin")
-    ssl_lib = _env_path("SSL_LIB", ".local/ssl/lib")
-    path = node_bin + os.pathsep + os.environ.get("PATH", "")
+    path = os.environ.get("PATH", "")
+    if os.environ.get("NODE_BIN"):
+        path = os.path.expanduser(os.environ["NODE_BIN"]) + os.pathsep + path
 
-    jcode_bin = _env_path("JCODE_BIN", ".local/bin/jcode")
+    jcode_bin = _binary("JCODE_BIN", "jcode", HOME / ".local/bin/jcode")
 
     return {
         "clanker": Tool(
             name="clanker",
-            binary=_env_path("CLANKER_BIN", "clanker-src/build-linux/clanker"),
+            binary=_binary("CLANKER_BIN", "clanker", REPO / "build/clanker"),
             version_args=["--help"],
-            env={
-                "PATH": path,
-                # Clanker links a locally staged OpenSSL; the loader needs it.
-                "LD_LIBRARY_PATH": ssl_lib + os.pathsep + os.environ.get("LD_LIBRARY_PATH", ""),
-            },
+            env={"PATH": path},
         ),
         "jcode": Tool(
             name="jcode",
@@ -295,7 +274,6 @@ def registry() -> dict[str, Tool]:
             args=_JCODE_FLAGS,
             version_args=["version"],
             env={"PATH": path, "JCODE_NO_TELEMETRY": "1", "JCODE_MEMORY_ENABLED": "1"},
-            matches=_jcode_match(True),
             setup=_setup_jcode(True),
             image=_jcode_image,
             note="client/server: measured with its own daemon, in its default "
@@ -307,30 +285,27 @@ def registry() -> dict[str, Tool]:
             args=_JCODE_FLAGS,
             version_args=["version"],
             env={"PATH": path, "JCODE_NO_TELEMETRY": "1", "JCODE_MEMORY_ENABLED": "0"},
-            matches=_jcode_match(False),
             setup=_setup_jcode(False),
             image=_jcode_image,
             note="same image as jcode, with the local embedding model off",
         ),
         "pi": Tool(
             name="pi",
-            binary=_env_path("PI_BIN", ".local/npm/bin/pi"),
+            binary=_binary("PI_BIN", "pi", HOME / ".local/npm/bin/pi"),
             env={"PATH": path},
             matches=_node_script_match("pi"),
             prepare=_prepare_pi,
         ),
         "claude": Tool(
             name="claude",
-            binary=_env_path("CLAUDE_BIN", ".local/npm/bin/claude"),
+            binary=_binary("CLAUDE_BIN", "claude", HOME / ".local/bin/claude"),
             env={"PATH": path},
             prepare=_prepare_claude,
-            note="native ELF despite the .exe name and npm install",
         ),
         "opencode": Tool(
             name="opencode",
-            binary=_env_path("OPENCODE_BIN", ".local/npm/bin/opencode"),
+            binary=_binary("OPENCODE_BIN", "opencode", HOME / ".local/bin/opencode"),
             env={"PATH": path},
-            note="native ELF despite the .exe name and npm install",
         ),
     }
 

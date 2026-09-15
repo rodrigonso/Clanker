@@ -1,4 +1,4 @@
-"""`watch` -- live PSS readout for whatever is already running."""
+"""`watch` -- live RSS readout for matching agent processes."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def main(args) -> int:
             scale = max(live) if live else 1.0
             base = min((v for v in live if v > 0), default=0.0)
 
-            out = ["\033[H\033[J", "  live memory  (PSS, whole process tree)\n\n"]
+            out = ["\033[H\033[J", "  live memory  (RSS, matching executable images)\n\n"]
             for tool in tools:
                 mb, count = stats[tool.name]
                 if not count:
@@ -38,7 +38,7 @@ def main(args) -> int:
                 bar = int(BAR_WIDTH * mb / scale) if scale else 0
                 rel = f"{mb / base:.0f}x" if base and mb > base else ""
                 out.append(
-                    f"  {colour[tool.name]}{tool.name:<{width}}{RESET} {mb:>7.1f} MB  "
+                    f"  {colour[tool.name]}{tool.name:<{width}}{RESET} {mb:>7.1f} MiB  "
                     f"{colour[tool.name]}{'█' * bar}{RESET}{' ' * (BAR_WIDTH - bar)} "
                     f"{count} proc  peak {peak[tool.name]:.1f}  {rel}\n"
                 )

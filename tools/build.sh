@@ -4,9 +4,9 @@ set -eo pipefail
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 config=Release
-build_dir= target= install_prefix= curl_archive= openssl_prefix= rg_executable=
-core=0 examples=0 run_tests=0 package=0 clean=0 static_openssl=0
-test_args=() openssl_licenses=() rg_licenses=()
+build_dir= target= install_prefix= curl_archive= pcre2_archive=
+core=0 examples=0 run_tests=0 package=0 clean=0
+test_args=()
 fail() { echo "error: $*" >&2; exit 2; }
 while (($#)); do
   case "$1" in
@@ -15,8 +15,7 @@ while (($#)); do
     --test) run_tests=1; shift ;;
     --package) package=1; shift ;;
     --clean) clean=1; shift ;;
-    --static-openssl) static_openssl=1; shift ;;
-    --config|--build-dir|--target|--install-prefix|--curl-archive|--openssl-prefix|--openssl-license|--rg-executable|--rg-license)
+    --config|--build-dir|--target|--install-prefix|--curl-archive|--pcre2-archive)
       (($# >= 2)) && [[ -n "$2" && "$2" != --* ]] || fail "$1 requires a value"
       case "$1" in
         --config) config="$2" ;;
@@ -24,10 +23,7 @@ while (($#)); do
         --target) target="$2" ;;
         --install-prefix) install_prefix="$2" ;;
         --curl-archive) curl_archive="$2" ;;
-        --openssl-prefix) openssl_prefix="$2" ;;
-        --openssl-license) openssl_licenses+=("$2") ;;
-        --rg-executable) rg_executable="$2" ;;
-        --rg-license) rg_licenses+=("$2") ;;
+        --pcre2-archive) pcre2_archive="$2" ;;
       esac
       shift 2 ;;
     --) shift; test_args=("$@"); run_tests=1; break ;;
@@ -36,12 +32,12 @@ while (($#)); do
 usage: bash tools/build.sh [--core-only] [--examples] [--test] [--clean]
        [--config Release|Debug|RelWithDebInfo|MinSizeRel] [--build-dir path]
        [--target clanker|clanker_core|clanker_agent|clanker_tests|clanker_core_example]
-       [--install-prefix path] [--package] [--curl-archive path]
-       [--openssl-prefix path] [--static-openssl] [--openssl-license absolute-file]...
-       [--rg-executable absolute-file --rg-license absolute-file]... [-- suite...]
+       [--install-prefix path] [--package] [--curl-archive path] [--pcre2-archive path]
+       [-- suite...]
 
-Requires CMake 3.24+, a C/C++17 toolchain and a CMake build tool (make or Ninja).
-CLI builds need OpenSSL development files on Linux; macOS uses SecureTransport.
+Requires macOS, CMake 3.24+, a C/C++23-capable toolchain and Make or Ninja.
+CLI builds use native SecureTransport. On Windows, use build.bat instead.
+Core-only builds never fetch networking or regex dependencies.
 CC, CXX, CPPFLAGS, CFLAGS, CXXFLAGS, LDFLAGS and JOBS are honored. CMake caches
 toolchain settings; use a new build directory when changing compilers.
 Relative build/install paths are relative to the repository. Tests retain
@@ -49,8 +45,7 @@ the caller's working directory. --clean uses CMake's --clean-first without
 deleting the build directory or downloaded dependencies.
 Concurrent writers fail fast. An interrupted process can leave a *.lock.d
 directory; remove it only after confirming that no builder still owns it.
-Packages contain only the runtime. Linux packaging requires static OpenSSL
-and its complete notices. No OpenSSL or ripgrep is downloaded automatically.
+Packages contain only the runtime and dependency notices.
 HELP
       exit 0 ;;
     *) fail "unknown argument: $1" ;;
@@ -61,10 +56,7 @@ case "$config" in
   *) fail "invalid build configuration: $config" ;;
 esac
 os="$(uname -s)"; arch="$(uname -m)"
-case "$os" in Linux|Darwin) ;; *) fail "unsupported platform: $os" ;; esac
-if [[ "$os" != Linux && ( -n "$openssl_prefix" || "$static_openssl" == 1 || ${#openssl_licenses[@]} != 0 ) ]]; then
-  fail "OpenSSL options are Linux-only; macOS uses SecureTransport"
-fi
+[[ "$os" == Darwin ]] || fail "this script supports only macOS; use build.bat on Windows (host: $os)"
 if [[ -z "$build_dir" ]]; then
   if ((core)); then build_dir=out/core; else build_dir=build; fi
 fi
@@ -88,7 +80,6 @@ if ((package)); then
 fi
 [[ -z "${JOBS:-}" || "$JOBS" =~ ^[1-9][0-9]*$ ]] || fail "JOBS must be a positive integer"
 source "$root/tools/package.sh"
-validate_distribution
 command -v cmake >/dev/null || fail "required tool not found: cmake"
 
 mkdir -p "$build_dir"
@@ -124,10 +115,9 @@ if ((core == 0)); then
     [[ "$curl_archive" == /* ]] || curl_archive="$PWD/$curl_archive"
     configure_args+=("-DCLANKER_CURL_ARCHIVE:FILEPATH=$curl_archive")
   fi
-  if [[ "$os" == Linux ]]; then
-    [[ -z "$openssl_prefix" || "$openssl_prefix" == /* ]] || openssl_prefix="$PWD/$openssl_prefix"
-    static_option=OFF; ((static_openssl == 0)) || static_option=ON
-    configure_args+=("-DOPENSSL_ROOT_DIR:PATH=$openssl_prefix" "-DOPENSSL_USE_STATIC_LIBS=$static_option")
+  if [[ -n "$pcre2_archive" ]]; then
+    [[ "$pcre2_archive" == /* ]] || pcre2_archive="$PWD/$pcre2_archive"
+    configure_args+=("-DCLANKER_PCRE2_ARCHIVE:FILEPATH=$pcre2_archive")
   fi
 fi
 # CMake initializes language flags from CFLAGS/CXXFLAGS, not CPPFLAGS.
@@ -139,13 +129,16 @@ if [[ -n "$install_prefix" && "$target" != clanker_core ]]; then targets+=(clank
 if ((core == 0)) && { ((package)) || [[ -n "$install_prefix" ]]; } && [[ "$target" != clanker ]]; then
   targets+=(clanker)
 fi
-jobs="${JOBS:-$(getconf _NPROCESSORS_ONLN)}"
+jobs="${JOBS:-$(sysctl -n hw.ncpu)}"
 build_args=(--build "$build_dir" --config "$config" --parallel "$jobs")
 build_args+=(--target "${targets[@]}")
 ((clean == 0)) || build_args+=(--clean-first)
 cmake "${build_args[@]}"
 
-if ((run_tests)); then "$build_dir/clanker_tests" "${test_args[@]}"; fi
+if ((run_tests)); then
+  "$build_dir/clanker_tests" "${test_args[@]}"
+  if ((${#test_args[@]} == 0)); then cmake -P "$build_dir/generated/test_platform.cmake"; fi
+fi
 if ((examples)); then "$build_dir/examples/core/clanker_core_example"; fi
 if ((core == 0)) && { [[ -n "$install_prefix" ]] || ((package)); }; then
   curl_info=()
@@ -154,6 +147,12 @@ if ((core == 0)) && { [[ -n "$install_prefix" ]] || ((package)); }; then
   [[ ${#curl_info[@]} == 3 && "${curl_info[0]}" == /* && -n "${curl_info[1]}" && "${curl_info[2]}" =~ ^[0-9a-fA-F]{64}$ ]] ||
     fail "invalid CMake curl metadata"
   curl_source="${curl_info[0]}"; curl_version="${curl_info[1]}"; curl_hash="${curl_info[2]}"
+  pcre2_info=()
+  [[ -f "$build_dir/clanker-pcre2.txt" ]] || fail "CMake PCRE2 metadata is missing"
+  while IFS= read -r line || [[ -n "$line" ]]; do pcre2_info+=("$line"); done < "$build_dir/clanker-pcre2.txt"
+  [[ ${#pcre2_info[@]} == 3 && "${pcre2_info[0]}" == /* && -n "${pcre2_info[1]}" && "${pcre2_info[2]}" =~ ^[0-9a-fA-F]{64}$ ]] ||
+    fail "invalid CMake PCRE2 metadata"
+  pcre2_source="${pcre2_info[0]}"; pcre2_version="${pcre2_info[1]}"; pcre2_hash="${pcre2_info[2]}"
 fi
 if [[ -n "$install_prefix" ]]; then install_clanker "$install_prefix"; fi
 if ((package)); then package_clanker; fi

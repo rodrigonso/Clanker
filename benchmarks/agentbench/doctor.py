@@ -6,7 +6,6 @@ import os
 import platform
 import shutil
 import subprocess
-from pathlib import Path
 
 from . import proc
 from .measure import tool_version
@@ -22,10 +21,7 @@ def _jcode_servers(binary: str) -> list[int]:
     """
     real = os.path.realpath(binary)
     found = []
-    for name in os.listdir("/proc"):
-        if not name.isdigit():
-            continue
-        pid = int(name)
+    for pid in proc.proc_table():
         if proc.read_exe(pid) == real and "serve" in proc.read_cmdline(pid).split():
             found.append(pid)
     return found
@@ -36,12 +32,20 @@ def main(args) -> int:
 
     print("=== platform ===")
     print(f"  {platform.platform()}")
-    if platform.system() != "Linux":
-        print("  !! PSS is Linux-only; run this under WSL on Windows")
-        problems += 1
-    rollup = Path("/proc/self/smaps_rollup")
-    print(f"  /proc/self/smaps_rollup: {'ok' if rollup.exists() else 'MISSING'}")
-    if not rollup.exists():
+    if platform.system() != "Darwin":
+        print("  !! The interactive comparison requires macOS")
+        return 1
+    try:
+        table = proc.proc_table()
+        own_rss = table.get(os.getpid(), (0, 0, 0))[2]
+        print(f"  process RSS: {'ok' if own_rss else 'UNAVAILABLE'}")
+        if not own_rss:
+            problems += 1
+    except (OSError, subprocess.CalledProcessError) as error:
+        print(f"  !! process inspection failed: {error}")
+        return 1
+    if not proc.read_exe(os.getpid()):
+        print("  !! libproc cannot resolve executable paths")
         problems += 1
 
     print("\n=== required commands ===")
@@ -72,7 +76,7 @@ def main(args) -> int:
 
     jcode = registry().get("jcode")
     if jcode and jcode.available():
-        stale = _jcode_servers(jcode.binary)
+        stale = _jcode_servers(jcode.real_binary)
         if stale:
             print(f"\n  !! jcode server already running (pid {', '.join(map(str, stale))}).")
             print("     Each measurement starts its own on a private socket, but a "
@@ -81,17 +85,17 @@ def main(args) -> int:
 
     print("\n=== memory ===")
     try:
-        for line in Path("/proc/meminfo").read_text().splitlines()[:3]:
-            print(f"  {line}")
-    except OSError:
-        pass
-    print("  10 concurrent opencode sessions need ~6 GB; run that one alone.")
+        memory = subprocess.run(["/usr/sbin/sysctl", "-n", "hw.memsize"],
+                                capture_output=True, text=True, check=True)
+        print(f"  physical memory: {int(memory.stdout.strip()) / (1024 ** 3):.1f} GiB")
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        print("  physical memory: unavailable")
+    print("  RSS counts shared pages in each process; concurrent sessions can be costly.")
 
     if problems:
         print(f"\n{problems} problem(s) found.")
-        print("\nBuild clanker for Linux with:")
-        print("  cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release")
-        print("  cmake --build build-linux --target clanker")
+        print("\nBuild clanker for macOS from the repository root with:")
+        print("  bash tools/build.sh --config Release")
         print("Install jcode with:")
         print("  curl -fsSL https://jcode.sh/install | bash")
         print("Install the others with:")

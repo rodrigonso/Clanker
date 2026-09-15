@@ -18,7 +18,6 @@
 #include "base/arena.h"
 #include "base/process_file_lock.h"
 #include "base/thread.h"
-#include "json/json.h"
 #include "tests.h"
 #include "tools/fs.h"
 
@@ -97,82 +96,6 @@ int RunLockProbe(const char* path) {
   return status == ProcessFileLockStatus::Busy && held && survived ? 0 : 1;
 }
 
-bool HasArg(int argc, char** argv, const char* expected) {
-  for (int i = 1; i < argc; i++) {
-    if (strcmp(argv[i], expected) == 0) return true;
-  }
-  return false;
-}
-
-void WriteFakeGrepMatch(StrView path, u32 lineNumber, StrView lineText) {
-  Arena arena = ArenaCreate((usize)1 << 20);
-  StrBuf json = StrBuf_Make(&arena, path.Length + lineText.Length + 128);
-  StrBuf_AppendCStr(&json, "{\"type\":\"match\",\"data\":{\"path\":{\"text\":");
-  Json_WriteString(&json, path);
-  StrBuf_AppendCStr(&json, "},\"lines\":{\"text\":");
-  Json_WriteString(&json, lineText);
-  StrBuf_AppendCStr(&json, "},\"line_number\":");
-  StrBuf_AppendU64(&json, lineNumber);
-  StrBuf_AppendCStr(&json, "}}\n");
-  fwrite(json.Data, 1, json.Length, stdout);
-  ArenaRelease(&arena);
-}
-
-int RunFakeRipgrep(int argc, char** argv) {
-  int separator = -1;
-  for (int i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "--") == 0) {
-      separator = i;
-      break;
-    }
-  }
-  if (separator < 0 || separator + 2 >= argc) return 2;
-  const char* pattern = argv[separator + 1];
-  const char* root = argv[separator + 2];
-
-  if (strcmp(pattern, "[") == 0) {
-    fprintf(stderr, "regex parse error: invalid repetition operator\n");
-    return 2;
-  }
-  if (strcmp(pattern, "definitely-no-match") == 0) return 1;
-  if (strcmp(pattern, "BETA") == 0 &&
-      (!HasArg(argc, argv, "--json") || !HasArg(argc, argv, "--line-number") ||
-       !HasArg(argc, argv, "--color=never") || !HasArg(argc, argv, "--hidden") ||
-       !HasArg(argc, argv, "--ignore-case") || !HasArg(argc, argv, "--fixed-strings") ||
-       !HasArg(argc, argv, "--glob"))) {
-    fprintf(stderr, "expected grep flags were not forwarded\n");
-    return 9;
-  }
-
-  Arena arena = ArenaCreate((usize)1 << 20);
-  StrBuf path = StrBuf_Make(&arena, (u32)strlen(root) + 16);
-  StrBuf_AppendCStr(&path, root);
-#if defined(_WIN32)
-  StrBuf_AppendChar(&path, '\\');
-#else
-  StrBuf_AppendChar(&path, '/');
-#endif
-  StrBuf_AppendCStr(&path, "a.txt");
-
-  if (strcmp(pattern, "alpha|beta|gamma") == 0) {
-    WriteFakeGrepMatch(StrBuf_View(&path), 1, SVL("alpha\n"));
-    WriteFakeGrepMatch(StrBuf_View(&path), 2, SVL("beta\n"));
-    WriteFakeGrepMatch(StrBuf_View(&path), 3, SVL("gamma\n"));
-  } else if (strcmp(pattern, "x+") == 0) {
-    StrBuf longLine = StrBuf_Make(&arena, 640);
-    for (u32 i = 0; i < 600; i++) StrBuf_AppendChar(&longLine, 'x');
-    StrBuf_AppendChar(&longLine, '\n');
-    WriteFakeGrepMatch(StrBuf_View(&path), 2, StrBuf_View(&longLine));
-  } else if (pattern[0] == '\0') {
-    WriteFakeGrepMatch(StrBuf_View(&path), 1, SVL("alpha\n"));
-  } else {
-    WriteFakeGrepMatch(StrBuf_View(&path), 2, SVL("beta\r\n"));
-  }
-  fflush(stdout);
-  ArenaRelease(&arena);
-  return 0;
-}
-
 // Appends everything on stdin to `path`, plus a trailing newline so successive
 // runs stay separable. Shared by every child helper that records its payload.
 bool DrainStdinToFile(const char* path) {
@@ -189,7 +112,6 @@ bool DrainStdinToFile(const char* path) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (getenv("CLANKER_TEST_FAKE_RG")) return RunFakeRipgrep(argc, argv);
   if (argc == 3 && strcmp(argv[1], "--echo-arg") == 0) {
     fwrite(argv[2], 1, strlen(argv[2]), stdout);
     return 0;

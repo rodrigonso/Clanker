@@ -19,7 +19,7 @@ from .tools import SetupContext, Tool
 class Run:
     tool: str
     sessions: int
-    pss_mb: float
+    rss_mb: float
     process_count: int
     version: str
     visible_sessions: int
@@ -86,7 +86,7 @@ def run_once(tool: Tool, sessions: int, cwd: Path,
             elif s.excerpt:
                 notes.append(f"session {i}: {s.excerpt}")
 
-        pss_mb, count = proc.tree_pss_mb([s.pid for s in launched] + daemon_pids,
+        rss_mb, count = proc.tree_rss_mb([s.pid for s in launched] + daemon_pids,
                                          pgids + daemon_pgids)
         # The failure this guards against is silent: a daemon that detaches
         # itself out of both the tree and the process group is simply not
@@ -99,7 +99,7 @@ def run_once(tool: Tool, sessions: int, cwd: Path,
         return Run(
             tool=tool.name,
             sessions=sessions,
-            pss_mb=pss_mb,
+            rss_mb=rss_mb,
             process_count=count,
             version=version,
             visible_sessions=sum(1 for s in launched if s.visible),
@@ -126,11 +126,11 @@ def summarise(runs: list[Run], sessions: int) -> None:
     for r in runs:
         by_tool.setdefault(r.tool, []).append(r)
 
-    print(f"\n=== median PSS across repeats, {sessions} "
+    print(f"\n=== median RSS across repeats, {sessions} "
           f"session{'s' if sessions != 1 else ''} ===")
-    print(f"{'tool':<16} {'PSS MB':>9} {'ready':>7} {'procs':>6} {'to visible':>11}   all runs")
+    print(f"{'tool':<16} {'RSS MiB':>9} {'ready':>7} {'procs':>6} {'to visible':>11}   all runs")
     for name, group in by_tool.items():
-        values = sorted(r.pss_mb for r in group)
+        values = sorted(r.rss_mb for r in group)
         median = values[len(values) // 2]
         procs = max(r.process_count for r in group)
         ready = sum(r.input_ready_sessions for r in group)
@@ -172,7 +172,7 @@ def main(args) -> int:
                 # reporting, but the rest of the table is still good.
                 print(f"    !! {err}\n    skipping {tool.name}", flush=True)
                 break
-            print(f"    {run.pss_mb:.1f} MB   {run.process_count} proc   "
+            print(f"    {run.rss_mb:.1f} MiB RSS   {run.process_count} proc   "
                   f"ready {run.input_ready_sessions}/{run.sessions}", flush=True)
             runs.append(run)
 
@@ -183,7 +183,8 @@ def main(args) -> int:
     summarise(runs, args.sessions)
 
     if args.json_out:
-        payload = {"cwd": str(cwd), "sessions": args.sessions,
+        payload = {"platform": "macOS", "metric": "rss", "unit": "MiB",
+                   "cwd": str(cwd), "sessions": args.sessions,
                    "results": [asdict(r) for r in runs]}
         Path(args.json_out).write_text(json.dumps(payload, indent=2))
         print(f"\nwrote {args.json_out}")

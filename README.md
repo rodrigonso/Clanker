@@ -1,8 +1,10 @@
 # Clanker
 
-A tiny, memory-efficient coding-agent harness in C++ — a clean reimplementation
+A tiny, memory-efficient coding-agent harness in C++23 — a clean reimplementation
 of the core of [`earendil-works/pi`](https://github.com/earendil-works/pi)
 without a JavaScript runtime.
+
+Supported platforms are **Windows and macOS**, for both the CLI and core SDK.
 
 The goal is footprint. A Node/Bun-based agent pays for an embedded JS engine and
 SDK object graphs before it does any work, and duplicates the transcript several
@@ -15,6 +17,52 @@ from a Release build. For scale, an empty `node -e ''` process
 on the same machine (Node 24.13.0) sits at ~33 MB before loading an agent at
 all. The claim here is the order of magnitude, not a benchmarked ratio against
 a specific upstream measurement — pi publishes no memory numbers.
+
+## Download and run
+
+Clanker is a **public-alpha candidate**. Release automation prepares unsigned
+previews; it does not automatically publish them. When a maintainer publishes a
+version, download its archive and matching `.sha256` file from this repository's
+**Releases** page. If no release is listed yet, use [Build](#build).
+
+| System | Archive |
+|---|---|
+| Windows 10+ / x86_64 | `clanker-<version>-Windows-x86_64.zip` |
+| macOS 15+ / Apple Silicon | `clanker-<version>-Darwin-arm64.tar.gz` |
+| macOS 15+ / Intel | `clanker-<version>-Darwin-x86_64.tar.gz` |
+
+Extract the entire archive wherever you prefer. There is no installer and no
+need to add anything to `PATH`, install a language runtime, or download helper
+tools. Keep the accompanying license notices. Start Clanker **from your project
+directory**, using the path to the extracted executable:
+
+```powershell
+# Windows PowerShell; replace the example paths with your own
+Set-Location C:\work\my-project
+& C:\Tools\clanker\bin\clanker.exe --permission-mode ask
+```
+
+```sh
+# macOS; replace the example paths with your own
+cd ~/work/my-project
+~/Applications/clanker/bin/clanker --permission-mode ask
+```
+
+Follow the first-run setup; [Providers](#providers) describes configuration.
+Start in Ask mode and review tool requests. Clanker can read and modify project
+files and run shell commands; conversation and tool context are sent to the
+selected model provider. Provider access and model usage are separate from the
+local executable. Ask mode is an approval policy, not an OS sandbox.
+
+**Preview limitations:** macOS native qualification is pending the native CI
+runs and interactive release checks. Some Windows filesystem/process operations
+still require ASCII installation, profile, and workspace paths. Archives are
+unsigned (and not notarized on macOS), so the OS may warn or block first launch.
+Do not disable OS-wide protections to run an untrusted download. SHA256
+checksums detect corruption, not publisher identity.
+
+Maintainers: see [release preparation](docs/RELEASING.md) for the native build
+matrix, draft-release process, and remaining publication gates.
 
 ## What it is
 
@@ -35,7 +83,7 @@ src/
   session/ append-only v2 message tree, reducer, memory + JSONL repositories
   agent/   incremental AgentHarness, in-memory queues, hooks, events, compaction
   tools/   read/write/edit/ls/find/grep/shell/ask_user, direct/shell process
-           exec, ripgrep discovery, fs/glob/diff/truncate/filelock infra
+           exec, in-process search, fs/glob/diff/truncate/filelock infra
   term/    full-screen TUI: raw-mode terminal, key decoder, differential
            renderer, markdown, transcript model, multi-line editor, controller
   app/     CLI entry + durable session startup + TUI/plain REPL + credential
@@ -48,7 +96,8 @@ tests/     single CLI test harness (suite selection via args; offline by default
 
 - **No C++ standard library**, no exceptions, no RTTI. Types and conventions
   (`Arena`, `Array<T>`, PascalCase fields, `FFI(cond)` fastfail) follow the
-  caboose/Briq house style. Only the C runtime and platform/libcurl APIs are used.
+  caboose/Briq house style. The CLI uses the C runtime, platform APIs, and the
+  C APIs of libcurl and PCRE2.
 - **Append-only durable sessions.** Session v2 entries form a branchable,
   message-oriented tree containing only model-visible state, compactions,
   names, labels, and the selected leaf. Active turns and message queues remain
@@ -95,21 +144,30 @@ tests/     single CLI test harness (suite selection via args; offline by default
 
 `build.bat` and `tools/build.sh` are thin wrappers around **CMake 3.24+**.
 The root `CMakeLists.txt` owns source lists, compiler settings, targets, and SDK
-installation. A single `cmake/curl.cmake` helper configures the CLI dependency;
-release packaging stays in separate scripts.
+installation. `cmake/curl.cmake` and `cmake/pcre2.cmake` configure the CLI's
+pinned source dependencies; release packaging stays in separate scripts.
 
 Windows requires the Visual Studio Desktop development with C++ workload,
 including the Windows SDK and C++ CMake tools (CMake and Ninja). The script
 locates and initializes the x64 toolchain automatically; no developer prompt
-is needed. Linux/macOS require CMake, a C++17 toolchain, and Make or Ninja.
-Linux CLI builds also need OpenSSL development files (for example,
-`libssl-dev` on Debian/Ubuntu).
+is needed. macOS requires CMake, a C++23-capable toolchain, and Make or Ninja.
+These are build-machine requirements, not runtime dependencies. Unsupported
+hosts and targets are rejected before configuring compilers or dependencies.
 
-The CLI builds a SHA256-pinned static libcurl using its upstream CMake build.
+C++23 is required for all Clanker targets and core SDK consumers. CMake selects
+the appropriate language-mode flag for the detected compiler.
+
+Windows Release, RelWithDebInfo, and MinSizeRel builds statically link the CRT
+(`/MT`) throughout Clanker, libcurl, and PCRE2. Debug builds retain the shared
+debug CRT (`/MDd`). Reconfigure and rebuild existing build directories when
+changing this runtime policy.
+
+The CLI builds SHA256-pinned static libcurl and PCRE2 10.48 (the 8-bit C regex
+library) using their upstream CMake builds.
 Downloaded sources and dependency build outputs stay in the selected build
-directory under `_deps/`. HTTPS uses Schannel on Windows, SecureTransport on
-macOS, and OpenSSL on Linux, with the host certificate trust store.
-Core-only builds never fetch or build networking dependencies.
+directory under `_deps/`. HTTPS uses native Schannel on Windows and
+SecureTransport on macOS, with the host certificate trust store.
+Core-only builds never fetch or build networking or regex dependencies.
 
 ```bat
 build.bat                                  REM Release CLI
@@ -121,21 +179,38 @@ build.bat -CoreOnly -Examples -Test          REM dependency-free core
 
 The same options work with `.\tools\build.ps1` from PowerShell.
 
-The `grep` tool honors `CLANKER_RG_PATH` first, then checks for a bundled `rg`
-beside the running executable, the `~/.clanker/bin` cache, and PATH. Otherwise
-it downloads the current ripgrep release to `~/.clanker/bin`; set
-`CLANKER_OFFLINE=1` to disable tool downloads.
+The `grep` tool searches in-process and requires no external search executable.
+Normal use does not download or install helper tools, libraries, or runtimes.
+Regex patterns use PCRE2 syntax: common existing search options are preserved,
+but this is not a byte-for-byte clone of ripgrep's Rust regex dialect.
+Regex work is bounded; exceeding a matching limit returns an explicit tool error.
+Explicit regex callouts and `\C` are rejected.
+
+Files are streamed through one reusable line buffer. UTF-8 and BOM-marked UTF-16
+are supported; NUL-containing binary files are skipped. Individual decoded lines
+over 8 MiB fail explicitly rather than exhausting arena memory. Output defaults
+to 100 matches and is capped at 50 KiB, with displayed lines truncated to 500
+characters. Directory traversal does not recursively follow symlinks.
+Search paths and filenames use UTF-8, including Windows Unicode descendants.
+Negative directory globs prune their subtrees; brace alternatives and character
+classes are supported, but nested brace alternatives are rejected explicitly.
+Ignore handling reads `.gitignore` and `.ignore`, including parent scopes; Git's
+global excludes and `.git/info/exclude` are not currently loaded.
 
 ```sh
-bash tools/build.sh              # Linux/macOS CLI
+bash tools/build.sh              # macOS CLI
 bash tools/build.sh --test       # build + offline suites
 ```
 
 CMake handles incremental and parallel builds, including header dependencies.
 `-Clean` / `--clean` rebuilds without deleting the build directory or downloaded
-sources. `-CurlArchive` / `--curl-archive` accepts an offline copy of the archive;
-its SHA256 must match the pin in `cmake/curl.cmake`. Use separate build
+sources. `-CurlArchive` / `--curl-archive` and `-Pcre2Archive` / `--pcre2-archive`
+accept offline source archives; their SHA256 values must match the pins in
+`cmake/curl.cmake` and `cmake/pcre2.cmake`, respectively. These set the CMake cache
+options `CLANKER_CURL_ARCHIVE` and `CLANKER_PCRE2_ARCHIVE`. Use separate build
 directories when changing compilers or sharing a checkout across platforms.
+Archive pins are checked again on every configure, even when their sources
+have already been populated.
 
 The build exposes three options: `CLANKER_BUILD_CLI` (on by default),
 `CLANKER_BUILD_TESTS`, and `CLANKER_BUILD_EXAMPLES` (both off by default).
@@ -159,7 +234,7 @@ Put `--` before Clanker's short options: without it PowerShell binds `-c` to
 
 The core contains the agent loop, permissions, compaction, JSON, memory and
 durable session repositories, filesystem helpers, and platform primitives.
-It uses only the C runtime and OS APIs: **no libcurl, OpenSSL, ripgrep,
+It uses only the C runtime and OS APIs: **no libcurl, PCRE2,
 JavaScript runtime, or dependency downloads**. Providers and tools are supplied
 by the embedding application. The bundled provider, tools, terminal UI, and
 application settings are CLI features, not part of this SDK.
@@ -178,26 +253,30 @@ when sharing a checkout between operating systems. Both modes use the same
 `--examples`/`-Examples` also runs the offline provider-injection example.
 
 Installation supplies `include/clanker` and a single static core archive under
-`lib`: `clanker_core.lib` on Windows, `libclanker_core.a` on Unix. Debug archives
+`lib`: `clanker_core.lib` on Windows, `libclanker_core.a` on macOS. Debug archives
 have a `d` suffix so Debug and Release can coexist. Consumers use their own build
 system; no generated project or package-manager integration is required.
 
 [`examples/core/main.cpp`](examples/core/main.cpp) creates an in-memory session,
 injects a local `Provider::Stream`, runs the harness, and reads its resulting
 transcript without making any network requests. To compile it against the
-installed SDK, use an x64 Visual Studio Developer Command Prompt:
+installed SDK, use an x64 Visual Studio Developer Command Prompt. The manual
+command uses `/std:c++latest` for MSVC's C++23 support:
 
 ```bat
-cl /nologo /std:c++17 /MD /GR- /EHs-c- /Iout\sdk\include\clanker ^
+cl /nologo /std:c++latest /MT /GR- /EHs-c- /Iout\sdk\include\clanker ^
   examples\core\main.cpp /Foout\consumer.obj /Feout\consumer.exe ^
   /link out\sdk\lib\clanker_core.lib psapi.lib bcrypt.lib
 out\consumer.exe
 ```
 
-On Linux/macOS:
+Windows SDK consumers must match the archive's CRT: `/MT` for Release,
+RelWithDebInfo, and MinSizeRel, or `/MDd` with `clanker_cored.lib` for Debug.
+
+On macOS:
 
 ```sh
-c++ -std=c++17 -fno-exceptions -fno-rtti -Iout/sdk/include/clanker \
+c++ -std=c++23 -fno-exceptions -fno-rtti -Iout/sdk/include/clanker \
   -c examples/core/main.cpp -o out/consumer.o
 cc out/consumer.o out/sdk/lib/libclanker_core.a -pthread -lm -o out/consumer
 ./out/consumer
@@ -216,58 +295,38 @@ together with compatible compiler/runtime settings when upgrading.
 
 ### CLI distribution
 
-The CLI keeps libcurl and platform TLS. The build scripts produce a
-relocatable runtime-only ZIP on Windows or TGZ on Linux/macOS, plus a companion
-SHA256 checksum, under the build directory's `packages` folder. SDK headers
-and libraries are not included in these CLI archives.
+The CLI statically links libcurl and PCRE2 and keeps platform TLS. The build
+scripts produce a relocatable runtime-only ZIP on Windows or TGZ on macOS,
+plus a companion SHA256 checksum, under the build directory's `packages` folder.
+SDK headers and libraries are not included in these CLI archives.
 
 ```powershell
 .\tools\build.ps1 -Package
 .\tools\build.ps1 -InstallPrefix .\out\install
 ```
 
-To include ripgrep rather than require PATH or a first-use download, supply a
-target-platform binary and its matching upstream notices. No dependency is
-downloaded during packaging:
-
-```powershell
-.\tools\build.ps1 -Package -RgExecutable C:\deps\ripgrep\rg.exe `
-  -RgLicense C:\deps\ripgrep\COPYING,C:\deps\ripgrep\LICENSE-MIT,C:\deps\ripgrep\UNLICENSE
-```
-
-Use the complete notice set for the particular binary, including any bundled
-optional dependencies. Explicit `CLANKER_RG_PATH` still overrides bundled rg.
-Discovery follows the actual executable location, not the working directory,
-so moving the extracted directory does not require reconfiguration.
-
-Linux release archives require **static OpenSSL**, plus its matching license
-notices; normal source builds and local installs may use dynamic system OpenSSL.
-Use `--openssl-prefix` for an OpenSSL installation outside the standard paths:
+On macOS:
 
 ```sh
-bash tools/build.sh --build-dir out/release --package \
-  --static-openssl --openssl-license /absolute/openssl/LICENSE.txt \
-  --rg-executable /absolute/ripgrep/rg \
-  --rg-license /absolute/ripgrep/COPYING \
-  --rg-license /absolute/ripgrep/LICENSE-MIT \
-  --rg-license /absolute/ripgrep/UNLICENSE
+bash tools/build.sh --build-dir out/release --package
 ```
 
-The packaging step rejects Debug configurations and unresolved or non-system
-runtime dependencies. Windows archives include the redistributable release
-VC runtime and use Windows 10+ for UCRT and the certificate store. Linux archives
-still depend on the OS loader, libc and certificate trust store: build on the
-oldest supported distribution, not an arbitrary newer glibc host. Custom OpenSSL
-provider modules, FIPS configurations, and CA bundles are not packaged. macOS
-uses system frameworks; its packaging path remains provisional without a Mac
-runner, signing, or notarization. Existing Windows ANSI filesystem/process
-operations still require ASCII installation and workspace paths.
+The packaging step requires the project and upstream notices and rejects Debug
+configurations and unresolved or non-system
+runtime dependencies. Windows Clanker binaries statically link the release CRT
+and require no VC runtime DLLs; packaging rejects a Clanker binary that imports
+them. Windows 10+ and its certificate store are still required. macOS uses
+system frameworks; the unsigned preview targets macOS 15+ in native CI.
+Native CI and interactive qualification must pass before publishing. Existing
+Windows ANSI filesystem/process operations still require ASCII installation
+and workspace paths.
 
 Each archive contains `share/clanker/DISTRIBUTION.txt` and dependency notices.
-Extract the whole directory tree and add its `bin` directory to PATH. These
+Extract the archive and run the executable in `bin`; adding it to PATH is optional. These
 scripts do not sign, publish, or include user configuration or session data.
-**Public redistribution remains blocked by the missing project `LICENSE` file**;
-local archive generation warns about this rather than inventing a license grant.
+Missing project or upstream notices are packaging errors. The GitHub workflow
+can prepare a draft release after all native jobs succeed; publishing remains
+a maintainer action. See [release preparation](docs/RELEASING.md).
 
 ### Visual Studio
 
@@ -979,6 +1038,8 @@ failure, 2 on a usage error.
 Adding a suite is a new `tests/test_*.cpp` and one row in `tests/suites.txt`.
 That registration supplies the source file, function declaration, and runner
 entry. Mark CLI-only suites `cli`; the core build includes only `core` rows.
+Unfiltered build-script runs also exercise CMake's unsupported-platform guard
+for both the CLI and core SDK, before any compiler or dependency setup.
 
 The default run is network-free and key-free: the loop runs against the
 scripted provider in `tests/script_provider.h`, the Responses request
@@ -986,11 +1047,6 @@ builder and SSE parser against recorded fixtures, and the TUI via pure units
 (key decoder, differential-renderer diff, markdown, line-wrapping, the
 multi-line editor) plus a headless controller test driving the
 event→transcript mapping. Live full-screen rendering is verified manually.
-
-On WSL, run filesystem-sensitive suites from a Linux filesystem working
-directory. Windows-mounted directories may not honor POSIX mode bits, causing
-the settings permission assertion to fail even when the Linux implementation
-is correct.
 
 ## JSON mode
 
@@ -1048,4 +1104,7 @@ Deliberately out of scope for now (the structure leaves seams for them):
 
 ## License
 
-MIT (matching the upstream pi project this core is modeled on).
+[MIT](LICENSE), matching the license already declared for this project.
+Upstream material retains its own license and copyright; see
+[third-party notices](THIRD_PARTY_NOTICES.md), including pi and the adapted
+jcode benchmark harness. CLI archives and installed SDKs include these notices.

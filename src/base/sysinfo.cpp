@@ -10,12 +10,12 @@
 #include <psapi.h>
 #include <direct.h>
 #else
+#include <limits.h>
+#include <mach/mach.h>
+#include <mach-o/dyld.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#if defined(__APPLE__)
-#include <limits.h>
-#include <mach-o/dyld.h>
-#endif
 #endif
 
 #if defined(_WIN32)
@@ -44,11 +44,6 @@ u64 CurrentRssBytes() {
   return 0;
 }
 #else
-#include <sys/resource.h>
-#if defined(__APPLE__)
-#include <mach/mach.h>
-#endif
-
 u64 NowMillis() {
   struct timespec ts;
   if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return (u64)time(nullptr) * 1000ull;
@@ -58,35 +53,16 @@ u64 NowMillis() {
 u64 PeakRssBytes() {
   struct rusage r;
   if (getrusage(RUSAGE_SELF, &r) != 0) return 0;
-#if defined(__APPLE__)
   return (u64)r.ru_maxrss;  // bytes on macOS
-#else
-  return (u64)r.ru_maxrss * 1024;  // kilobytes on Linux
-#endif
 }
 
 u64 CurrentRssBytes() {
-#if defined(__APPLE__)
   mach_task_basic_info_data_t info = {};
   mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
   kern_return_t result =
       task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info,
                 &count);
   return result == KERN_SUCCESS ? (u64)info.resident_size : 0;
-#elif defined(__linux__)
-  FILE* file = fopen("/proc/self/statm", "rb");
-  if (!file) return 0;
-  unsigned long long residentPages = 0;
-  int fields = fscanf(file, "%*llu %llu", &residentPages);
-  fclose(file);
-  long pageSize = sysconf(_SC_PAGESIZE);
-  if (fields != 1 || pageSize <= 0) return 0;
-  u64 pageBytes = (u64)pageSize;
-  if ((u64)residentPages > ~0ull / pageBytes) return 0;
-  return (u64)residentPages * pageBytes;
-#else
-  return 0;
-#endif
 }
 #endif
 
@@ -221,16 +197,7 @@ StrView Sys_ExecutablePath(Arena* a) {
     result = DupCStr(a, StrView{utf8, (u32)bytes});
     break;
   }
-#elif defined(__linux__)
-  for (u32 capacity = 512; capacity <= 1024 * 1024; capacity *= 2) {
-    char* path = ArenaPushArray(&scratch, char, capacity);
-    ssize_t length = readlink("/proc/self/exe", path, capacity);
-    if (length <= 0) break;
-    if ((usize)length == capacity) continue;
-    result = DupCStr(a, StrView{path, (u32)length});
-    break;
-  }
-#elif defined(__APPLE__)
+#else
   uint32_t capacity = 512;
   char* path = ArenaPushArray(&scratch, char, capacity);
   int status = _NSGetExecutablePath(path, &capacity);

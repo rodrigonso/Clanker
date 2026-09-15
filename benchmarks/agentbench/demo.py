@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -18,17 +19,17 @@ def _tmux(*args: str, check: bool = False) -> subprocess.CompletedProcess:
 def _hold(command: str, name: str) -> str:
     """Keep a pane open after its program exits, so a crash is visible instead
     of collapsing the layout."""
-    return f"{command}; printf '\\n[{name} exited - press a key]'; read -rsn1"
+    return f"{command}; printf '\\n[{name} exited - press Enter]'; read -r"
 
 
 def _launch_command(tool) -> str:
     """Build the shell command for a pane, carrying the tool's full env.
 
-    All of it, not just LD_LIBRARY_PATH: pi is a `#!/usr/bin/env node` script
-    and silently fails to start if PATH does not reach the node install.
+    pi is a `#!/usr/bin/env node` script and silently fails to start if PATH
+    does not reach the node install.
     """
-    prefix = " ".join(f"{k}='{v}'" for k, v in sorted(tool.env.items()))
-    parts = [prefix, f"'{tool.binary}'", *(f"'{a}'" for a in tool.args)]
+    prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in sorted(tool.env.items()))
+    parts = [prefix, shlex.join(tool.argv)]
     return " ".join(p for p in parts if p)
 
 
@@ -41,7 +42,7 @@ def main(args) -> int:
         return 1
 
     if not shutil.which("tmux"):
-        print("tmux is required: sudo apt install -y tmux", file=sys.stderr)
+        print("tmux is required: brew install tmux", file=sys.stderr)
         return 1
 
     _tmux("kill-session", "-t", SESSION)
@@ -68,7 +69,8 @@ def main(args) -> int:
     # Anchor to pane 0 rather than "the active pane", which may already have
     # exited and taken the layout with it.
     package_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    monitor = (f"cd '{package_root}' && {sys.executable} -m agentbench watch "
+    monitor = (f"cd {shlex.quote(package_root)} && {shlex.quote(sys.executable)} "
+               f"-m agentbench watch "
                f"--tools {' '.join(t.name for t in tools)}")
     _tmux("split-window", "-v", "-f", "-l", "12", "-t", f"{SESSION}:0.0",
           "-c", package_root, monitor)

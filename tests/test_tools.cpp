@@ -3,15 +3,17 @@
 #include <string.h>
 
 #include "base/arena.h"
+#include "base/file_io.h"
 #include "base/str.h"
 #include "base/sysinfo.h"
 #include "base/thread.h"
+#include "base/win32_utf8.h"
 #include "check.h"
 #include "tools/exec.h"
 #include "tools/fs.h"
 #include "tools/imagemime.h"
+#include "tools/search_regex.h"
 #include "tools/tools.h"
-#include "tools/tools_manager.h"
 #include "tools/truncate.h"
 #include "tests.h"
 
@@ -45,7 +47,8 @@ static StrView Slurp(Arena* a, const char* path) {
 }
 
 static bool RunTool(const Tool& t, Arena* a, StrView argsJson, ToolResult* out,
-                    StrBuf* err, const ToolUpdateSink* updates = nullptr) {
+                    StrBuf* err, const ToolUpdateSink* updates = nullptr,
+                    volatile i32* abort = nullptr) {
   JsonSchema schema = {};
   if (!JsonSchema_Compile(a, t.ParamsJsonSchema, &schema, err)) return false;
   JsonValue* root = Json_Parse(a, argsJson);
@@ -62,75 +65,12 @@ static bool RunTool(const Tool& t, Arena* a, StrView argsJson, ToolResult* out,
   StrBuf canonical = StrBuf_Make(a, argsJson.Length + 32);
   Json_WriteValue(&canonical, root);
   ToolArgs args = {root, StrBuf_View(&canonical)};
-  return t.Execute(t.Ctx, a, SV("id"), &args, nullptr, updates, out, err);
-}
-
-static void SetTestEnv(const char* name, const char* value) {
-#if defined(_WIN32)
-  _putenv_s(name, value ? value : "");
-#else
-  if (value)
-    setenv(name, value, 1);
-  else
-    unsetenv(name);
-#endif
+  return t.Execute(t.Ctx, a, SV("id"), &args, abort, updates, out, err);
 }
 
 static bool CaptureChunk(void* user, StrView chunk) {
   StrBuf_Append((StrBuf*)user, chunk);
   return true;
-}
-
-static void TestBundledRipgrep(Arena* a) {
-  StrView cwd = Sys_CurrentDir(a);
-  StrBuf rootName = StrBuf_Make(a, 64);
-  StrBuf_AppendCStr(&rootName, "out/clanker-rg-discovery-");
-  StrBuf_AppendU64(&rootName, MonotonicMillis());
-  StrView root = Fs_Join(a, cwd, StrBuf_View(&rootName));
-  StrView bin = Fs_Join(a, root, SVL("bin"));
-  StrView elsewhere = Fs_Join(a, root, SVL("elsewhere"));
-  CHECK(Fs_MkdirP(a, bin));
-  CHECK(Fs_MkdirP(a, elsewhere));
-#if defined(_WIN32)
-  StrView rgName = SVL("rg.exe");
-#else
-  StrView rgName = SVL("rg");
-#endif
-  StrView executable = Fs_Join(a, bin, SVL("clanker"));
-  StrView bundled = Fs_Join(a, bin, rgName);
-  StrView decoy = Fs_Join(a, elsewhere, rgName);
-  MakeFile(StrView_DupCStr(a, decoy), "not the bundled tool");
-  CHECK(Sys_SetCurrentDir(elsewhere));
-  CHECK(ToolManager_FindBundledRipgrep(a, executable).Length == 0);
-  CHECK(ToolManager_FindBundledRipgrep(a, SVL("clanker")).Length == 0);
-  CHECK(ToolManager_FindBundledRipgrep(a, StrView{}).Length == 0);
-  CHECK(ToolManager_FindBundledRipgrep(a, SVL("/")).Length == 0);
-  CHECK(ToolManager_FindBundledRipgrep(a, SVL("C:\\")).Length == 0);
-  MakeFile(StrView_DupCStr(a, bundled), "bundled tool");
-  CHECK(Fs_PathEquals(ToolManager_FindBundledRipgrep(a, executable), bundled));
-
-  // An explicit missing override must fail, not silently use another rg.
-  const char* previousRaw = getenv("CLANKER_RG_PATH");
-  StrView previous = previousRaw ? StrView_Dup(a, SV(previousRaw)) : StrView{};
-  SetTestEnv("CLANKER_RG_PATH", StrView_DupCStr(a, decoy));
-  StrBuf err = StrBuf_Make(a, 128);
-  CHECK(Fs_PathEquals(ToolManager_EnsureRipgrep(a, nullptr, &err), decoy));
-  CHECK(err.Length == 0);
-  StrView missing = Fs_Join(a, root, SVL("missing-rg"));
-  SetTestEnv("CLANKER_RG_PATH", StrView_DupCStr(a, missing));
-  CHECK(ToolManager_EnsureRipgrep(a, nullptr, &err).Length == 0);
-  CHECK(StrView_Contains(StrBuf_View(&err), "CLANKER_RG_PATH does not exist"));
-  SetTestEnv("CLANKER_RG_PATH", previousRaw ? StrView_DupCStr(a, previous) : nullptr);
-
-  CHECK(Sys_SetCurrentDir(cwd));
-  remove(StrView_DupCStr(a, bundled));
-  CHECK(Fs_MkdirP(a, bundled));
-  CHECK(ToolManager_FindBundledRipgrep(a, executable).Length == 0);
-  CLANKER_RMDIR(StrView_DupCStr(a, bundled));
-  remove(StrView_DupCStr(a, decoy));
-  CLANKER_RMDIR(StrView_DupCStr(a, bin));
-  CLANKER_RMDIR(StrView_DupCStr(a, elsewhere));
-  CLANKER_RMDIR(StrView_DupCStr(a, root));
 }
 
 static StrView Args1(Arena* a, const char* k, const char* v) {
@@ -641,20 +581,7 @@ static void TestTreeTools(Arena* a) {
             StrView_Contains(fo.Content.Data[0].Text, "c.txt"),
             !StrView_Contains(fo.Content.Data[0].Text, "b.md"));
 
-  const char* oldRgPathRaw = getenv("CLANKER_RG_PATH");
-  const char* oldFakeRgRaw = getenv("CLANKER_TEST_FAKE_RG");
-  StrView oldRgPath = oldRgPathRaw ? StrView_Dup(a, SV(oldRgPathRaw)) : StrView{};
-  StrView oldFakeRg = oldFakeRgRaw ? StrView_Dup(a, SV(oldFakeRgRaw)) : StrView{};
-  bool useRealRipgrep = getenv("CLANKER_TEST_REAL_RG") != nullptr;
-  if (!useRealRipgrep) {
-    StrView fakeRg = Fs_RealPath(a, SV(g_test_executable));
-    StrBuf fakeRgNative = StrBuf_Make(a, fakeRg.Length + 1);
-    StrBuf_Append(&fakeRgNative, fakeRg);
-    SetTestEnv("CLANKER_RG_PATH", StrBuf_CStr(&fakeRgNative));
-    SetTestEnv("CLANKER_TEST_FAKE_RG", "1");
-  }
-
-  // grep forwards pi's ripgrep options and formats context from the source file.
+  // Search the actual files, including case folding and context formatting.
   Tool gt = GrepTool();
   ToolResult go = {};
   StrBuf ge = StrBuf_Make(a, 32);
@@ -698,6 +625,18 @@ static void TestTreeTools(Arena* a) {
                  &invalidRegex, &invalidRegexErr));
   CHECK(StrView_Contains(StrBuf_View(&invalidRegexErr), "regex parse error"));
 
+  const char* invalidGlobs[] = {"[", "{a,b", "{a,{b,c}}", "a}", "a\\"};
+  for (const char* glob : invalidGlobs) {
+    StrBuf json = StrBuf_Make(a, 128);
+    StrBuf_AppendCStr(&json, "{\"pattern\":\"alpha\",\"path\":\"clanker_tools_it\",\"glob\":");
+    Json_WriteString(&json, SV(glob));
+    StrBuf_AppendChar(&json, '}');
+    ToolResult invalidGlob = {};
+    StrBuf invalidGlobErr = StrBuf_Make(a, 64);
+    CHECK(!RunTool(gt, a, StrBuf_View(&json), &invalidGlob, &invalidGlobErr));
+    CHECK(StrView_Contains(StrBuf_View(&invalidGlobErr), "glob parse error"));
+  }
+
   ToolResult missingPath = {};
   StrBuf missingPathErr = StrBuf_Make(a, 32);
   CHECK(!RunTool(gt, a, SV("{\"pattern\":\"x\",\"path\":\"clanker_tools_missing\"}"),
@@ -710,20 +649,291 @@ static void TestTreeTools(Arena* a) {
                 &emptyPattern, &emptyPatternErr));
   CHECK(StrView_Contains(emptyPattern.Content.Data[0].Text, "a.txt:1: alpha"));
 
-  StrBuf oldRgPathNative = StrBuf_Make(a, oldRgPath.Length + 1);
-  StrBuf_Append(&oldRgPathNative, oldRgPath);
-  StrBuf oldFakeRgNative = StrBuf_Make(a, oldFakeRg.Length + 1);
-  StrBuf_Append(&oldFakeRgNative, oldFakeRg);
-  SetTestEnv("CLANKER_TEST_FAKE_RG",
-             oldFakeRg.Length ? StrBuf_CStr(&oldFakeRgNative) : nullptr);
-  SetTestEnv("CLANKER_RG_PATH", oldRgPath.Length ? StrBuf_CStr(&oldRgPathNative) : nullptr);
-
   remove("clanker_tools_it/a.txt");
   remove("clanker_tools_it/b.md");
   remove("clanker_tools_it/long.txt");
   remove("clanker_tools_it/sub/c.txt");
   CLANKER_RMDIR("clanker_tools_it/sub");
   CLANKER_RMDIR("clanker_tools_it");
+}
+
+// ---- native search ------------------------------------------------------
+
+static StrView RunGrep(Arena* arena, const char* json) {
+  ToolResult result = {};
+  StrBuf err = StrBuf_Make(arena, 128);
+  bool ok = RunTool(GrepTool(), arena, SV(json), &result, &err);
+  CHECK(ok);
+  if (!ok) fprintf(stderr, "grep: %.*s\n", (int)err.Length, err.Data);
+  return result.Content.Count ? result.Content.Data[0].Text : StrView{};
+}
+
+static void TestUnicodeGrep(Arena* a) {
+  StrView root = SVL("clanker_unicode_grep_it");
+  StrView directory = Fs_Join(a, root, SVL("\xe4\xb8\xad\xf0\x9f\x98\x80"));
+  CHECK(Fs_MkdirP(a, directory));
+  StrView marker = Fs_Join(a, root, SVL(".git"));
+  StrView topFile = Fs_Join(a, root, SVL("\xe4\xb8\xad\xf0\x9f\x98\x80.txt"));
+  StrView file = Fs_Join(a, directory, SVL("\xc3\xa9.txt"));
+  StrView ignored = Fs_Join(a, directory, SVL("\xe6\x96\x87.txt"));
+  StrView ignore = Fs_Join(a, directory, SVL(".gitignore"));
+  char longName[201];
+  memset(longName, 'x', 200);
+  longName[200] = 0;
+  StrView longDirectory = Fs_Join(a, directory, SV(longName));
+  StrView longFile = Fs_Join(a, longDirectory, SVL("deep.txt"));
+  CHECK(Fs_MkdirP(a, longDirectory));
+  CHECK(File_WriteAll(a, marker, StrView{}) == FileIoResult::Success);
+  CHECK(File_WriteAll(a, ignore, SVL("\xe6\x96\x87.txt\n")) == FileIoResult::Success);
+  CHECK(File_WriteAll(a, topFile, SVL("needle\n")) == FileIoResult::Success);
+  CHECK(File_WriteAll(a, file, SVL("needle\n")) == FileIoResult::Success);
+  CHECK(File_WriteAll(a, ignored, SVL("needle\n")) == FileIoResult::Success);
+  CHECK(File_WriteAll(a, longFile, SVL("needle\n")) == FileIoResult::Success);
+  StrView bytes = {};
+  CHECK(File_ReadAll(a, file, &bytes) == FileIoResult::Success);
+  CHECK(StrView_EqCStr(bytes, "needle\n"));
+  CHECK(Fs_ResolvePermissionTarget(a, Fs_RealPath(a, root), Fs_RealPath(a, file)).Contained);
+  CHECK(Fs_ResolvePermissionTarget(a, Fs_RealPath(a, root), Fs_RealPath(a, longFile)).Contained);
+
+  StrView result = RunGrep(a, "{\"pattern\":\"needle\",\"path\":\"clanker_unicode_grep_it\"}");
+  CHECK_ALL(StrView_Contains(result, "\xe4\xb8\xad\xf0\x9f\x98\x80.txt:1: needle"),
+            StrView_Contains(result, "\xe4\xb8\xad\xf0\x9f\x98\x80/\xc3\xa9.txt:1: needle"),
+            StrView_Contains(result, "deep.txt:1: needle"),
+            !StrView_Contains(result, "\xe6\x96\x87.txt"));
+  StrView paths[] = {directory, file};
+  for (StrView path : paths) {
+    StrBuf json = StrBuf_Make(a, 128);
+    StrBuf_AppendCStr(&json, "{\"pattern\":\"needle\",\"glob\":\"\xc3\xa9.txt\",\"path\":");
+    Json_WriteString(&json, path);
+    StrBuf_AppendChar(&json, '}');
+    CHECK(StrView_EqCStr(RunGrep(a, json.Data), "\xc3\xa9.txt:1: needle"));
+  }
+
+  StrView files[] = {marker, topFile, file, ignored, ignore, longFile};
+  for (StrView path : files) {
+#if defined(_WIN32)
+    wchar_t native[4096];
+    CHECK(Win32_Path(path, native, 4096));
+    CHECK(_wremove(native) == 0);
+#else
+    CHECK(remove(StrView_DupCStr(a, path)) == 0);
+#endif
+  }
+  StrView directories[] = {longDirectory, directory};
+  for (StrView path : directories) {
+#if defined(_WIN32)
+    wchar_t native[4096];
+    CHECK(Win32_Path(path, native, 4096));
+    CHECK(_wrmdir(native) == 0);
+#else
+    CHECK(rmdir(StrView_DupCStr(a, path)) == 0);
+#endif
+  }
+  CHECK(CLANKER_RMDIR(StrView_DupCStr(a, root)) == 0);
+}
+
+static void TestNativeGrep(Arena* a) {
+  const char* root = "clanker_native_grep_it";
+  CHECK(Fs_MkdirP(a, SVL("clanker_native_grep_it/.git")));
+  CHECK(Fs_MkdirP(a, SVL("clanker_native_grep_it/sub")));
+  CHECK(Fs_MkdirP(a, SVL("clanker_native_grep_it/ignored-dir")));
+  const struct { const char* Name; const char* Text; } files[] = {
+      {".gitignore", "ignored.txt\n*.skip\n!keep.skip\nignored-dir/\n"},
+      {".ignore", "extra.txt\n"},
+      {"sample.txt", "zero\r\nalpha 123\r\nBETA beta\r\ncaf\xc3\xa9 \xc3\x89" "COLE\r\nliteral a+b[0]\r\nlast"},
+      {".hidden.txt", "needle\n"},
+      {"ignored.txt", "needle\n"},
+      {"extra.txt", "needle\n"},
+      {"drop.skip", "needle\n"},
+      {"keep.skip", "needle\n"},
+      {"other.md", "needle\n"},
+      {"only.txt", "needle\n"},
+      {"sub/.gitignore", "/only.txt\n"},
+      {"sub/only.txt", "needle\n"},
+      {"sub/drop.skip", "needle\n"},
+      {"sub/deep.txt", "needle\n"},
+      {"ignored-dir/hidden.txt", "needle\n"},
+      {".git/config", "needle\n"},
+      {"empty.txt", ""},
+      {"blanks.txt", "\n\n"},
+  };
+  for (const auto& file : files) {
+    StrView path = Fs_Join(a, SV(root), SV(file.Name));
+    CHECK(File_WriteAll(a, path, SV(file.Text)) == FileIoResult::Success);
+  }
+  CHECK(File_WriteAll(a, SVL("clanker_native_grep_it/binary.dat"),
+                     SVL("needle\n\0needle")) == FileIoResult::Success);
+  CHECK(File_WriteAll(a, SVL("clanker_native_grep_it/utf16.txt"),
+                     SVL("\xff\xfe" "n\0e\0e\0d\0l\0e\0\n\0")) == FileIoResult::Success);
+  CHECK(File_WriteAll(a, SVL("clanker_native_grep_it/utf16be.txt"),
+                     SVL("\xfe\xff" "\0n\0e\0e\0d\0l\0e\0\n")) == FileIoResult::Success);
+  CHECK(File_WriteAll(a, SVL("clanker_native_grep_it/bom.txt"),
+                     SVL("\xef\xbb\xbf" "needle\n")) == FileIoResult::Success);
+  CHECK(File_WriteAll(a, SVL("clanker_native_grep_it/invalid.txt"),
+                     SVL("\xffneedle\n")) == FileIoResult::Success);
+
+  StrView result = RunGrep(a, "{\"pattern\":\"^alpha\\\\s+[0-9]{3}$\",\"path\":\"clanker_native_grep_it/sample.txt\"}");
+  CHECK(StrView_EqCStr(result, "sample.txt:2: alpha 123"));
+  result = RunGrep(a, "{\"pattern\":\"(?i)\\\\bbeta\\\\b\",\"path\":\"clanker_native_grep_it/sample.txt\"}");
+  CHECK(StrView_EqCStr(result, "sample.txt:3: BETA beta"));
+  result = RunGrep(a, "{\"pattern\":\"a+b[0]\",\"literal\":true,\"path\":\"clanker_native_grep_it/sample.txt\"}");
+  CHECK(StrView_EqCStr(result, "sample.txt:5: literal a+b[0]"));
+  result = RunGrep(a, "{\"pattern\":\"a+b[0]\",\"path\":\"clanker_native_grep_it/sample.txt\"}");
+  CHECK(StrView_EqCStr(result, "No matches found"));
+  result = RunGrep(a, "{\"pattern\":\"\xc3\xa9" "cole\",\"literal\":true,\"ignoreCase\":true,\"path\":\"clanker_native_grep_it/sample.txt\"}");
+  CHECK(StrView_Contains(result, "sample.txt:4: caf\xc3\xa9 \xc3\x89" "COLE"));
+  result = RunGrep(a, "{\"pattern\":\"\\\\p{L}+\",\"path\":\"clanker_native_grep_it/sample.txt\"}");
+  CHECK(StrView_Contains(result, "sample.txt:4: caf\xc3\xa9"));
+  result = RunGrep(a, "{\"pattern\":\"^last$\",\"context\":1,\"path\":\"clanker_native_grep_it/sample.txt\"}");
+  CHECK(StrView_EqCStr(result, "sample.txt-5- literal a+b[0]\nsample.txt:6: last"));
+  result = RunGrep(a, "{\"pattern\":\"alpha|BETA\",\"context\":1,\"path\":\"clanker_native_grep_it/sample.txt\"}");
+  CHECK(StrView_EqCStr(result,
+      "sample.txt-1- zero\nsample.txt:2: alpha 123\nsample.txt-3- BETA beta\n"
+      "sample.txt-2- alpha 123\nsample.txt:3: BETA beta\nsample.txt-4- caf\xc3\xa9 \xc3\x89" "COLE"));
+
+  result = RunGrep(a, "{\"pattern\":\"needle\",\"path\":\"clanker_native_grep_it\"}");
+  CHECK_ALL(StrView_Contains(result, ".hidden.txt:1: needle"),
+            StrView_Contains(result, "sub/deep.txt:1: needle"),
+            StrView_Contains(result, "only.txt:1: needle"),
+            StrView_Contains(result, "keep.skip:1: needle"),
+            !StrView_Contains(result, "ignored.txt"),
+            !StrView_Contains(result, "ignored-dir"),
+            !StrView_Contains(result, "drop.skip"),
+            !StrView_Contains(result, "sub/only.txt"),
+            !StrView_Contains(result, "extra.txt"),
+            !StrView_Contains(result, ".git/config"),
+            !StrView_Contains(result, "binary.dat"));
+  result = RunGrep(a, "{\"pattern\":\"needle\",\"path\":\"clanker_native_grep_it/sub\"}");
+  CHECK(StrView_EqCStr(result, "deep.txt:1: needle"));
+  result = RunGrep(a, "{\"pattern\":\"needle\",\"glob\":\"**/*.txt\",\"path\":\"clanker_native_grep_it\"}");
+  CHECK_ALL(StrView_Contains(result, "only.txt:1: needle"),
+            StrView_Contains(result, "sub/deep.txt:1: needle"),
+            !StrView_Contains(result, "other.md"));
+  result = RunGrep(a, "{\"pattern\":\"needle\",\"glob\":\"ignored.txt\",\"path\":\"clanker_native_grep_it\"}");
+  CHECK(StrView_EqCStr(result, "ignored.txt:1: needle"));
+  result = RunGrep(a, "{\"pattern\":\"needle\",\"glob\":\"!*.txt\",\"path\":\"clanker_native_grep_it\"}");
+  CHECK_ALL(StrView_Contains(result, "other.md:1: needle"),
+            !StrView_Contains(result, "deep.txt"));
+  result = RunGrep(a, "{\"pattern\":\"needle\",\"glob\":\"!sub\",\"path\":\"clanker_native_grep_it\"}");
+  CHECK_ALL(!StrView_Contains(result, "sub/"), StrView_Contains(result, "other.md:1: needle"));
+  result = RunGrep(a, "{\"pattern\":\"needle\",\"glob\":\"{**/*.txt,*.md}\",\"path\":\"clanker_native_grep_it\"}");
+  CHECK_ALL(StrView_Contains(result, "only.txt:1: needle"),
+            StrView_Contains(result, "sub/deep.txt:1: needle"),
+            StrView_Contains(result, "other.md:1: needle"));
+  result = RunGrep(a, "{\"pattern\":\"needle\",\"glob\":\"{[o,x]ther.md,only.txt}\",\"path\":\"clanker_native_grep_it\"}");
+  CHECK_ALL(StrView_Contains(result, "other.md:1: needle"),
+            StrView_Contains(result, "only.txt:1: needle"));
+  result = RunGrep(a, "{\"pattern\":\"^needle$\",\"path\":\"clanker_native_grep_it/utf16.txt\"}");
+  CHECK(StrView_EqCStr(result, "utf16.txt:1: needle"));
+  result = RunGrep(a, "{\"pattern\":\"^needle$\",\"path\":\"clanker_native_grep_it/utf16be.txt\"}");
+  CHECK(StrView_EqCStr(result, "utf16be.txt:1: needle"));
+  result = RunGrep(a, "{\"pattern\":\"^needle$\",\"path\":\"clanker_native_grep_it/bom.txt\"}");
+  CHECK(StrView_EqCStr(result, "bom.txt:1: needle"));
+  result = RunGrep(a, "{\"pattern\":\"needle\",\"path\":\"clanker_native_grep_it/invalid.txt\"}");
+  CHECK(StrView_Contains(result, "invalid.txt:1: \xffneedle"));
+  result = RunGrep(a, "{\"pattern\":\"needle\",\"path\":\"clanker_native_grep_it/binary.dat\"}");
+  CHECK(StrView_EqCStr(result, "No matches found"));
+  result = RunGrep(a, "{\"pattern\":\"\",\"path\":\"clanker_native_grep_it/empty.txt\"}");
+  CHECK(StrView_EqCStr(result, "No matches found"));
+  result = RunGrep(a, "{\"pattern\":\"\",\"path\":\"clanker_native_grep_it/blanks.txt\"}");
+  CHECK(StrView_EqCStr(result, "blanks.txt:1: \nblanks.txt:2: "));
+
+  StrBuf content = StrBuf_Make(a, 20000);
+  for (u32 i = 0; i < 16383; i++) StrBuf_AppendChar(&content, 'a');
+  StrBuf_AppendCStr(&content, "\xc3\xa9\nneedle");
+  CHECK(File_WriteAll(a, SVL("clanker_native_grep_it/chunks.txt"),
+                     StrBuf_View(&content)) == FileIoResult::Success);
+  result = RunGrep(a, "{\"pattern\":\"^needle$\",\"path\":\"clanker_native_grep_it/chunks.txt\"}");
+  CHECK(StrView_EqCStr(result, "chunks.txt:2: needle"));
+  StrBuf_Clear(&content);
+  for (u32 i = 0; i < 499; i++) StrBuf_AppendChar(&content, 'x');
+  StrBuf_AppendCStr(&content, "\xf0\x9f\x98\x80z\n");
+  CHECK(File_WriteAll(a, SVL("clanker_native_grep_it/wide.txt"),
+                     StrBuf_View(&content)) == FileIoResult::Success);
+  result = RunGrep(a, "{\"pattern\":\"x\",\"path\":\"clanker_native_grep_it/wide.txt\"}");
+  CHECK_ALL(StrView_Contains(result, "\xf0\x9f\x98\x80... [truncated]"),
+            !StrView_Contains(result, "\xf0\x9f\x98\x80z"));
+
+  StrBuf_Clear(&content);
+  for (u32 i = 0; i < 300; i++) {
+    for (u32 j = 0; j < 499; j++) StrBuf_AppendChar(&content, 'x');
+    StrBuf_AppendChar(&content, '\n');
+  }
+  CHECK(File_WriteAll(a, SVL("clanker_native_grep_it/output.txt"),
+                     StrBuf_View(&content)) == FileIoResult::Success);
+  result = RunGrep(a, "{\"pattern\":\"x\",\"limit\":1000,\"path\":\"clanker_native_grep_it/output.txt\"}");
+  CHECK_ALL(result.Length <= TRUNC_MAX_BYTES + 512,
+            StrView_Contains(result, "50.0KB limit reached"),
+            !StrView_Contains(result, "matches limit reached"));
+  result = RunGrep(a, "{\"pattern\":\"x\",\"context\":4294967295,\"path\":\"clanker_native_grep_it/output.txt\"}");
+  CHECK(StrView_Contains(result, "50.0KB limit reached"));
+
+  volatile i32 abort = 1;
+  ToolResult cancelled = {};
+  StrBuf cancelErr = StrBuf_Make(a, 128);
+  CHECK(!RunTool(GrepTool(), a,
+                 SVL("{\"pattern\":\"x\",\"path\":\"clanker_native_grep_it\"}"),
+                 &cancelled, &cancelErr, nullptr, &abort));
+  CHECK(StrView_Contains(StrBuf_View(&cancelErr), "Operation aborted"));
+
+  FILE* oversized = fopen("clanker_native_grep_it/oversized.txt", "wb");
+  CHECK(oversized != nullptr);
+  if (oversized) {
+    char block[16384];
+    memset(block, 'x', sizeof(block));
+    for (u32 i = 0; i < 512; i++) CHECK(fwrite(block, 1, sizeof(block), oversized) == sizeof(block));
+    CHECK(fputc('x', oversized) != EOF);
+    CHECK(fclose(oversized) == 0);
+    ToolResult oversizedResult = {};
+    StrBuf oversizedErr = StrBuf_Make(a, 128);
+    CHECK(!RunTool(GrepTool(), a,
+                   SVL("{\"pattern\":\"x\",\"path\":\"clanker_native_grep_it/oversized.txt\"}"),
+                   &oversizedResult, &oversizedErr));
+    CHECK(StrView_Contains(StrBuf_View(&oversizedErr), "Search line exceeds 8MiB"));
+  }
+
+  Arena regexArena = ArenaCreate();
+  SearchRegex regex = {};
+  StrBuf regexErr = StrBuf_Make(a, 128);
+  bool compiled = SearchRegex_Compile(&regexArena, SVL("^a+$"), false, false,
+                                       nullptr, &regex, &regexErr);
+  CHECK(compiled);
+  if (compiled) {
+    bool matched = false;
+    CHECK(SearchRegex_Match(&regex, SVL("aaaa"), &matched, &regexErr));
+    CHECK(matched);
+    usize warm = regexArena.Used;
+    for (u32 i = 0; i < 1000; i++) {
+      CHECK(SearchRegex_Match(&regex, SVL("aaaa"), &matched, &regexErr));
+      CHECK(matched);
+    }
+    CHECK(regexArena.Used == warm);
+  }
+  ArenaRelease(&regexArena);
+  regexArena = ArenaCreate();
+  regex = {};
+  StrBuf_Clear(&regexErr);
+  compiled = SearchRegex_Compile(&regexArena, SVL("^(a+)+$"), false, false,
+                                  nullptr, &regex, &regexErr);
+  CHECK(compiled);
+  if (compiled) {
+    bool matched = false;
+    CHECK(!SearchRegex_Match(&regex,
+        SVL("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"),
+        &matched, &regexErr));
+    CHECK(regexErr.Length > 0);
+  }
+  ArenaRelease(&regexArena);
+
+  for (const auto& file : files) remove(StrView_DupCStr(a, Fs_Join(a, SV(root), SV(file.Name))));
+  const char* extra[] = {"binary.dat", "utf16.txt", "utf16be.txt", "bom.txt",
+                         "invalid.txt", "chunks.txt", "wide.txt", "output.txt",
+                         "oversized.txt"};
+  for (const char* file : extra) remove(StrView_DupCStr(a, Fs_Join(a, SV(root), SV(file))));
+  CLANKER_RMDIR("clanker_native_grep_it/.git");
+  CLANKER_RMDIR("clanker_native_grep_it/sub");
+  CLANKER_RMDIR("clanker_native_grep_it/ignored-dir");
+  CLANKER_RMDIR(root);
 }
 
 // ---- ask_user ------------------------------------------------------------
@@ -873,7 +1083,6 @@ static void TestAskUser(Arena* a) {
 
 void TestTools() {
   Arena a = ArenaCreate();
-  TestBundledRipgrep(&a);
   TestToolPermissions(&a);
   TestRead(&a);
   TestReadTruncation(&a);
@@ -882,6 +1091,8 @@ void TestTools() {
   TestWrite(&a);
   TestEdit(&a);
   TestTreeTools(&a);
+  TestNativeGrep(&a);
+  TestUnicodeGrep(&a);
   TestAskUser(&a);
   ArenaRelease(&a);
 }

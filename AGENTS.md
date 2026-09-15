@@ -1,6 +1,6 @@
 # Clanker agent rules
 
-A C++17 reimplementation of the core of [`earendil-works/pi`](https://github.com/earendil-works/pi)
+A C++23 reimplementation of the core of [`earendil-works/pi`](https://github.com/earendil-works/pi)
 without a JavaScript runtime. Footprint is the point: prefer the change that
 allocates less and copies less.
 
@@ -17,16 +17,22 @@ Build and test through the repo scripts. They are thin wrappers around CMake:
 .\tools\run.ps1 -- -p "summarize README.md"  # build, then run; Clanker flags after --
 ```
 
-On Linux/macOS use `bash tools/build.sh --test`, or
+Only Windows and macOS are supported. On macOS use `bash tools/build.sh --test`, or
 `bash tools/build.sh --core-only --examples --test` for the core SDK.
 Core-only builds default to `out/core`; use distinct build directories when
 sharing a checkout between operating systems. `-InstallPrefix` /
 `--install-prefix` installs the SDK and enabled CLI; `-Package` / `--package`
 creates a CLI archive.
 
-Targets and sources are defined in the root `CMakeLists.txt`; only the pinned
-CLI dependency policy lives in `cmake/curl.cmake`. Suites are registered in
-`tests/suites.txt` (`session`, `harness`, `compaction`,
+Public-alpha release policy is in `docs/RELEASING.md`. Keep `LICENSE`,
+`THIRD_PARTY_NOTICES.md`, and upstream notices under `licenses/` in runtime and
+SDK distributions. Release automation must create drafts only; native CI does
+not replace history review, interactive qualification, or signing.
+
+Targets and sources are defined in the root `CMakeLists.txt`; pinned CLI
+dependency policies live in `cmake/curl.cmake` and `cmake/pcre2.cmake`. HTTPS
+uses native Schannel on Windows and SecureTransport on macOS. Suites are
+registered in `tests/suites.txt` (`session`, `harness`, `compaction`,
 `tools`, `infra`, `prompt_context`, ...). Run the narrowest suite that covers
 your change; use `.\build.bat -Test` before declaring a change finished.
 Network-tagged suites only run with `--all` and are not part of a normal pass.
@@ -43,7 +49,7 @@ Never commit anything under `~/.clanker` or a session log; those are user data.
 ## Code conventions
 
 - **No C++ standard library**, no exceptions, no RTTI. Only the C runtime and
-  platform/libcurl APIs. Builds run with `/GR- /EHs-c- /W4` and must stay
+  platform/libcurl/PCRE2 C APIs. Builds run with `/GR- /EHs-c- /W4` and must stay
   warning-clean.
 - Use the house types: `Arena` for all allocation, `Array<T>`, `StrView` /
   `StrBuf` for UTF-8 text. Fields are PascalCase; `FFI(cond)` is the fastfail.

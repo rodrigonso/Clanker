@@ -4,7 +4,7 @@
     Configures and builds Clanker with CMake and the Visual Studio toolchain.
 .DESCRIPTION
     build.bat accepts the same options. Core-only builds never fetch networking
-    dependencies. Tests remain offline unless explicitly selected otherwise.
+    or regex dependencies. Tests remain offline unless explicitly selected otherwise.
 #>
 [CmdletBinding(PositionalBinding = $false)]
 param(
@@ -20,8 +20,7 @@ param(
     [string]$InstallPrefix,
     [switch]$Package,
     [string]$CurlArchive,
-    [string]$RgExecutable,
-    [string[]]$RgLicense,
+    [string]$Pcre2Archive,
     [switch]$Help,
     [string[]]$TestArgs
 )
@@ -33,8 +32,7 @@ if ($Help) {
 usage: build.bat [-Config Release|Debug|RelWithDebInfo|MinSizeRel]
        [-CoreOnly] [-Examples] [-Test] [-TestArgs session,tools]
        [-BuildDir path] [-Target name] [-Clean] [-InstallPrefix path]
-       [-Package] [-RgExecutable path -RgLicense path1,path2]
-       [-CurlArchive path]
+       [-Package] [-CurlArchive path] [-Pcre2Archive path]
 Requires Visual Studio C++ tools, CMake 3.24+ and Ninja (included with
 Visual Studio's C++ CMake tools). -Clean rebuilds without deleting the cache.
 '@
@@ -48,7 +46,6 @@ if ($TestArgs) {
     $TestArgs = @($TestArgs | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '--' })
     $Test = $true
 }
-if ($RgLicense) { $RgLicense = @($RgLicense | ForEach-Object { $_ -split ';|,' }) }
 if ($Package -and ($CoreOnly -or $Config -eq 'Debug')) {
     throw '-Package requires a non-Debug CLI build.'
 }
@@ -62,7 +59,6 @@ $build = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($BuildDir)) {
     $BuildDir
 } else { Join-Path $root $BuildDir }))
 . (Join-Path $PSScriptRoot 'package.ps1')
-Assert-DistributionOptions
 
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 if (-not (Test-Path -LiteralPath $vswhere)) { throw 'Install the Visual Studio Desktop development with C++ workload.' }
@@ -97,6 +93,10 @@ try {
         if ($CurlArchive) { $CurlArchive = [IO.Path]::GetFullPath($CurlArchive) }
         $configure += "-DCLANKER_CURL_ARCHIVE:FILEPATH=$CurlArchive"
     }
+    if (-not $CoreOnly -and $PSBoundParameters.ContainsKey('Pcre2Archive')) {
+        if ($Pcre2Archive) { $Pcre2Archive = [IO.Path]::GetFullPath($Pcre2Archive) }
+        $configure += "-DCLANKER_PCRE2_ARCHIVE:FILEPATH=$Pcre2Archive"
+    }
     Invoke-Checked $cmake $configure
     $targets = @($Target)
     if ($buildTests) { $targets += 'clanker_tests' }
@@ -107,13 +107,26 @@ try {
     if ($Clean) { $arguments += '--clean-first' }
     Invoke-Checked $cmake $arguments
 
-    if ($Test) { Invoke-Checked (Join-Path $build 'clanker_tests.exe') $TestArgs }
+    if ($Test) {
+        Invoke-Checked (Join-Path $build 'clanker_tests.exe') $TestArgs
+        if (-not $TestArgs) {
+            Invoke-Checked $cmake @('-P', (Join-Path $build 'generated\test_platform.cmake'))
+        }
+    }
     if ($Examples) { Invoke-Checked (Join-Path $build 'examples\core\clanker_core_example.exe') @() }
     if ($InstallPrefix -or $Package) {
         if (-not $CoreOnly) {
             $curlInfo = [IO.File]::ReadAllLines((Join-Path $build 'clanker-curl.txt'))
             $curlSource = $curlInfo[0]
             $curlVersion = $curlInfo[1]
+            $pcre2Info = [IO.File]::ReadAllLines((Join-Path $build 'clanker-pcre2.txt'))
+            if ($pcre2Info.Count -ne 3 -or -not [IO.Path]::IsPathRooted($pcre2Info[0]) -or
+                [string]::IsNullOrWhiteSpace($pcre2Info[1]) -or $pcre2Info[2] -notmatch '^[0-9a-fA-F]{64}$') {
+                throw 'Invalid CMake PCRE2 metadata.'
+            }
+            $pcre2Source = $pcre2Info[0]
+            $pcre2Version = $pcre2Info[1]
+            $pcre2Hash = $pcre2Info[2]
         }
         if ($InstallPrefix) {
             $prefix = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($InstallPrefix)) {
