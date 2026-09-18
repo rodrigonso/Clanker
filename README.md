@@ -384,12 +384,78 @@ The provider owns its context; returned messages must use the arena passed to
 `Stream`, and streaming slices need only remain valid during the callback.
 Keep configuration backing storage alive for the harness lifetime. Close the
 harness before its repository and release caller-owned arenas afterward.
+Concurrent repository operations require separate caller arenas; shared
+repository allocation is serialized. Join outstanding operations before closing
+their logs or repository. Harness metadata changes and forks reserve mutation
+admission through completion, just like runs.
 Embedding defaults differ intentionally from the CLI: turn limits and compaction
 are disabled, and tools are admitted in Yolo mode unless configured otherwise.
 The example selects Ask explicitly and registers no tools.
 
 This is an early C++ source API, not a stable ABI. Rebuild the SDK and consumers
 together with compatible compiler/runtime settings when upgrading.
+
+### Snapshots and event watches
+
+Choose the smallest read API needed:
+
+- `AgentHarness_Snapshot` returns a deep-owned `SessionReduction` for metadata
+  and tree consumers.
+- `AgentHarness_SnapshotTranscript` returns an `AgentTranscriptSnapshot` with
+  the active, compaction-aware transcript, head ID, event cursor, running/faulted
+  flags, and `HasEarlierMessages`. Set `maxMessages` to zero for the whole
+  transcript or a positive count for its exact chronological suffix.
+- `AgentHarness_Watch(harness, capacity, watch)` subscribes to future events
+  without allocating or copying history.
+- `AgentHarness_WatchTranscript` atomically snapshots the transcript and
+  registers a watch at the same cursor. Use this instead of taking a snapshot
+  and subscribing separately, which can miss intervening events.
+
+Snapshot payloads, including nested message content, belong entirely to the
+supplied arena; they do not borrow harness storage. Hydrate or consume them,
+then release that arena. A watch owns its queue until
+`AgentHarness_WatchClose`; each `AgentHarness_WatchNext` event is deep-owned by
+the arena supplied to that call. The old combined `AgentHarnessSnapshot` and
+`AgentHarness_SnapshotFull` APIs have been removed.
+
+Presentation watches may coalesce or drop transient events and report lag.
+`AgentHarnessConfig.Events` instead observes every event synchronously, in
+publication order, without copying or retaining payloads. Its callback must
+not reenter the harness or wait for another harness operation; borrowed content
+is read-only and valid only for the callback. A blocking callback applies
+backpressure. JSON output uses this observer rather than a presentation watch.
+
+The plain REPL and text print mode watch without history. TUI startup, session
+switches, and lag recovery use an atomic whole-transcript watch, hydrate before
+delivering live events, and immediately release a dedicated snapshot arena.
+Idle TUI memory compaction requests only the last 400 messages rather than
+cloning the whole history and slicing it afterward. This is a message-count
+limit, not a byte bound: individual messages can be large, whole-transcript
+hydration still scales with history, and branch-projection scratch still scales
+with the active branch.
+
+### Transient memory ownership
+
+Run-message bookkeeping lasts for the run, but context and model overrides
+have replaceable owners: installing a new override releases the superseded
+storage without resetting the accumulated message list. Hook construction
+buffers are temporary, and the harness copies accepted overrides before that
+scratch is reclaimed. Automatic compaction discards the context override while
+preserving independent model/profile overrides.
+
+Mutable hook inputs are detached down to nested content and configuration
+views, so edits cannot mutate stored history or retained overrides. Borrowed
+replacements are detached before subsequent mutable callbacks; retries reuse
+already-owned turn storage. Runs without mutable hooks keep the borrowing fast
+path.
+
+The TUI reclaims consumed display batches during active runs, including when
+newer events remain queued. Delayed text reveal keeps its payload alive until
+the line model has consumed it. Tool-progress IDs, status strings, and hydration
+intermediates no longer accumulate in the session arena. Memory still scales
+with durable history, retained transcript content, current overrides, and
+genuinely pending display output; these changes remove obsolete copies rather
+than impose a total-session memory cap.
 
 ### CLI distribution
 
@@ -627,6 +693,28 @@ list and may be repeated; exclusions are applied after the allowlist.
 than being ignored, since without an extension mechanism an unrecognized name
 is always a typo.
 
+### Read and shell output limits
+
+Text results keep at most 2,000 lines and 50 KiB: `read` returns the beginning
+of the selected range, and `shell` returns the tail. Both use bounded working
+buffers instead of retaining the entire file or command output in memory.
+`read` still scans to EOF to report exact line counts and continuation offsets,
+checking cancellation between chunks.
+
+Once shell output exceeds either limit, Clanker creates its overflow log and
+streams the full output to it, including the already captured prefix. The log
+is left in the session's artifact directory (`shell-<hex>.log`), or the OS temp
+directory under `--no-session`, and its path appears in the result. Small
+commands create no log. Live previews reuse the bounded tail. An artifact
+creation, write, or close failure is a tool error; any retained partial log is
+reported as incomplete, never as full output. Disk use remains proportional to
+output, and shell commands still have no default timeout.
+
+Images are not text-truncated. `read` accepts at most **10 MiB of raw image
+data**, then encodes it as base64 (about 13.34 MiB at the limit). Larger images
+produce an explicit error. This is Clanker's resource limit, not a claim about
+the provider's image limits.
+
 ## Lifecycle hooks
 
 Clanker reports lifecycle transitions to external commands so an editor or
@@ -816,6 +904,12 @@ context has eaten into the reserved headroom it folds the older part of the
 branch into a single summary and continues. The most recent messages are kept
 verbatim, and the retained tail always begins at a user turn, so an assistant
 tool call is never separated from its tool results.
+
+Both repositories validate compaction topology before accepting any part of an
+append batch: the source head must equal the parent, and the summarized endpoints
+must be ordered ancestors on that branch. Earlier entries in the same batch are
+included. Invalid batches leave storage unchanged; loading an existing malformed
+log reports corruption rather than accepting a session that fails during replay.
 
 Token pressure is read from the provider's reported usage when there is any
 (prompt + cache + output of the newest assistant turn, plus an estimate for
@@ -1168,6 +1262,10 @@ event→transcript mapping. Live full-screen rendering is verified manually.
 on stdout, flushed as it happens. All human-facing output stays on stderr, so
 stdout is safe to pipe.
 
+Machine events are observed synchronously before the presentation watch queue:
+they are never coalesced, dropped, or reconstructed after a lag. A slow pipe
+applies backpressure to the producer rather than growing an event backlog.
+
 ```sh
 clanker --mode json -p "summarize README.md"
 ```
@@ -1193,6 +1291,12 @@ rather than a re-flattened copy. `agent_end` always arrives before `result`,
 and `result.ok` matches the process exit code. A failed run adds
 `result.error`; a run that succeeded but stopped early — today only at the turn
 limit — adds `result.message` instead.
+
+The terminator is the last stdout line, including when a successful run carries
+a notice. Encoding, write, or flush failures cancel production and cause a
+nonzero exit with a stderr diagnostic; an unusable output stream cannot be
+promised a final `result`. Startup failures also report on stderr before a run
+and its event stream begin.
 
 `--mode json` requires `-p`; there is no interactive form without a
 bidirectional protocol.

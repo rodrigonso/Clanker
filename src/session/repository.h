@@ -66,11 +66,18 @@ inline SessionRecord SessionRecord_MakeStarted(DurableId sessionId,
   return started;
 }
 
+// Results allocated into a caller arena remain owned by that arena. Parallel
+// calls must use independent caller arenas (never the backend's own arena).
+// Close requires all operations using the log, including forks reading its
+// live records, to have completed. Close the repository only after its calls
+// and all log handles have finished.
 struct SessionLog {
   void* Ctx;
   bool Writable;
   SessionResult (*ReadAll)(void* ctx, Arena* arena, Array<SessionRecord>* out);
   SessionResult (*Append)(void* ctx, SessionRecord* record);
+  // Invalid batches leave records, sequence, metadata and storage unchanged,
+  // including the caller's input. References may target earlier batch records.
   SessionResult (*AppendBatch)(void* ctx, SessionRecord* records, u32 count);
   void (*Close)(void* ctx);
 };

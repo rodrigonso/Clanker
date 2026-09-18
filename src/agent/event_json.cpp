@@ -88,29 +88,32 @@ const char* StreamDeltaType(StreamEventKind kind) {
 
 }  // namespace
 
-bool AgentEventJson_Write(StrBuf* out, const AgentHarnessEvent* event) {
-  if (!out || !event) return false;
+SessionResult AgentEventJson_Write(StrBuf* out, const AgentHarnessEvent* event) {
+  if (!out || !event) return SessionResult_Invalid("event JSON arguments are invalid");
 
   // A rejected event must leave `out` byte-for-byte as it was found, so callers
   // can append unconditionally and flush only on success.
   u32 mark = out->Length;
-  auto reject = [out, mark]() {
+  auto restore = [out, mark](SessionResult result) {
     out->Length = mark;
     out->Data[mark] = '\0';
-    return false;
+    return result;
   };
 
   JsonWriter w = {};
   JsonWrite_Begin(&w, out);
 
   switch (event->Kind) {
-    case AgentHarnessEventKind::DurableRecord:
+    case AgentHarnessEventKind::DurableRecord: {
+      if (!event->Record)
+        return restore(SessionResult_Invalid("event JSON record is missing"));
       JsonWrite_String(&w, "type", SVL("record"));
       JsonWrite_String(&w, "kind", SessionRecordKind_Name(event->Record->Kind));
       JsonWrite_Key(&w, "record");
-      if (!SessionResult_IsOk(SessionRecord_Encode(out, event->Record)))
-        return reject();
+      SessionResult encoded = SessionRecord_Encode(out, event->Record);
+      if (!SessionResult_IsOk(encoded)) return restore(encoded);
       break;
+    }
     case AgentHarnessEventKind::TransientAgentStart:
       JsonWrite_String(&w, "type", SVL("agent_start"));
       JsonWrite_String(&w, "turn", TurnKindName(event->Turn.Kind));
@@ -129,7 +132,7 @@ bool AgentEventJson_Write(StrBuf* out, const AgentHarnessEvent* event) {
       break;
     case AgentHarnessEventKind::TransientStream: {
       const char* type = StreamDeltaType(event->Stream.Kind);
-      if (!type) return reject();
+      if (!type) return restore(SessionResult_Ok());
       JsonWrite_String(&w, "type", SV(type));
       JsonWrite_U64(&w, "index", event->Stream.ContentIndex);
       JsonWrite_String(&w, "text", event->Stream.Delta);
@@ -184,9 +187,21 @@ bool AgentEventJson_Write(StrBuf* out, const AgentHarnessEvent* event) {
       JsonWrite_U64(&w, "count", event->Dropped.Count);
       break;
     default:
-      return reject();
+      return restore(SessionResult_Invalid("event JSON kind is invalid"));
   }
 
   JsonWrite_End(&w);
-  return true;
+  return SessionResult_Ok();
+}
+
+void AgentEventJson_WriteResult(StrBuf* out, SessionResult result) {
+  JsonWriter w = {};
+  JsonWrite_Begin(&w, out);
+  JsonWrite_String(&w, "type", SVL("result"));
+  JsonWrite_Bool(&w, "ok", SessionResult_IsOk(result));
+  if (!SessionResult_IsOk(result))
+    JsonWrite_String(&w, "error", result.Message);
+  else if (result.Message.Length)
+    JsonWrite_String(&w, "message", result.Message);
+  JsonWrite_End(&w);
 }

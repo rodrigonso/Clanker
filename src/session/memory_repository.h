@@ -9,6 +9,8 @@ struct MemoryRepository {
   Arena Mem;
   Mutex Lock;
   Array<MemorySession*> Sessions;
+  // Admitted append batches, including injected storage failures. Invalid
+  // input never reaches storage and does not consume a failure injection.
   u64 AppendCalls;
   // Counts calls to SessionLog_ReadAll across every log this repository has
   // handed out. Tests use this to prove the harness reads full history only
@@ -25,7 +27,7 @@ void MemoryRepository_Destroy(MemoryRepository* repository);
 SessionRepository MemoryRepository_AsRepository(MemoryRepository* repository);
 
 // Injects one storage failure after `successfulCalls` more append calls. Zero
-// fails the next append. The affected writable log becomes permanently faulted.
+// fails the next valid append. The affected writable log becomes permanently faulted.
 void MemoryRepository_FailAfterAppends(MemoryRepository* repository,
                                        u32 successfulCalls);
 void MemoryRepository_ClearFailure(MemoryRepository* repository);

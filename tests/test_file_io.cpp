@@ -41,6 +41,30 @@ void TestFileIo() {
   CHECK(arena.Used == mark);
   CHECK(File_ReadAll(&arena, boundedPath, &bytes) == FileIoResult::Success);
   CHECK_ALL(StrView_Eq(bytes, content), bytes.Data && bytes.Data[bytes.Length] == '\0');
+  FileReader reader = {};
+  mark = arena.Used;
+  CHECK(File_OpenRead(&arena, boundedPath, &reader) == FileIoResult::Success);
+  CHECK_ALL(reader.Handle != nullptr, arena.Used == mark);
+  char chunk[4096];
+  u32 total = 0;
+  const u32 capacities[] = {1u, 16u, 4096u, 4096u, 4096u, 4096u};
+  for (u32 capacity : capacities) {
+    u32 count = 123;
+    CHECK(File_ReadChunk(&reader, chunk, capacity, &count) == FileIoResult::Success);
+    CHECK(count == ClankerMin(capacity, content.Length - total));
+    CHECK(StrView_Eq(StrView{chunk, count}, StrView{content.Data + total, count}));
+    total += count;
+  }
+  CHECK_ALL(total == content.Length, arena.Used == mark);
+  CHECK(File_Close(&reader) == FileIoResult::Success);
+  CHECK(reader.Handle == nullptr);
+  CHECK(File_Close(&reader) == FileIoResult::Success);
+  u32 count = 123;
+  CHECK(File_ReadChunk(&reader, chunk, sizeof(chunk), &count) == FileIoResult::IoError);
+  CHECK(count == 0);
+  CHECK(File_OpenRead(&arena, SVL("out/clanker-file-io-missing/not-found"), &reader) ==
+        FileIoResult::Missing);
+  CHECK_ALL(reader.Handle == nullptr, arena.Used == mark);
   CHECK(ConfigFile_ReadAll(&arena, path, &bytes) == ConfigFileReadResult::Success);
   CHECK(StrView_Eq(bytes, content));
 
@@ -55,12 +79,38 @@ void TestFileIo() {
   CHECK(File_ReadAll(&arena, path, &bytes, content.Length - 1u) == FileIoResult::TooLarge);
   CHECK_ALL(bytes.Data == nullptr, bytes.Length == 0, arena.Used == mark);
 
+  CHECK(File_OpenRead(&arena, path, &reader) == FileIoResult::Success);
+  CHECK(File_ReadChunk(&reader, chunk, 16, &count) == FileIoResult::Success);
+  CHECK(count == 16);
+  FILE* append = fopen(StrView_DupCStr(&arena, path), "ab");
+  CHECK(append != nullptr);
+  if (append) {
+    CHECK(fputc('x', append) == 'x');
+    CHECK(fclose(append) == 0);
+  }
+  total = count;
+  for (;;) {
+    CHECK(File_ReadChunk(&reader, chunk, sizeof(chunk), &count) == FileIoResult::Success);
+    if (!count) break;
+    CHECK(total + count <= 10001);
+    if (total + count <= 10001)
+      CHECK(StrView_Eq(StrView{chunk, count}, StrView{data + total, count}));
+    total += count;
+  }
+  CHECK(total == 10001);
+  CHECK(File_Close(&reader) == FileIoResult::Success);
+
   CHECK(File_WriteAll(&arena, path, SVL("short")) == FileIoResult::Success);
   CHECK(File_ReadAll(&arena, path, &bytes) == FileIoResult::Success);
   CHECK(StrView_Eq(bytes, SVL("short")));
   CHECK(File_WriteAll(&arena, path, StrView{}) == FileIoResult::Success);
   CHECK(File_ReadAll(&arena, path, &bytes) == FileIoResult::Success);
   CHECK_ALL(bytes.Length == 0, bytes.Data && bytes.Data[0] == '\0');
+  CHECK(File_OpenRead(&arena, path, &reader) == FileIoResult::Success);
+  count = 123;
+  CHECK(File_ReadChunk(&reader, chunk, sizeof(chunk), &count) == FileIoResult::Success);
+  CHECK(count == 0);
+  CHECK(File_Close(&reader) == FileIoResult::Success);
 
   mark = arena.Used;
   CHECK(File_ReadAll(&arena, StrBuf_View(&root), &bytes) != FileIoResult::Success);
@@ -95,6 +145,17 @@ void TestFileIo() {
   CHECK(_wrmdir(native) == 0);
 #else
   CHECK(rmdir(StrView_DupCStr(&arena, unicodeDir)) == 0);
+#endif
+#if !defined(_WIN32)
+  CHECK(File_OpenRead(&arena, StrBuf_View(&root), &reader) == FileIoResult::Success);
+  count = 123;
+  CHECK(File_ReadChunk(&reader, chunk, sizeof(chunk), &count) == FileIoResult::IoError);
+  CHECK(count == 0);
+  CHECK(File_Close(&reader) == FileIoResult::Success);
+  CHECK(File_OpenRead(&arena, path, &reader) == FileIoResult::Success);
+  CHECK(close(fileno((FILE*)reader.Handle)) == 0);
+  CHECK(File_Close(&reader) == FileIoResult::IoError);
+  CHECK(reader.Handle == nullptr);
 #endif
 
   CHECK(remove(StrView_DupCStr(&arena, path)) == 0);

@@ -5,6 +5,8 @@
 // Built-in tool factories.
 Tool ReadTool();
 
+struct ShellCaptureIo;
+
 // Where the `shell` tool writes output that exceeds the truncation limit.
 // `Directory` is re-read on every call so the owner can repoint it when the
 // session changes; an empty view falls back to the OS temp directory, which is
@@ -12,6 +14,8 @@ Tool ReadTool();
 // running, since a tool batch reads it from worker threads.
 struct ShellToolContext {
   StrView Directory;
+  // Optional artifact I/O seam; null uses native exclusive-create files.
+  const ShellCaptureIo* OutputIo;
 };
 
 Tool ShellTool(ShellToolContext* context = nullptr);

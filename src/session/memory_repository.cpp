@@ -139,22 +139,13 @@ SessionResult AppendBatch(void* context, SessionRecord* input, u32 count) {
   if (handle->Faulted)
     return SessionResult_Error(SessionStatus::Faulted, SVL("session log is faulted"));
 
-  repository->AppendCalls++;
-  if (repository->FailOnAppendCall != 0 &&
-      repository->AppendCalls == repository->FailOnAppendCall) {
-    handle->Faulted = true;
-    repository->FailOnAppendCall = 0;
-    return SessionResult_Error(SessionStatus::IoError,
-                               SVL("injected memory repository append failure"));
-  }
-
   MemorySession* session = handle->Session;
   Arena scratch = ArenaCreate();
   Array<SessionRecord> prepared = Array_Make<SessionRecord>(&scratch, count);
   u64 firstSeq = (u64)session->Records.Count + 1;
 
   // Two-phase: validate every new record against the already-folded
-  // reduction (O(1) per record) plus the small in-flight batch prepared so
+  // reduction plus the small in-flight batch prepared so
   // far (bounded by `count`, never the historical log). Only after the
   // whole batch validates do we mutate the persistent records/reduction, so
   // a failure partway through the batch leaves prior history untouched.
@@ -173,6 +164,16 @@ SessionResult AppendBatch(void* context, SessionRecord* input, u32 count) {
       return valid;
     }
     Array_Push(&prepared, record);
+  }
+
+  repository->AppendCalls++;
+  if (repository->FailOnAppendCall != 0 &&
+      repository->AppendCalls == repository->FailOnAppendCall) {
+    handle->Faulted = true;
+    repository->FailOnAppendCall = 0;
+    ArenaRelease(&scratch);
+    return SessionResult_Error(SessionStatus::IoError,
+                               SVL("injected memory repository append failure"));
   }
 
   for (u32 i = 0; i < prepared.Count; i++) {

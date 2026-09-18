@@ -8,20 +8,40 @@
 
 namespace TuiInternal {
 
+static StrView HydrationText(Arena* scratch, const Message* message) {
+  usize bytes = 0;
+  u32 count = 0;
+  StrView single = {};
+  for (u32 i = 0; i < message->Content.Count; i++) {
+    const Content& content = message->Content.Data[i];
+    if (content.Kind != ContentKind::Text) continue;
+    if (bytes) bytes++;
+    bytes += content.Text.Length;
+    single = content.Text;
+    count++;
+  }
+  if (count < 2) return single;
+  FFI(bytes >= 0xffffffffu);
+  StrBuf text = StrBuf_Make(scratch, (u32)bytes + 1);
+  for (u32 i = 0; i < message->Content.Count; i++) {
+    const Content& content = message->Content.Data[i];
+    if (content.Kind != ContentKind::Text) continue;
+    if (text.Length) StrBuf_AppendChar(&text, '\n');
+    StrBuf_Append(&text, content.Text);
+  }
+  return StrBuf_View(&text);
+}
+
 void HydrateTranscriptLocked(Tui* t, const Message* messages,
                                     u32 count) {
+  Arena scratch = ArenaCreate();
   for (u32 i = 0; i < count; i++) {
+    ArenaReset(&scratch);
+    ArenaTrim(&scratch, (usize)64 << 10);
     const Message* message = &messages[i];
     if (message->Kind == Role::User) {
       if (t->Model.HasAssistant) LineModel_EndAssistant(&t->Model);
-      StrBuf text = StrBuf_Make(&t->SessionMem, 128);
-      for (u32 c = 0; c < message->Content.Count; c++) {
-        const Content* content = &message->Content.Data[c];
-        if (content->Kind != ContentKind::Text) continue;
-        if (text.Length) StrBuf_AppendChar(&text, '\n');
-        StrBuf_Append(&text, content->Text);
-      }
-      LineModel_AddUser(&t->Model, StrBuf_View(&text), message->Timestamp);
+      LineModel_AddUser(&t->Model, HydrationText(&scratch, message), message->Timestamp);
     } else if (message->Kind == Role::Assistant) {
       bool hasText = false;
       for (u32 c = 0; c < message->Content.Count; c++)
@@ -49,20 +69,15 @@ void HydrateTranscriptLocked(Tui* t, const Message* messages,
         LineModel_AddNotice(&t->Model, EntryKind::Info,
                             SVL("Interrupted by user."));
     } else if (message->Kind == Role::ToolResult) {
-      StrBuf text = StrBuf_Make(&t->SessionMem, 128);
-      for (u32 c = 0; c < message->Content.Count; c++) {
-        const Content* content = &message->Content.Data[c];
-        if (content->Kind != ContentKind::Text) continue;
-        if (text.Length) StrBuf_AppendChar(&text, '\n');
-        StrBuf_Append(&text, content->Text);
-      }
-      StrView result = StrBuf_View(&text);
+      StrView result = HydrationText(&scratch, message);
       if (!LineModel_FinishTool(&t->Model, message->ToolCallId, result,
                                 Truncate(result, 1500), message->IsError))
         LineModel_AddNotice(&t->Model, EntryKind::Error,
                             SVL("tool result did not match a pending call"));
     }
   }
+  LineModel_Layout(&t->Model);
+  ArenaRelease(&scratch);
 }
 
 // Every Tui field that can hold a string owned by SessionMem and is not rebuilt
@@ -73,6 +88,10 @@ void ClearSessionScopedStringsLocked(Tui* t) {
   // without a hand-maintained list -- which is the point of the struct. It used
   // to be nine assignments that a new field could silently escape.
   t->Sess = TuiSessionStrings{};
+  SetTransientText(&t->StateTool, {});
+  SetTransientText(&t->RetryStatus, {});
+  SetTransientText(&t->OperationLabel, {});
+  SetTransientText(&t->OperationStatus, {});
 }
 
 // A modal or a running operation is displaying strings owned by SessionMem and
@@ -102,55 +121,39 @@ void RebuildTranscriptLocked(Tui* t, const Message* messages, u32 count,
   Arena next = {};
   TuiSubmission preserved[64] = {};
   u32 preservedCount = 0;
-  StrView editText = {};
-  u32 editCursor = 0;
-  Array<StrView> history = {};
   if (swap) {
     next = ArenaCreate();
     preservedCount = t->QCount;
     for (u32 i = 0; i < preservedCount; i++) {
       const TuiSubmission& queued = t->Queue[(t->QHead + i) % 64];
-      preserved[i].Kind = queued.Kind;
+      preserved[i] = queued;
       preserved[i].Text = StrView_Dup(&next, queued.Text);
     }
-    // Whatever the user has already typed, and their recall history, are theirs
-    // -- reclaiming memory must not eat them.
-    editText = StrView_Dup(&next, LineEdit_Text(&t->Edit));
-    editCursor = LineEdit_Cursor(&t->Edit);
-    history = Array_Make<StrView>(&next, t->Edit.History.Count ? t->Edit.History.Count : 1);
-    for (u32 i = 0; i < t->Edit.History.Count; i++)
-      Array_Push(&history, StrView_Dup(&next, t->Edit.History.Data[i]));
   }
 
   LineModel_Release(&t->Model);
   if (swap) {
-    ArenaRelease(&t->SessionMem);
+    Arena old = t->SessionMem;
     t->SessionMem = next;
+    // Clone against the final arena address, not the stack-local arena handle:
+    // every growable buffer must keep its Backing after this function returns.
+    LineEdit_Clone(&t->Edit, &t->Edit, &t->SessionMem);
+    ArenaRelease(&old);
     ClearSessionScopedStringsLocked(t);
   }
   LineModel_Init(&t->Model, &t->SessionMem, width, cap, t->Color, rounded);
   if (swap) {
-    LineEdit_Init(&t->Edit, &t->SessionMem);
     LineEdit_Init(&t->ModalEdit, &t->SessionMem);
-    t->InputUi = UiTextInputState{&t->Edit, 0, false};
-    if (editText.Length) {
-      LineEdit_InsertText(&t->Edit, editText);
-      LineEdit_SetCursor(&t->Edit, editCursor);
-    }
-    for (u32 i = 0; i < history.Count; i++)
-      Array_Push(&t->Edit.History, history.Data[i]);
+    t->InputUi.Edit = &t->Edit;
     memset(t->Queue, 0, sizeof(t->Queue));
     for (u32 i = 0; i < preservedCount; i++) t->Queue[i] = preserved[i];
     t->QHead = 0;
     t->QTail = preservedCount % 64;
     t->QCount = preservedCount;
   }
-  StreamReveal_Init(&t->Reveal, &t->SessionMem);
-  t->DisplayEvents = Array_Make<TuiDisplayEvent>(&t->SessionMem, 16);
-  t->DisplayHead = 0;
-  ResetToolUpdates(t);
+  ResetDisplay(t);
   t->Use = {};
-  t->Sess.StateTool = {};
+  SetTransientText(&t->StateTool, {});
   t->State = t->AgentRunning ? TuiState::Thinking : TuiState::Idle;
   HydrateTranscriptLocked(t, messages, count);
   // The live set, for deciding when the next compaction is worth its copy.
@@ -160,14 +163,6 @@ void RebuildTranscriptLocked(Tui* t, const Message* messages, u32 count,
 }  // namespace TuiInternal
 
 using namespace TuiInternal;
-
-void Tui_HydrateTranscript(Tui* t, const Message* messages, u32 count) {
-  if (!t || (!messages && count)) return;
-  Mutex_Lock(&t->Lock);
-  HydrateTranscriptLocked(t, messages, count);
-  Wake(t);
-  Mutex_Unlock(&t->Lock);
-}
 
 void Tui_ReplaceTranscript(Tui* t, const Message* messages, u32 count) {
   if (!t || (!messages && count)) return;

@@ -17,6 +17,17 @@ constexpr u64 FILE_READ_MAX_BYTES = 0xFFFFFFFEull;
 // Opens a UTF-8 path in the requested C-runtime mode. The caller owns the FILE.
 FileIoResult File_Open(Arena* arena, StrView path, const char* mode, FILE** out);
 
+struct FileReader {
+  void* Handle;
+};
+
+// Binary streaming I/O with caller-owned buffers. A successful zero-byte read
+// means EOF. Errors clear `count`; close clears the handle, including on error.
+// Closing an empty reader succeeds. Open with an empty reader.
+FileIoResult File_OpenRead(Arena* scratch, StrView path, FileReader* out);
+FileIoResult File_ReadChunk(FileReader* file, void* buffer, u32 capacity, u32* count);
+FileIoResult File_Close(FileReader* file);
+
 // Binary whole-file I/O, including close errors. Successful reads are
 // null-terminated at [Length]; failed reads leave `out` empty and give back
 // any arena space they used. A file longer than `maxBytes` fails with TooLarge

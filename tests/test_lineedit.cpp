@@ -249,5 +249,49 @@ void TestLineEdit() {
   LineEdit_Clear(&e);
   CHECK_ALL(LineEdit_Empty(&e), !LineEdit_HasSelection(&e));
 
+  {
+    Arena source = ArenaCreate();
+    Arena destination = ArenaCreate();
+    LineEdit original;
+    LineEdit_Init(&original, &source);
+    LineEdit_InsertText(&original, SVL("first history"));
+    LineEdit_Submit(&original);
+    LineEdit_InsertText(&original, SVL("second history"));
+    LineEdit_Submit(&original);
+    LineEdit_InsertText(&original, SVL("unfinished draft"));
+    LineEdit_HistoryPrev(&original);
+    LineEdit_HistoryPrev(&original);
+    Select(&original, 2, 7);
+    original.DesiredCol = 23;
+
+    LineEdit copy;
+    LineEdit_Clone(&copy, &original, &destination);
+    CHECK_ALL(copy.Text.Data != original.Text.Data,
+              copy.Stash.Data != original.Stash.Data,
+              copy.History.Data != original.History.Data,
+              copy.History.Data[0].Data != original.History.Data[0].Data);
+    ArenaRelease(&source);
+    CHECK_ALL(copy.Mem == &destination, copy.Text.Backing == &destination,
+              copy.Stash.Backing == &destination, copy.History.Backing == &destination,
+              copy.HistPos == 0, copy.Cursor == 7, copy.Anchor == 2,
+              copy.DesiredCol == 23, SelectionEq(&copy, 2, 7, "rst h"));
+    LineEdit_HistoryNext(&copy);
+    CHECK(Eq(&copy, "second history"));
+    LineEdit_HistoryNext(&copy);
+    CHECK_ALL(Eq(&copy, "unfinished draft"), copy.HistPos == -1);
+    for (u32 i = 0; i < 256; i++) LineEdit_InsertChar(&copy, 'x');
+    CHECK(copy.Text.Length == 272);
+    for (u32 i = 0; i < 20; i++) {
+      LineEdit_Submit(&copy);
+      LineEdit_InsertText(&copy, SVL("another recall"));
+    }
+    CHECK(copy.History.Count == 22);
+    LineEdit_HistoryPrev(&copy);
+    CHECK(StrView_Eq(StrBuf_View(&copy.Stash), SVL("another recall")));
+    LineEdit_Clone(&copy, &copy, &destination);
+    CHECK_ALL(copy.HistPos == 21, Eq(&copy, "another recall"));
+    ArenaRelease(&destination);
+  }
+
   ArenaRelease(&a);
 }

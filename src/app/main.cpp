@@ -3,7 +3,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "agent/event_json.h"
 #include "agent/harness.h"
 #include "app/auth_flow.h"
 #include "app/command.h"
@@ -143,8 +142,7 @@ static void RunPlainRepl(InteractiveRuntime* rt) {
   HarnessEventPump pump = {};
   HarnessEventSink sink = {nullptr, ReplSink};
   SessionResult watching =
-      StartHarnessEventPump(nullptr, rt->Harness, sink, nullptr, &pump,
-                            nullptr);
+      StartHarnessEventPump(rt->Harness, sink, nullptr, &pump);
   if (!SessionResult_IsOk(watching)) {
     ReportHarnessResult(watching);
     return;
@@ -200,24 +198,18 @@ static void MaybeCompactTuiSession(InteractiveRuntime* rt, Tui* tui) {
   if (!Tui_SessionMemoryWantsCompaction(tui)) return;
   // The transcript is rebuilt from the harness, which is the authority, so the
   // copy is what the user was already looking at.
-  Arena scratch = ArenaCreate();
-  AgentHarnessSnapshot snapshot = {};
-  SessionResult taken =
-      AgentHarness_SnapshotFull(&scratch, rt->Harness, &snapshot);
+  Arena snapshotMem = ArenaCreate();
+  AgentTranscriptSnapshot snapshot = {};
+  // Match the existing scrollback rebuild policy without copying the history
+  // that the TUI would immediately discard.
+  const u32 kMaxRebuiltMessages = 400;
+  SessionResult taken = AgentHarness_SnapshotTranscript(
+      &snapshotMem, rt->Harness, kMaxRebuiltMessages, &snapshot);
   if (SessionResult_IsOk(taken)) {
-    // Only the tail can ever be on screen -- the scrollback cap drops the rest
-    // immediately -- and rebuilding from the whole history would make each
-    // compaction cost grow with session length instead of with the live set.
-    const u32 kMaxRebuiltMessages = 400;
-    const Message* messages = snapshot.Transcript.Data;
-    u32 count = snapshot.Transcript.Count;
-    if (count > kMaxRebuiltMessages) {
-      messages += count - kMaxRebuiltMessages;
-      count = kMaxRebuiltMessages;
-    }
-    Tui_CompactSessionMemory(tui, messages, count);
+    Tui_CompactSessionMemory(tui, snapshot.Transcript.Data,
+                            snapshot.Transcript.Count);
   }
-  ArenaRelease(&scratch);
+  ArenaRelease(&snapshotMem);
 }
 
 static void RunTuiRepl(InteractiveRuntime* rt) {
@@ -243,13 +235,9 @@ static void RunTuiRepl(InteractiveRuntime* rt) {
 
   HarnessEventPump pump = {};
   HarnessEventSink sink = {&tui, TuiBridge_HarnessEvent};
-  Arena hydrateMem = ArenaCreate();
-  AgentHarnessSnapshot snapshot = {};
   SessionResult watching =
-      StartHarnessEventPump(&hydrateMem, rt->Harness, sink, &tui, &pump,
-                            &snapshot);
+      StartHarnessEventPump(rt->Harness, sink, &tui, &pump);
   if (!SessionResult_IsOk(watching)) {
-    ArenaRelease(&hydrateMem);
     ReportHarnessResult(watching);
     Tui_Stop(&tui);
     rt->TuiView = nullptr;
@@ -257,10 +245,6 @@ static void RunTuiRepl(InteractiveRuntime* rt) {
   }
   rt->EventPump = &pump;
   rt->EventSink = sink;
-  Tui_HydrateTranscript(&tui, snapshot.Transcript.Data,
-                        snapshot.Transcript.Count);
-  Tui_SetContextTokens(&tui, snapshot.ContextTokens);
-  ArenaRelease(&hydrateMem);
 
   Http_GlobalInit();
   Tui_LoadStartupContext(&tui);
@@ -1001,11 +985,31 @@ int main(int argc, char** argv) {
   if (onePrompt) {
     EnableTerminal();
     Http_GlobalInit();
+    Atomic_StoreI32(&g_abort, 0);
+    if (!ResolvePromptAuth(&harness, &g_abort)) {
+      if (Atomic_LoadI32(&g_abort)) {
+        EndHookSession();
+        AgentHarness_Close(&harness);
+        sessions.Close(sessions.Ctx);
+        Http_GlobalShutdown();
+        ArenaRelease(&arena);
+        return 130;
+      }
+      StrView authGuidance = AuthGuidance(&arena, runtime.Spec, false);
+      fprintf(stderr, "error: %.*s\n", (int)authGuidance.Length, authGuidance.Data);
+      EndHookSession();
+      AgentHarness_Close(&harness);
+      sessions.Close(sessions.Ctx);
+      Http_GlobalShutdown();
+      ArenaRelease(&arena);
+      return 1;
+    }
     HarnessEventPump pump = {};
+    HarnessJsonOutput json = {};
     HarnessEventSink sink = {nullptr, ReplSink};
-    SessionResult watching =
-        StartHarnessEventPump(nullptr, &harness, sink, nullptr, &pump,
-                              nullptr, jsonMode);
+    SessionResult watching = jsonMode
+        ? StartHarnessJsonOutput(&harness, &json)
+        : StartHarnessEventPump(&harness, sink, nullptr, &pump);
     if (!SessionResult_IsOk(watching)) {
       ReportHarnessResult(watching);
       EndHookSession();
@@ -1016,49 +1020,12 @@ int main(int argc, char** argv) {
       return 1;
     }
     Atomic_StoreI32(&g_abort, 0);
-    if (!ResolvePromptAuth(&harness, &g_abort)) {
-      if (Atomic_LoadI32(&g_abort)) {
-        StopHarnessEventPump(&pump);
-        EndHookSession();
-        AgentHarness_Close(&harness);
-        sessions.Close(sessions.Ctx);
-        Http_GlobalShutdown();
-        ArenaRelease(&arena);
-        return 130;
-      }
-      StrView authGuidance = AuthGuidance(&arena, runtime.Spec, false);
-      fprintf(stderr, "error: %.*s\n", (int)authGuidance.Length, authGuidance.Data);
-      StopHarnessEventPump(&pump);
-      EndHookSession();
-      AgentHarness_Close(&harness);
-      sessions.Close(sessions.Ctx);
-      Http_GlobalShutdown();
-      ArenaRelease(&arena);
-      return 1;
-    }
-    Atomic_StoreI32(&g_abort, 0);
     SessionResult run = RunHarnessPrompt(&harness, SV(onePrompt));
-    StopHarnessEventPump(&pump);
-    if (jsonMode) {
-      // Terminator: the pump has drained, so this is always the last line and
-      // carries the same verdict as the exit code.
-      StrBuf line = StrBuf_Make(&arena, 128);
-      JsonWriter w = {};
-      JsonWrite_Begin(&w, &line);
-      JsonWrite_String(&w, "type", SVL("result"));
-      JsonWrite_Bool(&w, "ok", SessionResult_IsOk(run));
-      if (!SessionResult_IsOk(run))
-        JsonWrite_String(&w, "error", run.Message);
-      else if (run.Message.Length)
-        // Present only when an otherwise-successful run ended early, so a
-        // consumer can tell "finished" from "stopped at the turn limit".
-        JsonWrite_String(&w, "message", run.Message);
-      JsonWrite_End(&w);
-      fwrite(line.Data, 1, line.Length, stdout);
-      fputc('\n', stdout);
-      fflush(stdout);
-    }
-    ReportHarnessResult(run);
+    if (jsonMode)
+      run = FinishHarnessJsonOutput(&json, run);
+    else
+      StopHarnessEventPump(&pump);
+    if (!jsonMode || !SessionResult_IsOk(run)) ReportHarnessResult(run);
     MaybeReportMem();
     EndHookSession();
     AgentHarness_Close(&harness);

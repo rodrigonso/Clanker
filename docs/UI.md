@@ -191,15 +191,94 @@ Pacing is display-only and never gates the agent thread.
 `Tui_AppendAssistantText` takes the lock, queues, wakes the render thread and
 returns; it never waits on the reveal. Time-to-first-token, turn wall time and
 tool-start timestamps are all stamped at arrival, so none of them observes the
-animation. The controller itself costs ~0.02 us per frame.
+animation. The pacing arithmetic itself costs ~0.02 us per frame.
 
-The real cost of pacing is that it raises the transcript append count, and
-`LineModel_AppendAssistant` re-renders the whole assistant entry on every
-append — roughly 70 us at 2 KB, 240 us at 8 KB and 1 ms at 32 KB. This is not
-new work: at one append per frame the count matches what token-level providers
-already produced before pacing existed. It is the one place where cost scales
-with both message length and frame rate, so it is the first thing to measure if
-streaming ever feels heavy.
+Queued display events own arena-backed FIFO batches, not session storage. A
+batch closes after 32 events or once its allocations reach 256 KiB; a single
+large event or coalesced text buffer can exceed that threshold. Completed
+batches are reclaimed even while newer events remain queued. At most one empty
+batch keeps 64 KiB committed for reuse. Text adopted by `StreamReveal` pins its
+batch until the final revealed slice has been copied into the line model;
+dequeue alone does not release the text. Direct reveal storage is also recycled
+and trimmed to 64 KiB after draining. Reveal timing and UTF-8 handling do not
+depend on batch boundaries.
+
+Tool-progress slots share a reclaimable arena for IDs and replace-in-place
+previews. Queued updates identify the slot rather than borrowing its strings,
+so idle slots can be discarded and live slots compacted without waiting for
+every tool to finish. Status strings have independently resettable owners.
+Hydration borrows single text blocks or joins multiple blocks in per-message
+scratch; the line model copies only what it retains. Tool outcomes are computed
+from the full result before keeping the bounded preview. These ownership rules
+reclaim obsolete copies, not genuine pending output or retained transcript
+content.
+
+## Transcript Layout and Ownership
+
+Line-model mutations retain content and invalidate only the changed entry.
+They do not wrap, parse markdown, or copy the transcript on arrival.
+`PumpDisplay` materializes layout once after draining the events/reveal for a
+render turn, under the same TUI lock. Hydration likewise lays out once after
+loading its messages. Display queries also materialize outstanding changes,
+so even const row/revision queries require that lock; they are not independent
+read-only operations.
+
+Each entry caches its wrapped rows, including owned span text. Layout formats
+only dirty entries and tools whose preview visibility changed. Progress on an
+unfinished tool does not invalidate rows, since previews appear on completion.
+Mutations directly maintain the earliest dirty entry index: layout does not
+search history for dirty entries. Expanded-preview costs and their admission
+boundary are cached. That boundary is reconsidered only when expansion
+membership, an expanded preview, or width changes, not on assistant appends.
+
+The flat display-row index is a ring. Cached uncropped entry coordinates let
+layout replace metadata from the earliest dirty entry onward, leaving prefix
+rows in their existing slots. Front cropping advances the ring head without
+copying history. If markdown shrinks enough to expose formerly cropped prefix
+rows, a binary coordinate lookup restores only those newly visible rows.
+Entry-ID/row-range lookup is likewise binary, rather than scanning the flat
+transcript to restore a scroll anchor.
+
+Normal append-to-last-assistant layout is independent of retained history:
+its work is the active assistant's formatting, visible-prefix fingerprinting,
+and changed visible row writes. A changed middle entry updates the following
+entry coordinates and visible row metadata, proportional to that suffix.
+Actual eviction is linear in retained entries, removes the prefix with one
+move, and does not re-render survivors. Capped hydration starts from the newest
+entries and does not format the discarded prefix. Separators belong to index
+assembly, not entry caches, so dropping an entry does not invalidate its neighbor.
+
+Row caches share an arena rather than reserving/committing an arena per entry.
+The latest allocation is replaced in place when possible (notably during
+streaming). These are shared, lazily committed arenas, not a 64 KiB allocation
+per entry. When total row storage exceeds 64 KiB and dead storage exceeds the
+live set, live cached rows are copied into a fresh arena without re-running
+layout, and visible row pointers are refreshed. This amortized reclamation and
+geometric growth of the flat ring may copy retained rows; ordinary tail layout
+does neither. Markdown scratch is reset between entries and trimmed after
+streaming ends. Cached text does not borrow mutable tool buffers, reveal
+batches, or markdown scratch.
+
+Multiple assistant deltas before layout produce one render of that assistant,
+not one per token. The active markdown entry can still reflow as a whole at
+that boundary: closing emphasis, setext headings, tables, and fences can change
+earlier rows. This is intentionally distinct from re-rendering retained
+history. Prefix fingerprints and cropped-row offsets preserve append-stable
+selection revisions; semantic reflows and front cropping invalidate them.
+Width changes deliberately invalidate all retained entry layouts, as do
+bullet-style changes; expand-all may likewise update the whole retained suffix.
+A trial-width scrollbar probe leaves caches untouched
+and stops once it exceeds the viewport, rejecting histories with too many
+visible entries without formatting them.
+
+Session compaction uses `LineEdit_Clone` to deep-own the complete editor state
+in the replacement arena: text, cursor, selection anchor, sticky column,
+history position, recall history, and the saved live draft. Growable buffer
+backing pointers refer to the final arena handle, not a stack-local copy.
+Composer scrolling/drag state survives compaction too. `/clear` intentionally
+resets the editor and history. Both arena swaps retain every queued submission
+field, including permission mode, while copying its text and preserving FIFO
+order across a wrapped queue.
 
 ## Markdown
 
@@ -208,8 +287,8 @@ logical span-lines for the transcript. It is modelled on pi's
 `packages/tui/src/components/markdown.ts`, which lexes with `marked` and
 hand-writes the walk to ANSI; Clanker keeps the same visual vocabulary but scans
 lines directly instead of materialising a token tree. That choice is a
-consequence of streaming: `LineModel_AppendAssistant` re-renders the entire
-entry on every delta, so allocation has to stay proportional to output rather
+consequence of streaming: a dirty assistant is rendered at the layout boundary,
+so allocation has to stay proportional to output rather
 than to a parse forest. Only blockquotes, list items and table cells recurse.
 
 Supported: ATX and setext headings, fenced (``` and `~~~`) and indented code,
@@ -243,8 +322,8 @@ Two properties are load-bearing:
 
 - **Width is a parameter, never module state.** Rules and tables are sized
   against it, and `LineModel_FitsAtWidth` re-renders at a trial width. Width
-  changes therefore reflow tables through the existing `LineModel_SetWidth` ->
-  `RebuildAll` path for free.
+  changes therefore invalidate every retained entry through
+  `LineModel_SetWidth`, reflowing tables at the next layout boundary.
 - **Rows own their wrap prefix.** Each row carries its own list marker
   indent, quote bar or code indent in `SpanLine::Continuation`, and
   `BuildAssistant` *concatenates* the assistant icon indent onto it instead of

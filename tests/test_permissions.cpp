@@ -687,10 +687,9 @@ void TestHarnessReviewerIsolation() {
 
   AgentHarness harness = {};
   CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
-  AgentHarnessSnapshot before = {};
   AgentHarnessWatch watch = {};
   CHECK(SessionResult_IsOk(
-      AgentHarness_Watch(&arena, &harness, 64, &before, &watch)));
+      AgentHarness_Watch(&harness, 64, &watch)));
   CHECK(SessionResult_IsOk(
       AgentHarness_Run(&harness, SVL("trusted requested work"))));
   CHECK_ALL(executions == 1, script.Index == 3);
@@ -715,9 +714,9 @@ void TestHarnessReviewerIsolation() {
   CHECK_ALL(reviewStarts == 1, reviewEnds == 1);
   CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
 
-  AgentHarnessSnapshot snapshot = {};
+  AgentTranscriptSnapshot snapshot = {};
   CHECK(SessionResult_IsOk(
-      AgentHarness_SnapshotFull(&arena, &harness, &snapshot)));
+      AgentHarness_SnapshotTranscript(&arena, &harness, 0, &snapshot)));
   CHECK(snapshot.Transcript.Count == 4);
   bool reviewerPersisted = false;
   for (u32 i = 0; i < snapshot.Transcript.Count; i++) {
@@ -771,9 +770,9 @@ void TestHarnessReviewerIsolation() {
       SessionResult_IsOk(AgentHarness_Init(&harness, malformedLog, &config)));
   CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("try it safely"))));
   CHECK_ALL(executions == 0, malformedScript.Index == 3);
-  AgentHarnessSnapshot malformedSnapshot = {};
+  AgentTranscriptSnapshot malformedSnapshot = {};
   CHECK(SessionResult_IsOk(
-      AgentHarness_SnapshotFull(&arena, &harness, &malformedSnapshot)));
+      AgentHarness_SnapshotTranscript(&arena, &harness, 0, &malformedSnapshot)));
   bool recoverableDenial = false;
   for (u32 i = 0; i < malformedSnapshot.Transcript.Count; i++) {
     const Message* message = &malformedSnapshot.Transcript.Data[i];

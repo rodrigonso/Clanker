@@ -20,7 +20,9 @@ struct AgentHarnessProviderInput {
 // State handed to the per-turn decision hooks once a run turn's assistant
 // message and tool results are durable, mirroring pi's
 // ShouldStopAfterTurnContext / PrepareNextTurnContext. Every array is
-// arena-backed by the harness and only valid for the duration of the call.
+// arena-backed by turn scratch and only valid for the duration of the call.
+// Nested arrays/text are detached from durable and override storage. Changes
+// to this observational input are not overrides; return AgentNextTurnUpdate.
 struct AgentTurnContext {
   AgentTurnKind Turn;
   DurableId HeadId;
@@ -38,6 +40,8 @@ struct AgentTurnContext {
 // each Has* flag opts a single field in. Overrides never touch the session
 // tree or the harness config -- they expire when the run ends.
 //
+// Accepted context/model fields are copied into replaceable per-run owners;
+// hook construction allocations are only valid until the end of this turn.
 // A replacement Context is copied and then kept live: every message the run
 // appends afterwards (assistant, tool results, steering, follow-up) is
 // accumulated onto it, exactly as pi grows its currentContext. Automatic
@@ -59,6 +63,15 @@ struct AgentNextTurnUpdate {
 struct AgentHarnessHooks {
   void* User;
 
+  // Callback inputs and construction arena are turn-scoped, not retained
+  // session storage. Mutable messages include owned nested Content arrays
+  // (and their Backing) and text; provider inputs also detach model, system,
+  // schema and option views. Borrowed replacement fields must remain readable
+  // through this turn; the driver detaches them before another mutable hook
+  // and copies accepted durable/override data into its destination owner.
+  // Request rewrites never modify durable history or active overrides.
+  // Opaque callback/user pointers and the live cancellation signal are not
+  // mutable configuration; hooks must not modify their pointees.
   SessionResult (*BeforeRun)(void* user, Arena* arena, Message* ioPrompt);
   SessionResult (*BeforeContext)(void* user, Arena* arena,
                                  AgentTurnKind turn,
@@ -84,7 +97,8 @@ struct AgentHarnessHooks {
                               StrView* ioArgumentsJson);
   // Runs after a run turn's `turn_end`, before the loop decides whether
   // another provider request should start. Writes replacement model / effort /
-  // context for the rest of this run. pi: `prepareNextTurn`.
+  // context for the rest of this run. The arena is turn-scoped scratch; the
+  // harness copies accepted fields before recycling it. pi: `prepareNextTurn`.
   SessionResult (*PrepareNextTurn)(void* user, Arena* arena,
                                    const AgentTurnContext* context,
                                    AgentNextTurnUpdate* out);

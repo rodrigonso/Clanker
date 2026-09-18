@@ -28,6 +28,7 @@ struct AgentHarnessConfig {
   AgentCompactionPolicy Compaction;
   AgentToolHooks ToolHooks;
   AgentHarnessHooks Hooks;
+  AgentHarnessEventObserver Events;
   // How the harness reaches the user mid-run. Null means nobody is there to
   // ask, which every caller must tolerate.
   AgentAskUser AskUser;
@@ -59,12 +60,12 @@ struct AgentHarness {
   Arena Queued;   // queued message text; recycled whenever all queues drain
   // Per-turn scratch: the materialized context, the built request, the
   // provider's response, and every per-turn hook allocation. Reset at the top
-  // of each turn of a run, which is what keeps a long run's cost proportional
+  // of each turn of a run and trimmed after spikes, keeping cost proportional
   // to one turn rather than to the number of turns times the conversation.
   // Nothing allocated here may outlive the turn that allocated it.
   Arena Work;
-  // Per-run scratch for the handful of things that genuinely span turns: the
-  // run's accumulated message list and a PrepareNextTurn context override.
+  // Per-run scratch for the accumulated list of State-owned messages.
+  // PrepareNextTurn overrides have separate, replaceable per-run owners.
   // Reset with Work at the end of each Run/Compact/Navigate.
   Arena RunMem;
   // Holds only the returned SessionResult's message, which callers read after
@@ -74,8 +75,8 @@ struct AgentHarness {
   Arena LastResult;
   ToolRuntime* RuntimeTools;
   Mutex StateLock;  // guards Records/Reduction/Queues/Running/Faulted/Watchers
-  // Guards the watcher registry only (Watchers/WatcherCount and each entry's
-  // registration state). Split from StateLock because publishing happens once
+  // Serializes event observation and guards PublishedCursor and the watcher
+  // registry. Split from StateLock because publishing happens once
   // per streamed token while StateLock is also held for O(history) snapshot
   // work; sharing one lock made token delivery wait on it.
   //
@@ -99,6 +100,7 @@ struct AgentHarness {
 
   AgentHarnessWatch* Watchers[AGENT_HARNESS_MAX_WATCHERS];
   u32 WatcherCount;
+  u64 PublishedCursor;
   bool Initialized;
 };
 
@@ -111,13 +113,11 @@ SessionResult AgentHarness_Init(AgentHarness* harness, SessionLog log,
                                 const AgentHarnessConfig* config);
 SessionResult AgentHarness_Close(AgentHarness* harness);
 
-// Deep-copies the whole reduction, including every record. Costs the session's
-// full history; prefer Summarize/DescribeSession/SnapshotFull for anything that
-// needs less than the tree itself.
+// Copies the complete tree and index for metadata and branch browsing. Costs
+// the session's full history; prefer Summarize/DescribeSession/
+// SnapshotTranscript for anything that needs less than the tree itself.
 SessionResult AgentHarness_Snapshot(Arena* arena, AgentHarness* harness,
                                     SessionReduction* out);
-SessionResult AgentHarness_SnapshotFull(Arena* arena, AgentHarness* harness,
-                                        AgentHarnessSnapshot* out);
 
 // The handful of scalars callers usually want from a snapshot. Copies only the
 // provider and model strings.
@@ -137,19 +137,27 @@ SessionResult AgentHarness_Summarize(Arena* arena, AgentHarness* harness,
 // copying them.
 SessionResult AgentHarness_DescribeSession(Arena* arena, AgentHarness* harness,
                                            SessionInfo* out);
-// `outSnapshot` is optional; when it is null, `arena` may be too and the watch
-// starts at the current cursor without copying the transcript.
-SessionResult AgentHarness_Watch(Arena* arena, AgentHarness* harness,
-                                 u32 capacity,
-                                 AgentHarnessSnapshot* outSnapshot,
+// Copies only the active, compaction-aware transcript into arena. maxMessages
+// selects an exact suffix (0 means all); it limits message count, not bytes.
+// All returned content is caller-owned and survives harness close.
+SessionResult AgentHarness_SnapshotTranscript(Arena* arena, AgentHarness* harness,
+                                              u32 maxMessages,
+                                              AgentTranscriptSnapshot* out);
+// Subscribes from the current durable cursor without copying any history.
+SessionResult AgentHarness_Watch(AgentHarness* harness, u32 capacity,
                                  AgentHarnessWatch* outWatch);
+// Snapshot and registration are atomic with respect to durable appends.
+SessionResult AgentHarness_WatchTranscript(Arena* arena, AgentHarness* harness,
+                                           u32 capacity, u32 maxMessages,
+                                           AgentTranscriptSnapshot* outSnapshot,
+                                           AgentHarnessWatch* outWatch);
 SessionResult AgentHarness_WatchNext(Arena* arena, AgentHarnessWatch* watch,
                                      AgentHarnessEvent* out);
 SessionResult AgentHarness_WatchRequestClose(AgentHarnessWatch* watch);
 SessionResult AgentHarness_WatchClose(AgentHarnessWatch* watch);
-// A returned SessionResult's Message is owned by the harness and stays valid
-// only until the next accepted Run/Compact/Navigate. Copy it if you need it to
-// outlive that; the run's scratch memory is handed back to the OS on return.
+// A returned operation result's Message stays valid until the next accepted
+// run, compaction, navigation, metadata change, fork, or Close. Copy it if it
+// must outlive that; operation scratch is reclaimed before returning.
 SessionResult AgentHarness_Run(AgentHarness* harness, StrView prompt);
 SessionResult AgentHarness_Compact(AgentHarness* harness,
                                    StrView instructions = StrView{});

@@ -1,5 +1,10 @@
 #include <string.h>
 
+#if defined(_WIN32)
+#include <windows.h>
+#include <psapi.h>
+#endif
+
 #include "agent/driver.h"
 #include "agent/harness.h"
 #include "base/arena.h"
@@ -890,15 +895,14 @@ static void TestHarnessReplayAndIncremental() {
     CHECK(SessionResult_IsOk(AgentHarness_Navigate(&harness, compactedHead)));
     CHECK(memory.ReadAllCalls == afterRunCalls);
 
-    AgentHarnessSnapshot full = {};
-    CHECK(SessionResult_IsOk(AgentHarness_SnapshotFull(&arena, &harness, &full)));
+    AgentTranscriptSnapshot full = {};
+    CHECK(SessionResult_IsOk(AgentHarness_SnapshotTranscript(&arena, &harness, 0, &full)));
     CHECK(memory.ReadAllCalls == afterRunCalls);
 
-    AgentHarnessSnapshot watchSnapshot = {};
     AgentHarnessWatch* watchPtr = ArenaPushStruct(&arena, AgentHarnessWatch);
     *watchPtr = AgentHarnessWatch{};
     AgentHarnessWatch& watch = *watchPtr;
-    CHECK(SessionResult_IsOk(AgentHarness_Watch(&arena, &harness, 16, &watchSnapshot, &watch)));
+    CHECK(SessionResult_IsOk(AgentHarness_Watch(&harness, 16, &watch)));
     CHECK(memory.ReadAllCalls == afterRunCalls);
     CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
 
@@ -975,11 +979,10 @@ static void TestHarnessReplayAndIncremental() {
     config.Retry.MaxDelayMs = 2;
     AgentHarness harness = {};
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
-    AgentHarnessSnapshot initial = {};
     AgentHarnessWatch* watchPtr = ArenaPushStruct(&arena, AgentHarnessWatch);
     *watchPtr = AgentHarnessWatch{};
     AgentHarnessWatch& watch = *watchPtr;
-    CHECK(SessionResult_IsOk(AgentHarness_Watch(&arena, &harness, 32, &initial, &watch)));
+    CHECK(SessionResult_IsOk(AgentHarness_Watch(&harness, 32, &watch)));
     CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("go"))));
 
     WatchTally tally = DrainUntilAgentEnd(&arena, &watch);
@@ -1015,11 +1018,10 @@ static void TestHarnessReplayAndIncremental() {
     config.Stream.Retry = &policy;
     AgentHarness harness = {};
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
-    AgentHarnessSnapshot initial = {};
     AgentHarnessWatch* watchPtr = ArenaPushStruct(&arena, AgentHarnessWatch);
     *watchPtr = AgentHarnessWatch{};
     AgentHarnessWatch& watch = *watchPtr;
-    CHECK(SessionResult_IsOk(AgentHarness_Watch(&arena, &harness, 32, &initial, &watch)));
+    CHECK(SessionResult_IsOk(AgentHarness_Watch(&harness, 32, &watch)));
     CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("go"))));
     WatchTally tally = DrainUntilAgentEnd(&arena, &watch);
     CHECK_ALL(providerState.WasCopied, providerState.Enabled,
@@ -1070,11 +1072,10 @@ static void TestHarnessLifecycle() {
     AgentHarness harness = {};
     AgentHarnessConfig config = ScriptConfig(&script, &echo, 1);
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
-    AgentHarnessSnapshot initial = {};
     AgentHarnessWatch* watchPtr = ArenaPushStruct(&arena, AgentHarnessWatch);
     *watchPtr = AgentHarnessWatch{};
     AgentHarnessWatch& watch = *watchPtr;
-    CHECK(SessionResult_IsOk(AgentHarness_Watch(&arena, &harness, 64, &initial, &watch)));
+    CHECK(SessionResult_IsOk(AgentHarness_Watch(&harness, 64, &watch)));
     CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("lifecycle prompt"))));
 
     bool sawAgentStart = false, sawTurnStart = false, sawToolStart = false, sawAgentEnd = false;
@@ -1145,11 +1146,10 @@ static void TestHarnessLifecycle() {
     config.ProviderImpl.Stream = ImmediateErrorProviderStream;
     AgentHarness harness = {};
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
-    AgentHarnessSnapshot initial = {};
     AgentHarnessWatch* watchPtr = ArenaPushStruct(&arena, AgentHarnessWatch);
     *watchPtr = AgentHarnessWatch{};
     AgentHarnessWatch& watch = *watchPtr;
-    CHECK(SessionResult_IsOk(AgentHarness_Watch(&arena, &harness, 32, &initial, &watch)));
+    CHECK(SessionResult_IsOk(AgentHarness_Watch(&harness, 32, &watch)));
     CHECK(AgentHarness_Run(&harness, SVL("will fail")).Status == SessionStatus::ProviderError);
 
     bool sawFailedTurnEnd = false, sawFailedAgentEnd = false;
@@ -1194,11 +1194,10 @@ static void TestHarnessLifecycle() {
     config.ProviderImpl.Stream = TruncatedLengthProviderStream;
     AgentHarness harness = {};
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
-    AgentHarnessSnapshot initial = {};
     AgentHarnessWatch* watchPtr = ArenaPushStruct(&arena, AgentHarnessWatch);
     *watchPtr = AgentHarnessWatch{};
     AgentHarnessWatch& watch = *watchPtr;
-    CHECK(SessionResult_IsOk(AgentHarness_Watch(&arena, &harness, 32, &initial, &watch)));
+    CHECK(SessionResult_IsOk(AgentHarness_Watch(&harness, 32, &watch)));
     CHECK(AgentHarness_Run(&harness, SVL("write a large file")).Status ==
           SessionStatus::ProviderError);
 
@@ -1244,11 +1243,10 @@ static void TestHarnessLifecycle() {
     AgentHarness harness = {};
     AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
-    AgentHarnessSnapshot initial = {};
     AgentHarnessWatch* watchPtr = ArenaPushStruct(&arena, AgentHarnessWatch);
     *watchPtr = AgentHarnessWatch{};
     AgentHarnessWatch& watch = *watchPtr;
-    CHECK(SessionResult_IsOk(AgentHarness_Watch(&arena, &harness, 32, &initial, &watch)));
+    CHECK(SessionResult_IsOk(AgentHarness_Watch(&harness, 32, &watch)));
 
     CHECK(SessionResult_IsOk(AgentHarness_QueueSteering(&harness, SVL("idle steer"))));
     CHECK(SessionResult_IsOk(AgentHarness_QueueFollowUp(&harness, SVL("idle follow-up"))));
@@ -1307,12 +1305,11 @@ static void TestHarnessLifecycle() {
     AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
     AgentHarness harness = {};
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
-    AgentHarnessSnapshot initial = {};
     AgentHarnessWatch* watchPtr = ArenaPushStruct(&arena, AgentHarnessWatch);
     *watchPtr = AgentHarnessWatch{};
     AgentHarnessWatch& watch = *watchPtr;
     CHECK(SessionResult_IsOk(
-        AgentHarness_Watch(&arena, &harness, 16, &initial, &watch)));
+        AgentHarness_Watch(&harness, 16, &watch)));
     MemoryRepository_FailAfterAppends(&memory, 0);
     CHECK(AgentHarness_Compact(&harness).Status == SessionStatus::IoError);
     WatchTally tally = DrainUntilAgentEnd(&arena, &watch);
@@ -1327,8 +1324,588 @@ static void TestHarnessLifecycle() {
 
 }
 
+static DurableId AppendSnapshotMessage(AgentHarness* harness, DurableId parent,
+                                        Message message) {
+  SessionRecord record = {};
+  record.EntryId = DurableId_Generate();
+  record.Kind = SessionRecordKind::Message;
+  record.MessageEntry.ParentId = parent;
+  record.MessageEntry.Value = message;
+  CHECK(SessionResult_IsOk(AgentHarness_Append(harness, &record, 1)));
+  return record.EntryId;
+}
+
+static DurableId AppendSnapshotCompaction(AgentHarness* harness, DurableId parent,
+                                           DurableId base, DurableId through,
+                                           Message summary) {
+  SessionRecord record = {};
+  record.EntryId = DurableId_Generate();
+  record.Kind = SessionRecordKind::Compaction;
+  record.CompactionEntry.ParentId = parent;
+  record.CompactionEntry.BaseEntryId = base;
+  record.CompactionEntry.ThroughEntryId = through;
+  record.CompactionEntry.SourceHeadId = parent;
+  record.CompactionEntry.Summary = summary;
+  CHECK(SessionResult_IsOk(AgentHarness_Append(harness, &record, 1)));
+  return record.EntryId;
+}
+
+static bool SnapshotMessageEq(const Message& actual, const Message& expected) {
+  if (actual.Kind != expected.Kind || actual.Stop != expected.Stop ||
+      actual.Timestamp != expected.Timestamp || actual.IsError != expected.IsError ||
+      actual.Use.Input != expected.Use.Input || actual.Use.Output != expected.Use.Output ||
+      actual.Use.CacheRead != expected.Use.CacheRead ||
+      actual.Use.Reasoning != expected.Use.Reasoning ||
+      actual.Use.TotalTokens != expected.Use.TotalTokens ||
+      !StrView_Eq(actual.ErrorMessage, expected.ErrorMessage) ||
+      !StrView_Eq(actual.Model, expected.Model) ||
+      !StrView_Eq(actual.Provider, expected.Provider) ||
+      !StrView_Eq(actual.ToolCallId, expected.ToolCallId) ||
+      !StrView_Eq(actual.ToolName, expected.ToolName) ||
+      actual.Content.Count != expected.Content.Count)
+    return false;
+  for (u32 i = 0; i < actual.Content.Count; i++) {
+    const Content& a = actual.Content.Data[i];
+    const Content& e = expected.Content.Data[i];
+    if (a.Kind != e.Kind || !StrView_Eq(a.Text, e.Text) ||
+        !StrView_Eq(a.ToolId, e.ToolId) || !StrView_Eq(a.ToolName, e.ToolName) ||
+        !StrView_Eq(a.ToolArgsJson, e.ToolArgsJson) ||
+        !StrView_Eq(a.ImageData, e.ImageData) ||
+        !StrView_Eq(a.ImageMimeType, e.ImageMimeType) ||
+        !StrView_Eq(a.Signature, e.Signature))
+      return false;
+  }
+  return true;
+}
+
+static bool SnapshotArenaOwns(const Arena* arena, const void* data, usize size) {
+  if (!size) return true;
+  usize begin = (usize)data;
+  usize base = (usize)arena->Base;
+  return begin >= base && begin - base <= arena->Used &&
+         size <= arena->Used - (begin - base);
+}
+
+static bool SnapshotIsOwned(const Arena* arena, const AgentTranscriptSnapshot& snapshot) {
+  const Array<Message>& messages = snapshot.Transcript;
+  if ((messages.Count && messages.Backing != arena) ||
+      !SnapshotArenaOwns(arena, messages.Data, sizeof(Message) * messages.Count))
+    return false;
+  for (u32 i = 0; i < messages.Count; i++) {
+    const Message& message = messages.Data[i];
+    if ((message.Content.Count && message.Content.Backing != arena) ||
+        !SnapshotArenaOwns(arena, message.Content.Data,
+                          sizeof(Content) * message.Content.Count))
+      return false;
+    StrView fields[] = {message.ErrorMessage, message.Model, message.Provider,
+                        message.ToolCallId, message.ToolName};
+    for (StrView field : fields)
+      if (!SnapshotArenaOwns(arena, field.Data, field.Length)) return false;
+    for (u32 j = 0; j < message.Content.Count; j++) {
+      const Content& content = message.Content.Data[j];
+      StrView nested[] = {content.Text, content.ToolId, content.ToolName,
+                          content.ToolArgsJson, content.ImageData,
+                          content.ImageMimeType, content.Signature};
+      for (StrView field : nested)
+        if (!SnapshotArenaOwns(arena, field.Data, field.Length)) return false;
+    }
+  }
+  return true;
+}
+
+static void CheckTranscriptSuffixes(AgentHarness* harness) {
+  Arena oracleArena = ArenaCreate();
+  Array<Message> oracle = {};
+  CHECK(SessionResult_IsOk(SessionReducer_Context(
+      &oracleArena, &harness->Reduction, harness->Reduction.HeadId, &oracle)));
+  u32 limits[] = {0, 1, 2, oracle.Count, oracle.Count + 3};
+  for (u32 limit : limits) {
+    for (u32 withWatch = 0; withWatch < 2; withWatch++) {
+      Arena output = ArenaCreate();
+      AgentTranscriptSnapshot snapshot = {};
+      AgentHarnessWatch watch = {};
+      SessionResult result =
+          withWatch ? AgentHarness_WatchTranscript(&output, harness, 1, limit,
+                                                    &snapshot, &watch)
+                    : AgentHarness_SnapshotTranscript(&output, harness, limit, &snapshot);
+      CHECK(SessionResult_IsOk(result));
+      u32 count = limit && limit < oracle.Count ? limit : oracle.Count;
+      CHECK_ALL(snapshot.Transcript.Count == count,
+                snapshot.HasEarlierMessages == (count < oracle.Count),
+                DurableId_Eq(snapshot.HeadId, harness->Reduction.HeadId),
+                snapshot.Cursor == harness->Records.Data[harness->Records.Count - 1].Seq,
+                !snapshot.Running, !snapshot.Faulted, SnapshotIsOwned(&output, snapshot));
+      if (snapshot.Transcript.Count == count) {
+        for (u32 i = 0; i < count; i++)
+          CHECK(SnapshotMessageEq(snapshot.Transcript.Data[i],
+                                  oracle.Data[oracle.Count - count + i]));
+      }
+      if (withWatch) {
+        CHECK_ALL(watch.Cursor == snapshot.Cursor, watch.Count == 0);
+        CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
+      }
+      ArenaRelease(&output);
+    }
+  }
+  ArenaRelease(&oracleArena);
+}
+
+static void TestHarnessTranscriptProjection() {
+  Arena arena = ArenaCreate();
+  MemoryRepository memory = {};
+  MemoryRepository_Init(&memory);
+  SessionRepository repository = MemoryRepository_AsRepository(&memory);
+  SessionLog log = {};
+  CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+  ScriptProvider script = {};
+  AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
+  AgentHarness harness = {};
+  CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+  DurableId root = harness.Reduction.HeadId;
+  CheckTranscriptSuffixes(&harness);
+
+  DurableId first = AppendSnapshotMessage(&harness, root, Message_User(&arena, SVL("one")));
+  Message call = Message_AssistantEmpty(&arena);
+  call.Stop = StopReason::ToolUse;
+  Array_Push(&call.Content, Content_ToolCall(SVL("call"), SVL("echo"), SVL("{\"x\":1}")));
+  DurableId assistant = AppendSnapshotMessage(&harness, first, call);
+  DurableId result = AppendSnapshotMessage(
+      &harness, assistant, Message_ToolResult(&arena, SVL("call"), SVL("echo"),
+                                             SVL("tool result"), false));
+  CheckTranscriptSuffixes(&harness);  // A one-message tail is just the tool result.
+  DurableId second = AppendSnapshotMessage(&harness, result, Message_User(&arena, SVL("two")));
+  Message reply = Message_AssistantEmpty(&arena);
+  Array_Push(&reply.Content, Content_Text(SVL("reply")));
+  DurableId tail = AppendSnapshotMessage(&harness, second, reply);
+  DurableId sibling = AppendSnapshotMessage(
+      &harness, first, Message_User(&arena, SVL("inactive sibling")));
+  CHECK(DurableId_Eq(harness.Reduction.HeadId, tail));
+  CheckTranscriptSuffixes(&harness);  // The cursor includes the inactive sibling.
+  CHECK(SessionResult_IsOk(AgentHarness_SetName(&harness, SVL("non-message tail"))));
+  CheckTranscriptSuffixes(&harness);
+
+  DurableId compacted = AppendSnapshotCompaction(
+      &harness, tail, root, result, Message_User(&arena, SVL("summary one")));
+  CheckTranscriptSuffixes(&harness);
+  DurableId third = AppendSnapshotMessage(
+      &harness, compacted, Message_User(&arena, SVL("three")));
+  DurableId thirdReply = AppendSnapshotMessage(&harness, third, reply);
+  DurableId overlapped = AppendSnapshotCompaction(
+      &harness, thirdReply, root, third, Message_User(&arena, SVL("summary two")));
+  CheckTranscriptSuffixes(&harness);
+  AgentTranscriptSnapshot latest = {};
+  CHECK(SessionResult_IsOk(
+      AgentHarness_SnapshotTranscript(&arena, &harness, 0, &latest)));
+  CHECK_ALL(latest.Transcript.Count == 2,
+            ContextTextEq(&latest.Transcript, 0, Role::User, "summary two"),
+            ContextTextEq(&latest.Transcript, 1, Role::Assistant, "reply"));
+
+  DurableId heads[] = {sibling, result, compacted, root, overlapped};
+  for (DurableId head : heads) {
+    CHECK(SessionResult_IsOk(AgentHarness_Navigate(&harness, head)));
+    CheckTranscriptSuffixes(&harness);
+  }
+  CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+  repository.Close(repository.Ctx);
+  ArenaRelease(&arena);
+}
+
+static void TestHarnessTranscriptOwnership() {
+  Arena arena = ArenaCreate();
+  Arena output = ArenaCreate();
+  Arena watchedOutput = ArenaCreate();
+  MemoryRepository memory = {};
+  MemoryRepository_Init(&memory);
+  SessionRepository repository = MemoryRepository_AsRepository(&memory);
+  SessionLog log = {};
+  CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+  ScriptProvider script = {};
+  AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
+  AgentHarness harness = {};
+  CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+
+  Message expected[3] = {};
+  expected[0] = Message_User(&arena, SVL("owned user text"));
+  Array_Push(&expected[0].Content, Content_Image(SVL("dXNlcg=="), SVL("image/png")));
+  expected[1] = Message_AssistantEmpty(&arena);
+  expected[1].Stop = StopReason::ToolUse;
+  expected[1].Use = Usage{7, 5, 3, 2, 17};
+  expected[1].Model = SVL("owned-model");
+  expected[1].Provider = SVL("owned-provider");
+  expected[1].ErrorMessage = SVL("owned diagnostic");
+  Array_Push(&expected[1].Content, Content_Text(SVL("owned assistant text")));
+  Array_Push(&expected[1].Content, Content_Thinking(SVL("owned thinking")));
+  Array_Push(&expected[1].Content,
+             Content_ToolCall(SVL("owned-call"), SVL("echo"), SVL("{\"nested\":{\"x\":[1,2]}}")));
+  expected[1].Content.Data[0].Signature = SVL("text-item");
+  expected[1].Content.Data[1].Signature = SVL("{\"encrypted_content\":\"opaque-reasoning\"}");
+  expected[1].Content.Data[2].Signature = SVL("tool-item");
+  expected[2] = Message_ToolResult(&arena, SVL("owned-call"), SVL("echo"),
+                                   SVL("owned tool result"), true);
+  Array_Push(&expected[2].Content, Content_Image(SVL("cmVzdWx0"), SVL("image/jpeg")));
+  DurableId head = harness.Reduction.HeadId;
+  for (u32 i = 0; i < 3; i++) head = AppendSnapshotMessage(&harness, head, expected[i]);
+  AgentTranscriptSnapshot snapshot = {};
+  AgentTranscriptSnapshot watched = {};
+  AgentHarnessWatch watch = {};
+  CHECK(SessionResult_IsOk(
+      AgentHarness_SnapshotTranscript(&output, &harness, 0, &snapshot)));
+  CHECK(SessionResult_IsOk(
+      AgentHarness_WatchTranscript(&watchedOutput, &harness, 4, 2, &watched, &watch)));
+  bool owned = SnapshotIsOwned(&output, snapshot) && SnapshotIsOwned(&watchedOutput, watched);
+  CHECK_ALL(owned, snapshot.Transcript.Count == 3, watched.Transcript.Count == 2,
+            watched.HasEarlierMessages, !snapshot.HasEarlierMessages);
+
+  // Poison the actual projection source, not just the append caller's input.
+  for (u32 i = 1; i < harness.Records.Count; i++) {
+    Message& source = harness.Records.Data[i].MessageEntry.Value;
+    StrView fields[] = {source.ErrorMessage, source.Model, source.Provider,
+                        source.ToolCallId, source.ToolName};
+    for (StrView field : fields)
+      if (field.Length) memset((void*)field.Data, '!', field.Length);
+    for (u32 j = 0; j < source.Content.Count; j++) {
+      Content& content = source.Content.Data[j];
+      StrView nested[] = {content.Text, content.ToolId, content.ToolName,
+                          content.ToolArgsJson, content.ImageData,
+                          content.ImageMimeType, content.Signature};
+      for (StrView field : nested)
+        if (field.Length) memset((void*)field.Data, '!', field.Length);
+      content = {};
+    }
+    source.Content.Count = 0;
+  }
+  AppendSnapshotMessage(&harness, head, Message_User(&arena, SVL("after snapshot")));
+  CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+  repository.Close(repository.Ctx);
+  CHECK_ALL(DurableId_Eq(snapshot.HeadId, head), DurableId_Eq(watched.HeadId, head),
+            snapshot.Cursor == 4, watched.Cursor == 4);
+  if (owned && snapshot.Transcript.Count == 3 && watched.Transcript.Count == 2) {
+    for (u32 i = 0; i < 3; i++)
+      CHECK(SnapshotMessageEq(snapshot.Transcript.Data[i], expected[i]));
+    for (u32 i = 0; i < 2; i++)
+      CHECK(SnapshotMessageEq(watched.Transcript.Data[i], expected[i + 1]));
+  }
+  u64 cursor = watched.Cursor;
+  ArenaRelease(&output);
+  ArenaRelease(&watchedOutput);
+  AgentHarnessEvent event = {};
+  CHECK(SessionResult_IsOk(AgentHarness_WatchNext(&arena, &watch, &event)));
+  CHECK_ALL(event.Kind == AgentHarnessEventKind::DurableRecord, event.Cursor == cursor + 1);
+  if (event.Kind == AgentHarnessEventKind::DurableRecord)
+    CHECK(StrView_EqCStr(event.Record->MessageEntry.Value.Content.Data[0].Text,
+                         "after snapshot"));
+  CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
+  ArenaRelease(&arena);
+}
+
+static usize HarnessSnapshotArenaBytes(AgentHarness* harness, bool committed) {
+  Arena* arenas[] = {&harness->State, &harness->Runtime, &harness->Queued,
+                     &harness->Work, &harness->RunMem, &harness->LastResult};
+  usize bytes = 0;
+  for (Arena* arena : arenas) bytes += committed ? arena->Committed : arena->Used;
+  return bytes;
+}
+
+static void TestHarnessTranscriptMemory() {
+  Arena arena = ArenaCreate();
+  Arena output = ArenaCreate();
+  MemoryRepository memory = {};
+  MemoryRepository_Init(&memory);
+  SessionRepository repository = MemoryRepository_AsRepository(&memory);
+  SessionLog log = {};
+  CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+  ScriptProvider script = {};
+  AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
+  AgentHarness harness = {};
+  CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+  AgentHarnessWatch watch = {};
+  CHECK(SessionResult_IsOk(AgentHarness_Watch(&harness, 4, &watch)));
+  usize emptyWatchUsed = watch.Mem.Used;
+  usize emptyWatchCommitted = watch.Mem.Committed;
+  CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
+
+  const u32 payloadBytes = 4 * 1024 * 1024;
+  char* payload = ArenaPushArray(&arena, char, payloadBytes + 1);
+  memset(payload, 'x', payloadBytes);
+  payload[payloadBytes] = 0;
+  Message huge = Message_User(&arena, StrView{payload, payloadBytes});
+  DurableId root = harness.Reduction.HeadId;
+  DurableId first = AppendSnapshotMessage(&harness, root, huge);
+  DurableId older = first;
+  for (u32 i = 0; i < 1024; i++)
+    older = AppendSnapshotMessage(&harness, older,
+                                   Message_User(&arena, SVL("suffix-excluded message")));
+  DurableId second = AppendSnapshotMessage(&harness, older, huge);
+  DurableId tail = AppendSnapshotMessage(
+      &harness, second, Message_ToolResult(&arena, SVL("tail"), SVL("echo"), SVL("tiny"), false));
+  AppendSnapshotMessage(&harness, root, huge);
+  CHECK(SessionResult_IsOk(AgentHarness_SetName(&harness, StrView{payload, payloadBytes})));
+  CHECK(harness.State.Used >= (usize)payloadBytes * 4);
+
+  // Exercise plain suffix exclusion, partial compaction, and overlapping full
+  // compaction. None may commit the omitted payloads in the caller's arena.
+  DurableId head = tail;
+  for (u32 phase = 0; phase < 3; phase++) {
+    if (phase)
+      head = AppendSnapshotCompaction(
+          &harness, head, root, phase == 1 ? first : second,
+          Message_User(&arena, SVL("small summary")));
+    usize used = HarnessSnapshotArenaBytes(&harness, false);
+    usize committed = HarnessSnapshotArenaBytes(&harness, true);
+    usize callerUsed = arena.Used;
+    usize callerCommitted = arena.Committed;
+    u64 reads = memory.ReadAllCalls;
+    for (u32 repetition = 0; repetition < 24; repetition++) {
+      u32 limit = phase == 2 && repetition % 2 ? 0 : 1;
+      AgentTranscriptSnapshot snapshot = {};
+      SessionResult result =
+          repetition % 2
+              ? AgentHarness_WatchTranscript(&output, &harness, 4, limit, &snapshot, &watch)
+              : AgentHarness_SnapshotTranscript(&output, &harness, limit, &snapshot);
+      CHECK(SessionResult_IsOk(result));
+      CHECK_ALL(snapshot.Transcript.Count == (limit ? 1u : 2u),
+                snapshot.HasEarlierMessages == (limit != 0),
+                SnapshotIsOwned(&output, snapshot),
+                ContextTextEq(&snapshot.Transcript, snapshot.Transcript.Count - 1,
+                              Role::ToolResult, "tiny"),
+                output.Used < (usize)64 * 1024, output.Committed <= (usize)128 * 1024);
+      if (repetition % 2)
+        CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
+      ArenaReset(&output);
+      ArenaTrim(&output, 0);
+      CHECK_ALL(output.Used == 0, output.Committed == 0);
+      CHECK(SessionResult_IsOk(AgentHarness_Watch(&harness, 4, &watch)));
+      CHECK_ALL(watch.Count == 0, watch.Mem.Used == emptyWatchUsed,
+                watch.Mem.Committed == emptyWatchCommitted,
+                watch.Cursor == harness.Records.Data[harness.Records.Count - 1].Seq);
+      CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
+      CHECK_ALL(HarnessSnapshotArenaBytes(&harness, false) == used,
+                HarnessSnapshotArenaBytes(&harness, true) == committed,
+                arena.Used == callerUsed, arena.Committed == callerCommitted,
+                memory.ReadAllCalls == reads, harness.WatcherCount == 0);
+    }
+  }
+
+  MemoryRepository_FailAfterAppends(&memory, 0);
+  CHECK(AgentHarness_SetName(&harness, SVL("cannot persist")).Status == SessionStatus::IoError);
+  AgentTranscriptSnapshot faulted = {};
+  CHECK(SessionResult_IsOk(
+      AgentHarness_SnapshotTranscript(&output, &harness, 1, &faulted)));
+  CHECK_ALL(faulted.Faulted, !faulted.Running,
+            faulted.Cursor == harness.Records.Data[harness.Records.Count - 1].Seq);
+  CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+  repository.Close(repository.Ctx);
+  ArenaRelease(&output);
+  ArenaRelease(&arena);
+}
+
+static void TestHarnessTranscriptWatchFailures() {
+  Arena arena = ArenaCreate();
+  Arena output = ArenaCreate();
+  MemoryRepository memory = {};
+  MemoryRepository_Init(&memory);
+  SessionRepository repository = MemoryRepository_AsRepository(&memory);
+  SessionLog log = {};
+  CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+  ScriptProvider script = {};
+  AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
+  AgentHarness harness = {};
+  CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+  AgentTranscriptSnapshot snapshot = {};
+  AgentHarnessWatch rejected = {};
+  CHECK(AgentHarness_Watch(&harness, AGENT_HARNESS_MAX_WATCH_EVENTS + 1, &rejected).Status ==
+        SessionStatus::InvalidArgument);
+  CHECK(AgentHarness_WatchTranscript(&output, &harness, AGENT_HARNESS_MAX_WATCH_EVENTS + 1,
+                                     0, &snapshot, &rejected).Status ==
+        SessionStatus::InvalidArgument);
+  CHECK_ALL(!rejected.Initialized, !rejected.Registered, rejected.Mem.Base == nullptr,
+            harness.WatcherCount == 0, output.Used == 0, output.Committed == 0);
+  AgentHarnessWatch* watches = ArenaPushArray(&arena, AgentHarnessWatch,
+                                             AGENT_HARNESS_MAX_WATCHERS);
+  for (u32 i = 0; i < AGENT_HARNESS_MAX_WATCHERS; i++) {
+    watches[i] = {};
+    CHECK(SessionResult_IsOk(
+        i % 2 ? AgentHarness_Watch(&harness, 0, &watches[i])
+              : AgentHarness_WatchTranscript(&output, &harness, AGENT_HARNESS_MAX_WATCH_EVENTS,
+                                              1, &snapshot, &watches[i])));
+    CHECK(watches[i].Capacity == (i % 2 ? 16u : AGENT_HARNESS_MAX_WATCH_EVENTS));
+  }
+  ArenaReset(&output);
+  ArenaTrim(&output, 0);
+  CHECK(AgentHarness_Watch(&harness, 1, &watches[0]).Status == SessionStatus::InvalidArgument);
+  CHECK(AgentHarness_Watch(&harness, 1, &rejected).Status == SessionStatus::Busy);
+  CHECK(AgentHarness_WatchTranscript(&output, &harness, 1, 0, &snapshot, &rejected).Status ==
+        SessionStatus::Busy);
+  CHECK_ALL(harness.WatcherCount == AGENT_HARNESS_MAX_WATCHERS,
+            !rejected.Initialized, !rejected.Registered, rejected.Mem.Base == nullptr,
+            output.Used == 0, output.Committed == 0);
+  for (u32 i = 0; i < AGENT_HARNESS_MAX_WATCHERS; i++)
+    CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watches[i])));
+
+  DurableId root = harness.Reduction.HeadId;
+  DurableId active = AppendSnapshotMessage(&harness, root, Message_User(&arena, SVL("active")));
+  DurableId inactive = AppendSnapshotMessage(
+      &harness, root, Message_User(&arena, SVL("off branch")));
+  AppendSnapshotCompaction(&harness, active, root, active,
+                            Message_User(&arena, SVL("valid span")));
+  // Production append rejects off-branch spans. Corrupt only the in-memory
+  // projection fixture, then restore it before any further durable operation.
+  SessionRecord* damaged = &harness.Records.Data[harness.Records.Count - 1];
+  DurableId savedThrough = damaged->CompactionEntry.ThroughEntryId;
+  damaged->CompactionEntry.ThroughEntryId = inactive;
+  AgentHarnessWatch watch = {};
+  CHECK(SessionResult_IsOk(AgentHarness_Watch(&harness, 4, &watch)));
+  CHECK_ALL(watch.Mem.Used == 0, watch.Mem.Committed == 0, harness.WatcherCount == 1);
+  usize used = HarnessSnapshotArenaBytes(&harness, false);
+  usize committed = HarnessSnapshotArenaBytes(&harness, true);
+  for (u32 i = 0; i < 16; i++) {
+    CHECK(AgentHarness_SnapshotTranscript(&output, &harness, 1, &snapshot).Status ==
+          SessionStatus::Corrupt);
+    CHECK(AgentHarness_WatchTranscript(&output, &harness, 4, 1, &snapshot, &rejected).Status ==
+          SessionStatus::Corrupt);
+    CHECK_ALL(!rejected.Initialized, !rejected.Registered, rejected.Owner == nullptr,
+              rejected.Mem.Base == nullptr, harness.WatcherCount == 1,
+              harness.Watchers[0] == &watch, output.Used == 0, output.Committed == 0,
+              HarnessSnapshotArenaBytes(&harness, false) == used,
+              HarnessSnapshotArenaBytes(&harness, true) == committed);
+  }
+  damaged->CompactionEntry.ThroughEntryId = savedThrough;
+  u64 cursor = watch.Cursor;
+  CHECK(SessionResult_IsOk(AgentHarness_SetName(&harness, SVL("still watching"))));
+  AgentHarnessEvent event = {};
+  CHECK(SessionResult_IsOk(AgentHarness_WatchNext(&arena, &watch, &event)));
+  CHECK_ALL(event.Kind == AgentHarnessEventKind::DurableRecord, event.Cursor == cursor + 1,
+            watch.Count == 0);
+  CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
+  CHECK(SessionResult_IsOk(AgentHarness_Navigate(&harness, active)));
+  CHECK(SessionResult_IsOk(
+      AgentHarness_WatchTranscript(&output, &harness, 4, 1, &snapshot, &rejected)));
+  CHECK_ALL(harness.WatcherCount == 1, rejected.Registered);
+  CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&rejected)));
+  CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+  repository.Close(repository.Ctx);
+  ArenaRelease(&output);
+  ArenaRelease(&arena);
+}
+
+struct SnapshotAppendThread {
+  AgentHarness* Harness;
+  DurableId Parent;
+  u32 First;
+  u32 Count;
+  volatile i32 Ready;
+  volatile i32 Release;
+  SessionResult Result;
+};
+
+static void AppendSnapshotThread(void* context) {
+  SnapshotAppendThread* append = (SnapshotAppendThread*)context;
+  Arena arena = ArenaCreate();
+  Atomic_StoreI32(&append->Ready, 1);
+  while (!Atomic_LoadI32(&append->Release)) Sleep_Ms(1);
+  DurableId parent = append->Parent;
+  for (u32 i = 0; i < append->Count; i++) {
+    ArenaReset(&arena);
+    SessionRecord record = {};
+    record.EntryId = DurableId_Generate();
+    record.Kind = SessionRecordKind::Message;
+    record.MessageEntry.ParentId = parent;
+    record.MessageEntry.Value = Message_User(&arena, SVL("concurrent"));
+    record.MessageEntry.Value.Timestamp = append->First + i;
+    append->Result = AgentHarness_Append(append->Harness, &record, 1);
+    if (!SessionResult_IsOk(append->Result)) break;
+    parent = record.EntryId;
+  }
+  ArenaRelease(&arena);
+}
+
+static void TestHarnessTranscriptWatchBoundary() {
+  Arena arena = ArenaCreate();
+  MemoryRepository memory = {};
+  MemoryRepository_Init(&memory);
+  SessionRepository repository = MemoryRepository_AsRepository(&memory);
+  SessionLog log = {};
+  CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+  ScriptProvider script = {};
+  AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
+  AgentHarness harness = {};
+  CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+  for (u32 iteration = 0; iteration < 16; iteration++) {
+    Arena output = ArenaCreate();
+    SnapshotAppendThread append = {};
+    append.Harness = &harness;
+    append.Parent = harness.Reduction.HeadId;
+    append.First = harness.Records.Count;
+    append.Count = 32;
+    Thread thread = {};
+    bool started = Thread_Start(&thread, AppendSnapshotThread, &append);
+    CHECK(started);
+    if (!started) {
+      ArenaRelease(&output);
+      break;
+    }
+    u32 waited = 0;
+    while (!Atomic_LoadI32(&append.Ready) && waited++ < 2000) Sleep_Ms(1);
+    CHECK(Atomic_LoadI32(&append.Ready) != 0);
+    Atomic_StoreI32(&append.Release, 1);
+    AgentTranscriptSnapshot snapshot = {};
+    AgentHarnessWatch watch = {};
+    SessionResult subscribed =
+        AgentHarness_WatchTranscript(&output, &harness, 64, 7, &snapshot, &watch);
+    CHECK(SessionResult_IsOk(subscribed));
+    Thread_Join(&thread);
+    CHECK(SessionResult_IsOk(append.Result));
+    if (!SessionResult_IsOk(subscribed)) {
+      ArenaRelease(&output);
+      break;
+    }
+    u64 cursor = snapshot.Cursor;
+    u32 count = cursor - 1 < 7 ? (u32)(cursor - 1) : 7;
+    CHECK_ALL(snapshot.Transcript.Count == count,
+              snapshot.HasEarlierMessages == (cursor - 1 > count),
+              cursor >= append.First, cursor <= harness.Records.Count,
+              DurableId_Eq(snapshot.HeadId, harness.Records.Data[(u32)cursor - 1].EntryId));
+    if (snapshot.Transcript.Count == count) {
+      for (u32 i = 0; i < count; i++)
+        CHECK(snapshot.Transcript.Data[i].Timestamp == cursor - count + i);
+    }
+    // Releasing snapshot storage while still registered cannot release the
+    // watch's queued events or prevent later durable publication.
+    ArenaRelease(&output);
+    Message afterRelease = Message_User(&arena, SVL("after release"));
+    afterRelease.Timestamp = harness.Records.Count;
+    DurableId last = AppendSnapshotMessage(&harness, harness.Reduction.HeadId, afterRelease);
+    CHECK(SessionResult_IsOk(AgentHarness_WatchRequestClose(&watch)));
+    u32 delivered = 0;
+    for (;;) {
+      Arena eventArena = ArenaCreate();
+      AgentHarnessEvent event = {};
+      SessionResult next = AgentHarness_WatchNext(&eventArena, &watch, &event);
+      if (!SessionResult_IsOk(next)) {
+        CHECK(next.Status == SessionStatus::InvalidState);
+        ArenaRelease(&eventArena);
+        break;
+      }
+      delivered++;
+      CHECK_ALL(event.Kind == AgentHarnessEventKind::DurableRecord,
+                event.Cursor == cursor + delivered);
+      if (event.Kind == AgentHarnessEventKind::DurableRecord)
+        CHECK_ALL(event.Record->Seq == event.Cursor,
+                  DurableId_Eq(event.Record->EntryId,
+                                harness.Records.Data[(u32)event.Cursor - 1].EntryId));
+      ArenaRelease(&eventArena);
+    }
+    CHECK_ALL(cursor + delivered == harness.Records.Data[harness.Records.Count - 1].Seq,
+              DurableId_Eq(last, harness.Reduction.HeadId), !watch.Lagged);
+    CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
+  }
+  CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+  repository.Close(repository.Ctx);
+  ArenaRelease(&arena);
+}
+
 static void TestHarnessWatchers() {
-  // Watch atomically returns a snapshot cursor and then delivers every
+  // WatchTranscript atomically returns a snapshot cursor and then delivers every
   // durable transition plus transient agent/turn/provider lifecycle events in
   // publication order; message-only persistence means far fewer durable
   // events than transient ones.
@@ -1347,11 +1924,12 @@ static void TestHarnessWatchers() {
     AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
 
-    AgentHarnessSnapshot initial = {};
+    AgentTranscriptSnapshot initial = {};
     AgentHarnessWatch* watchPtr = ArenaPushStruct(&arena, AgentHarnessWatch);
     *watchPtr = AgentHarnessWatch{};
     AgentHarnessWatch& watch = *watchPtr;
-    CHECK(SessionResult_IsOk(AgentHarness_Watch(&arena, &harness, 16, &initial, &watch)));
+    CHECK(SessionResult_IsOk(
+        AgentHarness_WatchTranscript(&arena, &harness, 16, 0, &initial, &watch)));
     CHECK_ALL(initial.Cursor == 1, initial.Transcript.Count == 0, !initial.Running, !initial.Faulted);
     CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("watched prompt"))));
 
@@ -1379,8 +1957,8 @@ static void TestHarnessWatchers() {
     }
     CHECK_ALL(durableCount == 2, transientCount == 9, sawDelta, durableCursor == initial.Cursor + 2);
 
-    AgentHarnessSnapshot complete = {};
-    CHECK(SessionResult_IsOk(AgentHarness_SnapshotFull(&arena, &harness, &complete)));
+    AgentTranscriptSnapshot complete = {};
+    CHECK(SessionResult_IsOk(AgentHarness_SnapshotTranscript(&arena, &harness, 0, &complete)));
     CHECK_ALL(complete.Cursor == initial.Cursor + 2, complete.Transcript.Count == 2,
               ContextTextEq(&complete.Transcript, 0, Role::User, "watched prompt"),
               ContextTextEq(&complete.Transcript, 1, Role::Assistant, "watched response"));
@@ -1399,7 +1977,7 @@ static void TestHarnessWatchers() {
               !described.Busy);
     AgentHarnessWatch* barePtr = ArenaPushStruct(&arena, AgentHarnessWatch);
     *barePtr = AgentHarnessWatch{};
-    CHECK(SessionResult_IsOk(AgentHarness_Watch(nullptr, &harness, 16, nullptr, barePtr)));
+    CHECK(SessionResult_IsOk(AgentHarness_Watch(&harness, 16, barePtr)));
     CHECK(barePtr->Cursor == complete.Cursor);
     CHECK(SessionResult_IsOk(AgentHarness_WatchClose(barePtr)));
     CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
@@ -1424,11 +2002,10 @@ static void TestHarnessWatchers() {
     AgentHarness harness = {};
     AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
-    AgentHarnessSnapshot snapshot = {};
     AgentHarnessWatch* watchPtr = ArenaPushStruct(&arena, AgentHarnessWatch);
     *watchPtr = AgentHarnessWatch{};
     AgentHarnessWatch& watch = *watchPtr;
-    CHECK(SessionResult_IsOk(AgentHarness_Watch(&arena, &harness, 2, &snapshot, &watch)));
+    CHECK(SessionResult_IsOk(AgentHarness_Watch(&harness, 2, &watch)));
     CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("overflow prompt"))));
     AgentHarnessEvent event = {};
     CHECK(AgentHarness_WatchNext(&arena, &watch, &event).Status == SessionStatus::WatcherLagged);
@@ -1459,11 +2036,10 @@ static void TestHarnessWatchers() {
     config.ToolExec = ToolExecution::Parallel;
     AgentHarness harness = {};
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
-    AgentHarnessSnapshot snapshot = {};
     AgentHarnessWatch* watchPtr = ArenaPushStruct(&arena, AgentHarnessWatch);
     *watchPtr = AgentHarnessWatch{};
     AgentHarnessWatch& watch = *watchPtr;
-    CHECK(SessionResult_IsOk(AgentHarness_Watch(&arena, &harness, 32, &snapshot, &watch)));
+    CHECK(SessionResult_IsOk(AgentHarness_Watch(&harness, 32, &watch)));
 
     HarnessRunThread run = {};
     run.Harness = &harness;
@@ -1476,6 +2052,12 @@ static void TestHarnessWatchers() {
       waited++;
     }
     CHECK(providerState.Started != 0);
+    AgentTranscriptSnapshot running = {};
+    CHECK(SessionResult_IsOk(
+        AgentHarness_SnapshotTranscript(&arena, &harness, 1, &running)));
+    CHECK_ALL(running.Running, !running.Faulted, running.Cursor == 2,
+              running.Transcript.Count == 1,
+              ContextTextEq(&running.Transcript, 0, Role::User, "cancel me"));
     CHECK(SessionResult_IsOk(AgentHarness_QueueSteering(&harness, SVL("queued concurrently"))));
     CHECK(SessionResult_IsOk(AgentHarness_RequestCancel(&harness)));
     Thread_Join(&thread);
@@ -1508,11 +2090,10 @@ static void TestHarnessWatchers() {
     AgentHarness harness = {};
     AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
-    AgentHarnessSnapshot snapshot = {};
     AgentHarnessWatch* watchPtr = ArenaPushStruct(&arena, AgentHarnessWatch);
     *watchPtr = AgentHarnessWatch{};
     AgentHarnessWatch& watch = *watchPtr;
-    CHECK(SessionResult_IsOk(AgentHarness_Watch(&arena, &harness, 4, &snapshot, &watch)));
+    CHECK(SessionResult_IsOk(AgentHarness_Watch(&harness, 4, &watch)));
     WatchWaitThread wait = {};
     wait.Watch = &watch;
     Thread thread = {};
@@ -1620,11 +2201,10 @@ static void TestHarnessToolsAndHooks() {
     AgentHarness harness = {};
     AgentHarnessConfig config = ScriptConfig(&script, &delay, 1);
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
-    AgentHarnessSnapshot initial = {};
     AgentHarnessWatch* watchPtr = ArenaPushStruct(&arena, AgentHarnessWatch);
     *watchPtr = AgentHarnessWatch{};
     AgentHarnessWatch& watch = *watchPtr;
-    CHECK(SessionResult_IsOk(AgentHarness_Watch(&arena, &harness, 64, &initial, &watch)));
+    CHECK(SessionResult_IsOk(AgentHarness_Watch(&harness, 64, &watch)));
     CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("run parallel tools"))));
 
     StrView liveEnds[2] = {};
@@ -1805,12 +2385,11 @@ static void TestHarnessToolsAndHooks() {
     config.Hooks.AfterTurn = FailAfterTurn;
     AgentHarness harness = {};
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
-    AgentHarnessSnapshot initial = {};
     AgentHarnessWatch* watchPtr = ArenaPushStruct(&arena, AgentHarnessWatch);
     *watchPtr = AgentHarnessWatch{};
     AgentHarnessWatch& watch = *watchPtr;
     CHECK(SessionResult_IsOk(
-        AgentHarness_Watch(&arena, &harness, 16, &initial, &watch)));
+        AgentHarness_Watch(&harness, 16, &watch)));
     CHECK(AgentHarness_Run(&harness, SVL("go")).Status ==
           SessionStatus::HookError);
     WatchTally tally = DrainUntilAgentEnd(&arena, &watch);
@@ -2664,13 +3243,12 @@ static void TestHarnessCancellationAndBranches() {
     config.Hooks.AfterTurn = BlockingAfterTurn;
     AgentHarness harness = {};
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
-    AgentHarnessSnapshot initial = {};
     AgentHarnessWatch* watchPtr =
         ArenaPushStruct(&arena, AgentHarnessWatch);
     *watchPtr = AgentHarnessWatch{};
     AgentHarnessWatch& watch = *watchPtr;
     CHECK(SessionResult_IsOk(
-        AgentHarness_Watch(&arena, &harness, 32, &initial, &watch)));
+        AgentHarness_Watch(&harness, 32, &watch)));
 
     HarnessRunThread run = {};
     run.Harness = &harness;
@@ -2732,8 +3310,8 @@ static void TestHarnessCancellationAndBranches() {
     CHECK(first.Result.Status == SessionStatus::Cancelled);
     CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("after cancel"))));
 
-    AgentHarnessSnapshot snapshot = {};
-    CHECK(SessionResult_IsOk(AgentHarness_SnapshotFull(&arena, &harness, &snapshot)));
+    AgentTranscriptSnapshot snapshot = {};
+    CHECK(SessionResult_IsOk(AgentHarness_SnapshotTranscript(&arena, &harness, 0, &snapshot)));
     CHECK_ALL(providerState.Calls == 2, providerState.FollowUpContextValid,
               snapshot.Transcript.Count == 4,
               ContextTextEq(&snapshot.Transcript, 0, Role::User, "cancel me"),
@@ -3091,12 +3669,11 @@ static void TestHarnessAutoCompaction() {
     AgentHarnessConfig config = AutoCompactConfig(&script, echo, 1, true);
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
 
-    AgentHarnessSnapshot watchSnapshot = {};
     AgentHarnessWatch* watchPtr = ArenaPushStruct(&arena, AgentHarnessWatch);
     *watchPtr = AgentHarnessWatch{};
     AgentHarnessWatch& watch = *watchPtr;
     CHECK(SessionResult_IsOk(
-        AgentHarness_Watch(&arena, &harness, 128, &watchSnapshot, &watch)));
+        AgentHarness_Watch(&harness, 128, &watch)));
 
     CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("hello"))));
     CHECK(script.Index == 3);  // turn, compaction summary, final turn
@@ -3403,12 +3980,11 @@ static void TestHarnessWatchDrainsAfterClose() {
   AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
   CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
 
-  AgentHarnessSnapshot snapshot = {};
   AgentHarnessWatch* watchPtr = ArenaPushStruct(&arena, AgentHarnessWatch);
   *watchPtr = AgentHarnessWatch{};
   AgentHarnessWatch& watch = *watchPtr;
   CHECK(SessionResult_IsOk(
-      AgentHarness_Watch(&arena, &harness, 64, &snapshot, &watch)));
+      AgentHarness_Watch(&harness, 64, &watch)));
 
   CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("hello"))));
 
@@ -3462,10 +4038,9 @@ void TestHarnessWatchOverflow() {
   // Adjacent text deltas on the same content block collapse into one queued
   // event, so a burst far larger than the ring still fits.
   {
-    AgentHarnessSnapshot snapshot = {};
     AgentHarnessWatch watch = {};
     CHECK(SessionResult_IsOk(
-        AgentHarness_Watch(&arena, &harness, 8, &snapshot, &watch)));
+        AgentHarness_Watch(&harness, 8, &watch)));
 
     for (u32 i = 0; i < 200; i++) {
       StreamEvent delta = {};
@@ -3488,10 +4063,9 @@ void TestHarnessWatchOverflow() {
   // A different content index cannot merge, so the ring genuinely overflows.
   // The watcher keeps running and reports the gap instead of dying.
   {
-    AgentHarnessSnapshot snapshot = {};
     AgentHarnessWatch watch = {};
     CHECK(SessionResult_IsOk(
-        AgentHarness_Watch(&arena, &harness, 8, &snapshot, &watch)));
+        AgentHarness_Watch(&harness, 8, &watch)));
 
     for (u32 i = 0; i < 20; i++) {
       StreamEvent delta = {};
@@ -3517,10 +4091,9 @@ void TestHarnessWatchOverflow() {
   // Durable records are never sacrificed to make room: losing one would leave
   // the consumer's transcript short an entry.
   {
-    AgentHarnessSnapshot snapshot = {};
     AgentHarnessWatch watch = {};
     CHECK(SessionResult_IsOk(
-        AgentHarness_Watch(&arena, &harness, 4, &snapshot, &watch)));
+        AgentHarness_Watch(&harness, 4, &watch)));
 
     CHECK(SessionResult_IsOk(AgentHarness_QueueNextTurn(&harness, SVL("queued"))));
     CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("hello"))));
@@ -3538,7 +4111,8 @@ void TestHarnessWatchOverflow() {
     }
     // A four-slot ring cannot hold a whole run, so events were certainly
     // discarded -- yet every durable record still arrived.
-    SessionReduction reduction = AgentHarness_ReduceSnapshot(&harness);
+    SessionReduction reduction = {};
+    CHECK(SessionResult_IsOk(AgentHarness_Snapshot(&arena, &harness, &reduction)));
     CHECK_ALL(!watch.Lagged, dropped > 0, durable == reduction.RecordCount - 1);
     CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
   }
@@ -3549,10 +4123,9 @@ void TestHarnessWatchOverflow() {
   // one-byte deltas consumed ~200 MB, and a longer stall reached the arena
   // reservation and trapped the process instead of degrading.
   {
-    AgentHarnessSnapshot snapshot = {};
     AgentHarnessWatch watch = {};
     CHECK(SessionResult_IsOk(
-        AgentHarness_Watch(&arena, &harness, 8, &snapshot, &watch)));
+        AgentHarness_Watch(&harness, 8, &watch)));
 
     for (u32 i = 0; i < 20000; i++) {
       StreamEvent delta = {};
@@ -3581,7 +4154,7 @@ void TestHarnessWatchOverflow() {
 }
 
 // The harness keeps an in-memory clone of every record, which is what makes
-// folding and snapshots O(1), so State grows with the conversation by design.
+// incremental folding O(1), so State grows with the conversation by design.
 // This pins the rate: it is roughly twice the raw text, and a change that added
 // another clone per turn would show up here rather than as a slow leak.
 void TestHarnessStateGrowthRate() {
@@ -3817,6 +4390,367 @@ void TestHarnessOverrideOutlivesTurnArena() {
   ArenaRelease(&arena);
 }
 
+StrView OverrideFilledText(Arena* arena, u32 length, char fill) {
+  char* text = ArenaPushArray(arena, char, length);
+  memset(text, fill, length);
+  return StrView{text, length};
+}
+
+u64 OverridePrivateBytesOutsideWork(const AgentHarness* harness) {
+#if defined(_WIN32)
+  PROCESS_MEMORY_COUNTERS_EX memory = {};
+  memory.cb = sizeof(memory);
+  CHECK(GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&memory,
+                             sizeof(memory)) != 0);
+  return (u64)memory.PrivateUsage - harness->Work.Committed;
+#else
+  (void)harness;
+  return 0;
+#endif
+}
+
+struct ReplacementProbe {
+  AgentHarness* Harness;
+  u32 Turns;
+  Array<Message> Context;
+  Model SeenModel;
+  u32 ContextCount;
+  u32 TextLength;
+  char TextFill;
+  u32 NameLength;
+  char NameFill;
+  u64 PrivateBytesBefore;
+};
+
+SessionResult ReplacementProvider(void* user, Arena* arena, AgentTurnKind kind, u32,
+                                   AgentHarnessProviderInput* input) {
+  ReplacementProbe* probe = (ReplacementProbe*)user;
+  CHECK(kind == AgentTurnKind::Run);
+  CHECK(arena == &probe->Harness->Work);
+  // The first override intentionally carries two 4 MiB fields. Later small
+  // replacements must not retain that spike or grow with replacement count.
+  if (probe->Turns != 1) CHECK(arena->Used < ((usize)2 << 20));
+  if (probe->Turns) {
+    CHECK(input->Context.MessageCount == probe->ContextCount + 1);
+    if (probe->ContextCount) {
+      StrView text = input->Context.Messages[0].Content.Data[0].Text;
+      CHECK(text.Length == probe->TextLength);
+      if (probe->TextLength == 9)
+        CHECK(StrView_EqCStr(text, "follow-up"));
+      else
+        CHECK_ALL(text.Data[0] == probe->TextFill,
+                  text.Data[text.Length - 1] == probe->TextFill);
+    }
+    CHECK(input->Context.Messages[input->Context.MessageCount - 1].Content.Backing ==
+          arena);
+    CHECK_ALL(StrView_EqCStr(input->ModelInfo.Id, "owned-model"),
+              StrView_EqCStr(input->ModelInfo.Provider, "script"),
+              StrView_EqCStr(input->ModelInfo.BaseUrl, "https://override.invalid"),
+              input->ModelInfo.Name.Length == probe->NameLength,
+              input->ModelInfo.Name.Data[0] == probe->NameFill,
+              input->ModelInfo.Name.Data[probe->NameLength - 1] == probe->NameFill,
+              input->Options.Profile.Effort == ModelEffort::Medium);
+  }
+  probe->SeenModel = input->ModelInfo;
+  probe->Context = {(Message*)input->Context.Messages, input->Context.MessageCount,
+                    input->Context.MessageCount, arena};
+  return SessionResult_Ok();
+}
+
+SessionResult ReplacementPrepare(void* user, Arena* arena, const AgentTurnContext* turn,
+                                  AgentNextTurnUpdate* out) {
+  ReplacementProbe* probe = (ReplacementProbe*)user;
+  probe->Turns++;
+  CHECK(arena == &probe->Harness->Work);
+  CHECK(turn->NewMessages.Count == probe->Turns * 2);
+  // RunMem retains only the geometrically grown array of durable handles.
+  CHECK(probe->Harness->RunMem.Used <
+        ((usize)turn->NewMessages.Count + 8) * sizeof(Message) * 4);
+  CHECK(probe->Harness->RunMem.Committed < ((usize)1 << 20));
+  ArenaAlloc(arena, probe->Turns == 1 ? (usize)8 << 20 : (usize)128 << 10, 1);
+  out->HasModel = probe->Turns <= 306;
+  out->HasContext = probe->Turns <= 300 || probe->Turns == 307 || probe->Turns == 309;
+  const u32 length = probe->Turns == 1 ? 4 * 1024 * 1024 : 64 * 1024;
+  if (out->HasModel) {
+    out->ModelInfo.Id = StrView_Dup(arena, SVL("owned-model"));
+    out->ModelInfo.Provider = StrView_Dup(arena, SVL("script"));
+    out->ModelInfo.BaseUrl = StrView_Dup(arena, SVL("https://override.invalid"));
+    out->ModelInfo.Name = OverrideFilledText(arena, length, 'm');
+    out->ModelInfo.EffortMask = ModelEffort_Bit(ModelEffort::Medium);
+    out->ModelInfo.DefaultEffort = ModelEffort::Medium;
+    if (probe->Turns == 3) {
+      // Both replacement fields borrow request copies from this turn.
+      out->ModelInfo = probe->SeenModel;
+      out->ModelInfo.Name = probe->Context.Data[0].Content.Data[0].Text;
+    } else if (probe->Turns == 4) {
+      out->ModelInfo = probe->SeenModel;
+    }
+    probe->NameLength = out->ModelInfo.Name.Length;
+    probe->NameFill = out->ModelInfo.Name.Data[0];
+  }
+  if (probe->Turns == 1) {
+    out->HasProfile = true;
+    out->Profile.Effort = ModelEffort::Medium;
+  }
+  if (out->HasContext && probe->Turns != 307) {
+    StrView text = probe->Turns == 3 || probe->Turns == 309
+                       ? probe->SeenModel.Name : OverrideFilledText(arena, length, 'c');
+    out->Context = Array_Make<Message>(arena, 1);
+    Array_Push(&out->Context, Message_User(arena, text));
+    if (probe->Turns == 4) {
+      out->Context = probe->Context;
+      out->Context.Count = 1;
+    }
+    text = out->Context.Data[0].Content.Data[0].Text;
+    probe->TextLength = text.Length;
+    probe->TextFill = text.Data[0];
+  }
+  if (!out->HasContext && probe->ContextCount == 0) {
+    probe->TextLength = 9;
+    probe->TextFill = 'f';
+  }
+  probe->ContextCount = out->HasContext ? out->Context.Count : probe->ContextCount + 2;
+  return SessionResult_Ok();
+}
+
+SessionResult ReplacementStop(void* user, Arena* arena, const AgentTurnContext* turn, bool* stop) {
+  ReplacementProbe* probe = (ReplacementProbe*)user;
+  CHECK(turn->Context.Count == probe->ContextCount);
+  CHECK(turn->Context.Backing == arena);
+  for (u32 i = 0; i < turn->Context.Count; i++)
+    CHECK(turn->Context.Data[i].Content.Backing == arena);
+  if (probe->Turns > 2) CHECK(arena->Used < ((usize)4 << 20));
+  // Work alone cannot expose leaked private override owners. Leave room for
+  // the small growing transcript, but not the first 8 MiB override spike or
+  // hundreds of abandoned 64 KiB replacements.
+  if (probe->Turns == 3 || probe->Turns % 25 == 0)
+    CHECK(OverridePrivateBytesOutsideWork(probe->Harness) <=
+          probe->PrivateBytesBefore + ((u64)4 << 20));
+  *stop = probe->Turns == 310;
+  return SessionResult_Ok();
+}
+
+SessionResult ReplacementFollowUp(void*, Arena* arena, Array<Message>* out) {
+  Array_Push(out, Message_User(arena, SVL("follow-up")));
+  return SessionResult_Ok();
+}
+
+void TestHarnessReplacementOwnership() {
+  Arena arena = ArenaCreate();
+  MemoryRepository memory = {};
+  MemoryRepository_Init(&memory);
+  SessionRepository repository = MemoryRepository_AsRepository(&memory);
+  SessionLog log = {};
+  CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+  ScriptStep steps[310] = {};
+  for (u32 i = 0; i < 310; i++) {
+    steps[i].Text = SVL("answer");
+    steps[i].Stop = StopReason::Stop;
+  }
+  ScriptProvider script = {steps, 310, 0};
+  AgentHarness harness = {};
+  ReplacementProbe probe = {};
+  probe.Harness = &harness;
+  AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
+  config.Hooks.User = &probe;
+  config.Hooks.BeforeProvider = ReplacementProvider;
+  config.Hooks.PrepareNextTurn = ReplacementPrepare;
+  config.Hooks.ShouldStopAfterTurn = ReplacementStop;
+  config.Hooks.GetFollowUpMessages = ReplacementFollowUp;
+  CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+  probe.PrivateBytesBefore = OverridePrivateBytesOutsideWork(&harness);
+  CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("go"))));
+  CHECK_ALL(script.Index == 310, probe.Turns == 310, harness.RunMem.Used == 0,
+            harness.Work.Used == 0, harness.Work.Committed <= ((usize)1 << 20),
+            StrView_EqCStr(harness.Config.ModelInfo.Id, "script-model"),
+            harness.Config.Stream.Profile.Effort == ModelEffort::None);
+  CHECK(OverridePrivateBytesOutsideWork(&harness) <=
+        probe.PrivateBytesBefore + ((u64)4 << 20));
+  CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+  MemoryRepository_Destroy(&memory);
+  ArenaRelease(&arena);
+}
+
+enum class OverrideExit : u8 {
+  Stop, PrepareError, StopError, ProviderHookError, ProviderError, AfterError,
+  InvalidUpdate, Cancel, Compact, CompactError, CompactCancel
+};
+
+struct OverrideExitProbe {
+  AgentHarness* Harness;
+  OverrideExit Exit;
+  u32 Prepares;
+  u32 Providers;
+  StrView ContextError;
+  Model SeenModel;
+  bool Compacted;
+  bool AfterTurn;
+};
+
+bool OverrideExitCompacts(OverrideExit exit) {
+  return exit == OverrideExit::Compact || exit == OverrideExit::CompactError ||
+         exit == OverrideExit::CompactCancel;
+}
+
+SessionResult OverrideExitPrepare(void* user, Arena* arena, const AgentTurnContext*,
+                                   AgentNextTurnUpdate* out) {
+  OverrideExitProbe* probe = (OverrideExitProbe*)user;
+  probe->Prepares++;
+  if (probe->Prepares == 1) {
+    out->HasContext = true;
+    out->Context = Array_Make<Message>(arena, 1);
+    Message message = Message_User(
+        arena, OverrideExitCompacts(probe->Exit) ? OverrideFilledText(arena, 16384, 'c')
+                                               : SVL("override context"));
+    message.ToolName = StrView_Dup(arena, SVL("owned context error"));
+    message.Content.Data[0].Signature = OverrideFilledText(arena, 2 * 1024 * 1024, 's');
+    Array_Push(&out->Context, message);
+    out->HasModel = true;
+    out->ModelInfo.Id = StrView_Dup(arena, SVL("owned model error"));
+    out->ModelInfo.Provider = StrView_Dup(arena, SVL("script"));
+    out->ModelInfo.Name = OverrideFilledText(arena, 2 * 1024 * 1024, 'm');
+    out->ModelInfo.ContextWindow = 1000;
+    out->ModelInfo.EffortMask = ModelEffort_Bit(ModelEffort::Medium);
+    out->HasProfile = true;
+    out->Profile.Effort = ModelEffort::Medium;
+  } else if (probe->Exit == OverrideExit::PrepareError) {
+    ArenaAlloc(arena, (usize)8 << 20, 1);
+    return SessionResult_Error(SessionStatus::InvalidArgument, probe->ContextError);
+  } else if (probe->Exit == OverrideExit::InvalidUpdate) {
+    out->HasContext = true;
+    out->HasModel = true;
+    out->ModelInfo.Provider = SVL("script");
+  } else if (probe->Exit == OverrideExit::Cancel) {
+    CHECK(SessionResult_IsOk(AgentHarness_RequestCancel(probe->Harness)));
+  }
+  return SessionResult_Ok();
+}
+
+SessionResult OverrideExitStop(void* user, Arena*, const AgentTurnContext* turn, bool* stop) {
+  OverrideExitProbe* probe = (OverrideExitProbe*)user;
+  if (probe->Prepares == 1) {
+    probe->ContextError = turn->Context.Data[0].ToolName;
+    CHECK(turn->Context.Backing == &probe->Harness->Work);
+  } else if (probe->Exit == OverrideExit::StopError) {
+    return SessionResult_Error(SessionStatus::InvalidArgument, probe->ContextError);
+  }
+  *stop = probe->Prepares == 2 && probe->Exit != OverrideExit::Cancel;
+  return SessionResult_Ok();
+}
+
+SessionResult OverrideExitProvider(void* user, Arena* arena, AgentTurnKind kind, u32,
+                                    AgentHarnessProviderInput* input) {
+  OverrideExitProbe* probe = (OverrideExitProbe*)user;
+  // Hook inputs are callback-scoped. Refresh borrowed errors after Work resets.
+  probe->ContextError = StrView_Dup(arena, SVL("owned context error"));
+  if (kind == AgentTurnKind::Compaction) return SessionResult_Ok();
+  probe->Providers++;
+  if (probe->Providers == 2) {
+    CHECK_ALL(StrView_EqCStr(input->ModelInfo.Id, "owned model error"),
+              input->ModelInfo.Name.Length == 2 * 1024 * 1024,
+              input->ModelInfo.Name.Data[0] == 'm',
+              input->Options.Profile.Effort == ModelEffort::Medium);
+    if (probe->Exit == OverrideExit::Compact) {
+      probe->Compacted = true;
+    }
+  }
+  probe->SeenModel = input->ModelInfo;
+  if (probe->Providers == 2 && probe->Exit == OverrideExit::ProviderHookError)
+    return SessionResult_Error(SessionStatus::InvalidArgument, input->ModelInfo.Id);
+  return SessionResult_Ok();
+}
+
+SessionResult OverrideExitAfterProvider(void* user, Arena*, AgentTurnKind kind, u32,
+                                         Message* assistant) {
+  OverrideExitProbe* probe = (OverrideExitProbe*)user;
+  if (kind == AgentTurnKind::Compaction && probe->Exit == OverrideExit::CompactCancel) {
+    assistant->Stop = StopReason::Aborted;
+    assistant->ErrorMessage = probe->ContextError;
+  }
+  if ((kind == AgentTurnKind::Compaction && probe->Exit == OverrideExit::CompactError) ||
+      (kind == AgentTurnKind::Run && probe->Providers == 2 &&
+       probe->Exit == OverrideExit::ProviderError)) {
+    assistant->Stop = StopReason::Error;
+    assistant->ErrorMessage = probe->ContextError;
+  }
+  return SessionResult_Ok();
+}
+
+SessionResult OverrideExitAfterTurn(void* user, Arena*, AgentTurnKind,
+                                     AgentTurnOutcome, StrView) {
+  OverrideExitProbe* probe = (OverrideExitProbe*)user;
+  probe->AfterTurn = true;
+  if (!probe->Compacted) {
+    CHECK(StrView_EqCStr(probe->ContextError, "owned context error"));
+  }
+  if (probe->Exit == OverrideExit::AfterError)
+    return SessionResult_Error(SessionStatus::InvalidArgument, probe->SeenModel.Id);
+  return SessionResult_Ok();
+}
+
+void TestHarnessOverrideExitOwnership() {
+  for (u32 i = 0; i <= (u32)OverrideExit::CompactCancel; i++) {
+    Arena arena = ArenaCreate();
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+    ScriptStep steps[3] = {};
+    steps[0].Text = SVL("first assistant response");
+    steps[1].Text = SVL("summary or final response");
+    steps[2].Text = SVL("after compaction");
+    for (u32 j = 0; j < 3; j++) steps[j].Stop = StopReason::Stop;
+    ScriptProvider script = {steps, 3, 0};
+    AgentHarness harness = {};
+    OverrideExitProbe probe = {};
+    probe.Harness = &harness;
+    probe.Exit = (OverrideExit)i;
+    AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
+    config.Retry = {};
+    if (OverrideExitCompacts(probe.Exit)) {
+      config.Compaction.Enabled = true;
+      config.Compaction.ReserveTokens = 400;
+      config.Compaction.KeepRecentTokens = 1;
+    }
+    config.Hooks.User = &probe;
+    config.Hooks.PrepareNextTurn = OverrideExitPrepare;
+    config.Hooks.ShouldStopAfterTurn = OverrideExitStop;
+    config.Hooks.BeforeProvider = OverrideExitProvider;
+    config.Hooks.AfterProvider = OverrideExitAfterProvider;
+    config.Hooks.AfterTurn = OverrideExitAfterTurn;
+    config.Hooks.GetFollowUpMessages = ReplacementFollowUp;
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+    u64 privateBytesBefore = OverridePrivateBytesOutsideWork(&harness);
+    SessionResult result = AgentHarness_Run(&harness, SVL("go"));
+    if (probe.Exit == OverrideExit::Stop || probe.Exit == OverrideExit::Compact) {
+      CHECK(SessionResult_IsOk(result));
+    } else if (probe.Exit == OverrideExit::Cancel || probe.Exit == OverrideExit::CompactCancel) {
+      CHECK(result.Status == SessionStatus::Cancelled);
+      if (probe.Exit == OverrideExit::CompactCancel)
+        CHECK(StrView_EqCStr(result.Message, "owned context error"));
+    } else if (probe.Exit == OverrideExit::InvalidUpdate) {
+      CHECK_ALL(result.Status == SessionStatus::HookError,
+                StrView_Contains(result.Message, "invalid model"));
+    } else {
+      CHECK(!SessionResult_IsOk(result));
+      CHECK(StrView_Contains(result.Message,
+                            probe.Exit == OverrideExit::ProviderHookError ||
+                                    probe.Exit == OverrideExit::AfterError
+                                ? "owned model error" : "owned context error"));
+    }
+    CHECK_ALL(probe.AfterTurn, harness.Work.Used == 0, harness.RunMem.Used == 0,
+              harness.Work.Committed <= ((usize)1 << 20),
+              harness.RunMem.Committed <= ((usize)1 << 20),
+              probe.Compacted == (probe.Exit == OverrideExit::Compact));
+    CHECK(OverridePrivateBytesOutsideWork(&harness) <=
+          privateBytesBefore + ((u64)1 << 20));
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    MemoryRepository_Destroy(&memory);
+    ArenaRelease(&arena);
+  }
+}
+
 void TestHarnessWorkArenaPerTurn() {
   Arena scratch = ArenaCreate();
   const u32 bodyLength = 256 * 1024;
@@ -3887,7 +4821,7 @@ void TestHarnessWorkArenaTrim() {
   CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("long"))));
   usize afterLong = harness.Work.Committed;
 
-  // 1 MiB keep (harness.cpp WORK_ARENA_KEEP_BYTES) + one 64 KiB commit chunk.
+  // 1 MiB keep (driver.h WORK_ARENA_KEEP_BYTES) + one 64 KiB commit chunk.
   usize floor = ((usize)1 << 20) + (usize)64 * 1024;
   CHECK_ALL(afterShort <= floor, afterLong <= floor, harness.Work.Used == 0);
 
@@ -4092,12 +5026,608 @@ void TestHarnessTurnLimit() {
   ArenaRelease(&arena);
 }
 
+struct MutableHookProbe {
+  AgentHarness* Harness;
+  Message Borrowed;
+  u32 FailAt;
+  u32 ContextCalls;
+  u32 ProviderCalls;
+  u32 Turns;
+  const Content* RetryContent;
+};
+
+void MutateHookText(StrView text, char marker) {
+  CHECK(text.Length != 0);
+  if (text.Length) ((char*)text.Data)[0] = marker;
+}
+
+void CheckHookSeed(const Message& message) {
+  CHECK_ALL(message.Content.Count == 4,
+            StrView_EqCStr(message.Content.Data[0].Text, "original"),
+            StrView_EqCStr(message.Content.Data[0].Signature, "text-signature"),
+            StrView_EqCStr(message.Content.Data[1].ToolArgsJson, "{\"x\":1}"),
+            StrView_EqCStr(message.Content.Data[1].ToolId, "call-id"),
+            StrView_EqCStr(message.Content.Data[1].ToolName, "echo"),
+            StrView_EqCStr(message.Content.Data[2].ImageData, "aW1hZ2U="),
+            StrView_EqCStr(message.Content.Data[2].ImageMimeType, "image/png"),
+            StrView_EqCStr(message.Content.Data[3].Text, "thinking"),
+            StrView_EqCStr(message.Content.Data[3].Signature, "encrypted"),
+            StrView_EqCStr(message.Model, "seed-model"),
+            StrView_EqCStr(message.Provider, "seed-provider"),
+            StrView_EqCStr(message.ToolCallId, "seed-call"),
+            StrView_EqCStr(message.ToolName, "seed-tool"),
+            StrView_EqCStr(message.ErrorMessage, "seed-error"));
+}
+
+void MutateHookMessage(Arena* arena, Message* message, char marker) {
+  CHECK(message->Content.Backing == arena);
+  Content* content = message->Content.Data;
+  MutateHookText(content[0].Text, marker);
+  MutateHookText(content[0].Signature, marker);
+  MutateHookText(content[1].ToolArgsJson, marker);
+  MutateHookText(content[1].ToolId, marker);
+  MutateHookText(content[1].ToolName, marker);
+  MutateHookText(content[2].ImageData, marker);
+  MutateHookText(content[2].ImageMimeType, marker);
+  MutateHookText(content[3].Text, marker);
+  MutateHookText(content[3].Signature, marker);
+  MutateHookText(message->Model, marker);
+  MutateHookText(message->Provider, marker);
+  MutateHookText(message->ToolCallId, marker);
+  MutateHookText(message->ToolName, marker);
+  MutateHookText(message->ErrorMessage, marker);
+  u32 capacity = message->Content.Capacity;
+  for (u32 i = message->Content.Count; i <= capacity; i++)
+    Array_Push(&message->Content, Content_Text(StrView_Dup(arena, SVL("added"))));
+  CHECK(message->Content.Capacity > capacity);
+}
+
+SessionResult MutableHookFailure(Arena* arena) {
+  return SessionResult_Error(SessionStatus::InvalidArgument,
+                             StrView_Dup(arena, SVL("mutable hook failure")));
+}
+
+SessionResult MutableBeforeContext(void* user, Arena* arena, AgentTurnKind,
+                                    DurableId, Array<Message>* messages) {
+  MutableHookProbe* probe = (MutableHookProbe*)user;
+  probe->ContextCalls++;
+  CheckHookSeed(messages->Data[0]);
+  CHECK(messages->Count == (probe->ContextCalls == 3 ? 4u : 2u));
+  usize stateUsed = probe->Harness->State.Used;
+  MutateHookMessage(arena, &messages->Data[0], 'B');
+  CHECK(probe->Harness->State.Used == stateUsed);
+  if (probe->FailAt == 1) return MutableHookFailure(arena);
+  // A later hook must detach this borrowed replacement again.
+  messages->Data[0] = probe->Borrowed;
+  return SessionResult_Ok();
+}
+
+SessionResult MutableConvert(void* user, Arena* arena, AgentTurnKind,
+                              DurableId, Array<Message>* messages) {
+  MutableHookProbe* probe = (MutableHookProbe*)user;
+  CheckHookSeed(messages->Data[0]);
+  usize stateUsed = probe->Harness->State.Used;
+  MutateHookMessage(arena, &messages->Data[0], 'C');
+  CHECK(probe->Harness->State.Used == stateUsed);
+  if (probe->FailAt == 2) return MutableHookFailure(arena);
+  messages->Data[0] = probe->Borrowed;
+  return SessionResult_Ok();
+}
+
+SessionResult MutableBeforeProvider(void* user, Arena* arena, AgentTurnKind, u32 attempt,
+                                     AgentHarnessProviderInput* input) {
+  MutableHookProbe* probe = (MutableHookProbe*)user;
+  Message* first = (Message*)input->Context.Messages;
+  if (!attempt) {
+    CheckHookSeed(*first);
+  } else {
+    // Retry reuses this turn's already detached history, not a fresh deep copy.
+    CHECK_ALL(first->Content.Data == probe->RetryContent,
+              first->Content.Data[0].Text.Data[0] == 'P');
+  }
+  usize stateUsed = probe->Harness->State.Used;
+  MutateHookMessage(arena, first, 'P');
+  CHECK(probe->Harness->State.Used == stateUsed);
+  probe->RetryContent = first->Content.Data;
+  CHECK_ALL(StrView_EqCStr(input->ModelInfo.Id, "script-model"),
+            input->Options.Profile.Effort == ModelEffort::None);
+  MutateHookText(input->ModelInfo.Id, 'S');
+  MutateHookText(input->ModelInfo.Name, 'N');
+  MutateHookText(input->ModelInfo.Provider, 'S');
+  MutateHookText(input->ModelInfo.BaseUrl, 'H');
+  MutateHookText(input->Context.SystemPrompt, 'D');
+  ToolDef* tool = (ToolDef*)input->Context.Tools;
+  MutateHookText(tool->Name, 'E');
+  MutateHookText(tool->Description, 'E');
+  MutateHookText(tool->ParamsJsonSchema, ' ');
+  MutateHookText(input->Options.Request.ToolName, 'E');
+  CHECK(input->Options.Retry->MaxRetries == 7);
+  ((HttpRetryPolicy*)input->Options.Retry)->MaxRetries = 8;
+  input->Options.Profile.Effort = ModelEffort::Medium;
+  if (probe->FailAt == 3) return MutableHookFailure(arena);
+  return SessionResult_Ok();
+}
+
+bool MutableProvider(void* user, Arena* arena, const Model* model,
+                       const LlmContext* context, const StreamOptions* options,
+                       StreamSink, Message* out) {
+  MutableHookProbe* probe = (MutableHookProbe*)user;
+  CHECK_ALL(context->Messages[0].Content.Data[0].Text.Data[0] == 'P',
+            model->Id.Data[0] == 'S', options->Profile.Effort == ModelEffort::Medium,
+            options->Retry->MaxRetries == 8);
+  probe->ProviderCalls++;
+  if (probe->ProviderCalls == 1 && !probe->FailAt) {
+    *out = Message_AssistantEmpty(arena);
+    out->Stop = StopReason::Error;
+    out->ErrorMessage = SVL("rate limit exceeded");
+    out->Model = probe->Harness->Config.ModelInfo.Id;
+    return false;
+  }
+  // Providers may return borrowed nested fields, even when the outer Message
+  // lives in Work. AfterProvider must not mutate the source record/config.
+  *out = probe->Borrowed;
+  out->Kind = Role::Assistant;
+  out->Stop = StopReason::Stop;
+  return true;
+}
+
+SessionResult MutableAfterProvider(void* user, Arena* arena, AgentTurnKind, u32,
+                                    Message* assistant) {
+  MutableHookProbe* probe = (MutableHookProbe*)user;
+  if (assistant->Stop == StopReason::Error) {
+    CHECK(assistant->Content.Backing == arena);
+    MutateHookText(assistant->Model, 'S');
+    return SessionResult_Ok();
+  }
+  CheckHookSeed(*assistant);
+  MutateHookMessage(arena, assistant, 'A');
+  assistant->Content.Data[1].Kind = ContentKind::Text;
+  if (probe->FailAt == 4) return MutableHookFailure(arena);
+  return SessionResult_Ok();
+}
+
+SessionResult MutablePrepare(void* user, Arena* arena, const AgentTurnContext* turn,
+                              AgentNextTurnUpdate* update) {
+  MutableHookProbe* probe = (MutableHookProbe*)user;
+  probe->Turns++;
+  CHECK_ALL(turn->Context.Backing == arena, turn->NewMessages.Backing == arena,
+            turn->Assistant->Content.Backing == arena);
+  MutateHookText(turn->NewMessages.Data[0].Content.Data[0].Text, 'X');
+  MutateHookText(turn->Assistant->Content.Data[0].Text, 'X');
+  if (probe->Turns == 1) {
+    update->HasContext = true;
+    update->Context = Array_Make<Message>(arena, 1);
+    Array_Push(&update->Context, probe->Borrowed);
+    update->HasModel = true;
+    update->ModelInfo = probe->Harness->Config.ModelInfo;
+  }
+  return SessionResult_Ok();
+}
+
+SessionResult MutableStop(void* user, Arena* arena, const AgentTurnContext* turn, bool* stop) {
+  MutableHookProbe* probe = (MutableHookProbe*)user;
+  CHECK(turn->Context.Count == probe->Turns * 2 - 1);
+  CheckHookSeed(turn->Context.Data[0]);
+  MutateHookMessage(arena, &turn->Context.Data[0], 'S');
+  *stop = probe->Turns == 3;
+  return SessionResult_Ok();
+}
+
+void TestHarnessMutableHookOwnership() {
+  for (u32 failure = 0; failure <= 4; failure++) {
+    Arena arena = ArenaCreate();
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+    ScriptProvider script = {};
+    Tool echo = {};
+    echo.Name = SVL("echo");
+    echo.Description = SVL("echo arguments");
+    echo.ParamsJsonSchema = SVL("{\"type\":\"object\"}");
+    echo.Execute = EchoExec;
+    AgentHarnessConfig config = ScriptConfig(&script, &echo, 1);
+    config.ModelInfo.Name = SVL("named model");
+    config.ModelInfo.BaseUrl = SVL("https://example.invalid");
+    config.ModelInfo.EffortMask = ModelEffort_Bit(ModelEffort::Medium);
+    config.Stream.Request.ToolName = SVL("echo");
+    HttpRetryPolicy httpRetry = {};
+    httpRetry.MaxRetries = 7;
+    config.Stream.Retry = &httpRetry;
+    config.Retry.BaseDelayMs = 0;
+    AgentHarness harness = {};
+    MutableHookProbe probe = {};
+    probe.Harness = &harness;
+    probe.FailAt = failure;
+    config.ProviderImpl = {&probe, MutableProvider};
+    config.Hooks.User = &probe;
+    config.Hooks.BeforeContext = MutableBeforeContext;
+    config.Hooks.ConvertToLlm = MutableConvert;
+    config.Hooks.BeforeProvider = MutableBeforeProvider;
+    config.Hooks.AfterProvider = MutableAfterProvider;
+    config.Hooks.PrepareNextTurn = MutablePrepare;
+    config.Hooks.ShouldStopAfterTurn = MutableStop;
+    config.Hooks.GetFollowUpMessages = ReplacementFollowUp;
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+    Message seed = Message_User(&arena, SVL("original"));
+    seed.Content.Data[0].Signature = SVL("text-signature");
+    Array_Push(&seed.Content, Content_ToolCall(SVL("call-id"), SVL("echo"), SVL("{\"x\":1}")));
+    Array_Push(&seed.Content, Content_Image(SVL("aW1hZ2U="), SVL("image/png")));
+    Content thinking = Content_Thinking(SVL("thinking"));
+    thinking.Signature = SVL("encrypted");
+    Array_Push(&seed.Content, thinking);
+    seed.Model = SVL("seed-model");
+    seed.Provider = SVL("seed-provider");
+    seed.ToolCallId = SVL("seed-call");
+    seed.ToolName = SVL("seed-tool");
+    seed.ErrorMessage = SVL("seed-error");
+    AppendSnapshotMessage(&harness, harness.Reduction.HeadId, seed);
+    probe.Borrowed = harness.Records.Data[1].MessageEntry.Value;
+    SessionResult result = AgentHarness_Run(&harness, SVL("prompt"));
+    if (failure) {
+      CHECK_ALL(result.Status == SessionStatus::HookError,
+                StrView_EqCStr(result.Message, "mutable hook failure"));
+    } else {
+      CHECK_ALL(SessionResult_IsOk(result), probe.Turns == 3, probe.ProviderCalls == 4);
+    }
+    CheckHookSeed(harness.Records.Data[1].MessageEntry.Value);
+    CHECK_ALL(StrView_EqCStr(harness.Config.ModelInfo.Id, "script-model"),
+              StrView_EqCStr(harness.Config.ModelInfo.Name, "named model"),
+              StrView_EqCStr(harness.Config.ModelInfo.Provider, "script"),
+              StrView_EqCStr(harness.Config.ModelInfo.BaseUrl, "https://example.invalid"),
+              StrView_EqCStr(harness.Config.SystemPrompt, "durable system"),
+              StrView_EqCStr(echo.Name, "echo"),
+              StrView_EqCStr(echo.Description, "echo arguments"),
+              StrView_EqCStr(echo.ParamsJsonSchema, "{\"type\":\"object\"}"),
+              StrView_EqCStr(harness.Config.Stream.Request.ToolName, "echo"),
+              httpRetry.MaxRetries == 7,
+              harness.Config.Stream.Profile.Effort == ModelEffort::None);
+    CHECK_ALL(harness.Work.Used == 0, harness.RunMem.Used == 0, !harness.Running);
+    Array<SessionRecord> persisted = {};
+    CHECK(SessionResult_IsOk(SessionLog_ReadAll(&harness.Log, &arena, &persisted)));
+    CheckHookSeed(persisted.Data[1].MessageEntry.Value);
+    harness.Config.Hooks = {};
+    harness.Config.ProviderImpl = ScriptProvider_Make(&script);
+    CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("future request"))));
+    Array<Message> future = {};
+    CHECK(SessionResult_IsOk(
+        SessionReducer_Context(&arena, &harness.Reduction, harness.Reduction.HeadId, &future)));
+    CheckHookSeed(future.Data[0]);
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    MemoryRepository_Destroy(&memory);
+    ArenaRelease(&arena);
+  }
+}
+
+struct CompactionMutationProbe {
+  AgentHarness* Harness;
+  u32 Turns;
+  bool Compacted;
+};
+
+struct ToolMutationProbe {
+  Message Borrowed;
+  u32 Calls;
+  bool Fail;
+};
+
+bool ToolMutationProvider(void* user, Arena* arena, const Model*, const LlmContext*,
+                            const StreamOptions*, StreamSink, Message* out) {
+  ToolMutationProbe* probe = (ToolMutationProbe*)user;
+  *out = probe->Calls++ == 0 ? probe->Borrowed : Message_AssistantEmpty(arena);
+  return true;
+}
+
+SessionResult MutableBeforeToolArguments(void* user, Arena* arena, StrView toolName,
+                                           StrView* arguments) {
+  ToolMutationProbe* probe = (ToolMutationProbe*)user;
+  CHECK_ALL(StrView_EqCStr(toolName, "echo"), StrView_EqCStr(*arguments, "{\"x\":1}"));
+  MutateHookText(toolName, 'E');
+  ((char*)arguments->Data)[5] = '2';
+  return probe->Fail ? MutableHookFailure(arena) : SessionResult_Ok();
+}
+
+void TestHarnessMutableToolArguments() {
+  for (u32 failure = 0; failure < 2; failure++) {
+    Arena arena = ArenaCreate();
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+    u32 executions = 0;
+    Tool echo = {};
+    echo.Name = SVL("echo");
+    echo.Description = SVL("echo arguments");
+    echo.ParamsJsonSchema = SVL("{\"type\":\"object\"}");
+    echo.Execute = EchoExec;
+    echo.Ctx = &executions;
+    ScriptProvider unused = {};
+    AgentHarnessConfig config = ScriptConfig(&unused, &echo, 1);
+    ToolMutationProbe probe = {};
+    probe.Fail = failure != 0;
+    config.ProviderImpl = {&probe, ToolMutationProvider};
+    config.Hooks.User = &probe;
+    config.Hooks.BeforeTool = MutableBeforeToolArguments;
+    AgentHarness harness = {};
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+    Message assistant = Message_AssistantEmpty(&arena);
+    assistant.Stop = StopReason::ToolUse;
+    Array_Push(&assistant.Content,
+               Content_ToolCall(SVL("borrowed-call"), SVL("echo"), SVL("{\"x\":1}")));
+    AppendSnapshotMessage(&harness, harness.Reduction.HeadId, assistant);
+    probe.Borrowed = harness.Records.Data[1].MessageEntry.Value;
+    SessionResult result = AgentHarness_Run(&harness, SVL("go"));
+    CHECK(result.Status == (failure ? SessionStatus::HookError : SessionStatus::Ok));
+    CHECK(executions == (failure ? 0u : 1u));
+    CHECK_ALL(StrView_EqCStr(probe.Borrowed.Content.Data[0].ToolName, "echo"),
+              StrView_EqCStr(probe.Borrowed.Content.Data[0].ToolArgsJson, "{\"x\":1}"),
+              StrView_EqCStr(harness.Records.Data[3].MessageEntry.Value.Content.Data[0].ToolName,
+                            "echo"),
+              StrView_EqCStr(
+                  harness.Records.Data[3].MessageEntry.Value.Content.Data[0].ToolArgsJson,
+                  "{\"x\":1}"));
+    if (!failure)
+      CHECK(StrView_EqCStr(harness.Records.Data[4].MessageEntry.Value.Content.Data[0].Text,
+                          "echo:{\"x\":2}"));
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    MemoryRepository_Destroy(&memory);
+    ArenaRelease(&arena);
+  }
+}
+
+SessionResult CompactionMutationContext(void* user, Arena* arena, AgentTurnKind kind,
+                                         DurableId, Array<Message>* messages) {
+  CompactionMutationProbe* probe = (CompactionMutationProbe*)user;
+  if (kind == AgentTurnKind::Compaction) {
+    probe->Compacted = true;
+    CHECK(StrView_EqCStr(messages->Data[0].Content.Data[0].Text, "unchanged seed"));
+    CHECK(messages->Data[0].Content.Backing == arena);
+    usize stateUsed = probe->Harness->State.Used;
+    MutateHookText(messages->Data[0].Content.Data[0].Text, 'X');
+    Array_Push(&messages->Data[0].Content, Content_Text(SVL("summary-only")));
+    CHECK(probe->Harness->State.Used == stateUsed);
+  }
+  return SessionResult_Ok();
+}
+
+SessionResult CompactionMutationPrepare(void* user, Arena* arena, const AgentTurnContext*,
+                                         AgentNextTurnUpdate* update) {
+  CompactionMutationProbe* probe = (CompactionMutationProbe*)user;
+  if (++probe->Turns == 1) {
+    update->HasContext = true;
+    update->Context = Array_Make<Message>(arena, 1);
+    Array_Push(&update->Context, Message_User(arena, OverrideFilledText(arena, 8192, 'O')));
+  }
+  return SessionResult_Ok();
+}
+
+SessionResult CompactionMutationStop(void* user, Arena* arena, const AgentTurnContext* turn,
+                                      bool* stop) {
+  CompactionMutationProbe* probe = (CompactionMutationProbe*)user;
+  CHECK(turn->Context.Backing == arena);
+  if (probe->Turns == 1) {
+    CHECK(turn->Context.Data[0].Content.Data[0].Text.Data[0] == 'O');
+    // Trimming the observational copy must not suppress required compaction.
+    turn->Context.Data[0].Content.Data[0].Text.Length = 1;
+  } else {
+    CHECK_ALL(probe->Compacted,
+              StrView_EqCStr(turn->Context.Data[0].Content.Data[0].Text,
+                            "Summary of previous conversation:\nsummary"));
+  }
+  *stop = probe->Turns == 2;
+  return SessionResult_Ok();
+}
+
+void TestHarnessMutableAutoCompaction() {
+  Arena arena = ArenaCreate();
+  MemoryRepository memory = {};
+  MemoryRepository_Init(&memory);
+  SessionRepository repository = MemoryRepository_AsRepository(&memory);
+  SessionLog log = {};
+  CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+  ScriptStep steps[3] = {};
+  steps[0].Text = SVL("first answer");
+  steps[1].Text = SVL("summary");
+  steps[2].Text = SVL("final answer");
+  ScriptProvider script = {steps, 3, 0};
+  AgentHarness harness = {};
+  CompactionMutationProbe probe = {};
+  probe.Harness = &harness;
+  AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
+  config.ModelInfo.ContextWindow = 1000;
+  config.Compaction.Enabled = true;
+  config.Compaction.ReserveTokens = 400;
+  config.Compaction.KeepRecentTokens = 1;
+  config.Hooks.User = &probe;
+  config.Hooks.BeforeContext = CompactionMutationContext;
+  config.Hooks.PrepareNextTurn = CompactionMutationPrepare;
+  config.Hooks.ShouldStopAfterTurn = CompactionMutationStop;
+  config.Hooks.GetFollowUpMessages = ReplacementFollowUp;
+  CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+  AppendSnapshotMessage(&harness, harness.Reduction.HeadId,
+                         Message_User(&arena, SVL("unchanged seed")));
+  CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("go"))));
+  CHECK_ALL(probe.Compacted, probe.Turns == 2, script.Index == 3,
+            StrView_EqCStr(harness.Records.Data[1].MessageEntry.Value.Content.Data[0].Text,
+                          "unchanged seed"),
+            harness.Records.Data[1].MessageEntry.Value.Content.Count == 1);
+  CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+  MemoryRepository_Destroy(&memory);
+  ArenaRelease(&arena);
+}
+
+struct MutationAdmissionProbe {
+  AgentHarness* Harness;
+  SessionLog Log;
+  SessionRepository Repository;
+  Arena Mem;
+  Mutex Lock;
+  CondVar Changed;
+  DurableId Head;
+  bool Entered;
+  bool Release;
+  bool Fail;
+  SessionResult Result;
+  SessionLog ForkLog;
+  SessionInfo ForkInfo;
+};
+
+SessionResult AdmissionAppend(void* user, SessionRecord* record) {
+  MutationAdmissionProbe* probe = (MutationAdmissionProbe*)user;
+  // The log callback runs under StateLock, after public admission released it.
+  // This assertion covers precisely the old check-idle/unlock/append gap.
+  CHECK(probe->Harness->Running);
+  CHECK(DurableId_Eq(probe->Harness->Reduction.HeadId, probe->Head));
+  if (record->Kind != SessionRecordKind::SessionName)
+    CHECK(DurableId_Eq(SessionRecord_ParentId(record), probe->Head));
+  if (probe->Fail)
+    return SessionResult_Error(SessionStatus::InvalidArgument,
+                               StrView_Dup(&probe->Mem, SVL("admission failure")));
+  return SessionLog_Append(&probe->Log, record);
+}
+
+SessionResult AdmissionFork(void* user, Arena* arena, const SessionForkOptions* options,
+                             SessionLog* log, SessionInfo* info) {
+  MutationAdmissionProbe* probe = (MutationAdmissionProbe*)user;
+  {
+    ScopedLock lock(&probe->Lock);
+    probe->Entered = true;
+    Cond_Signal(&probe->Changed);
+    while (!probe->Release) Cond_Wait(&probe->Changed, &probe->Lock);
+  }
+  CHECK(DurableId_Eq(options->SourceHeadId, probe->Head));
+  if (probe->Fail)
+    return SessionResult_Error(SessionStatus::InvalidArgument,
+                               StrView_Dup(arena, SVL("fork admission failure")));
+  return probe->Repository.Fork(probe->Repository.Ctx, arena, options, log, info);
+}
+
+void AdmissionForkThread(void* user) {
+  MutationAdmissionProbe* probe = (MutationAdmissionProbe*)user;
+  SessionRepository blocking = {};
+  blocking.Ctx = probe;
+  blocking.Fork = AdmissionFork;
+  probe->Result = AgentHarness_Fork(&probe->Mem, probe->Harness, &blocking, {}, {},
+                                    SVL("forked"), &probe->ForkLog, &probe->ForkInfo);
+}
+
+void TestHarnessMutationAdmission() {
+  Arena arena = ArenaCreate();
+  MemoryRepository memory = {};
+  MemoryRepository_Init(&memory);
+  SessionRepository repository = MemoryRepository_AsRepository(&memory);
+  SessionLog log = {};
+  CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+  ScriptProvider script = {};
+  AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
+  AgentHarness harness = {};
+  CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+  DurableId root = harness.Reduction.HeadId;
+  AppendSnapshotMessage(&harness, root, Message_User(&arena, SVL("fork source")));
+  MutationAdmissionProbe probe = {};
+  probe.Harness = &harness;
+  probe.Log = harness.Log;
+  probe.Repository = repository;
+  probe.Mem = ArenaCreate();
+  Mutex_Init(&probe.Lock);
+  Cond_Init(&probe.Changed);
+  harness.Log.Ctx = &probe;
+  harness.Log.Append = AdmissionAppend;
+  for (u32 operation = 0; operation < 3; operation++) {
+    for (u32 failed = 0; failed < 2; failed++) {
+      probe.Fail = failed == 0;
+      probe.Head = harness.Reduction.HeadId;
+      u32 count = harness.Records.Count;
+      SessionResult result =
+          operation == 0 ? AgentHarness_LabelBranch(&harness, SVL("reserved branch"))
+          : operation == 1 ? AgentHarness_SetName(&harness, SVL("reserved name"))
+          : AgentHarness_SetModel(&harness, config.ModelInfo, config.ProviderImpl, {});
+      CHECK_ALL(!harness.Running, !harness.Faulted,
+                harness.Records.Count == count + (probe.Fail ? 0u : 1u));
+      ArenaReset(&probe.Mem);
+      ArenaTrim(&probe.Mem, 0);
+      if (probe.Fail) {
+        CHECK_ALL(result.Status == SessionStatus::InvalidArgument,
+                  StrView_EqCStr(result.Message, "admission failure"),
+                  DurableId_Eq(harness.Reduction.HeadId, probe.Head));
+      } else {
+        CHECK(SessionResult_IsOk(result));
+      }
+    }
+  }
+  harness.Log = probe.Log;
+  for (u32 failed = 0; failed < 2; failed++) {
+    probe.Fail = failed == 0;
+    probe.Head = harness.Reduction.HeadId;
+    probe.Entered = false;
+    probe.Release = false;
+    Thread thread = {};
+    CHECK(Thread_Start(&thread, AdmissionForkThread, &probe));
+    {
+      ScopedLock lock(&probe.Lock);
+      while (!probe.Entered) Cond_Wait(&probe.Changed, &probe.Lock);
+    }
+    CHECK(AgentHarness_LabelBranch(&harness, SVL("race")).Status == SessionStatus::Busy);
+    CHECK(AgentHarness_SetName(&harness, SVL("race")).Status == SessionStatus::Busy);
+    CHECK(AgentHarness_SetModel(&harness, config.ModelInfo, config.ProviderImpl, {}).Status ==
+          SessionStatus::Busy);
+    CHECK(AgentHarness_Run(&harness, SVL("race")).Status == SessionStatus::Busy);
+    CHECK(AgentHarness_Compact(&harness, {}).Status == SessionStatus::Busy);
+    CHECK(AgentHarness_Navigate(&harness, root).Status == SessionStatus::Busy);
+    SessionLog rejectedLog = {};
+    SessionInfo rejectedInfo = {};
+    CHECK(AgentHarness_Fork(&arena, &harness, &repository, {}, {}, SVL("race"),
+                            &rejectedLog, &rejectedInfo).Status == SessionStatus::Busy);
+    CHECK(AgentHarness_Close(&harness).Status == SessionStatus::Busy);
+    AgentTranscriptSnapshot snapshot = {};
+    CHECK(SessionResult_IsOk(AgentHarness_SnapshotTranscript(&arena, &harness, 1, &snapshot)));
+    CHECK_ALL(snapshot.Running, DurableId_Eq(snapshot.HeadId, probe.Head));
+    CHECK(SessionResult_IsOk(AgentHarness_RequestCancel(&harness)));
+    {
+      ScopedLock lock(&probe.Lock);
+      probe.Release = true;
+      Cond_Signal(&probe.Changed);
+    }
+    Thread_Join(&thread);
+    CHECK_ALL(!harness.Running, DurableId_Eq(harness.Reduction.HeadId, probe.Head));
+    if (probe.Fail) {
+      ArenaReset(&probe.Mem);
+      ArenaTrim(&probe.Mem, 0);
+      CHECK_ALL(probe.Result.Status == SessionStatus::InvalidArgument,
+                StrView_EqCStr(probe.Result.Message, "fork admission failure"));
+    } else {
+      CHECK(SessionResult_IsOk(probe.Result));
+      SessionLog_Close(&probe.ForkLog);
+    }
+  }
+  CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("after reservations"))));
+  CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+  Cond_Destroy(&probe.Changed);
+  Mutex_Destroy(&probe.Lock);
+  ArenaRelease(&probe.Mem);
+  MemoryRepository_Destroy(&memory);
+  ArenaRelease(&arena);
+}
+
 void TestHarness() {
   TestHarnessReplayAndIncremental();
   TestHarnessLifecycle();
+  TestHarnessTranscriptProjection();
+  TestHarnessTranscriptOwnership();
+  TestHarnessTranscriptMemory();
+  TestHarnessTranscriptWatchFailures();
+  TestHarnessTranscriptWatchBoundary();
   TestHarnessWatchers();
   TestHarnessWatchOverflow();
   TestHarnessOverrideOutlivesTurnArena();
+  TestHarnessReplacementOwnership();
+  TestHarnessMutableHookOwnership();
+  TestHarnessMutableToolArguments();
+  TestHarnessMutableAutoCompaction();
+  TestHarnessMutationAdmission();
+  TestHarnessOverrideExitOwnership();
   TestHarnessWorkArenaPerTurn();
   TestHarnessWorkArenaTrim();
   TestHarnessStateGrowthRate();

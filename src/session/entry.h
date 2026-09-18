@@ -58,8 +58,12 @@ struct ToolsEntryData {
 
 struct CompactionEntryData {
   DurableId ParentId;
+  // Inclusive, ordered span on ParentId's ancestry; root and metadata nodes
+  // are valid endpoints, and later spans may overlap earlier compactions.
   DurableId BaseEntryId;
   DurableId ThroughEntryId;
+  // The branch head summarized by the producer, also the compaction's parent
+  // (not necessarily the session's currently selected head).
   DurableId SourceHeadId;
   Message Summary;
   bool HasUsage;

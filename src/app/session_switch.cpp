@@ -14,22 +14,13 @@
 bool RuntimeRestartWatch(InteractiveRuntime* rt,
                                 const AppCommandUx* ux) {
   if (!rt->EventPump) return true;
-  Arena scratch = ArenaCreate();
-  AgentHarnessSnapshot snapshot = {};
-  SessionResult watched = StartHarnessEventPump(
-      &scratch, rt->Harness, rt->EventSink, rt->TuiView, rt->EventPump,
-      rt->TuiView ? &snapshot : nullptr);
+  SessionResult watched =
+      StartHarnessEventPump(rt->Harness, rt->EventSink,
+                            rt->TuiView, rt->EventPump);
   if (!SessionResult_IsOk(watched)) {
-    ArenaRelease(&scratch);
     EmitCommandError(ux, watched.Message);
     return false;
   }
-  if (rt->TuiView) {
-    Tui_ReplaceTranscript(rt->TuiView, snapshot.Transcript.Data,
-                          snapshot.Transcript.Count);
-    Tui_SetContextTokens(rt->TuiView, snapshot.ContextTokens);
-  }
-  ArenaRelease(&scratch);
   return true;
 }
 

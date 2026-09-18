@@ -76,6 +76,15 @@ struct Entry {
   u64 Id;
   EntryKind Kind;
   bool Collapsed;
+  bool Dirty;
+  bool PreviewShown;
+  bool Separator;
+  u32 PreviewRows;
+  u32 PreviousVisible;
+  u64 RowStart;  // uncropped coordinate, including this entry's separator
+  Array<SpanLine> Rows;
+  usize RowsMark;
+  usize RowsBytes;
   union {
     TextEntry Text;
     ToolEntry Tool;
@@ -83,20 +92,32 @@ struct Entry {
 };
 
 // The scrollback: logical entries plus their wrapped display rows for the
-// current width. The agent thread mutates this (under the controller's lock);
-// the render thread reads display rows.
+// current width. Mutations only invalidate entry caches; display queries
+// materialize them together. Both writes and queries require the controller's
+// lock, including const queries (which may update the derived layout).
 struct LineModel {
   Arena* Mem;
   Arena RowsMem;
+  Arena LayoutMem;
   Array<Entry> Entries;
-  Array<SpanLine> Lines;  // wrapped rows; each SpanLine is one screen row
+  Array<SpanLine> Lines;  // visible rows, in a ring starting at LinesHead
+  u32 LinesHead;
+  u32 FirstDirtyEntry;  // UINT32_MAX when clean; mutations lower this directly
+  u32 LayoutEntries;
+  u32 LastVisibleEntry;
+  u64 RowsBegin;  // uncropped coordinates are not renumbered during eviction
+  u64 RowsEnd;
+  u64 RowOffset;
+  u64 ExpandedEntryId;
   u16 Width;
   u32 Cap;                 // soft cap on retained rows (oldest dropped past this)
   u32 AssistantStart;      // first display row of the streaming assistant entry
   u32 AssistantRowOffset;  // rendered assistant rows currently cropped from the front
-  usize AssistantRowsMark; // RowsMem position before the streaming assistant entry
+  usize LiveRowsBytes;
   u64 NextEntryId;
   u64 DisplayRevision;
+  bool PreviewBudgetDirty;
+  bool TrimPending;
   bool HasAssistant;
   bool Color;
   bool Rounded;
@@ -105,6 +126,7 @@ struct LineModel {
 void LineModel_Init(LineModel* m, Arena* mem, u16 width, u32 cap,
                     bool color = true, bool rounded = true);
 void LineModel_Release(LineModel* m);
+void LineModel_Layout(LineModel* m);
 void LineModel_SetWidth(LineModel* m, u16 width);  // re-wrap everything
 bool LineModel_SetRounded(LineModel* m, bool rounded);
 u32 LineModel_Count(const LineModel* m);
@@ -128,7 +150,8 @@ StrView LineModel_ExtractDisplayRow(Arena* arena, const DisplayRowLayout* layout
                                     u16 focus);
 u64 LineModel_HashDisplayRow(const DisplayRowLayout* layout, u16 anchor, u16 focus);
 
-// Streaming assistant API. Appends re-render only the active assistant entry.
+// Appends accumulate without layout or transcript copies. Display queries
+// render the dirty assistant once, even if several deltas arrived this turn.
 void LineModel_BeginAssistant(LineModel* m);
 void LineModel_AppendAssistant(LineModel* m, StrView delta);
 void LineModel_EndAssistant(LineModel* m);

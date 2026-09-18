@@ -80,6 +80,7 @@ enum class TuiDisplayEventKind : u8 {
 
 struct TuiDisplayEvent {
   TuiDisplayEventKind Kind;
+  Arena* Mem;
   StrBuf Payload;
   StrView ToolCallId;
   StrView ToolName;
@@ -89,6 +90,19 @@ struct TuiDisplayEvent {
   u64 Timestamp;
   u16 ToolUpdateSlot;
   bool IsError;
+};
+
+struct TuiDisplayBatch {
+  Arena Mem;
+  TuiDisplayBatch* Next;
+  u32 Head;
+  u32 Count;
+  TuiDisplayEvent Events[32];
+};
+
+struct TuiTransientText {
+  Arena Mem;
+  StrView Text;
 };
 
 struct TuiToolUpdateSlot {
@@ -124,14 +138,9 @@ struct TuiCommandSpec {
 // added here is covered automatically, and a SessionMem-backed StrView added
 // anywhere else on Tui is now visibly the wrong thing to do.
 //
-// The large objects (Model, Edit, ModalEdit, Reveal, DisplayEvents,
-// ToolUpdates) deliberately stay outside: each is explicitly re-initialised
-// against the new arena, so none of them is part of this hazard.
+// Model, Edit and ModalEdit are explicitly re-initialised against the new
+// arena. Display events, reveal and status strings own separate storage.
 struct TuiSessionStrings {
-  StrView StateTool;        // name of the running tool
-  StrView RetryStatus;      // "provider request in 250 ms (1/3)"
-  StrView OperationLabel;   // long-running command banner
-  StrView OperationStatus;
   StrView ModalTitle;
   StrView ModalCategory;    // breadcrumb before the title; empty hides it
   StrView ModalPrompt;
@@ -161,6 +170,7 @@ struct Tui {
   usize SessionMemBaseline;
   Arena CommandMem;
   Arena ToolUpdateMem;
+  Arena RevealMem;
   Arena ScreenMem;
   TuiAgentHooks Agent;
   Term Trm;  Screen Scr;
@@ -202,6 +212,10 @@ struct Tui {
 
   // Status.
   TuiState State;
+  TuiTransientText StateTool;
+  TuiTransientText RetryStatus;
+  TuiTransientText OperationLabel;
+  TuiTransientText OperationStatus;
   Usage Use;
   // Tokens the active branch occupies in the model's context window, shown as
   // the status bar's usage bar. 0 when unknown, which reads as an empty bar.
@@ -230,7 +244,7 @@ struct Tui {
   u32 ModalSelected;
   u32 ModalFirst;
 
-  // Everything above points at Tui-lifetime or inline storage. These do not:
+  // Everything above owns its storage or has Tui-lifetime backing. These do not:
   // see TuiSessionStrings.
   TuiSessionStrings Sess;
 
@@ -285,8 +299,10 @@ struct Tui {
 
   // Received assistant text coalesced at render-frame boundaries.
   StreamReveal Reveal;
-  Array<TuiDisplayEvent> DisplayEvents;
-  u32 DisplayHead;
+  TuiDisplayBatch* DisplayFirst;
+  TuiDisplayBatch* DisplayLast;
+  TuiDisplayBatch* DisplaySpare;
+  TuiDisplayBatch* RevealBatch;
   TuiToolUpdateSlot ToolUpdates[TUI_TOOL_UPDATE_SLOT_COUNT];
 
   // Process-level samples survive conversation resets.
@@ -309,7 +325,6 @@ void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts);
 // Clear conversation/UI state at an idle boundary without emitting a notice.
 // Returns false while the agent is active or shutdown is in progress.
 bool Tui_ClearSession(Tui* t);
-void Tui_HydrateTranscript(Tui* t, const Message* messages, u32 count);
 void Tui_ReplaceTranscript(Tui* t, const Message* messages, u32 count);
 
 // SessionMem is a bump allocator, so transcript entries dropped by the

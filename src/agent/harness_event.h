@@ -24,8 +24,8 @@ enum class AgentPermissionReviewOutcome : u8 {
 };
 
 // Durable events mirror appended session-tree entries (authoritative for
-// snapshots/replay). Transient events are watcher-only lifecycle notices for
-// the UI/REPL -- agent/turn/tool/retry/queue progress that v2 never persists;
+// snapshots/replay). Transient events are lifecycle notices for consumers --
+// agent/turn/tool/retry/queue progress that v2 never persists;
 // a restarted process derives everything it needs from the tree instead.
 enum class AgentHarnessEventKind : u8 {
   DurableRecord,
@@ -115,16 +115,28 @@ struct AgentHarnessEvent {
   };
 };
 
+// Synchronous, ordered delivery before presentation watches coalesce or drop
+// events. Payloads are borrowed, read-only, and valid only during OnEvent.
+// Calls are serialized under WatcherLock, sometimes also StateLock: the
+// callback must not reenter the harness or wait for another harness operation.
+// Blocking applies backpressure to producers without retaining an event queue.
+struct AgentHarnessEventObserver {
+  void* User;
+  void (*OnEvent)(void* user, const AgentHarnessEvent* event);
+};
+
 // The active branch's transcript as of `Cursor`. Messages are deep copies, so a
 // snapshot shares nothing with the harness and costs the branch, not the
 // session's whole history.
-struct AgentHarnessSnapshot {
+struct AgentTranscriptSnapshot {
   Array<Message> Transcript;
+  DurableId HeadId;
   u64 Cursor;
   // AgentCompaction_BranchContextTokens of the same branch; 0 when unknown.
   u32 ContextTokens;
   bool Running;
   bool Faulted;
+  bool HasEarlierMessages;
 };
 
 // One arena per watcher rather than one per ring slot. Every arena commits at

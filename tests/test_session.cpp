@@ -908,6 +908,461 @@ static void AppendRaw(Arena* arena, StrView path, const char* bytes) {
   fclose(file);
 }
 
+static SessionRecord CompactionRecord(Arena* arena, u8 id, DurableId parent,
+                                      DurableId base, DurableId through) {
+  SessionRecord record = {};
+  record.EntryId = TestId(id);
+  record.Kind = SessionRecordKind::Compaction;
+  record.CompactionEntry.ParentId = parent;
+  record.CompactionEntry.SourceHeadId = parent;
+  record.CompactionEntry.BaseEntryId = base;
+  record.CompactionEntry.ThroughEntryId = through;
+  record.CompactionEntry.Summary = UserMessage(arena, "admitted summary");
+  return record;
+}
+
+static StrView EncodeRecords(Arena* arena, const Array<SessionRecord>* records) {
+  StrBuf bytes = StrBuf_Make(arena, 1024);
+  for (u32 i = 0; i < records->Count; i++) {
+    CHECK(SessionResult_IsOk(SessionRecord_Encode(&bytes, &records->Data[i])));
+    StrBuf_AppendChar(&bytes, '\n');
+  }
+  return StrBuf_View(&bytes);
+}
+
+static void RunCompactionAdmissionContract(Arena* arena, SessionRepository* repository,
+                                           JsonlRepository* jsonl) {
+  StrView project = SVL("compaction-admission");
+  DurableId sessionId = TestId(40);
+  SessionLog writer = {};
+  SessionInfo info = {};
+  CHECK(SessionResult_IsOk(
+      RepositoryCreate(repository, arena, sessionId, project, &writer, &info)));
+  Array<SessionRecord> initial = {};
+  CHECK(SessionResult_IsOk(SessionLog_ReadAll(&writer, arena, &initial)));
+  DurableId root = initial.Data[0].EntryId;
+  SessionRecord history[4] = {};
+  history[0].EntryId = TestId(41);
+  history[0].Kind = SessionRecordKind::Message;
+  history[0].MessageEntry.ParentId = root;
+  history[0].MessageEntry.Value = UserMessage(arena, "stable history");
+  history[1].EntryId = TestId(42);
+  history[1].Kind = SessionRecordKind::Tools;
+  history[1].ToolsEntry.ParentId = history[0].EntryId;
+  history[2].EntryId = TestId(43);
+  history[2].Kind = SessionRecordKind::Message;
+  history[2].MessageEntry.ParentId = history[1].EntryId;
+  history[2].MessageEntry.Value = UserMessage(arena, "retained tail");
+  history[3].EntryId = TestId(44);
+  history[3].Kind = SessionRecordKind::Message;
+  history[3].MessageEntry.ParentId = root;
+  history[3].MessageEntry.Value = UserMessage(arena, "inactive sibling");
+  SessionRecord deferredInvalid[2] = {
+      history[0], CompactionRecord(arena, 49, history[0].EntryId, root, history[2].EntryId)};
+  CHECK(SessionLog_AppendBatch(&writer, deferredInvalid, 2).Status ==
+        SessionStatus::InvalidArgument);
+  Array<SessionRecord> stillBuffered = {};
+  CHECK(SessionResult_IsOk(SessionLog_ReadAll(&writer, arena, &stillBuffered)));
+  CHECK(stillBuffered.Count == 1);
+  if (jsonl)
+    CHECK(!Fs_Exists(JsonlRepository_SessionPath(arena, jsonl, project, sessionId)));
+  CHECK(SessionResult_IsOk(SessionLog_AppendBatch(&writer, history, 4)));
+
+  Array<SessionRecord> before = {};
+  CHECK(SessionResult_IsOk(SessionLog_ReadAll(&writer, arena, &before)));
+  StrView beforeBytes = EncodeRecords(arena, &before);
+  SessionInfo beforeInfo = {};
+  CHECK(SessionResult_IsOk(
+      repository->Resolve(repository->Ctx, arena, sessionId, &beforeInfo)));
+  StrView path = jsonl ? JsonlRepository_SessionPath(arena, jsonl, project, sessionId)
+                      : StrView{};
+  for (u32 variant = 0; variant < 11; variant++) {
+    SessionRecord batch[4] = {};
+    batch[0].EntryId = TestId(50);
+    batch[0].Kind = SessionRecordKind::SessionName;
+    batch[0].SessionNameEntry.Name = SVL("must not persist");
+    batch[1].EntryId = TestId(51);
+    batch[1].Kind = SessionRecordKind::Message;
+    batch[1].MessageEntry.ParentId = history[2].EntryId;
+    batch[1].MessageEntry.Value = UserMessage(arena, "must not persist");
+    batch[2] = CompactionRecord(arena, 52, batch[1].EntryId, root, history[0].EntryId);
+    batch[3].EntryId = TestId(53);
+    batch[3].Kind = SessionRecordKind::Thinking;
+    batch[3].ThinkingEntry.ParentId = batch[2].EntryId;
+    batch[3].ThinkingEntry.Level = SVL("high");
+    switch (variant) {
+      case 0:
+        batch[2].CompactionEntry.BaseEntryId = history[3].EntryId;
+        batch[2].CompactionEntry.ThroughEntryId = batch[1].EntryId;
+        break;
+      case 1: batch[2].CompactionEntry.ThroughEntryId = history[3].EntryId; break;
+      case 2: batch[2].CompactionEntry.BaseEntryId = history[2].EntryId; break;
+      case 3: batch[2].CompactionEntry.SourceHeadId = history[3].EntryId; break;
+      case 4: batch[2].CompactionEntry.SourceHeadId = history[0].EntryId; break;
+      case 5: batch[2].CompactionEntry.BaseEntryId = batch[0].EntryId; break;
+      case 6: batch[2].CompactionEntry.ThroughEntryId = batch[2].EntryId; break;
+      case 7: batch[2].CompactionEntry.ThroughEntryId = batch[3].EntryId; break;
+      case 8: batch[2].CompactionEntry.ThroughEntryId = TestId(99); break;
+      case 9:
+        batch[1].MessageEntry.ParentId = root;
+        batch[2].CompactionEntry.ParentId = history[2].EntryId;
+        batch[2].CompactionEntry.SourceHeadId = history[2].EntryId;
+        batch[2].CompactionEntry.ThroughEntryId = batch[1].EntryId;
+        break;
+      case 10:
+        batch[0].Kind = SessionRecordKind::Leaf;
+        batch[0].LeafEntry.LeafId = root;
+        batch[2].CompactionEntry.BaseEntryId = batch[0].EntryId;
+        break;
+    }
+    SessionRecord untouched[4];
+    memcpy(untouched, batch, sizeof(batch));
+    MemoryRepository* memory = jsonl ? nullptr : (MemoryRepository*)repository->Ctx;
+    usize memoryUsed = memory ? memory->Mem.Used : 0;
+    u64 appendCalls = memory ? memory->AppendCalls : 0;
+    CHECK(SessionLog_AppendBatch(&writer, batch, 4).Status == SessionStatus::InvalidArgument);
+    CHECK(memcmp(batch, untouched, sizeof(batch)) == 0);
+    if (memory) CHECK_ALL(memory->Mem.Used == memoryUsed, memory->AppendCalls == appendCalls);
+    Array<SessionRecord> after = {};
+    CHECK(SessionResult_IsOk(SessionLog_ReadAll(&writer, arena, &after)));
+    CHECK_ALL(after.Count == before.Count,
+              StrView_Eq(EncodeRecords(arena, &after), beforeBytes));
+    SessionInfo afterInfo = {};
+    CHECK(SessionResult_IsOk(
+        repository->Resolve(repository->Ctx, arena, sessionId, &afterInfo)));
+    CHECK_ALL(StrView_Eq(afterInfo.ExplicitName, beforeInfo.ExplicitName),
+              StrView_Eq(afterInfo.DisplayTitle, beforeInfo.DisplayTitle),
+              StrView_Eq(afterInfo.CurrentModel, beforeInfo.CurrentModel),
+              afterInfo.MessageCount == beforeInfo.MessageCount,
+              afterInfo.CompactionCount == beforeInfo.CompactionCount,
+              afterInfo.StorageUpdatedAt == beforeInfo.StorageUpdatedAt);
+    if (jsonl) {
+      StrView disk = {};
+      CHECK(ConfigFile_ReadAll(arena, path, &disk) == ConfigFileReadResult::Success);
+      CHECK(StrView_Eq(disk, beforeBytes));
+    }
+  }
+
+  // All endpoints and parents may be historical or earlier in this batch.
+  // Overlapping/nested spans are legal; metadata and root are tree nodes.
+  SessionRecord valid[9] = {};
+  valid[0].EntryId = TestId(50);
+  valid[0].Kind = SessionRecordKind::SessionName;
+  valid[0].SessionNameEntry.Name = SVL("accepted batch");
+  valid[1].EntryId = TestId(51);
+  valid[1].Kind = SessionRecordKind::Model;
+  valid[1].ModelEntry.ParentId = history[2].EntryId;
+  valid[1].ModelEntry.Provider = SVL("test");
+  valid[1].ModelEntry.Model = SVL("admitted-model");
+  valid[2] = CompactionRecord(arena, 52, valid[1].EntryId, root, history[1].EntryId);
+  valid[3] = CompactionRecord(arena, 53, valid[2].EntryId, history[0].EntryId, valid[2].EntryId);
+  valid[4] = CompactionRecord(arena, 54, valid[3].EntryId, history[1].EntryId, history[2].EntryId);
+  valid[5] = CompactionRecord(arena, 55, valid[4].EntryId, root, valid[4].EntryId);
+  valid[6] = CompactionRecord(arena, 56, history[3].EntryId, root, history[3].EntryId);
+  valid[7] = CompactionRecord(arena, 57, root, root, root);
+  valid[8] = CompactionRecord(arena, 58, valid[1].EntryId, history[1].EntryId, history[1].EntryId);
+  CHECK(SessionResult_IsOk(SessionLog_AppendBatch(&writer, valid, 9)));
+  CHECK_ALL(valid[0].Seq == 6, valid[8].Seq == 14);
+  Array<SessionRecord> accepted = {};
+  CHECK(SessionResult_IsOk(SessionLog_ReadAll(&writer, arena, &accepted)));
+  SessionReduction reduction = {};
+  CHECK(SessionResult_IsOk(
+      SessionReducer_Reduce(arena, accepted.Data, accepted.Count, &reduction)));
+  CHECK(DurableId_Eq(reduction.HeadId, valid[5].EntryId));
+  for (u32 i = 2; i < 9; i++) {
+    Array<Message> context = {};
+    CHECK(SessionResult_IsOk(
+        SessionReducer_Context(arena, &reduction, valid[i].EntryId, &context)));
+  }
+
+  SessionForkOptions fork = {};
+  fork.SourceSessionId = sessionId;
+  fork.SourceHeadId = valid[5].EntryId;
+  fork.RequestedTargetId = TestId(60);
+  fork.ProjectKey = project;
+  fork.WorkingDirectory = SVL("C:\\work\\clanker");
+  SessionLog forkLog = {};
+  CHECK(SessionResult_IsOk(repository->Fork(repository->Ctx, arena, &fork, &forkLog, &info)));
+  Array<SessionRecord> forkRecords = {};
+  CHECK(SessionResult_IsOk(SessionLog_ReadAll(&forkLog, arena, &forkRecords)));
+  CHECK(forkRecords.Count == 9);
+  SessionReduction forkReduction = {};
+  CHECK(SessionResult_IsOk(
+      SessionReducer_Reduce(arena, forkRecords.Data, forkRecords.Count, &forkReduction)));
+  Array<Message> forkContext = {};
+  CHECK(SessionResult_IsOk(
+      SessionReducer_Context(arena, &forkReduction, forkReduction.HeadId, &forkContext)));
+  CHECK(forkContext.Count == 1);
+  for (u32 i = 0; i < forkRecords.Count; i++) {
+    const SessionRecord* record = &forkRecords.Data[i];
+    if (record->Kind == SessionRecordKind::Compaction)
+      CHECK(DurableId_Eq(record->CompactionEntry.SourceHeadId,
+                        record->CompactionEntry.ParentId));
+  }
+  SessionLog_Close(&forkLog);
+  SessionLog_Close(&writer);
+
+  SessionOpenOptions open = {};
+  open.SessionId = sessionId;
+  open.ProjectKey = project;
+  open.Writable = true;
+  CHECK(SessionResult_IsOk(repository->Open(repository->Ctx, arena, &open, &writer, &info)));
+  CHECK_ALL(info.CompactionCount == 7, StrView_EqCStr(info.ExplicitName, "accepted batch"),
+            StrView_EqCStr(info.CurrentModel, "admitted-model"));
+  SessionLog_Close(&writer);
+
+  if (jsonl) {
+    for (u32 variant = 0; variant < 3; variant++) {
+      SessionRecord corrupt =
+          CompactionRecord(arena, 70, history[3].EntryId, root, history[2].EntryId);
+      if (variant == 1) {
+        corrupt.CompactionEntry.ParentId = history[2].EntryId;
+        corrupt.CompactionEntry.SourceHeadId = history[2].EntryId;
+        corrupt.CompactionEntry.BaseEntryId = history[2].EntryId;
+        corrupt.CompactionEntry.ThroughEntryId = history[0].EntryId;
+      } else if (variant == 2) {
+        corrupt.CompactionEntry.ThroughEntryId = history[3].EntryId;
+        corrupt.CompactionEntry.SourceHeadId = history[0].EntryId;
+      }
+      corrupt.SchemaVersion = SESSION_SCHEMA_VERSION;
+      corrupt.SessionId = sessionId;
+      corrupt.Seq = 6;
+      StrBuf bytes = StrBuf_Make(arena, beforeBytes.Length + 1024);
+      StrBuf_Append(&bytes, beforeBytes);
+      CHECK(SessionResult_IsOk(SessionRecord_Encode(&bytes, &corrupt)));
+      if (variant == 1) StrBuf_AppendChar(&bytes, '\n');
+      if (variant == 2) StrBuf_AppendCStr(&bytes, "\n{\"schema");
+      // Neither a missing newline nor a torn tail may be repaired before
+      // validating the complete prefix, including its compaction topology.
+      CHECK(ConfigFile_WriteAtomic(arena, path, StrBuf_View(&bytes)));
+      for (u32 writable = 0; writable < 2; writable++) {
+        open.Writable = writable != 0;
+        SessionResult loaded =
+            repository->Open(repository->Ctx, arena, &open, &writer, &info);
+        CHECK_ALL(loaded.Status == SessionStatus::Corrupt,
+                  StrView_Contains(loaded.Message, "compaction"), writer.Ctx == nullptr);
+      }
+      CHECK(repository->Resolve(repository->Ctx, arena, sessionId, &info).Status ==
+            SessionStatus::Corrupt);
+      SessionListOptions list = {};
+      list.Scope = SessionListScope::CurrentProject;
+      list.ProjectKey = project;
+      u32 skipped = 0;
+      list.SkippedCount = &skipped;
+      Array<SessionInfo> items = {};
+      CHECK(SessionResult_IsOk(repository->List(repository->Ctx, arena, &list, &items)));
+      CHECK_ALL(skipped == 1, items.Count == 1);
+      StrView unchanged = {};
+      CHECK(ConfigFile_ReadAll(arena, path, &unchanged) == ConfigFileReadResult::Success);
+      CHECK(StrView_Eq(unchanged, StrBuf_View(&bytes)));
+    }
+    RemoveJsonlArtifacts(arena, jsonl->Root, project, sessionId);
+    RemoveJsonlArtifacts(arena, jsonl->Root, project, fork.RequestedTargetId);
+  }
+}
+
+static void RemoveJsonlRoot(Arena* arena, StrView root, StrView project) {
+  RemoveJsonlDirectories(arena, root, project);
+  StrView sessions = Fs_Join(arena, root, SVL("sessions"));
+  StrView paths[] = {Fs_Join(arena, sessions, SVL("v2")), sessions, root};
+  for (u32 i = 0; i < 3; i++) {
+    StrBuf native = StrBuf_Make(arena, paths[i].Length + 1);
+    StrBuf_Append(&native, paths[i]);
+    SESSION_RMDIR(StrBuf_CStr(&native));
+  }
+}
+
+static void TestCompactionAdmissionRepositories(Arena* arena) {
+  MemoryRepository memory = {};
+  MemoryRepository_Init(&memory);
+  SessionRepository repository = MemoryRepository_AsRepository(&memory);
+  RunCompactionAdmissionContract(arena, &repository, nullptr);
+  repository.Close(repository.Ctx);
+
+  StrView root = Fs_Join(arena, SVL("out"), SVL("session-compaction-admission"));
+  JsonlRepository jsonl = {};
+  JsonlRepository_Init(&jsonl, root);
+  repository = JsonlRepository_AsRepository(&jsonl);
+  RunCompactionAdmissionContract(arena, &repository, &jsonl);
+  repository.Close(repository.Ctx);
+  RemoveJsonlRoot(arena, root, SVL("compaction-admission"));
+}
+
+struct ParallelRepositoryGate {
+  Mutex Lock;
+  CondVar Changed;
+  bool Started;
+};
+
+struct ParallelRepositoryWorker {
+  SessionRepository* Repository;
+  JsonlRepository* Jsonl;
+  ParallelRepositoryGate* Gate;
+  Arena Mem;
+  Array<SessionRecord> Snapshot;
+  bool Success;
+};
+
+static bool ParallelRepositoryIteration(ParallelRepositoryWorker* worker,
+                                        SessionLog* writer, SessionLog* reader,
+                                        SessionLog* forkLog, DurableId* ids) {
+  SessionRepository* repository = worker->Repository;
+  Arena* arena = &worker->Mem;
+  StrView project = SVL("parallel-ownership");
+  SessionInfo info = {};
+  if (!SessionResult_IsOk(
+          RepositoryCreate(repository, arena, DurableId{}, project, writer, &info)))
+    return false;
+  ids[0] = info.SessionId;
+  Array<SessionRecord> root = {};
+  if (!SessionResult_IsOk(SessionLog_ReadAll(writer, arena, &root)) || root.Count != 1)
+    return false;
+  SessionForkOptions fork = {};
+  fork.SourceSessionId = ids[0];
+  fork.SourceHeadId = root.Data[0].EntryId;
+  fork.ProjectKey = project;
+  fork.WorkingDirectory = SVL("C:\\work\\clanker");
+  if (!SessionResult_IsOk(repository->Fork(repository->Ctx, arena, &fork, forkLog, &info)))
+    return false;
+  ids[1] = info.SessionId;
+  Array<SessionRecord> buffered = {};
+  if (!SessionResult_IsOk(SessionLog_ReadAll(forkLog, arena, &buffered)) ||
+      buffered.Count != 1 || DurableId_Eq(buffered.Data[0].EntryId, root.Data[0].EntryId))
+    return false;
+  SessionLog_Close(forkLog);
+
+  char payload[] = "parallel payload";
+  SessionRecord message = {};
+  message.Kind = SessionRecordKind::Message;
+  message.MessageEntry.ParentId = root.Data[0].EntryId;
+  message.MessageEntry.Value = UserMessage(arena, payload);
+  if (!SessionResult_IsOk(SessionLog_Append(writer, &message))) return false;
+  payload[0] = 'X';
+  Array<SessionRecord> written = {};
+  if (!SessionResult_IsOk(SessionLog_ReadAll(writer, arena, &written)) ||
+      written.Count != 2 ||
+      !StrView_EqCStr(written.Data[1].MessageEntry.Value.Content.Data[0].Text,
+                     "parallel payload"))
+    return false;
+  SessionLog_Close(writer);
+
+  SessionOpenOptions open = {};
+  open.SessionId = ids[0];
+  open.ProjectKey = project;
+  for (u32 i = 0; i < 4; i++) {
+    open.Writable = (i % 2) != 0;
+    if (!SessionResult_IsOk(repository->Open(repository->Ctx, arena, &open, reader, &info)))
+      return false;
+    Array<SessionRecord> read = {};
+    if (!SessionResult_IsOk(SessionLog_ReadAll(reader, arena, &read)) ||
+        read.Count != 2 || !DurableId_Eq(read.Data[1].EntryId, message.EntryId) ||
+        !StrView_EqCStr(read.Data[1].MessageEntry.Value.Content.Data[0].Text,
+                       "parallel payload") ||
+        read.Data[1].MessageEntry.Value.Content.Data ==
+            written.Data[1].MessageEntry.Value.Content.Data)
+      return false;
+    SessionLog_Close(reader);
+  }
+
+  fork.SourceHeadId = message.EntryId;
+  if (!SessionResult_IsOk(repository->Fork(repository->Ctx, arena, &fork, forkLog, &info)))
+    return false;
+  ids[2] = info.SessionId;
+  if (!SessionResult_IsOk(SessionLog_ReadAll(forkLog, arena, &worker->Snapshot)) ||
+      worker->Snapshot.Count != 2)
+    return false;
+  const SessionRecord* copied = &worker->Snapshot.Data[1];
+  return copied->Seq == 2 && !DurableId_Eq(copied->EntryId, message.EntryId) &&
+         DurableId_Eq(copied->MessageEntry.ParentId, worker->Snapshot.Data[0].EntryId) &&
+         StrView_EqCStr(copied->MessageEntry.Value.Content.Data[0].Text, "parallel payload") &&
+         StrView_EqCStr(buffered.Data[0].SessionStarted.WorkingDirectory, "C:\\work\\clanker");
+}
+
+static void ParallelRepositoryRun(void* context) {
+  ParallelRepositoryWorker* worker = (ParallelRepositoryWorker*)context;
+  worker->Mem = ArenaCreate();
+  {
+    ScopedLock lock(&worker->Gate->Lock);
+    while (!worker->Gate->Started)
+      Cond_Wait(&worker->Gate->Changed, &worker->Gate->Lock);
+  }
+  worker->Success = true;
+  for (u32 i = 0; i < 8; i++) {
+    SessionLog writer = {};
+    SessionLog reader = {};
+    SessionLog forkLog = {};
+    DurableId ids[3] = {};
+    worker->Success =
+        ParallelRepositoryIteration(worker, &writer, &reader, &forkLog, ids);
+    SessionLog_Close(&forkLog);
+    SessionLog_Close(&reader);
+    SessionLog_Close(&writer);
+    if (worker->Jsonl) {
+      for (u32 j = 0; j < 3; j++)
+        if (DurableId_IsSet(ids[j]))
+          RemoveJsonlArtifacts(&worker->Mem, worker->Jsonl->Root,
+                               SVL("parallel-ownership"), ids[j]);
+    }
+    if (!worker->Success) break;
+  }
+}
+
+static void RunParallelRepositoryContract(SessionRepository* repository,
+                                           JsonlRepository* jsonl) {
+  ParallelRepositoryGate gate = {};
+  Mutex_Init(&gate.Lock);
+  Cond_Init(&gate.Changed);
+  Thread threads[8] = {};
+  bool started[8] = {};
+  ParallelRepositoryWorker workers[8] = {};
+  for (u32 i = 0; i < 8; i++) {
+    workers[i].Repository = repository;
+    workers[i].Jsonl = jsonl;
+    workers[i].Gate = &gate;
+    started[i] = Thread_Start(&threads[i], ParallelRepositoryRun, &workers[i]);
+    CHECK(started[i]);
+  }
+  {
+    ScopedLock lock(&gate.Lock);
+    gate.Started = true;
+    Cond_Broadcast(&gate.Changed);
+  }
+  for (u32 i = 0; i < 8; i++)
+    if (started[i]) Thread_Join(&threads[i]);
+  repository->Close(repository->Ctx);
+  for (u32 i = 0; i < 8; i++) {
+    if (!started[i]) continue;
+    CHECK(workers[i].Success);
+    if (workers[i].Success) {
+      CHECK_ALL(workers[i].Snapshot.Count == 2,
+                StrView_EqCStr(
+                    workers[i].Snapshot.Data[1].MessageEntry.Value.Content.Data[0].Text,
+                    "parallel payload"));
+    }
+    ArenaRelease(&workers[i].Mem);
+  }
+  Cond_Destroy(&gate.Changed);
+  Mutex_Destroy(&gate.Lock);
+}
+
+static void TestParallelRepositories(Arena* arena) {
+  MemoryRepository memory = {};
+  MemoryRepository_Init(&memory);
+  SessionRepository repository = MemoryRepository_AsRepository(&memory);
+  RunParallelRepositoryContract(&repository, nullptr);
+
+  StrView root = Fs_Join(arena, SVL("out"), SVL("session-parallel-ownership"));
+  StrView projectDir = Fs_Join(
+      arena, Fs_Join(arena, Fs_Join(arena, root, SVL("sessions")), SVL("v2")),
+      SVL("parallel-ownership"));
+  CHECK(Fs_MkdirP(arena, projectDir));
+  JsonlRepository jsonl = {};
+  JsonlRepository_Init(&jsonl, root);
+  repository = JsonlRepository_AsRepository(&jsonl);
+  RunParallelRepositoryContract(&repository, &jsonl);
+  RemoveJsonlRoot(arena, root, SVL("parallel-ownership"));
+}
+
 static bool ChildSeesLockBusy(Arena* arena, StrView lockPath) {
   StrBuf command = StrBuf_Make(arena, lockPath.Length + 256);
 #if defined(_WIN32)
@@ -1307,6 +1762,18 @@ static void TestCompactionReplay(Arena* arena) {
   root.SessionStarted.ProjectKey = SVL("clanker-compaction");
   root.SessionStarted.Label = SVL("compaction");
 
+  {
+    SessionReduction empty = {};
+    SessionRecord pending[2] = {root, CompactionRecord(arena, 11, root.EntryId,
+                                                      root.EntryId, root.EntryId)};
+    pending[1].SchemaVersion = SESSION_SCHEMA_VERSION;
+    pending[1].SessionId = sessionId;
+    pending[1].Seq = 2;
+    CHECK(SessionResult_IsOk(SessionReducer_ValidateAppend(&empty, &pending[0])));
+    CHECK(SessionResult_IsOk(SessionReducer_ValidateAppend(&empty, &pending[1], pending, 1)));
+    CHECK(SessionResult_IsOk(SessionRecords_Validate(pending, 2)));
+  }
+
   SessionRecord userOne = BaseRecord(sessionId, 2, 12, SessionRecordKind::Message);
   userOne.MessageEntry.ParentId = root.EntryId;
   userOne.MessageEntry.Value = UserMessage(arena, "one");
@@ -1445,8 +1912,7 @@ static void TestCompactionReplay(Arena* arena) {
   }
 
   // A span endpoint that exists in the session but is not an ancestor of the
-  // head cannot be positioned on this branch, so replay reports corruption
-  // rather than silently emitting the wrong context.
+  // head is rejected at admission/load, before context hydration.
   SessionRecord offBranch = BaseRecord(sessionId, 8, 34, SessionRecordKind::Compaction);
   offBranch.CompactionEntry.ParentId = assistantTwo.EntryId;
   offBranch.CompactionEntry.BaseEntryId = root.EntryId;
@@ -1456,8 +1922,15 @@ static void TestCompactionReplay(Arena* arena) {
   {
     Array<SessionRecord> records = build(&offBranch, 1);
     SessionReduction reduction = {};
+    CHECK(SessionReducer_Reduce(arena, records.Data, records.Count, &reduction).Status ==
+          SessionStatus::Corrupt);
     CHECK(SessionResult_IsOk(
-        SessionReducer_Reduce(arena, records.Data, records.Count, &reduction)));
+        SessionReducer_Reduce(arena, records.Data, records.Count - 1, &reduction)));
+    CHECK(SessionReducer_ValidateAppend(&reduction, &offBranch).Status ==
+          SessionStatus::InvalidArgument);
+    // Internal corruption can bypass repository admission; projection keeps
+    // its defensive error rather than materializing an invalid span.
+    SessionReducer_Fold(&reduction, records.Data, records.Count);
     Array<Message> context = {};
     CHECK(SessionReducer_Context(arena, &reduction, offBranch.EntryId, &context).Status ==
           SessionStatus::Corrupt);
@@ -1473,12 +1946,68 @@ static void TestCompactionReplay(Arena* arena) {
   {
     Array<SessionRecord> records = build(&inverted, 1);
     SessionReduction reduction = {};
+    CHECK(SessionReducer_Reduce(arena, records.Data, records.Count, &reduction).Status ==
+          SessionStatus::Corrupt);
     CHECK(SessionResult_IsOk(
-        SessionReducer_Reduce(arena, records.Data, records.Count, &reduction)));
+        SessionReducer_Reduce(arena, records.Data, records.Count - 1, &reduction)));
+    CHECK(SessionReducer_ValidateAppend(&reduction, &inverted).Status ==
+          SessionStatus::InvalidArgument);
+    SessionReducer_Fold(&reduction, records.Data, records.Count);
     Array<Message> context = {};
     CHECK(SessionReducer_Context(arena, &reduction, inverted.EntryId, &context).Status ==
           SessionStatus::Corrupt);
   }
+}
+
+static void TestAncestryScratchBudget() {
+  Arena recordsArena = ArenaCreate();
+  Arena scratch = ArenaCreate();
+  const u32 activeCount = 65;
+  const u32 inactiveCount = 32768;
+  Array<SessionRecord> records =
+      Array_Make<SessionRecord>(&recordsArena, activeCount + inactiveCount);
+  DurableId sessionId = TestId(1);
+  SessionRecord root = BaseRecord(sessionId, 1, 2, SessionRecordKind::SessionStarted);
+  root.SessionStarted.WorkingDirectory = SVL("C:\\work\\clanker");
+  root.SessionStarted.ProjectKey = SVL("ancestry-budget");
+  Array_Push(&records, root);
+  DurableId head = root.EntryId;
+  for (u32 i = 1; i < activeCount + inactiveCount; i++) {
+    SessionRecord record = BaseRecord(sessionId, (u64)i + 1, 0, SessionRecordKind::Message);
+    byte idBytes[DURABLE_ID_BYTE_COUNT] = {};
+    memcpy(idBytes, &i, sizeof(i));
+    record.EntryId = DurableId_FromBytes(idBytes);
+    record.MessageEntry.ParentId = i < activeCount ? head : root.EntryId;
+    record.MessageEntry.Value = UserMessage(&recordsArena, "branch node");
+    Array_Push(&records, record);
+    if (i < activeCount) head = record.EntryId;
+  }
+  SessionReduction reduction = {};
+  CHECK(SessionResult_IsOk(
+      SessionReducer_Reduce(&recordsArena, records.Data, records.Count, &reduction)));
+  CHECK(DurableId_Eq(reduction.HeadId, head));
+  usize used = recordsArena.Used;
+  usize committed = recordsArena.Committed;
+  for (u32 repetition = 0; repetition < 24; repetition++) {
+    Array<const SessionRecord*> branch = {};
+    CHECK(SessionResult_IsOk(SessionReducer_Ancestry(&reduction, &scratch, head, &branch)));
+    CHECK_ALL(branch.Count == activeCount, scratch.Used < (usize)8 * 1024,
+              scratch.Committed <= (usize)64 * 1024);
+    if (branch.Count == activeCount) {
+      for (u32 i = 0; i < activeCount; i++) CHECK(branch.Data[i] == &records.Data[i]);
+    }
+    ArenaReset(&scratch);
+    ArenaTrim(&scratch, 0);
+    CHECK_ALL(scratch.Used == 0, scratch.Committed == 0,
+              recordsArena.Used == used, recordsArena.Committed == committed);
+  }
+  Array<const SessionRecord*> rootOnly = {};
+  CHECK(SessionResult_IsOk(
+      SessionReducer_Ancestry(&reduction, &scratch, root.EntryId, &rootOnly)));
+  CHECK_ALL(rootOnly.Count == 1, rootOnly.Data[0] == &records.Data[0],
+            scratch.Used < (usize)8 * 1024, scratch.Committed <= (usize)64 * 1024);
+  ArenaRelease(&scratch);
+  ArenaRelease(&recordsArena);
 }
 
 void TestSession() {
@@ -1488,7 +2017,10 @@ void TestSession() {
   TestRecordClone();
   TestRecordValidation(&arena);
   TestReducer(&arena);
+  TestAncestryScratchBudget();
   TestCompactionReplay(&arena);
+  TestCompactionAdmissionRepositories(&arena);
+  TestParallelRepositories(&arena);
   TestReplay(&arena);
   TestMetadata(&arena);
   TestMemoryRepository(&arena);

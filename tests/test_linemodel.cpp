@@ -676,15 +676,305 @@ void TestLineModel() {
         Finish(&bounded, SVL("two"), SVL("second-preview-that-fits-on-one-row"));
     CHECK_ALL(firstFinished, secondFinished);
     CHECK(LineModel_ToggleAllTools(&bounded));
-    usize expandedUsed = bounded.RowsMem.Used;
+    LineModel_Layout(&bounded);
+    usize expandedUsed = bounded.LiveRowsBytes;
     CHECK_ALL(LineModel_Count(&bounded) <= bounded.Cap,
               AnyRowHas(&a, &bounded, "first-preview-that-fits-on-one-row"),
               AnyRowHas(&a, &bounded, "second-preview-that-fits-on-one-row"));
     CHECK(LineModel_ToggleAllTools(&bounded));
+    LineModel_Layout(&bounded);
     CHECK(LineModel_ToggleAllTools(&bounded));
-    CHECK_ALL(bounded.RowsMem.Used == expandedUsed,
+    LineModel_Layout(&bounded);
+    CHECK_ALL(bounded.LiveRowsBytes == expandedUsed,
               LineModel_Count(&bounded) <= bounded.Cap);
+    for (u32 i = 0; i < 1000; i++) {
+      LineModel_ToggleAllTools(&bounded);
+      LineModel_Layout(&bounded);
+    }
+    CHECK_ALL(bounded.LiveRowsBytes == expandedUsed,
+              bounded.RowsMem.Used <= 64 * 1024 + 2 * bounded.LiveRowsBytes,
+              AnyRowHas(&a, &bounded, "first-preview-that-fits-on-one-row"),
+              AnyRowHas(&a, &bounded, "second-preview-that-fits-on-one-row"));
     LineModel_Release(&bounded);
+  }
+
+  {
+    LineModel cached;
+    LineModel_Init(&cached, &a, 80, 5000);
+    for (u32 i = 0; i < 24; i++)
+      LineModel_AddNotice(&cached, EntryKind::Info, SVL("retained history"));
+    CHECK_ALL(cached.RowsMem.Used == 0, cached.LayoutMem.Used == 0);
+    LineModel_Layout(&cached);
+    const SpanLine* history[24] = {};
+    for (u32 i = 0; i < 24; i++) history[i] = cached.Entries.Data[i].Rows.Data;
+    usize historyBytes = cached.RowsMem.Used;
+
+    LineModel_AddUser(&cached, SVL("next prompt"), 0);
+    LineModel_AddTool(&cached, SVL("tool"), SVL("shell"), SVL("{\"command\":\"echo ok\"}"));
+    for (u32 i = 0; i < 128; i++)
+      CHECK(LineModel_UpdateTool(&cached, SVL("tool"), SVL("progress")));
+    CHECK(cached.RowsMem.Used == historyBytes);
+    CHECK(LineModel_FinishTool(&cached, SVL("tool"), SVL("exit code: 0"),
+                               SVL("final preview"), false));
+    LineModel_Layout(&cached);
+    bool untouched = true;
+    for (u32 i = 0; i < 24; i++)
+      untouched = untouched && history[i] == cached.Entries.Data[i].Rows.Data;
+    CHECK(untouched);
+    usize beforeStream = cached.RowsMem.Used;
+    LineModel_BeginAssistant(&cached);
+    for (u32 i = 0; i < 512; i++) LineModel_AppendAssistant(&cached, SVL("x"));
+    CHECK_ALL(cached.RowsMem.Used == beforeStream,
+              cached.Entries.Data[26].Rows.Count == 0);
+    LineModel_Layout(&cached);
+    CHECK_ALL(cached.RowsMem.Used == beforeStream + cached.Entries.Data[26].RowsBytes,
+              cached.Entries.Data[26].Text.Content.Length == 512);
+    for (u32 i = 0; i < 24; i++)
+      untouched = untouched && history[i] == cached.Entries.Data[i].Rows.Data;
+    CHECK(untouched);
+    LineModel_EndAssistant(&cached);
+    LineModel_Layout(&cached);
+
+    // A single new entry evicts a large prefix. Allocation advances only by
+    // that entry's cache, not by one re-layout for every removed entry.
+    cached.Cap = 8;
+    LineModel_AddNotice(&cached, EntryKind::Info, SVL("newest"));
+    usize beforeEviction = cached.RowsMem.Used;
+    LineModel_Layout(&cached);
+    CHECK_ALL(cached.Entries.Count == 1, LineModel_Count(&cached) == 1,
+              cached.RowsMem.Used == beforeEviction + cached.Entries.Data[0].RowsBytes,
+              AnyRowHas(&a, &cached, "newest"));
+    LineModel_Release(&cached);
+  }
+
+  {
+    LineModel bulk;
+    LineModel_Init(&bulk, &a, 80, 20);
+    for (u32 i = 0; i < 20; i++)
+      LineModel_AddTool(&bulk, StrView{}, SVL("custom"), SVL("{}"));
+    LineModel_Layout(&bulk);
+    const SpanLine* survivor = bulk.Entries.Data[19].Rows.Data;
+    u64 survivorId = bulk.Entries.Data[19].Id;
+    usize before = bulk.RowsMem.Used;
+    StrBuf tail = StrBuf_Make(&a, 64);
+    for (u32 i = 0; i < 16; i++) StrBuf_AppendCStr(&tail, "tail\n");
+    StrBuf_AppendCStr(&tail, "last");
+    LineModel_AddNotice(&bulk, EntryKind::Info, StrBuf_View(&tail));
+    LineModel_Layout(&bulk);
+    CHECK_ALL(bulk.Entries.Count == 3, bulk.Entries.Data[1].Id == survivorId,
+              bulk.Entries.Data[1].Rows.Data == survivor,
+              bulk.RowsMem.Used == before + bulk.Entries.Data[2].RowsBytes,
+              LineModel_Count(&bulk) == 20);
+    LineModel_Release(&bulk);
+  }
+
+  {
+    const u32 historyCounts[] = {16, 256, 1024};
+    for (u32 n = 0; n < 3; n++) {
+      u32 historyCount = historyCounts[n];
+      LineModel tail;
+      LineModel_Init(&tail, &a, 80, historyCount * 2 + 4);
+      for (u32 i = 0; i < historyCount; i++)
+        LineModel_AddNotice(&tail, EntryKind::Info, SVL("history"));
+      LineModel_Layout(&tail);
+      LineModel_BeginAssistant(&tail);
+      LineModel_AppendAssistant(&tail, SVL("tail"));
+      LineModel_Layout(&tail);
+      const SpanLine* historyCache = tail.Entries.Data[0].Rows.Data;
+      const SpanLine* survivor = LineModel_At(&tail, 2);
+      u64 expanded = tail.ExpandedEntryId;
+      for (u32 row = 0; row < tail.AssistantStart; row++) {
+        SpanLine* flat = &tail.Lines.Data[(tail.LinesHead + row) % tail.Lines.Capacity];
+        flat->Continuation.Text = SVL("flat-only sentinel");
+      }
+      CHECK(historyCache[0].Continuation.Text.Length == 0);
+      for (u32 i = 0; i < 64; i++) LineModel_AppendAssistant(&tail, SVL("x"));
+      CHECK_ALL(tail.FirstDirtyEntry == historyCount,
+                tail.Entries.Count - tail.FirstDirtyEntry == 1,
+                !tail.PreviewBudgetDirty, tail.LayoutEntries == historyCount + 1);
+      LineModel_Layout(&tail);
+      bool untouched = tail.Entries.Data[0].Rows.Data == historyCache &&
+                       tail.ExpandedEntryId == expanded;
+      for (u32 row = 0; row < tail.AssistantStart; row++)
+        untouched = untouched && StrView_Eq(LineModel_At(&tail, row)->Continuation.Text,
+                                            SVL("flat-only sentinel"));
+      CHECK(untouched);
+
+      // Cropping advances the ring, rather than moving the historical prefix.
+      LineModel_AppendAssistant(&tail, SVL("\nnext\nthird\nfourth\nfifth"));
+      CHECK_ALL(tail.FirstDirtyEntry == historyCount, !tail.PreviewBudgetDirty);
+      LineModel_Layout(&tail);
+      CHECK_ALL(tail.RowOffset == 1, LineModel_Count(&tail) == tail.Cap,
+                LineModel_At(&tail, 1) == survivor,
+                tail.Entries.Data[0].Rows.Data == historyCache);
+      untouched = true;
+      for (u32 row = 0; row < tail.AssistantStart; row++)
+        untouched = untouched && StrView_Eq(LineModel_At(&tail, row)->Continuation.Text,
+                                            SVL("flat-only sentinel"));
+      CHECK(untouched);
+      LineModel_Release(&tail);
+    }
+  }
+
+  {
+    LineModel middle;
+    LineModel_Init(&middle, &a, 80, 100);
+    LineModel_AddNotice(&middle, EntryKind::Info, SVL("first"));
+    LineModel_AddNotice(&middle, EntryKind::Info, SVL("second"));
+    LineModel_AddTool(&middle, SVL("middle"), SVL("read"), SVL("{\"path\":\"file\"}"));
+    LineModel_AddNotice(&middle, EntryKind::Info, SVL("later"));
+    LineModel_Layout(&middle);
+    const SpanLine* suffixCache = middle.Entries.Data[3].Rows.Data;
+    middle.Lines.Data[middle.LinesHead].Continuation.Text = SVL("untouched prefix");
+    CHECK(Finish(&middle, SVL("middle"), SVL("a\nb\nc")));
+    CHECK(LineModel_ToggleEntry(&middle, middle.Entries.Data[2].Id));
+    CHECK(middle.FirstDirtyEntry == 2);
+    LineModel_Layout(&middle);
+    u32 first = 0;
+    u32 count = 0;
+    CHECK(LineModel_FindEntryRows(&middle, middle.Entries.Data[3].Id, &first, &count));
+    CHECK_ALL(first == 9, count == 1, middle.Entries.Data[3].Rows.Data == suffixCache,
+              StrView_Eq(LineModel_At(&middle, 0)->Continuation.Text, SVL("untouched prefix")),
+              RowHas(&a, LineModel_At(&middle, first), "later"));
+    CHECK(LineModel_ToggleEntry(&middle, middle.Entries.Data[2].Id));
+    LineModel_Layout(&middle);
+    CHECK(LineModel_FindEntryRows(&middle, middle.Entries.Data[3].Id, &first, &count));
+    CHECK_ALL(first == 6, count == 1, middle.Entries.Data[3].Rows.Data == suffixCache,
+              StrView_Eq(LineModel_At(&middle, 0)->Continuation.Text, SVL("untouched prefix")));
+    LineModel_Release(&middle);
+  }
+
+  {
+    LineModel shrinking;
+    LineModel_Init(&shrinking, &a, 40, 8);
+    for (u32 i = 0; i < 4; i++)
+      LineModel_AddNotice(&shrinking, EntryKind::Info, SVL("history"));
+    LineModel_Layout(&shrinking);
+    LineModel_BeginAssistant(&shrinking);
+    LineModel_AppendAssistant(&shrinking, SVL("one\ntwo\nthree\nfour"));
+    LineModel_Layout(&shrinking);
+    CHECK(shrinking.RowOffset == 4);
+    const SpanLine* preserved = LineModel_At(&shrinking, 0);
+    shrinking.Lines.Data[shrinking.LinesHead].Continuation.Text = SVL("preserved slot");
+    LineModel_AppendAssistant(&shrinking, SVL("\n---"));
+    LineModel_Layout(&shrinking);
+    u32 first = 0;
+    u32 count = 0;
+    CHECK_ALL(shrinking.RowOffset == 1, LineModel_Count(&shrinking) == 8,
+              LineModel_At(&shrinking, 3) == preserved,
+              StrView_Eq(LineModel_At(&shrinking, 3)->Continuation.Text, SVL("preserved slot")),
+              RowHas(&a, LineModel_At(&shrinking, 1), "history"),
+              LineModel_FindEntryRows(&shrinking, shrinking.Entries.Data[1].Id, &first, &count));
+    CHECK_ALL(first == 1, count == 1);
+    LineModel_Release(&shrinking);
+  }
+
+  {
+    LineModel incremental;
+    LineModel reference;
+    LineModel_Init(&incremental, &a, 24, 10);
+    LineModel_Init(&reference, &a, 24, 10);
+    for (u32 i = 0; i < 4; i++) {
+      LineModel_AddNotice(&incremental, EntryKind::Info, SVL("history"));
+      LineModel_AddNotice(&reference, EntryKind::Info, SVL("history"));
+    }
+    LineModel_Layout(&incremental);
+    LineModel_Layout(&reference);
+    LineModel_BeginAssistant(&incremental);
+    LineModel_BeginAssistant(&reference);
+    const StrView parts[] = {
+        SVL("# Title\n\n"), SVL("```cpp\n"), SVL("one\ntwo\nthree\nfour\n"),
+        SVL("`"), SVL("`"), SVL("`\n"), SVL("\nlast **"), SVL("word**"),
+        SVL("\n\n| a | b |\n"), SVL("| --- | --- |\n"), SVL("| cell | value |\n")};
+    for (u32 p = 0; p < sizeof(parts) / sizeof(parts[0]); p++) {
+      LineModel_AppendAssistant(&incremental, parts[p]);
+      LineModel_AppendAssistant(&reference, parts[p]);
+      LineModel_SetRounded(&reference, false);
+      LineModel_SetRounded(&reference, true);
+      LineModel_Layout(&incremental);
+      LineModel_Layout(&reference);
+      bool same = LineModel_Count(&incremental) == LineModel_Count(&reference) &&
+                  incremental.AssistantStart == reference.AssistantStart &&
+                  incremental.AssistantRowOffset == reference.AssistantRowOffset;
+      for (u32 row = 0; same && row < LineModel_Count(&incremental); row++) {
+        const SpanLine* actual = LineModel_At(&incremental, row);
+        const SpanLine* expected = LineModel_At(&reference, row);
+        DisplayRowLayout actualLayout = LineModel_LayoutDisplayRow(actual, 24);
+        DisplayRowLayout expectedLayout = LineModel_LayoutDisplayRow(expected, 24);
+        same = actual->EntryId == expected->EntryId &&
+               actual->IsEntryStart == expected->IsEntryStart &&
+               LineModel_HashDisplayRow(&actualLayout, 0, 24) ==
+                   LineModel_HashDisplayRow(&expectedLayout, 0, 24);
+      }
+      CHECK(same);
+    }
+    LineModel_Release(&incremental);
+    LineModel_Release(&reference);
+  }
+
+  {
+    LineModel backlog;
+    LineModel_Init(&backlog, &a, 80, 5);
+    for (u32 i = 0; i < 2048; i++)
+      LineModel_AddNotice(&backlog, EntryKind::Info, SVL("notice"));
+    CHECK(backlog.RowsMem.Used == 0);
+    LineModel_Layout(&backlog);
+    CHECK_ALL(backlog.Entries.Count == 3, LineModel_Count(&backlog) == 5,
+              backlog.Entries.Data[0].Id == 2046,
+              backlog.RowsMem.Used <= backlog.LiveRowsBytes + backlog.Entries.Data[0].RowsBytes);
+    LineModel_Release(&backlog);
+  }
+
+  {
+    LineModel croppedHistory;
+    LineModel_Init(&croppedHistory, &a, 20, 3);
+    LineModel_AddUser(&croppedHistory, SVL("history"), 0);
+    LineModel_Layout(&croppedHistory);
+    const SpanLine* history = croppedHistory.Entries.Data[0].Rows.Data;
+    LineModel_BeginAssistant(&croppedHistory);
+    LineModel_AppendAssistant(&croppedHistory, SVL("one\ntwo\nthree\nfour"));
+    LineModel_Layout(&croppedHistory);
+    u64 revision = LineModel_DisplayRevision(&croppedHistory);
+    u32 offset = croppedHistory.AssistantRowOffset;
+    CHECK_ALL(croppedHistory.Entries.Count == 2, offset == 2,
+              croppedHistory.AssistantStart == 0,
+              RowHas(&a, LineModel_At(&croppedHistory, 0), "two"));
+    LineModel_AppendAssistant(&croppedHistory, SVL("x"));
+    CHECK(LineModel_DisplayRevision(&croppedHistory) == revision);
+    CHECK_ALL(croppedHistory.AssistantRowOffset == offset,
+              croppedHistory.Entries.Data[0].Rows.Data == history,
+              RowHas(&a, LineModel_At(&croppedHistory, 2), "fourx"));
+    LineModel_EndAssistant(&croppedHistory);
+    LineModel_Layout(&croppedHistory);
+    CHECK_ALL(croppedHistory.Entries.Count == 1, LineModel_Count(&croppedHistory) == 3,
+              RowHas(&a, LineModel_At(&croppedHistory, 0), "two"),
+              RowHas(&a, LineModel_At(&croppedHistory, 2), "fourx"));
+    LineModel_Release(&croppedHistory);
+  }
+
+  {
+    LineModel previews;
+    LineModel_Init(&previews, &a, 40, 5);
+    LineModel_AddTool(&previews, SVL("first"), SVL("read"), SVL("{\"path\":\"one\"}"));
+    Finish(&previews, SVL("first"), SVL("first a\nfirst b\nfirst c"));
+    LineModel_AddTool(&previews, SVL("second"), SVL("read"), SVL("{\"path\":\"two\"}"));
+    Finish(&previews, SVL("second"), SVL("second a\nsecond b\nsecond c"));
+    LineModel_Layout(&previews);
+    LineModel_ToggleAllTools(&previews);
+    LineModel_Layout(&previews);
+    CHECK_ALL(previews.Entries.Count == 2, !previews.Entries.Data[0].PreviewShown,
+              previews.Entries.Data[1].PreviewShown, LineModel_Count(&previews) == 5,
+              !AnyRowHas(&a, &previews, "first a"), AnyRowHas(&a, &previews, "second a"));
+    LineModel_ToggleEntry(&previews, previews.Entries.Data[1].Id);
+    LineModel_Layout(&previews);
+    CHECK_ALL(previews.Entries.Data[0].PreviewShown, !previews.Entries.Data[1].PreviewShown,
+              AnyRowHas(&a, &previews, "first a"), !AnyRowHas(&a, &previews, "second a"));
+    const SpanLine* firstCache = previews.Entries.Data[0].Rows.Data;
+    usize beforeProbe = previews.RowsMem.Used;
+    CHECK(!LineModel_FitsAtWidth(&previews, 20, 4));
+    CHECK_ALL(previews.Entries.Data[0].Rows.Data == firstCache,
+              previews.RowsMem.Used == beforeProbe, previews.Width == 40);
+    LineModel_Release(&previews);
   }
 
   {

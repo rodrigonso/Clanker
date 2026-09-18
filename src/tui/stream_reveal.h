@@ -27,6 +27,8 @@ constexpr u64 kRevealDeadlineMs = 120;
 
 void StreamReveal_Init(StreamReveal* r, Arena* arena);
 void StreamReveal_Push(StreamReveal* r, StrView text);
+// No copy: the caller keeps text's buffer and backing Arena alive until the
+// pending text has drained and this buffer is detached or replaced.
 void StreamReveal_Adopt(StreamReveal* r, StrBuf text);
 bool StreamReveal_HasPending(const StreamReveal* r);
 

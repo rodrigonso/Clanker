@@ -20,8 +20,10 @@ struct ExecResult {
 typedef bool (*ExecChunkFn)(void* user, StrView chunk);
 
 // Run `command` through the platform shell (`cmd /c` on Windows, `/bin/sh -c`
-// on POSIX). Aborts the whole process tree if `abort` becomes non-zero or
-// `timeoutMs` elapses.
+// on POSIX), delivering combined stdout/stderr only through onData. No output
+// is accumulated internally. Output in the result is reserved for diagnostics.
+// Aborts the whole process tree if the sink returns false, `abort` becomes
+// non-zero, or `timeoutMs` elapses.
 //
 // On Windows the shell is the system cmd.exe, and a bare program name resolves
 // only through PATH, never from the working directory, matching POSIX shells:
@@ -29,7 +31,7 @@ typedef bool (*ExecChunkFn)(void* user, StrView chunk);
 // same holds for Exec_RunShellInput below.
 ExecResult Exec_RunStreaming(Arena* arena, StrView command, u32 timeoutMs,
                              volatile i32* abort, ExecChunkFn onData,
-                             void* user, StrBuf* output = nullptr);
+                             void* user);
 
 struct ExecArgvSink {
   void* User;

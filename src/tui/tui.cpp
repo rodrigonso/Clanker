@@ -122,34 +122,142 @@ void SetPermissionMode(Tui* t, TuiPermissionMode mode,
 }
 
 bool HasQueuedDisplayEvents(const Tui* t) {
-  return t->DisplayHead < t->DisplayEvents.Count;
+  return t->DisplayFirst != nullptr;
 }
 
-void CompactDisplayEvents(Tui* t) {
-  if (t->DisplayHead == 0) return;
-  if (t->DisplayHead == t->DisplayEvents.Count) {
-    t->DisplayHead = 0;
-    t->DisplayEvents.Count = 0;
-    return;
+void ReleaseDisplayBatch(TuiDisplayBatch* batch) {
+  // The arena descriptor itself lives in the allocation being released.
+  Arena mem = batch->Mem;
+  ArenaRelease(&mem);
+}
+
+void RetireDisplayBatch(Tui* t, TuiDisplayBatch* batch) {
+  if (t->DisplaySpare) {
+    ReleaseDisplayBatch(batch);
+  } else {
+    Arena mem = batch->Mem;
+    ArenaReset(&mem);
+    ArenaTrim(&mem, (usize)64 << 10);
+    batch = ArenaPushStruct(&mem, TuiDisplayBatch);
+    *batch = {};
+    batch->Mem = mem;
+    t->DisplaySpare = batch;
   }
-  if (t->DisplayHead < 64) return;
-  u32 remaining = t->DisplayEvents.Count - t->DisplayHead;
-  memmove(t->DisplayEvents.Data, t->DisplayEvents.Data + t->DisplayHead,
-          sizeof(TuiDisplayEvent) * remaining);
-  t->DisplayEvents.Count = remaining;
-  t->DisplayHead = 0;
 }
 
 TuiDisplayEvent* QueueDisplayEvent(Tui* t, TuiDisplayEventKind kind) {
-  CompactDisplayEvents(t);
-  TuiDisplayEvent ev = {};
-  ev.Kind = kind;
-  return Array_Push(&t->DisplayEvents, ev);
+  TuiDisplayBatch* batch = t->DisplayLast;
+  if (!batch || batch->Count == 32 || batch->Mem.Used >= ((usize)256 << 10)) {
+    batch = t->DisplaySpare;
+    t->DisplaySpare = nullptr;
+    if (!batch) {
+      Arena mem = ArenaCreate();
+      batch = ArenaPushStruct(&mem, TuiDisplayBatch);
+      *batch = {};
+      batch->Mem = mem;
+    }
+    if (t->DisplayLast) t->DisplayLast->Next = batch;
+    else t->DisplayFirst = batch;
+    t->DisplayLast = batch;
+  }
+  TuiDisplayEvent* ev = &batch->Events[batch->Count++];
+  *ev = {};
+  ev->Kind = kind;
+  ev->Mem = &batch->Mem;
+  return ev;
+}
+
+void ConsumeDisplayEvent(Tui* t) {
+  TuiDisplayBatch* batch = t->DisplayFirst;
+  batch->Head++;
+  if (batch->Head != batch->Count) return;
+  t->DisplayFirst = batch->Next;
+  if (!t->DisplayFirst) t->DisplayLast = nullptr;
+  batch->Next = nullptr;
+  if (batch != t->RevealBatch) RetireDisplayBatch(t, batch);
+}
+
+void FinishReveal(Tui* t) {
+  FFI(StreamReveal_HasPending(&t->Reveal));
+  t->Reveal = {};
+  ArenaReset(&t->RevealMem);
+  ArenaTrim(&t->RevealMem, (usize)64 << 10);
+  StreamReveal_Init(&t->Reveal, &t->RevealMem);
+  TuiDisplayBatch* batch = t->RevealBatch;
+  t->RevealBatch = nullptr;
+  if (batch && batch->Head == batch->Count) RetireDisplayBatch(t, batch);
+}
+
+void SetTransientText(TuiTransientText* field, StrView text) {
+  if (!field->Mem.Base && text.Length) field->Mem = ArenaCreate();
+  ArenaReset(&field->Mem);
+  if (text.Length) {
+    char* data = (char*)ArenaAlloc(&field->Mem, (usize)text.Length + 1, 1);
+    // A caller can hand back a slice of the previous value.
+    memmove(data, text.Data, text.Length);
+    data[text.Length] = 0;
+    field->Text = StrView{data, text.Length};
+  } else {
+    field->Text = {};
+  }
+  ArenaTrim(&field->Mem, field->Mem.Used);
 }
 
 void ResetToolUpdates(Tui* t) {
   ArenaReset(&t->ToolUpdateMem);
+  ArenaTrim(&t->ToolUpdateMem, 0);
   memset(t->ToolUpdates, 0, sizeof(t->ToolUpdates));
+}
+
+void ReclaimToolUpdates(Tui* t) {
+  usize liveBytes = 0;
+  for (const TuiToolUpdateSlot& slot : t->ToolUpdates) {
+    if (slot.Active || slot.Queued)
+      liveBytes += slot.ToolCallId.Length + (usize)1 +
+                   (slot.Payload.Length > 1500 ? slot.Payload.Length + 1 : 1501u);
+  }
+  if (!liveBytes) {
+    ResetToolUpdates(t);
+    return;
+  }
+  usize budget = liveBytes * 4;
+  if (budget < ((usize)64 << 10)) budget = (usize)64 << 10;
+  if (t->ToolUpdateMem.Used <= budget && t->ToolUpdateMem.Committed <= budget)
+    return;
+  Arena next = ArenaCreate();
+  for (TuiToolUpdateSlot& slot : t->ToolUpdates) {
+    if (!slot.Active && !slot.Queued) {
+      slot = {};
+      continue;
+    }
+    slot.ToolCallId = StrView_Dup(&next, slot.ToolCallId);
+    StrBuf payload = StrBuf_Make(
+        &next, slot.Payload.Length > 1500 ? slot.Payload.Length + 1 : 1501u);
+    StrBuf_Append(&payload, StrBuf_View(&slot.Payload));
+    slot.Payload = payload;
+    slot.Payload.Backing = &t->ToolUpdateMem;
+  }
+  ArenaRelease(&t->ToolUpdateMem);
+  t->ToolUpdateMem = next;
+}
+
+void ResetDisplay(Tui* t) {
+  t->Reveal = {};
+  TuiDisplayBatch* pinned = t->RevealBatch;
+  t->RevealBatch = nullptr;
+  while (t->DisplayFirst) {
+    TuiDisplayBatch* batch = t->DisplayFirst;
+    t->DisplayFirst = batch->Next;
+    if (batch == pinned) pinned = nullptr;
+    ReleaseDisplayBatch(batch);
+  }
+  if (pinned) ReleaseDisplayBatch(pinned);
+  if (t->DisplaySpare) ReleaseDisplayBatch(t->DisplaySpare);
+  t->DisplayLast = t->DisplaySpare = nullptr;
+  ArenaReset(&t->RevealMem);
+  ArenaTrim(&t->RevealMem, 0);
+  if (t->RevealMem.Base) StreamReveal_Init(&t->Reveal, &t->RevealMem);
+  ResetToolUpdates(t);
 }
 
 TuiToolUpdateSlot* FindToolUpdate(Tui* t, StrView toolCallId) {
@@ -178,7 +286,7 @@ TuiToolUpdateSlot* AcquireToolUpdate(Tui* t, StrView toolCallId,
   for (u32 i = 0; i < TUI_TOOL_UPDATE_SLOT_COUNT; i++) {
     TuiToolUpdateSlot* slot = &t->ToolUpdates[i];
     if (slot->Active || slot->Queued) continue;
-    slot->ToolCallId = StrView_Dup(&t->SessionMem, toolCallId);
+    slot->ToolCallId = StrView_Dup(&t->ToolUpdateMem, toolCallId);
     if (!slot->Payload.Data)
       slot->Payload = StrBuf_Make(&t->ToolUpdateMem, 1501);
     slot->Active = true;
@@ -188,8 +296,8 @@ TuiToolUpdateSlot* AcquireToolUpdate(Tui* t, StrView toolCallId,
   return nullptr;
 }
 
-void SetDisplayPayload(Tui* t, TuiDisplayEvent* ev, StrView text) {
-  ev->Payload = StrBuf_Make(&t->SessionMem, text.Length + 1);
+void SetDisplayPayload(TuiDisplayEvent* ev, StrView text) {
+  ev->Payload = StrBuf_Make(ev->Mem, text.Length + 1);
   StrBuf_Append(&ev->Payload, text);
 }
 
@@ -205,10 +313,10 @@ void QueueText(Tui* t, StrView text) {
     return;
   }
 
-  TuiDisplayEvent* last = &t->DisplayEvents.Data[t->DisplayEvents.Count - 1];
+  TuiDisplayEvent* last = &t->DisplayLast->Events[t->DisplayLast->Count - 1];
   if (last->Kind != TuiDisplayEventKind::Text) {
     last = QueueDisplayEvent(t, TuiDisplayEventKind::Text);
-    SetDisplayPayload(t, last, text);
+    SetDisplayPayload(last, text);
   } else {
     StrBuf_Append(&last->Payload, text);
   }
@@ -347,14 +455,15 @@ void ApplyDisplayEvent(Tui* t, const TuiDisplayEvent& ev) {
     case TuiDisplayEventKind::ToolStart:
       LineModel_AddTool(&t->Model, ev.ToolCallId, ev.ToolName, ev.ToolArgsJson);
       t->State = TuiState::Tool;
-      t->Sess.StateTool = ev.ToolName;
+      SetTransientText(&t->StateTool, ev.ToolName);
       break;
     case TuiDisplayEventKind::ToolUpdate:
       if (ev.ToolUpdateSlot < TUI_TOOL_UPDATE_SLOT_COUNT) {
         TuiToolUpdateSlot* slot = &t->ToolUpdates[ev.ToolUpdateSlot];
-        LineModel_UpdateTool(&t->Model, ev.ToolCallId,
+        LineModel_UpdateTool(&t->Model, slot->ToolCallId,
                              Truncate(StrBuf_View(&slot->Payload), 1500));
         slot->Queued = false;
+        ReclaimToolUpdates(t);
       }
       break;
     case TuiDisplayEventKind::ToolEnd:
@@ -366,6 +475,7 @@ void ApplyDisplayEvent(Tui* t, const TuiDisplayEvent& ev) {
                               SVL("tool result did not match a pending call"));
       }
       t->State = TuiState::Thinking;
+      SetTransientText(&t->StateTool, {});
       break;
     case TuiDisplayEventKind::User:
       if (t->Model.HasAssistant) LineModel_EndAssistant(&t->Model);
@@ -382,6 +492,7 @@ void ApplyDisplayEvent(Tui* t, const TuiDisplayEvent& ev) {
     case TuiDisplayEventKind::AgentStart:
     case TuiDisplayEventKind::AgentEnd:
       t->State = t->AgentRunning ? TuiState::Thinking : TuiState::Idle;
+      SetTransientText(&t->StateTool, {});
       break;
     case TuiDisplayEventKind::Text: break;
   }
@@ -408,27 +519,32 @@ bool PumpDisplay(Tui* t, u64 nowMs) {
         changed = true;
       }
       if (StreamReveal_HasPending(&t->Reveal)) {
+        LineModel_Layout(&t->Model);
         RestoreViewportAnchor(t, anchor);
         return changed;
       }
+      FinishReveal(t);
     }
 
     if (!HasQueuedDisplayEvents(t)) break;
-    TuiDisplayEvent* ev = &t->DisplayEvents.Data[t->DisplayHead];
+    TuiDisplayBatch* batch = t->DisplayFirst;
+    TuiDisplayEvent* ev = &batch->Events[batch->Head];
     if (toolStartedThisFrame && ev->Kind != TuiDisplayEventKind::ToolStart) break;
-    t->DisplayHead++;
     if (ev->Kind == TuiDisplayEventKind::Text) {
       StreamReveal_Adopt(&t->Reveal, ev->Payload);
+      t->RevealBatch = batch;
+      ConsumeDisplayEvent(t);
       t->State = TuiState::Streaming;
       continue;
     }
     ApplyDisplayEvent(t, *ev);
     if (ev->Kind == TuiDisplayEventKind::ToolStart)
       toolStartedThisFrame = true;
+    ConsumeDisplayEvent(t);
     changed = true;
   }
 
-  CompactDisplayEvents(t);
+  LineModel_Layout(&t->Model);
   RestoreViewportAnchor(t, anchor);
   return changed;
 }
@@ -906,7 +1022,7 @@ void Compose(Tui* t) {
 // ---- key handling (lock held) ----
 void QueueUserDisplayLocked(Tui* t, StrView line) {
   TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::User);
-  SetDisplayPayload(t, display, line);
+  SetDisplayPayload(display, line);
   display->Timestamp = NowMillis();
   t->Follow = true;
 }
@@ -991,7 +1107,7 @@ void DoSubmit(Tui* t) {
       t->Perf.Visible = immediate.DebugEnable;
       TuiDisplayEvent* display =
           QueueDisplayEvent(t, TuiDisplayEventKind::Notice);
-      SetDisplayPayload(t, display,
+      SetDisplayPayload(display,
                         immediate.DebugEnable ? SVL("performance overlay on")
                                               : SVL("performance overlay off"));
       t->Follow = true;
@@ -1014,7 +1130,7 @@ void DoSubmit(Tui* t) {
     if (cancelling) RequestCancelLocked(t);
     if (!QPush(t, TuiSubmission{TuiSubmissionKind::Command, line})) {
       TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::Error);
-      SetDisplayPayload(t, display, SVL("Submission queue is full; command was not queued."));
+      SetDisplayPayload(display, SVL("Submission queue is full; command was not queued."));
       t->Follow = true;
       Wake(t);
       return;
@@ -1040,12 +1156,12 @@ void DoSubmit(Tui* t) {
     if (!t->Agent.Steer(t->Agent.User, line, &error)) {
       TuiDisplayEvent* display =
           QueueDisplayEvent(t, TuiDisplayEventKind::Error);
-      SetDisplayPayload(t, display, error);
+      SetDisplayPayload(display, error);
     }
   } else {
     if (!QPush(t, TuiSubmission{TuiSubmissionKind::Prompt, line})) {
       TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::Error);
-      SetDisplayPayload(t, display, SVL("Submission queue is full; prompt was not queued."));
+      SetDisplayPayload(display, SVL("Submission queue is full; prompt was not queued."));
       t->Follow = true;
       Wake(t);
       return;
@@ -1387,7 +1503,7 @@ void HandleKey(Tui* t, const Key& k) {
       TuiDisplayEvent* display =
           QueueDisplayEvent(t, TuiDisplayEventKind::Error);
       SetDisplayPayload(
-          t, display,
+          display,
           SVL("Permission mode changed for this run, but could not be queued for persistence."));
     }
     Wake(t);
@@ -1750,16 +1866,15 @@ void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts) {
       opts.Rounded ? UiBorderCorners::Rounded : UiBorderCorners::Square;
   t->UiUp = true;
   t->SessionMem = ArenaCreate();
-  t->ToolUpdateMem = ArenaCreate((usize)4 << 20);
+  t->ToolUpdateMem = ArenaCreate();
   t->ToolUpdateUp = true;
+  t->RevealMem = ArenaCreate();
   LineModel_Init(&t->Model, &t->SessionMem, 80, 5000, opts.Color, opts.Rounded);
   LineEdit_Init(&t->Edit, &t->SessionMem);
   t->InputUi.Edit = &t->Edit;
   LineEdit_Init(&t->ModalEdit, &t->SessionMem);
   KeyDecoder_Init(&t->Dec);
-  StreamReveal_Init(&t->Reveal, &t->SessionMem);
-  t->DisplayEvents = Array_Make<TuiDisplayEvent>(&t->SessionMem, 16);
-  ResetToolUpdates(t);
+  ResetDisplay(t);
   t->ClipboardRaw = StrBuf_Make(mem, 256);
   t->ClipboardOsc = StrBuf_Make(mem, 384);
   Mutex_Init(&t->Lock);
@@ -1790,7 +1905,7 @@ bool Tui_ClearSession(Tui* t) {
   u32 preservedCount = t->QCount;
   for (u32 i = 0; i < preservedCount; i++) {
     const TuiSubmission& queued = t->Queue[(t->QHead + i) % 64];
-    preserved[i].Kind = queued.Kind;
+    preserved[i] = queued;
     preserved[i].Text = StrView_Dup(&nextSession, queued.Text);
   }
 
@@ -1802,10 +1917,7 @@ bool Tui_ClearSession(Tui* t) {
   t->InputUi = UiTextInputState{&t->Edit, 0, false};
   LineEdit_Init(&t->ModalEdit, &t->SessionMem);
   KeyDecoder_Init(&t->Dec);
-  StreamReveal_Init(&t->Reveal, &t->SessionMem);
-  t->DisplayEvents = Array_Make<TuiDisplayEvent>(&t->SessionMem, 16);
-  t->DisplayHead = 0;
-  ResetToolUpdates(t);
+  ResetDisplay(t);
 
   memset(t->Queue, 0, sizeof(t->Queue));
   for (u32 i = 0; i < preservedCount; i++) t->Queue[i] = preserved[i];
@@ -1889,6 +2001,15 @@ void Tui_Stop(Tui* t) {
     t->ScreenUp = false;
   }
   if (t->SessionUp) {
+    ResetDisplay(t);
+    ArenaRelease(&t->RevealMem);
+    t->Reveal = {};
+    ArenaRelease(&t->StateTool.Mem);
+    ArenaRelease(&t->RetryStatus.Mem);
+    ArenaRelease(&t->OperationLabel.Mem);
+    ArenaRelease(&t->OperationStatus.Mem);
+    t->StateTool.Text = t->RetryStatus.Text = {};
+    t->OperationLabel.Text = t->OperationStatus.Text = {};
     LineModel_Release(&t->Model);
     ArenaRelease(&t->SessionMem);
     t->SessionUp = false;
@@ -1941,7 +2062,7 @@ bool Tui_AcceptPrompt(Tui* t, StrView text) {
 void Tui_CommandNotice(Tui* t, StrView text) {
   Mutex_Lock(&t->Lock);
   TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::Notice);
-  SetDisplayPayload(t, display, text);
+  SetDisplayPayload(display, text);
   t->Follow = true;
   Wake(t);
   Mutex_Unlock(&t->Lock);
@@ -1950,7 +2071,7 @@ void Tui_CommandNotice(Tui* t, StrView text) {
 void Tui_CommandError(Tui* t, StrView text) {
   Mutex_Lock(&t->Lock);
   TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::Error);
-  SetDisplayPayload(t, display, text);
+  SetDisplayPayload(display, text);
   t->Follow = true;
   Wake(t);
   Mutex_Unlock(&t->Lock);
@@ -2003,15 +2124,15 @@ void Tui_BeginOperation(Tui* t, StrView label) {
   Mutex_Lock(&t->Lock);
   if (t->Stop || t->Quit) {
     t->OperationActive = false;
-    t->Sess.OperationLabel = {};
-    t->Sess.OperationStatus = {};
+    SetTransientText(&t->OperationLabel, {});
+    SetTransientText(&t->OperationStatus, {});
     Atomic_StoreI32(&t->OperationAbortFlag, 1);
     Mutex_Unlock(&t->Lock);
     return;
   }
   t->OperationActive = true;
-  t->Sess.OperationLabel = StrView_Dup(&t->SessionMem, label);
-  t->Sess.OperationStatus = {};
+  SetTransientText(&t->OperationLabel, label);
+  SetTransientText(&t->OperationStatus, {});
   Atomic_StoreI32(&t->OperationAbortFlag, 0);
   t->Spinner = 0;
   t->SpinnerStartMs = 0;
@@ -2021,7 +2142,7 @@ void Tui_BeginOperation(Tui* t, StrView label) {
 
 void Tui_SetOperationStatus(Tui* t, StrView status) {
   Mutex_Lock(&t->Lock);
-  if (t->OperationActive) t->Sess.OperationStatus = StrView_Dup(&t->SessionMem, status);
+  if (t->OperationActive) SetTransientText(&t->OperationStatus, status);
   Wake(t);
   Mutex_Unlock(&t->Lock);
 }
@@ -2030,8 +2151,8 @@ bool Tui_EndOperation(Tui* t) {
   Mutex_Lock(&t->Lock);
   bool cancelled = Atomic_LoadI32(&t->OperationAbortFlag) != 0 || t->Stop || t->Quit;
   t->OperationActive = false;
-  t->Sess.OperationLabel = {};
-  t->Sess.OperationStatus = {};
+  SetTransientText(&t->OperationLabel, {});
+  SetTransientText(&t->OperationStatus, {});
   Wake(t);
   Mutex_Unlock(&t->Lock);
   return cancelled;
@@ -2066,7 +2187,7 @@ void Tui_FeedInput(Tui* t, const char* data, u32 n) {
 void Tui_TurnStarted(Tui* t) {
   Mutex_Lock(&t->Lock);
   t->AgentRunning = true;
-  t->Sess.RetryStatus = {};
+  SetTransientText(&t->RetryStatus, {});
   t->LastEscapeMs = 0;
   t->EscapeArmed = false;
   if (Tui_HasPendingDisplay(t))
@@ -2095,7 +2216,7 @@ void Tui_AssistantMessageEnded(Tui* t, StopReason stop, Usage use,
   TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::MessageEnd);
   display->Stop = stop;
   display->Use = use;
-  if (errorMessage.Length) SetDisplayPayload(t, display, errorMessage);
+  if (errorMessage.Length) SetDisplayPayload(display, errorMessage);
   TuiPerf_TurnMessageEnded(&t->Perf, use, MonotonicMicros());
   Wake(t);
   Mutex_Unlock(&t->Lock);
@@ -2104,9 +2225,9 @@ void Tui_AssistantMessageEnded(Tui* t, StopReason stop, Usage use,
 void Tui_ToolStarted(Tui* t, StrView callId, StrView name, StrView argumentsJson) {
   Mutex_Lock(&t->Lock);
   TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::ToolStart);
-  display->ToolCallId = StrView_Dup(&t->SessionMem, callId);
-  display->ToolName = StrView_Dup(&t->SessionMem, name);
-  display->ToolArgsJson = StrView_Dup(&t->SessionMem, argumentsJson);
+  display->ToolCallId = StrView_Dup(display->Mem, callId);
+  display->ToolName = StrView_Dup(display->Mem, name);
+  display->ToolArgsJson = StrView_Dup(display->Mem, argumentsJson);
   TuiPerf_ToolStarted(&t->Perf, name, MonotonicMicros());
   Wake(t);
   Mutex_Unlock(&t->Lock);
@@ -2124,7 +2245,6 @@ void Tui_ToolProgress(Tui* t, StrView callId, StrView preview) {
     if (!slot->Queued) {
       TuiDisplayEvent* display =
           QueueDisplayEvent(t, TuiDisplayEventKind::ToolUpdate);
-      display->ToolCallId = slot->ToolCallId;
       display->ToolUpdateSlot = slotIndex;
       slot->Queued = true;
     }
@@ -2136,11 +2256,12 @@ void Tui_ToolProgress(Tui* t, StrView callId, StrView preview) {
 void Tui_ToolEnded(Tui* t, StrView callId, StrView preview, bool isError) {
   Mutex_Lock(&t->Lock);
   TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::ToolEnd);
-  display->ToolCallId = StrView_Dup(&t->SessionMem, callId);
-  display->Payload = StrBuf_Make(&t->SessionMem, preview.Length + 1);
+  display->ToolCallId = StrView_Dup(display->Mem, callId);
+  display->Payload = StrBuf_Make(display->Mem, preview.Length + 1);
   Sanitize_Display(&display->Payload, preview);
   display->IsError = isError;
   if (TuiToolUpdateSlot* slot = FindToolUpdate(t, callId)) slot->Active = false;
+  ReclaimToolUpdates(t);
   TuiPerf_ToolEnded(&t->Perf, MonotonicMicros());
   Wake(t);
   Mutex_Unlock(&t->Lock);
@@ -2149,7 +2270,7 @@ void Tui_ToolEnded(Tui* t, StrView callId, StrView preview, bool isError) {
 void Tui_TurnEnded(Tui* t) {
   Mutex_Lock(&t->Lock);
   t->AgentRunning = false;
-  t->Sess.RetryStatus = {};
+  SetTransientText(&t->RetryStatus, {});
   t->LastEscapeMs = 0;
   t->EscapeArmed = false;
   QueueDisplayEvent(t, TuiDisplayEventKind::AgentEnd);
@@ -2160,7 +2281,8 @@ void Tui_TurnEnded(Tui* t) {
 void Tui_RetryStarted(Tui* t, bool providerLevel, u32 delayMs, u32 attempt,
                       u32 maxAttempts) {
   Mutex_Lock(&t->Lock);
-  StrBuf status = StrBuf_Make(&t->SessionMem, 96);
+  char data[96];
+  StrBuf status = {nullptr, data, 0, sizeof(data)};
   StrBuf_AppendCStr(&status, providerLevel ? "provider request" : "assistant turn");
   StrBuf_AppendCStr(&status, " in ");
   StrBuf_AppendU64(&status, delayMs);
@@ -2169,7 +2291,7 @@ void Tui_RetryStarted(Tui* t, bool providerLevel, u32 delayMs, u32 attempt,
   StrBuf_AppendChar(&status, '/');
   StrBuf_AppendU64(&status, maxAttempts);
   StrBuf_AppendChar(&status, ')');
-  t->Sess.RetryStatus = StrBuf_View(&status);
+  SetTransientText(&t->RetryStatus, StrBuf_View(&status));
   t->State = TuiState::Retry;
   Wake(t);
   Mutex_Unlock(&t->Lock);
@@ -2177,7 +2299,7 @@ void Tui_RetryStarted(Tui* t, bool providerLevel, u32 delayMs, u32 attempt,
 
 void Tui_RetryEnded(Tui* t) {
   Mutex_Lock(&t->Lock);
-  t->Sess.RetryStatus = {};
+  SetTransientText(&t->RetryStatus, {});
   if (t->State == TuiState::Retry) t->State = TuiState::Thinking;
   Wake(t);
   Mutex_Unlock(&t->Lock);
@@ -2185,7 +2307,7 @@ void Tui_RetryEnded(Tui* t) {
 
 void Tui_PermissionReviewStarted(Tui* t, StrView toolName) {
   Mutex_Lock(&t->Lock);
-  t->Sess.StateTool = StrView_Dup(&t->SessionMem, toolName);
+  SetTransientText(&t->StateTool, toolName);
   t->State = TuiState::PermissionReview;
   Wake(t);
   Mutex_Unlock(&t->Lock);
@@ -2193,7 +2315,7 @@ void Tui_PermissionReviewStarted(Tui* t, StrView toolName) {
 
 void Tui_PermissionReviewEnded(Tui* t) {
   Mutex_Lock(&t->Lock);
-  t->Sess.StateTool = {};
+  SetTransientText(&t->StateTool, {});
   if (t->State == TuiState::PermissionReview)
     t->State = t->AgentRunning ? TuiState::Thinking : TuiState::Idle;
   Wake(t);
@@ -2224,7 +2346,7 @@ void Tui_AddContextTokens(Tui* t, u32 tokens) {
 void Tui_NoticeDroppedEvents(Tui* t, u32 count) {
   Mutex_Lock(&t->Lock);
   TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::Notice);
-  StrBuf notice = StrBuf_Make(&t->SessionMem, 64);
+  StrBuf notice = StrBuf_Make(display->Mem, 64);
   StrBuf_AppendCStr(&notice, "skipped ");
   StrBuf_AppendU64(&notice, count);
   StrBuf_AppendCStr(&notice, " progress updates to keep up");

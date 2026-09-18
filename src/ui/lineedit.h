@@ -24,6 +24,8 @@ struct LineEditLayout {
 };
 
 void LineEdit_Init(LineEdit* e, Arena* mem);
+// Copies every editor state field and deep-owns text/history in mem.
+void LineEdit_Clone(LineEdit* out, const LineEdit* source, Arena* mem);
 void LineEdit_Clear(LineEdit* e);
 
 StrView LineEdit_Text(const LineEdit* e);

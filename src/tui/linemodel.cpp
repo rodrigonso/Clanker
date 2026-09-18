@@ -10,6 +10,7 @@
 namespace {
 
 const usize LINE_ROWS_RESERVE = (usize)64 * 1024 * 1024;
+const u32 NO_ENTRY = 0xffffffffu;
 const u32 ICON_FIELD_CELLS = 2;
 const u32 MARKER_LEFT_PADDING = 1;
 
@@ -103,9 +104,7 @@ void StartWrappedRow(Arena* a, const SpanLine* in, SpanLine* row, bool first, bo
 }
 
 void AddBlank(LineModel* m) {
-  SpanLine row;
-  InitRow(&m->RowsMem, &row, 1);
-  Array_Push(&m->Lines, row);
+  Array_Push(&m->Lines, SpanLine{});
 }
 
 void WrapAndAppend(LineModel* m, SpanLine* line) {
@@ -143,15 +142,6 @@ void AppendPlain(LineModel* m, StrView text, Style style, StrView prefix, StrVie
 bool EntryVisible(const Entry* entry) {
   if (entry->Kind == EntryKind::Assistant) return entry->Text.Content.Length != 0;
   return true;
-}
-
-const Entry* PreviousVisible(const LineModel* m, u32 idx) {
-  while (idx > 0) {
-    idx--;
-    const Entry* entry = &m->Entries.Data[idx];
-    if (EntryVisible(entry)) return entry;
-  }
-  return nullptr;
 }
 
 bool NeedsSeparator(const Entry* previous, const Entry* current) {
@@ -328,12 +318,8 @@ void BuildPlainTurn(LineModel* m, const Entry* entry, StrView marker, Style mark
   }
 }
 
-void BuildEntryRows(LineModel* m, u32 idx, u32 expandedStart) {
-  Entry* entry = &m->Entries.Data[idx];
+void BuildEntryRows(LineModel* m, const Entry* entry, bool showPreview) {
   if (!EntryVisible(entry)) return;
-  const Entry* previous = PreviousVisible(m, idx);
-  if (NeedsSeparator(previous, entry)) AddBlank(m);
-
   u32 rowStart = m->Lines.Count;
   bool previewHidden = false;
   switch (entry->Kind) {
@@ -345,7 +331,6 @@ void BuildEntryRows(LineModel* m, u32 idx, u32 expandedStart) {
       break;
     case EntryKind::Tool: {
       bool hasPreview = entry->Tool.Done && entry->Tool.Preview.Length != 0;
-      bool showPreview = !entry->Collapsed && hasPreview && idx >= expandedStart;
       BuildTool(m, entry, showPreview);
       previewHidden = hasPreview && !showPreview;
       break;
@@ -379,84 +364,271 @@ void BuildEntryRows(LineModel* m, u32 idx, u32 expandedStart) {
   }
 }
 
-void CropDisplayToCap(LineModel* m) {
-  if (m->Lines.Count <= m->Cap) {
-    if (m->HasAssistant) m->AssistantRowOffset = 0;
-    return;
-  }
-  u32 drop = m->Lines.Count - m->Cap;
-  u32 assistantStart = m->AssistantStart;
-  memmove(m->Lines.Data, m->Lines.Data + drop, m->Cap * sizeof(SpanLine));
-  m->Lines.Count = m->Cap;
-  if (m->HasAssistant) {
-    m->AssistantRowOffset = drop > assistantStart ? drop - assistantStart : 0;
-    m->AssistantStart = assistantStart > drop ? assistantStart - drop : 0;
-  }
-}
-
 void AdvanceDisplayRevision(LineModel* m) {
   m->DisplayRevision++;
   if (m->DisplayRevision == 0) m->DisplayRevision++;
 }
 
 u32 PreviewRowCount(LineModel* m, const Entry* entry) {
-  usize mark = m->RowsMem.Used;
-  Array<SpanLine> rows = Array_Make<SpanLine>(&m->RowsMem, 8);
+  ArenaReset(&m->LayoutMem);
+  Array<SpanLine> rows = Array_Make<SpanLine>(&m->LayoutMem, 8);
   StrView indent =
-      IconIndent(&m->RowsMem, OutlineMarker(m), MARKER_LEFT_PADDING);
-  AppendPlainRows(&m->RowsMem, &rows, m->Width, BufView(entry->Tool.Preview),
+      IconIndent(&m->LayoutMem, OutlineMarker(m), MARKER_LEFT_PADDING);
+  AppendPlainRows(&m->LayoutMem, &rows, m->Width, BufView(entry->Tool.Preview),
                   LStyle(m, 244, ATTR_DIM), indent, indent);
-  u32 count = rows.Count;
-  ArenaRestore(&m->RowsMem, mark);
-  return count;
+  return rows.Count;
 }
 
-u32 ExpandedStart(LineModel* m) {
+u64 ExpandedEntryId(LineModel* m) {
   u32 budget = m->Cap;
-  u32 start = m->Entries.Count;
+  u64 start = ~(u64)0;
   for (u32 i = m->Entries.Count; i > 0; i--) {
-    const Entry* entry = &m->Entries.Data[i - 1];
+    Entry* entry = &m->Entries.Data[i - 1];
     if (entry->Kind != EntryKind::Tool || entry->Collapsed || !entry->Tool.Done ||
         entry->Tool.Preview.Length == 0)
       continue;
-    u32 cost = PreviewRowCount(m, entry);
+    if (entry->PreviewRows == 0xffffffffu)
+      entry->PreviewRows = PreviewRowCount(m, entry);
+    u32 cost = entry->PreviewRows;
     if (cost > budget) break;
     budget -= cost;
-    start = i - 1;
+    start = entry->Id;
   }
   return start;
 }
 
-void BuildRows(LineModel* m, u32 stopAfter) {
-  u32 expandedStart = ExpandedStart(m);
-  for (u32 i = 0; i < m->Entries.Count; i++) {
-    if (i == m->Entries.Count - 1 && m->HasAssistant) {
-      m->AssistantStart = m->Lines.Count;
-      m->AssistantRowsMark = m->RowsMem.Used;
+Array<SpanLine> CopyRows(Arena* mem, const Array<SpanLine>& source) {
+  Array<SpanLine> rows = Array_Make<SpanLine>(mem, source.Count);
+  for (u32 i = 0; i < source.Count; i++) {
+    SpanLine row = source.Data[i];
+    row.Spans = Array_Make<Span>(mem, row.Spans.Count);
+    for (u32 s = 0; s < source.Data[i].Spans.Count; s++) {
+      Span span = source.Data[i].Spans.Data[s];
+      span.Text = StrView_Dup(mem, span.Text);
+      Array_Push(&row.Spans, span);
     }
-    BuildEntryRows(m, i, expandedStart);
-    if (m->Lines.Count > stopAfter) break;
+    if (row.HasRight) row.Right.Text = StrView_Dup(mem, row.Right.Text);
+    if (row.HasContinuation)
+      row.Continuation.Text = StrView_Dup(mem, row.Continuation.Text);
+    if (row.HasHiddenContent) row.Hidden.Text = StrView_Dup(mem, row.Hidden.Text);
+    Array_Push(&rows, row);
+  }
+  // Keep cache extents independently aligned when replacing the tail.
+  ArenaAlloc(mem, 0, alignof(SpanLine));
+  return rows;
+}
+
+void CacheEntry(LineModel* m, Entry* entry, bool showPreview) {
+  ArenaReset(&m->LayoutMem);
+  LineModel painter = {};
+  painter.RowsMem = m->LayoutMem;
+  painter.Width = m->Width;
+  painter.Color = m->Color;
+  painter.Rounded = m->Rounded;
+  painter.Lines = Array_Make<SpanLine>(&painter.RowsMem, 8);
+  BuildEntryRows(&painter, entry, showPreview);
+  m->LayoutMem = painter.RowsMem;
+
+  m->LiveRowsBytes -= entry->RowsBytes;
+  if (entry->RowsBytes && entry->RowsMark + entry->RowsBytes == m->RowsMem.Used)
+    ArenaRestore(&m->RowsMem, entry->RowsMark);
+  entry->RowsMark = m->RowsMem.Used;
+  // Own the rendered bytes as well as the spans: markdown scratch and mutable
+  // tool/editor buffers must never be referenced by a retained display row.
+  entry->Rows = CopyRows(&m->RowsMem, painter.Lines);
+  entry->RowsBytes = m->RowsMem.Used - entry->RowsMark;
+  m->LiveRowsBytes += entry->RowsBytes;
+  entry->PreviewShown = showPreview;
+  entry->Dirty = false;
+}
+
+bool CompactRows(LineModel* m) {
+  if (m->RowsMem.Used <= (usize)64 * 1024 ||
+      m->RowsMem.Used <= m->LiveRowsBytes * 2)
+    return false;
+  Arena old = m->RowsMem;
+  m->RowsMem = ArenaCreate(LINE_ROWS_RESERVE);
+  m->LiveRowsBytes = 0;
+  for (u32 i = 0; i < m->Entries.Count; i++) {
+    Entry* entry = &m->Entries.Data[i];
+    entry->RowsMark = m->RowsMem.Used;
+    entry->Rows = CopyRows(&m->RowsMem, entry->Rows);
+    entry->RowsBytes = m->RowsMem.Used - entry->RowsMark;
+    m->LiveRowsBytes += entry->RowsBytes;
+  }
+  ArenaRelease(&old);
+  return true;
+}
+
+void InvalidateEntry(LineModel* m, u32 index) {
+  m->Entries.Data[index].Dirty = true;
+  if (index < m->FirstDirtyEntry) m->FirstDirtyEntry = index;
+}
+
+void InvalidateAll(LineModel* m) {
+  for (u32 i = 0; i < m->Entries.Count; i++) {
+    m->Entries.Data[i].Dirty = true;
+    m->Entries.Data[i].PreviewRows = 0xffffffffu;
+  }
+  m->FirstDirtyEntry = 0;
+  m->PreviewBudgetDirty = true;
+}
+
+const SpanLine* FlatRow(const LineModel* m, u32 index) {
+  return &m->Lines.Data[(m->LinesHead + index) % m->Lines.Capacity];
+}
+
+void EnsureFlatCapacity(LineModel* m, u32 count) {
+  if (count <= m->Lines.Capacity) return;
+  u32 capacity = m->Lines.Capacity;
+  while (capacity < count) capacity *= 2;
+  Array<SpanLine> lines = Array_Make<SpanLine>(m->Mem, capacity);
+  for (u32 i = 0; i < m->Lines.Count; i++) Array_Push(&lines, *FlatRow(m, i));
+  m->Lines = lines;
+  m->LinesHead = 0;
+}
+
+u32 EntryAtRow(const LineModel* m, u64 row) {
+  u32 first = 0;
+  u32 end = m->Entries.Count;
+  while (first < end) {
+    u32 middle = first + (end - first) / 2;
+    if (m->Entries.Data[middle].RowStart <= row) first = middle + 1;
+    else end = middle;
+  }
+  return first ? first - 1 : 0;
+}
+
+u32 EntryIndexForId(const LineModel* m, u64 id) {
+  u32 first = 0;
+  u32 end = m->Entries.Count;
+  while (first < end) {
+    u32 middle = first + (end - first) / 2;
+    if (m->Entries.Data[middle].Id < id) first = middle + 1;
+    else end = middle;
+  }
+  return first;
+}
+
+void WriteFlatRange(LineModel* m, u64 start, u64 end, u32 firstEntry = NO_ENTRY) {
+  if (start >= end) return;
+  if (firstEntry == NO_ENTRY) firstEntry = EntryAtRow(m, start);
+  for (u32 i = firstEntry; i < m->Entries.Count; i++) {
+    const Entry* entry = &m->Entries.Data[i];
+    if (entry->RowStart >= end) break;
+    u64 contentStart = entry->RowStart + (entry->Separator ? 1u : 0u);
+    if (entry->Separator && entry->RowStart >= start) {
+      u32 row = (u32)(entry->RowStart - m->RowOffset);
+      m->Lines.Data[(m->LinesHead + row) % m->Lines.Capacity] = {};
+    }
+    u64 first = contentStart > start ? contentStart : start;
+    u64 last = contentStart + entry->Rows.Count;
+    if (last > end) last = end;
+    for (u64 row = first; row < last; row++) {
+      u32 visible = (u32)(row - m->RowOffset);
+      m->Lines.Data[(m->LinesHead + visible) % m->Lines.Capacity] =
+          entry->Rows.Data[(u32)(row - contentStart)];
+    }
   }
 }
 
-void RebuildAll(LineModel* m, bool crop) {
-  ArenaReset(&m->RowsMem);
-  m->Lines.Count = 0;
-  BuildRows(m, 0xffffffffu);
-  if (crop) CropDisplayToCap(m);
+bool PreviewShown(const LineModel* m, const Entry* entry) {
+  return entry->Kind == EntryKind::Tool && !entry->Collapsed &&
+         entry->Tool.Done && entry->Tool.Preview.Length &&
+         entry->Id >= m->ExpandedEntryId;
 }
 
-bool TrimToCap(LineModel* m) {
-  bool removedEntries = false;
-  RebuildAll(m, false);
-  while (m->Lines.Count > m->Cap && m->Entries.Count > 1) {
-    memmove(m->Entries.Data, m->Entries.Data + 1, (m->Entries.Count - 1) * sizeof(Entry));
-    m->Entries.Count--;
-    removedEntries = true;
-    RebuildAll(m, false);
+void CacheIfDirty(LineModel* m, Entry* entry) {
+  bool preview = PreviewShown(m, entry);
+  if (entry->Dirty || entry->PreviewShown != preview) CacheEntry(m, entry, preview);
+}
+
+void RemoveEntries(LineModel* m, u32 count) {
+  for (u32 i = 0; i < count; i++) m->LiveRowsBytes -= m->Entries.Data[i].RowsBytes;
+  m->Entries.Count -= count;
+  memmove(m->Entries.Data, m->Entries.Data + count, m->Entries.Count * sizeof(Entry));
+}
+
+bool TrimNewEntries(LineModel* m) {
+  if (!m->TrimPending || m->HasAssistant || m->FirstDirtyEntry != m->LayoutEntries)
+    return false;
+  u32 total = 0;
+  const Entry* next = nullptr;
+  // Size a new batch backwards, so a capped hydration never formats its
+  // discarded prefix. Existing entries are not visited on an ordinary append.
+  for (u32 i = m->Entries.Count; i > m->LayoutEntries; i--) {
+    Entry* entry = &m->Entries.Data[i - 1];
+    u32 removed = 0;
+    if (total > m->Cap) {
+      removed = i;
+    } else {
+      CacheIfDirty(m, entry);
+      u32 cost = entry->Rows.Count;
+      if (cost && next && NeedsSeparator(entry, next)) cost++;
+      if (i < m->Entries.Count && cost > m->Cap - total) removed = i;
+      else {
+        total += cost;
+        if (entry->Rows.Count) next = entry;
+      }
+    }
+    if (removed) {
+      RemoveEntries(m, removed);
+      m->RowsBegin = m->RowsEnd;
+      m->LayoutEntries = 0;
+      m->LastVisibleEntry = NO_ENTRY;
+      m->FirstDirtyEntry = 0;
+      return true;
+    }
   }
-  CropDisplayToCap(m);
-  return removedEntries;
+  return false;
+}
+
+bool TrimEntries(LineModel* m) {
+  if (!m->TrimPending || m->HasAssistant || m->RowsEnd - m->RowsBegin <= m->Cap ||
+      m->Entries.Count < 2)
+    return false;
+  u64 cutoff = m->RowsEnd - m->Cap;
+  u32 removed = 0;
+  for (u32 i = 0; i < m->Entries.Count; i++) {
+    const Entry* entry = &m->Entries.Data[i];
+    if (!entry->Rows.Count) continue;
+    if (entry->RowStart + (entry->Separator ? 1u : 0u) >= cutoff) break;
+    removed = i + 1;
+  }
+  if (removed == m->Entries.Count) removed--;
+  if (!removed) return false;
+  RemoveEntries(m, removed);
+  m->RowsBegin = m->RowsEnd;
+  m->LastVisibleEntry = NO_ENTRY;
+  for (u32 i = 0; i < m->Entries.Count; i++) {
+    Entry* entry = &m->Entries.Data[i];
+    entry->PreviousVisible = m->LastVisibleEntry;
+    if (!entry->Rows.Count) continue;
+    if (m->LastVisibleEntry == NO_ENTRY) {
+      if (entry->Separator) entry->RowStart++;
+      entry->Separator = false;
+      m->RowsBegin = entry->RowStart;
+      for (u32 j = 0; j < i; j++) m->Entries.Data[j].RowStart = m->RowsBegin;
+    }
+    m->LastVisibleEntry = i;
+  }
+  m->LayoutEntries = m->Entries.Count;
+  return true;
+}
+
+void RefreshPreviewBudget(LineModel* m) {
+  if (!m->PreviewBudgetDirty) return;
+  u64 old = m->ExpandedEntryId;
+  m->ExpandedEntryId = ExpandedEntryId(m);
+  m->PreviewBudgetDirty = false;
+  if (old == m->ExpandedEntryId) return;
+  u64 changed = old < m->ExpandedEntryId ? old : m->ExpandedEntryId;
+  u32 first = EntryIndexForId(m, changed);
+  if (first < m->FirstDirtyEntry) m->FirstDirtyEntry = first;
+}
+
+void EnsureLayout(const LineModel* m) {
+  LineModel_Layout(const_cast<LineModel*>(m));
 }
 
 }  // namespace
@@ -591,52 +763,80 @@ void WrapSpanLine(Arena* a, const SpanLine* in, u16 width, Array<SpanLine>* out)
 
 void LineModel_Init(LineModel* m, Arena* mem, u16 width, u32 cap,
                     bool color, bool rounded) {
+  *m = {};
   m->Mem = mem;
   m->RowsMem = ArenaCreate(LINE_ROWS_RESERVE);
+  m->LayoutMem = ArenaCreate(LINE_ROWS_RESERVE);
   m->Entries = Array_Make<Entry>(mem, 16);
   m->Lines = Array_Make<SpanLine>(mem, 128);
   m->Width = width ? width : 80;
   m->Cap = cap ? cap : 5000;
   m->AssistantStart = 0;
   m->AssistantRowOffset = 0;
-  m->AssistantRowsMark = 0;
   m->NextEntryId = 1;
   m->DisplayRevision = 1;
+  m->FirstDirtyEntry = NO_ENTRY;
+  m->LastVisibleEntry = NO_ENTRY;
+  m->ExpandedEntryId = ~(u64)0;
   m->HasAssistant = false;
   m->Color = color;
   m->Rounded = rounded;
 }
 
-void LineModel_Release(LineModel* m) { ArenaRelease(&m->RowsMem); }
+void LineModel_Release(LineModel* m) {
+  ArenaRelease(&m->RowsMem);
+  ArenaRelease(&m->LayoutMem);
+}
 
-u32 LineModel_Count(const LineModel* m) { return m->Lines.Count; }
+u32 LineModel_Count(const LineModel* m) {
+  EnsureLayout(m);
+  return m->Lines.Count;
+}
 
 bool LineModel_FitsAtWidth(LineModel* m, u16 width, u32 maxRows) {
+  EnsureLayout(m);
   if (maxRows >= m->Cap) return true;
   if (width < 1) width = 1;
   if (width == m->Width) return m->Lines.Count <= maxRows;
 
-  usize rowsMark = m->RowsMem.Used;
-  u16 savedWidth = m->Width;
-  Array<SpanLine> savedLines = m->Lines;
-  u32 savedAssistantStart = m->AssistantStart;
-  usize savedAssistantRowsMark = m->AssistantRowsMark;
+  // A scrollbar probe need not format a long history at every frame.
+  u32 visible = 0;
+  for (u32 i = 0; i < m->Entries.Count; i++)
+    if (EntryVisible(&m->Entries.Data[i]) && ++visible > maxRows) return false;
 
-  m->Width = width;
-  m->Lines = Array_Make<SpanLine>(&m->RowsMem, 32);
-  BuildRows(m, maxRows);
-  bool fits = m->Lines.Count <= maxRows;
-
-  ArenaRestore(&m->RowsMem, rowsMark);
-  m->Width = savedWidth;
-  m->Lines = savedLines;
-  m->AssistantStart = savedAssistantStart;
-  m->AssistantRowsMark = savedAssistantRowsMark;
+  LineModel probe = {};
+  probe.RowsMem = ArenaCreate(LINE_ROWS_RESERVE);
+  probe.LayoutMem = ArenaCreate(LINE_ROWS_RESERVE);
+  probe.Width = width;
+  probe.Cap = m->Cap;
+  probe.Color = m->Color;
+  probe.Rounded = m->Rounded;
+  probe.Entries = Array_Make<Entry>(&probe.RowsMem, m->Entries.Count);
+  probe.Lines = Array_Make<SpanLine>(&probe.RowsMem, 32);
+  for (u32 i = 0; i < m->Entries.Count; i++) {
+    Entry entry = m->Entries.Data[i];
+    entry.PreviewRows = 0xffffffffu;
+    Array_Push(&probe.Entries, entry);
+  }
+  u64 expandedId = ExpandedEntryId(&probe);
+  const Entry* previous = nullptr;
+  for (u32 i = 0; i < probe.Entries.Count; i++) {
+    const Entry* entry = &probe.Entries.Data[i];
+    if (!EntryVisible(entry)) continue;
+    if (NeedsSeparator(previous, entry)) AddBlank(&probe);
+    BuildEntryRows(&probe, entry, !entry->Collapsed && entry->Id >= expandedId);
+    previous = entry;
+    if (probe.Lines.Count > maxRows) break;
+  }
+  bool fits = probe.Lines.Count <= maxRows;
+  ArenaRelease(&probe.LayoutMem);
+  ArenaRelease(&probe.RowsMem);
   return fits;
 }
 
 const SpanLine* LineModel_At(const LineModel* m, u32 i) {
-  return i < m->Lines.Count ? &m->Lines.Data[i] : nullptr;
+  EnsureLayout(m);
+  return i < m->Lines.Count ? FlatRow(m, i) : nullptr;
 }
 
 u64 LineModel_RowEntryId(const LineModel* m, u32 row) {
@@ -644,7 +844,10 @@ u64 LineModel_RowEntryId(const LineModel* m, u32 row) {
   return line ? line->EntryId : 0;
 }
 
-u64 LineModel_DisplayRevision(const LineModel* m) { return m->DisplayRevision; }
+u64 LineModel_DisplayRevision(const LineModel* m) {
+  EnsureLayout(m);
+  return m->DisplayRevision;
+}
 
 DisplayRowLayout LineModel_LayoutDisplayRow(const SpanLine* line, u16 columns) {
   DisplayRowLayout layout = {};
@@ -850,14 +1053,14 @@ AssistantPrefixFingerprint CaptureAssistantPrefix(const LineModel* m) {
   if (m->Lines.Count <= m->AssistantStart) return result;
   result.RowCount = m->Lines.Count - m->AssistantStart;
   for (u32 i = 0; i + 1 < result.RowCount; i++) {
-    const SpanLine* line = &m->Lines.Data[m->AssistantStart + i];
+    const SpanLine* line = FlatRow(m, m->AssistantStart + i);
     DisplayRowLayout layout = LineModel_LayoutDisplayRow(line, m->Width);
     result.FixedRows = HashDisplayValue(result.FixedRows, layout.ContentEnd);
     result.FixedRows =
         HashDisplayValue(result.FixedRows,
                          DisplayRowPrefixHash(line, m->Width, layout.ContentEnd));
   }
-  const SpanLine* last = &m->Lines.Data[m->Lines.Count - 1u];
+  const SpanLine* last = FlatRow(m, m->Lines.Count - 1u);
   DisplayRowLayout layout = LineModel_LayoutDisplayRow(last, m->Width);
   result.LastEnd = layout.ContentEnd;
   result.LastRow = DisplayRowPrefixHash(last, m->Width, result.LastEnd);
@@ -870,7 +1073,7 @@ bool AssistantPrefixIsStable(const LineModel* m,
   if (m->Lines.Count < m->AssistantStart + previous.RowCount) return false;
   u64 fixedRows = 1469598103934665603ull;
   for (u32 i = 0; i + 1 < previous.RowCount; i++) {
-    const SpanLine* line = &m->Lines.Data[m->AssistantStart + i];
+    const SpanLine* line = FlatRow(m, m->AssistantStart + i);
     DisplayRowLayout layout = LineModel_LayoutDisplayRow(line, m->Width);
     fixedRows = HashDisplayValue(fixedRows, layout.ContentEnd);
     fixedRows =
@@ -878,7 +1081,7 @@ bool AssistantPrefixIsStable(const LineModel* m,
                          DisplayRowPrefixHash(line, m->Width, layout.ContentEnd));
   }
   if (fixedRows != previous.FixedRows) return false;
-  const SpanLine* last = &m->Lines.Data[m->AssistantStart + previous.RowCount - 1u];
+  const SpanLine* last = FlatRow(m, m->AssistantStart + previous.RowCount - 1u);
   DisplayRowLayout layout = LineModel_LayoutDisplayRow(last, m->Width);
   return layout.ContentEnd >= previous.LastEnd &&
          DisplayRowPrefixHash(last, m->Width, previous.LastEnd) == previous.LastRow;
@@ -886,53 +1089,132 @@ bool AssistantPrefixIsStable(const LineModel* m,
 
 }  // namespace
 
-bool LineModel_FindEntryRows(const LineModel* m, u64 entryId, u32* firstRow, u32* rowCount) {
-  if (entryId == 0) return false;
-  for (u32 i = 0; i < m->Lines.Count; i++) {
-    if (m->Lines.Data[i].EntryId != entryId) continue;
-    u32 end = i + 1;
-    while (end < m->Lines.Count && m->Lines.Data[end].EntryId == entryId) end++;
-    if (firstRow) *firstRow = i;
-    if (rowCount) *rowCount = end - i;
-    return true;
+void LineModel_Layout(LineModel* m) {
+  if (m->FirstDirtyEntry == NO_ENTRY && !m->TrimPending && !m->PreviewBudgetDirty) return;
+  u32 previousStart = m->AssistantStart;
+  u32 previousOffset = m->AssistantRowOffset;
+  bool streaming = m->HasAssistant;
+  bool trackAssistant = m->Entries.Count &&
+                        m->Entries.Data[m->Entries.Count - 1].Kind == EntryKind::Assistant;
+  bool assistantChanged = trackAssistant &&
+                          m->Entries.Data[m->Entries.Count - 1].Dirty;
+  AssistantPrefixFingerprint previous = {};
+  if (assistantChanged) previous = CaptureAssistantPrefix(m);
+
+  u64 oldOffset = m->RowOffset;
+  u64 oldEnd = oldOffset + m->Lines.Count;
+  RefreshPreviewBudget(m);
+  bool removed = TrimNewEntries(m);
+  u32 first = m->FirstDirtyEntry;
+  u64 suffixStart = first < m->LayoutEntries ? m->Entries.Data[first].RowStart : m->RowsEnd;
+  u64 row = suffixStart;
+  u32 prior = first < m->LayoutEntries ? m->Entries.Data[first].PreviousVisible
+                                      : m->LastVisibleEntry;
+  for (u32 i = first; i < m->Entries.Count; i++) {
+    Entry* entry = &m->Entries.Data[i];
+    CacheIfDirty(m, entry);
+    entry->PreviousVisible = prior;
+    entry->RowStart = row;
+    entry->Separator = entry->Rows.Count && prior != NO_ENTRY &&
+                       NeedsSeparator(&m->Entries.Data[prior], entry);
+    row += entry->Rows.Count + (entry->Separator ? 1u : 0u);
+    if (entry->Rows.Count) prior = i;
   }
-  return false;
+  m->RowsEnd = row;
+  m->LastVisibleEntry = prior;
+  m->LayoutEntries = m->Entries.Count;
+  if (TrimEntries(m)) removed = true;
+  bool relocated = CompactRows(m);
+
+  u64 offset = m->RowsEnd - m->RowsBegin > m->Cap ? m->RowsEnd - m->Cap : m->RowsBegin;
+  u32 count = (u32)(m->RowsEnd - offset);
+  EnsureFlatCapacity(m, count);
+  u32 capacity = m->Lines.Capacity;
+  if (offset >= oldOffset)
+    m->LinesHead = (m->LinesHead + (u32)((offset - oldOffset) % capacity)) % capacity;
+  else
+    m->LinesHead = (m->LinesHead + capacity - (u32)((oldOffset - offset) % capacity)) % capacity;
+  m->RowOffset = offset;
+  m->Lines.Count = count;
+  // Logical coordinates keep the surviving prefix in the same ring slots.
+  // Only an uncovered prefix or the changed suffix needs new metadata.
+  u64 stableStart = offset > oldOffset ? offset : oldOffset;
+  u64 stableEnd = suffixStart < oldEnd ? suffixStart : oldEnd;
+  u32 changedEntry = !removed && first < m->Entries.Count ? first : NO_ENTRY;
+  if (relocated || stableStart >= stableEnd) {
+    WriteFlatRange(m, offset, m->RowsEnd,
+                   !relocated && offset >= suffixStart ? changedEntry : NO_ENTRY);
+  } else {
+    WriteFlatRange(m, offset, stableStart);
+    WriteFlatRange(m, stableEnd, m->RowsEnd, changedEntry);
+  }
+  if (trackAssistant) {
+    u64 start = m->Entries.Data[m->Entries.Count - 1].RowStart;
+    m->AssistantStart = start > offset ? (u32)(start - offset) : 0;
+    m->AssistantRowOffset = offset > start ? (u32)(offset - start) : 0;
+  }
+  if (removed || (assistantChanged &&
+      (m->AssistantStart != previousStart || m->AssistantRowOffset != previousOffset ||
+       !AssistantPrefixIsStable(m, previous))))
+    AdvanceDisplayRevision(m);
+  if (!streaming) m->AssistantRowOffset = 0;
+  m->FirstDirtyEntry = NO_ENTRY;
+  m->TrimPending = false;
+  ArenaReset(&m->LayoutMem);
+  if (!streaming) {
+    ArenaTrim(&m->LayoutMem, (usize)64 * 1024);
+    ArenaTrim(&m->RowsMem, m->RowsMem.Used + (usize)64 * 1024);
+  }
+}
+
+bool LineModel_FindEntryRows(const LineModel* m, u64 entryId, u32* firstRow, u32* rowCount) {
+  EnsureLayout(m);
+  if (entryId == 0) return false;
+  u32 index = EntryIndexForId(m, entryId);
+  if (index == m->Entries.Count || m->Entries.Data[index].Id != entryId) return false;
+  const Entry* entry = &m->Entries.Data[index];
+  u64 start = entry->RowStart + (entry->Separator ? 1u : 0u);
+  u64 end = start + entry->Rows.Count;
+  if (start < m->RowOffset) start = m->RowOffset;
+  if (end > m->RowsEnd) end = m->RowsEnd;
+  if (start >= end) return false;
+  if (firstRow) *firstRow = (u32)(start - m->RowOffset);
+  if (rowCount) *rowCount = (u32)(end - start);
+  return true;
 }
 
 bool LineModel_IsEntryCollapsed(const LineModel* m, u64 entryId) {
-  for (u32 i = 0; i < m->Entries.Count; i++) {
-    const Entry* entry = &m->Entries.Data[i];
-    if (entry->Id == entryId) return entry->Collapsed;
-  }
-  return false;
+  u32 index = EntryIndexForId(m, entryId);
+  return index < m->Entries.Count && m->Entries.Data[index].Id == entryId &&
+         m->Entries.Data[index].Collapsed;
 }
 
 void LineModel_SetWidth(LineModel* m, u16 width) {
   if (width < 1) width = 1;
   if (width == m->Width) return;
   m->Width = width;
-  TrimToCap(m);
+  InvalidateAll(m);
+  m->TrimPending = true;
   AdvanceDisplayRevision(m);
 }
 
 bool LineModel_SetRounded(LineModel* m, bool rounded) {
   if (m->Rounded == rounded) return false;
   m->Rounded = rounded;
-  RebuildAll(m, true);
+  InvalidateAll(m);
   AdvanceDisplayRevision(m);
   return true;
 }
 
 bool LineModel_ToggleEntry(LineModel* m, u64 entryId) {
-  for (u32 i = 0; i < m->Entries.Count; i++) {
-    Entry* entry = &m->Entries.Data[i];
-    if (entry->Id != entryId) continue;
-    entry->Collapsed = !entry->Collapsed;
-    RebuildAll(m, true);
-    AdvanceDisplayRevision(m);
-    return true;
-  }
-  return false;
+  u32 index = EntryIndexForId(m, entryId);
+  if (index == m->Entries.Count || m->Entries.Data[index].Id != entryId) return false;
+  Entry* entry = &m->Entries.Data[index];
+  entry->Collapsed = !entry->Collapsed;
+  InvalidateEntry(m, index);
+  if (entry->Kind == EntryKind::Tool) m->PreviewBudgetDirty = true;
+  AdvanceDisplayRevision(m);
+  return true;
 }
 
 bool LineModel_ToggleAllTools(LineModel* m) {
@@ -952,10 +1234,11 @@ bool LineModel_ToggleAllTools(LineModel* m) {
     Entry* entry = &m->Entries.Data[i];
     if (entry->Kind != EntryKind::Tool || entry->Collapsed == collapsed) continue;
     entry->Collapsed = collapsed;
+    InvalidateEntry(m, i);
     changed = true;
   }
   if (changed) {
-    RebuildAll(m, true);
+    m->PreviewBudgetDirty = true;
     AdvanceDisplayRevision(m);
   }
   return changed;
@@ -972,32 +1255,21 @@ void LineModel_BeginAssistant(LineModel* m) {
   m->HasAssistant = true;
   m->AssistantStart = m->Lines.Count;
   m->AssistantRowOffset = 0;
-  m->AssistantRowsMark = m->RowsMem.Used;
+  InvalidateEntry(m, m->Entries.Count - 1);
 }
 
 void LineModel_AppendAssistant(LineModel* m, StrView delta) {
   FFI(!m->HasAssistant || m->Entries.Count == 0);
   if (delta.Length == 0) return;
-  u32 previousAssistantStart = m->AssistantStart;
-  u32 previousAssistantRowOffset = m->AssistantRowOffset;
-  AssistantPrefixFingerprint previous = CaptureAssistantPrefix(m);
   Entry* entry = &m->Entries.Data[m->Entries.Count - 1];
   StrBuf_Append(&entry->Text.Content, delta);
-  ArenaRestore(&m->RowsMem, m->AssistantRowsMark);
-  m->Lines.Count = m->AssistantStart;
-  BuildEntryRows(m, m->Entries.Count - 1, m->Entries.Count);
-  CropDisplayToCap(m);
-  if (m->AssistantStart != previousAssistantStart ||
-      m->AssistantRowOffset != previousAssistantRowOffset ||
-      !AssistantPrefixIsStable(m, previous))
-    AdvanceDisplayRevision(m);
+  InvalidateEntry(m, m->Entries.Count - 1);
 }
 
 void LineModel_EndAssistant(LineModel* m) {
   FFI(!m->HasAssistant);
   m->HasAssistant = false;
-  m->AssistantRowOffset = 0;
-  if (TrimToCap(m)) AdvanceDisplayRevision(m);
+  m->TrimPending = true;
 }
 
 void LineModel_AddNotice(LineModel* m, EntryKind kind, StrView text) {
@@ -1010,7 +1282,8 @@ void LineModel_AddNotice(LineModel* m, EntryKind kind, StrView text) {
   entry.Text.Content = StrBuf_Make(m->Mem, text.Length + 1);
   StrBuf_Append(&entry.Text.Content, text);
   Array_Push(&m->Entries, entry);
-  TrimToCap(m);
+  InvalidateEntry(m, m->Entries.Count - 1);
+  m->TrimPending = true;
   AdvanceDisplayRevision(m);
 }
 
@@ -1024,7 +1297,8 @@ void LineModel_AddUser(LineModel* m, StrView text, u64 timestampMs) {
   StrBuf_Append(&entry.Text.Content, text);
   entry.Text.Timestamp = FormatTimestamp(m->Mem, timestampMs);
   Array_Push(&m->Entries, entry);
-  TrimToCap(m);
+  InvalidateEntry(m, m->Entries.Count - 1);
+  m->TrimPending = true;
   AdvanceDisplayRevision(m);
 }
 
@@ -1034,12 +1308,14 @@ void LineModel_AddTool(LineModel* m, StrView toolId, StrView name, StrView argsJ
   entry.Id = m->NextEntryId++;
   FFI(entry.Id == 0);
   entry.Kind = EntryKind::Tool;
+  entry.PreviewRows = 0xffffffffu;
   entry.Collapsed = true;
   entry.Tool.Id = StrView_Dup(m->Mem, toolId);
   entry.Tool.Preview = StrBuf_Make(m->Mem, 256);
   ToolView_Init(m->Mem, &entry.Tool.View, name, argsJson);
   Array_Push(&m->Entries, entry);
-  TrimToCap(m);
+  InvalidateEntry(m, m->Entries.Count - 1);
+  m->TrimPending = true;
   AdvanceDisplayRevision(m);
 }
 
@@ -1050,8 +1326,6 @@ bool LineModel_UpdateTool(LineModel* m, StrView toolId, StrView preview) {
     if (!StrView_Eq(entry->Tool.Id, toolId)) continue;
     StrBuf_Clear(&entry->Tool.Preview);
     StrBuf_Append(&entry->Tool.Preview, preview);
-    RebuildAll(m, true);
-    AdvanceDisplayRevision(m);
     return true;
   }
   return false;
@@ -1065,10 +1339,12 @@ bool LineModel_FinishTool(LineModel* m, StrView toolId, StrView result, StrView 
     if (entry->Tool.Done) return true;
     entry->Tool.Done = true;
     entry->Tool.Error = isError;
+    InvalidateEntry(m, i - 1);
+    entry->PreviewRows = 0xffffffffu;
     StrBuf_Clear(&entry->Tool.Preview);
     StrBuf_Append(&entry->Tool.Preview, preview);
     ToolView_Finish(&entry->Tool.View, result, isError);
-    RebuildAll(m, true);
+    if (!entry->Collapsed && preview.Length) m->PreviewBudgetDirty = true;
     AdvanceDisplayRevision(m);
     return true;
   }

@@ -1,6 +1,9 @@
 #include "app/event_pump.h"
 
 #include <stdio.h>
+#if !defined(_WIN32)
+#include <signal.h>
+#endif
 
 #include "agent/event_json.h"
 #include "term/sanitize.h"
@@ -85,14 +88,63 @@ void ReportHarnessResult(SessionResult result) {
 
 namespace {
 
-// One event, one line, flushed immediately so a consumer reading the pipe sees
-// progress as it happens. Events with no JSON representation emit nothing.
-static void EmitHarnessEventJson(Arena* arena, const AgentHarnessEvent* event) {
-  StrBuf line = StrBuf_Make(arena, 256);
-  if (!AgentEventJson_Write(&line, event)) return;
-  fwrite(line.Data, 1, line.Length, stdout);
-  fputc('\n', stdout);
-  fflush(stdout);
+static void DispatchHarnessHooks(const AgentHarnessEvent* event) {
+  // Dispatch from ordered event delivery, never around Run on the caller:
+  // Stop must follow the run's last PostToolUse. PreToolUse belongs to the gate.
+  switch (event->Kind) {
+    case AgentHarnessEventKind::TransientToolEnd:
+      HookRunner_Dispatch(g_hooks, HookEvent::PostToolUse, event->Tool.Name);
+      break;
+    case AgentHarnessEventKind::TransientAgentStart:
+      if (event->Turn.Kind == AgentTurnKind::Run)
+        HookRunner_Dispatch(g_hooks, HookEvent::UserPromptSubmit, StrView{});
+      break;
+    case AgentHarnessEventKind::TransientAgentEnd:
+      if (event->Turn.Kind == AgentTurnKind::Run)
+        HookRunner_Dispatch(g_hooks,
+                            event->Turn.Outcome == AgentTurnOutcome::Failed
+                                ? HookEvent::StopFailure
+                                : HookEvent::Stop,
+                            StrView{});
+      break;
+    default:
+      break;
+  }
+}
+
+static bool WriteJsonFile(void* user, StrView line) {
+  FILE* file = (FILE*)user;
+  return fwrite(line.Data, 1, line.Length, file) == line.Length &&
+         fflush(file) == 0;
+}
+
+static void FailJsonOutput(HarnessJsonOutput* output, SessionResult failure) {
+  output->Failure = failure;
+  Atomic_StoreI32(&output->Harness->AbortFlag, 1);
+}
+
+static void WriteJsonLine(HarnessJsonOutput* output, StrBuf* line) {
+  StrBuf_AppendChar(line, '\n');
+  if (!output->Writer.Write(output->Writer.User, StrBuf_View(line)))
+    FailJsonOutput(output, SessionResult_Error(
+                              SessionStatus::IoError,
+                              SVL("failed to write or flush JSON output")));
+}
+
+static void ObserveJsonEvent(void* user, const AgentHarnessEvent* event) {
+  HarnessJsonOutput* output = (HarnessJsonOutput*)user;
+  DispatchHarnessHooks(event);
+  if (!SessionResult_IsOk(output->Failure)) return;
+  ArenaReset(&output->Scratch);
+  ArenaTrim(&output->Scratch, 64 * 1024);
+  StrBuf line = StrBuf_Make(&output->Scratch, 256);
+  SessionResult encoded = AgentEventJson_Write(&line, event);
+  if (!SessionResult_IsOk(encoded)) {
+    FailJsonOutput(output, SessionResult_Error(
+                              encoded.Status, SVL("failed to encode JSON event")));
+    return;
+  }
+  if (line.Length) WriteJsonLine(output, &line);
 }
 
 static void ClearLiveToolEnds(HarnessEventPump* pump) {
@@ -164,6 +216,28 @@ static void PumpHarnessEvent(HarnessEventPump* pump,
 // pages should not stay resident for the rest of the session.
 constexpr usize PUMP_SCRATCH_KEEP_BYTES = (usize)1 << 20;
 
+static SessionResult RegisterHarnessWatch(HarnessEventPump* pump) {
+  if (!pump->TuiView)
+    return AgentHarness_Watch(pump->Harness, AGENT_HARNESS_MAX_WATCH_EVENTS,
+                              &pump->Watch);
+
+  // Registration and history share one cursor. Hydrate before consuming any
+  // queued events, then release the copy rather than retaining it in event
+  // scratch or the runtime arena.
+  Arena snapshotMem = ArenaCreate();
+  AgentTranscriptSnapshot snapshot = {};
+  SessionResult watched = AgentHarness_WatchTranscript(
+      &snapshotMem, pump->Harness, AGENT_HARNESS_MAX_WATCH_EVENTS, 0,
+      &snapshot, &pump->Watch);
+  if (SessionResult_IsOk(watched)) {
+    Tui_ReplaceTranscript(pump->TuiView, snapshot.Transcript.Data,
+                          snapshot.Transcript.Count);
+    Tui_SetContextTokens(pump->TuiView, snapshot.ContextTokens);
+  }
+  ArenaRelease(&snapshotMem);
+  return watched;
+}
+
 static void RunHarnessEventPump(void* user) {
   HarnessEventPump* pump = (HarnessEventPump*)user;
   Arena scratch = ArenaCreate();
@@ -180,82 +254,33 @@ static void RunHarnessEventPump(void* user) {
         break;
       }
       AgentHarness_WatchClose(&pump->Watch);
-      AgentHarnessSnapshot snapshot = {};
-      SessionResult watched =
-          AgentHarness_Watch(&scratch, pump->Harness,
-                             AGENT_HARNESS_MAX_WATCH_EVENTS,
-                             pump->TuiView ? &snapshot : nullptr,
-                             &pump->Watch);
+      SessionResult watched = RegisterHarnessWatch(pump);
       ClearLiveToolEnds(pump);
-      if (SessionResult_IsOk(watched) && pump->TuiView) {
-        Tui_ReplaceTranscript(pump->TuiView, snapshot.Transcript.Data,
-                              snapshot.Transcript.Count);
-        Tui_SetContextTokens(pump->TuiView, snapshot.ContextTokens);
-      }
       Mutex_Unlock(&pump->WatchGuard);
       if (!SessionResult_IsOk(watched)) break;
       continue;
     }
     if (!SessionResult_IsOk(next)) break;
-    // Every run-scoped hook event is dispatched from here rather than from
-    // around AgentHarness_Run, because this watch stream is the only place the
-    // agent's events are already in order. Reporting Stop from the calling
-    // thread raced the pump and could land it ahead of the run's own last
-    // PostToolUse. Reported for every output mode: hooks describe the agent's
-    // lifecycle, not whatever this process happens to be rendering.
-    switch (event.Kind) {
-      // PreToolUse is absent deliberately: it is evaluated synchronously by the
-      // gate during clearance, strictly earlier than this, because its verdict
-      // decides whether the tool runs at all.
-      case AgentHarnessEventKind::TransientToolEnd:
-        HookRunner_Dispatch(g_hooks, HookEvent::PostToolUse, event.Tool.Name);
-        break;
-      case AgentHarnessEventKind::TransientAgentStart:
-        // Compaction is machinery, not a prompt the user submitted.
-        if (event.Turn.Kind == AgentTurnKind::Run)
-          HookRunner_Dispatch(g_hooks, HookEvent::UserPromptSubmit, StrView{});
-        break;
-      case AgentHarnessEventKind::TransientAgentEnd:
-        // A cancel is how a user stops a run they no longer want, so it ends
-        // the turn normally; only an actual error is reported as a failure.
-        if (event.Turn.Kind == AgentTurnKind::Run)
-          HookRunner_Dispatch(g_hooks,
-                              event.Turn.Outcome == AgentTurnOutcome::Failed
-                                  ? HookEvent::StopFailure
-                                  : HookEvent::Stop,
-                              StrView{});
-        break;
-      default:
-        break;
-    }
-
-    if (pump->JsonOutput)
-      EmitHarnessEventJson(&scratch, &event);
-    else
-      PumpHarnessEvent(pump, &event);
+    DispatchHarnessHooks(&event);
+    PumpHarnessEvent(pump, &event);
   }
   ArenaRelease(&scratch);
 }
 
 }  // namespace
 
-SessionResult StartHarnessEventPump(Arena* arena, AgentHarness* harness,
+SessionResult StartHarnessEventPump(AgentHarness* harness,
                                     HarnessEventSink sink, Tui* tuiView,
-                                    HarnessEventPump* pump,
-                                    AgentHarnessSnapshot* snapshot,
-                                    bool jsonOutput) {
+                                    HarnessEventPump* pump) {
   memset(pump, 0, sizeof(*pump));
   pump->Harness = harness;
   pump->TuiView = tuiView;
   pump->Sink = sink;
-  pump->JsonOutput = jsonOutput;
   pump->CompletionMem = ArenaCreate((usize)4 << 20);
   ClearLiveToolEnds(pump);
   Mutex_Init(&pump->WatchGuard);
   pump->WatchGuardInitialized = true;
-  SessionResult watched = AgentHarness_Watch(
-      arena, harness, AGENT_HARNESS_MAX_WATCH_EVENTS, snapshot,
-      &pump->Watch);
+  SessionResult watched = RegisterHarnessWatch(pump);
   if (SessionResult_IsOk(watched)) {
     if (!Thread_Start(&pump->Worker, RunHarnessEventPump, pump)) {
       AgentHarness_WatchClose(&pump->Watch);
@@ -290,4 +315,56 @@ void StopHarnessEventPump(HarnessEventPump* pump) {
   ArenaRelease(&pump->CompletionMem);
   pump->WatchGuardInitialized = false;
   pump->Started = false;
+}
+
+SessionResult StartHarnessJsonOutput(AgentHarness* harness,
+                                     HarnessJsonOutput* output,
+                                     HarnessJsonWriter writer) {
+  if (!harness || !harness->Initialized || !output)
+    return SessionResult_Invalid("JSON output arguments are invalid");
+  ScopedLock state(&harness->StateLock);
+  ScopedLock events(&harness->WatcherLock);
+  if (harness->Running || harness->Config.Events.OnEvent || output->Started)
+    return SessionResult_Error(SessionStatus::Busy,
+                               SVL("JSON output requires an idle, unobserved harness"));
+#if !defined(_WIN32)
+  // Process-wide, like the shell's stdin writer: a closed consumer must return
+  // EPIPE rather than terminating before we can report the delivery failure.
+  if (!writer.Write && signal(SIGPIPE, SIG_IGN) == SIG_ERR)
+    return SessionResult_Error(SessionStatus::IoError,
+                               SVL("failed to configure JSON pipe error handling"));
+#endif
+  *output = {};
+  output->Harness = harness;
+  output->Scratch = ArenaCreate();
+  output->Writer = writer.Write ? writer : HarnessJsonWriter{stdout, WriteJsonFile};
+  output->Failure = SessionResult_Ok();
+  output->Started = true;
+  harness->Config.Events = {output, ObserveJsonEvent};
+  return SessionResult_Ok();
+}
+
+SessionResult FinishHarnessJsonOutput(HarnessJsonOutput* output,
+                                      SessionResult result) {
+  if (!output || !output->Started)
+    return SessionResult_Invalid("JSON output is not started");
+  {
+    ScopedLock state(&output->Harness->StateLock);
+    ScopedLock events(&output->Harness->WatcherLock);
+    if (output->Harness->Running)
+      return SessionResult_Error(SessionStatus::Busy,
+                                 SVL("cannot finish JSON output during a run"));
+    output->Harness->Config.Events = {};
+  }
+  if (SessionResult_IsOk(output->Failure)) {
+    ArenaReset(&output->Scratch);
+    StrBuf line = StrBuf_Make(&output->Scratch, 128);
+    AgentEventJson_WriteResult(&line, result);
+    WriteJsonLine(output, &line);
+  }
+  if (!SessionResult_IsOk(output->Failure)) result = output->Failure;
+  ArenaRelease(&output->Scratch);
+  output->Started = false;
+  output->Harness = nullptr;
+  return result;
 }

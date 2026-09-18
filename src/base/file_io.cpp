@@ -56,6 +56,29 @@ FileIoResult File_Open(Arena* arena, StrView path, const char* mode, FILE** out)
   return error == ENOENT ? FileIoResult::Missing : FileIoResult::OpenFailed;
 }
 
+FileIoResult File_OpenRead(Arena* scratch, StrView path, FileReader* out) {
+  FILE* file = nullptr;
+  FileIoResult result = File_Open(scratch, path, "rb", &file);
+  out->Handle = file;
+  return result;
+}
+
+FileIoResult File_ReadChunk(FileReader* file, void* buffer, u32 capacity, u32* count) {
+  *count = 0;
+  if (!file->Handle || !buffer || !capacity) return FileIoResult::IoError;
+  FILE* handle = (FILE*)file->Handle;
+  size_t read = fread(buffer, 1, capacity, handle);
+  if (ferror(handle)) return FileIoResult::IoError;
+  *count = (u32)read;
+  return FileIoResult::Success;
+}
+
+FileIoResult File_Close(FileReader* file) {
+  FILE* handle = (FILE*)file->Handle;
+  file->Handle = nullptr;
+  return !handle || fclose(handle) == 0 ? FileIoResult::Success : FileIoResult::IoError;
+}
+
 FileIoResult File_ReadAll(Arena* arena, StrView path, StrView* out, u64 maxBytes) {
   *out = {};
   if (maxBytes > FILE_READ_MAX_BYTES) maxBytes = FILE_READ_MAX_BYTES;

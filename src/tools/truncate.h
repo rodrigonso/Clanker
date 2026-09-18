@@ -26,8 +26,8 @@ inline u32 Trunc_CountLines(StrView content) {
 }
 
 // Size for a truncation notice, rendered with one decimal ("12.5KB").
-inline void Trunc_AppendKb(StrBuf* b, u32 bytes) {
-  u32 kbx10 = (bytes * 10u + 512u) / 1024u;
+inline void Trunc_AppendKb(StrBuf* b, u64 bytes) {
+  u64 kbx10 = (bytes / 1024u) * 10u + ((bytes % 1024u) * 10u + 512u) / 1024u;
   StrBuf_AppendU64(b, kbx10 / 10u);
   StrBuf_AppendChar(b, '.');
   StrBuf_AppendU64(b, kbx10 % 10u);

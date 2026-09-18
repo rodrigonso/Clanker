@@ -101,6 +101,19 @@ void LineEdit_Clear(LineEdit* e) {
   e->HistPos = -1;
 }
 
+void LineEdit_Clone(LineEdit* out, const LineEdit* source, Arena* mem) {
+  LineEdit copy = *source;
+  copy.Mem = mem;
+  copy.Text = StrBuf_Make(mem, source->Text.Length + 1);
+  StrBuf_Append(&copy.Text, StrView{source->Text.Data, source->Text.Length});
+  copy.Stash = StrBuf_Make(mem, source->Stash.Length + 1);
+  StrBuf_Append(&copy.Stash, StrView{source->Stash.Data, source->Stash.Length});
+  copy.History = Array_Make<StrView>(mem, source->History.Count);
+  for (u32 i = 0; i < source->History.Count; i++)
+    Array_Push(&copy.History, StrView_Dup(mem, source->History.Data[i]));
+  *out = copy;
+}
+
 StrView LineEdit_Text(const LineEdit* e) { return StrView{e->Text.Data, e->Text.Length}; }
 u32 LineEdit_Cursor(const LineEdit* e) { return e->Cursor; }
 bool LineEdit_Empty(const LineEdit* e) { return e->Text.Length == 0; }

@@ -13,7 +13,9 @@ namespace {
 
 StrView WriteEvent(Arena* arena, const AgentHarnessEvent* event, bool* wrote) {
   StrBuf line = StrBuf_Make(arena, 128);
-  *wrote = AgentEventJson_Write(&line, event);
+  SessionResult result = AgentEventJson_Write(&line, event);
+  CHECK(SessionResult_IsOk(result));
+  *wrote = SessionResult_IsOk(result) && line.Length != 0;
   return StrBuf_View(&line);
 }
 
@@ -76,8 +78,8 @@ void TestTransientShapes(Arena* arena) {
   structural.Stream.Kind = StreamEventKind::TextStart;
   StrBuf untouched = StrBuf_Make(arena, 32);
   StrBuf_AppendCStr(&untouched, "keep");
-  CHECK(!AgentEventJson_Write(&untouched, &structural));
-  // A rejected event must leave the buffer exactly as it was found.
+  CHECK(SessionResult_IsOk(AgentEventJson_Write(&untouched, &structural)));
+  // A skipped event must leave the buffer exactly as it was found.
   CHECK(StrView_EqCStr(StrBuf_View(&untouched), "keep"));
 
   AgentHarnessEvent toolStart = {};
@@ -160,9 +162,42 @@ void TestTransientShapes(Arena* arena) {
   line = WriteEvent(arena, &cancel, &wrote);
   CHECK_ALL(wrote, StrView_EqCStr(line, "{\"type\":\"cancel_requested\"}"));
 
-  CHECK(!AgentEventJson_Write(nullptr, &cancel));
+  CHECK(!SessionResult_IsOk(AgentEventJson_Write(nullptr, &cancel)));
   StrBuf sink = StrBuf_Make(arena, 8);
-  CHECK(!AgentEventJson_Write(&sink, nullptr));
+  CHECK(!SessionResult_IsOk(AgentEventJson_Write(&sink, nullptr)));
+
+  AgentHarnessEvent malformed = {};
+  malformed.Kind = AgentHarnessEventKind::DurableRecord;
+  CHECK(!SessionResult_IsOk(AgentEventJson_Write(&untouched, &malformed)));
+  CHECK(StrView_EqCStr(StrBuf_View(&untouched), "keep"));
+  SessionRecord record = {};
+  record.Kind = (SessionRecordKind)255;
+  malformed.Record = &record;
+  CHECK(!SessionResult_IsOk(AgentEventJson_Write(&untouched, &malformed)));
+  CHECK(StrView_EqCStr(StrBuf_View(&untouched), "keep"));
+}
+
+struct ObserverTrace {
+  u64 Cursor;
+  u32 Records;
+  u32 Deltas;
+  bool InvalidCursor;
+};
+
+void ObserveTrace(void* user, const AgentHarnessEvent* event) {
+  ObserverTrace* trace = (ObserverTrace*)user;
+  if (event->Kind == AgentHarnessEventKind::DurableRecord) {
+    trace->Records++;
+    if (event->Cursor != trace->Cursor + 1 ||
+        event->Cursor != event->Record->Seq)
+      trace->InvalidCursor = true;
+    trace->Cursor = event->Cursor;
+  } else if (event->Cursor != trace->Cursor) {
+    trace->InvalidCursor = true;
+  }
+  if (event->Kind == AgentHarnessEventKind::TransientStream &&
+      event->Stream.Kind == StreamEventKind::TextDelta)
+    trace->Deltas++;
 }
 
 bool EchoToolExec(void* context, Arena* arena, StrView id, const ToolArgs* args,
@@ -217,16 +252,18 @@ void TestRunStream(Arena* arena) {
   config.ToolCount = 1;
   config.ProviderImpl = ScriptProvider_Make(&script);
   config.ToolExec = ToolExecution::Parallel;
+  ObserverTrace trace = {};
+  config.Events = {&trace, ObserveTrace};
 
   AgentHarness harness = {};
   CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+  trace.Cursor = harness.PublishedCursor;
 
-  AgentHarnessSnapshot snapshot = {};
   AgentHarnessWatch* watchPtr = ArenaPushStruct(arena, AgentHarnessWatch);
   *watchPtr = AgentHarnessWatch{};
   AgentHarnessWatch& watch = *watchPtr;
   CHECK(SessionResult_IsOk(
-      AgentHarness_Watch(arena, &harness, 128, &snapshot, &watch)));
+      AgentHarness_Watch(&harness, 128, &watch)));
 
   CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("hello"))));
 
@@ -242,10 +279,10 @@ void TestRunStream(Arena* arena) {
     if (event.Kind == AgentHarnessEventKind::TransientAgentEnd) finished = true;
 
     StrBuf line = StrBuf_Make(arena, 256);
-    if (!AgentEventJson_Write(&line, &event)) continue;
+    CHECK(SessionResult_IsOk(AgentEventJson_Write(&line, &event)));
+    if (!line.Length) continue;
     StrView text = StrBuf_View(&line);
     lines++;
-    if (!lines) continue;
     if (lines == 1) firstLine = text;
     lastLine = text;
 
@@ -275,6 +312,7 @@ void TestRunStream(Arena* arena) {
             toolEnds == 1, deltas >= 1, sawWorkingDelta, sawToolOutput);
   // user + assistant + tool result + assistant
   CHECK(records >= 4);
+  CHECK_ALL(!trace.InvalidCursor, trace.Records == records, trace.Deltas == 2);
   CHECK_ALL(StrView_Contains(firstLine, "\"type\":\"agent_start\""),
             StrView_Contains(lastLine, "\"type\":\"agent_end\""),
             StrView_Contains(lastLine, "\"outcome\":\"succeeded\""));

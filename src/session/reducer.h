@@ -27,14 +27,15 @@ struct SessionReduction {
 };
 
 // Allocates `out->Index` from `arena` and folds every record in order. Full
-// O(n) bulk validation (via SessionRecords_Validate) runs exactly once here;
+// bulk validation (via SessionRecords_Validate) runs exactly once here;
 // this is meant for session open only, never for a per-turn/per-append path.
 SessionResult SessionReducer_Reduce(Arena* arena, const SessionRecord* records, u32 count,
                                     SessionReduction* out);
 
 // Validates one candidate record against the already-folded `reduction`
-// using O(1) index lookups only (no re-scan of prior history). `pending`/
-// `pendingCount` (optional) are earlier records of the *same* in-flight
+// using O(1) index lookups (no re-scan of prior history). Compactions also
+// walk their parent's ancestry to validate the inclusive, ordered span.
+// `pending`/`pendingCount` (optional) are earlier records of the *same* in-flight
 // append batch that have already passed this check but are not yet folded
 // into `reduction`; they are matched with a bounded linear scan over just
 // that small batch, never over the historical log. Callers append the
@@ -50,12 +51,14 @@ SessionResult SessionReducer_ValidateAppend(const SessionReduction* reduction,
 // costs O(branch) to recompute inherited Model/Thinking/Tools settings.
 void SessionReducer_Fold(SessionReduction* reduction, const SessionRecord* records, u32 count);
 
+// The array belongs to arena; its records remain borrowed from reduction.
 SessionResult SessionReducer_Ancestry(const SessionReduction* reduction, Arena* arena,
                                       DurableId headId,
                                       Array<const SessionRecord*>* outBranch);
 
 // Materializes the model-visible message sequence for a branch. Harness
-// records and branch settings never enter this array.
+// records and branch settings never enter this array. Only the message array
+// belongs to arena; nested content remains borrowed from reduction.
 SessionResult SessionReducer_Context(Arena* arena, const SessionReduction* reduction,
                                      DurableId headId, Array<Message>* outMessages);
 
@@ -68,9 +71,11 @@ SessionResult SessionReducer_ContextThrough(Arena* arena, const SessionReduction
                                             DurableId headId, DurableId throughId,
                                             Array<Message>* outMessages);
 
-// Full O(n) bulk validation used only at session open (and other one-shot
+// Full bulk validation used only at session open (and other one-shot
 // contexts like fork copy verification): schema-version, envelope,
 // contiguous seq, duplicate-EntryId, and parent/reference-existence checks
-// across the whole record set. Builds and discards its own temporary
+// and compaction topology across the whole record set. Uses the same
+// admission check as append against each validated prefix: O(n) plus
+// compaction ancestry walks. Builds and discards its own temporary
 // DurableIdIndex; never called from a per-append hot path.
 SessionResult SessionRecords_Validate(const SessionRecord* records, u32 count);

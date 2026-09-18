@@ -43,19 +43,7 @@ SessionResult CloneHarnessEvent(Arena* arena, const AgentHarnessEvent* source,
       clone.Tool.Name = StrView_Dup(arena, source->Tool.Name);
       clone.Tool.ArgumentsJson = StrView_Dup(arena, source->Tool.ArgumentsJson);
       clone.Tool.Result.Content =
-          Array_Make<Content>(arena, source->Tool.Result.Content.Count
-                                         ? source->Tool.Result.Content.Count
-                                         : 1);
-      for (u32 i = 0; i < source->Tool.Result.Content.Count; i++) {
-        Content content = source->Tool.Result.Content.Data[i];
-        content.Text = StrView_Dup(arena, content.Text);
-        content.ToolId = StrView_Dup(arena, content.ToolId);
-        content.ToolName = StrView_Dup(arena, content.ToolName);
-        content.ToolArgsJson = StrView_Dup(arena, content.ToolArgsJson);
-        content.ImageData = StrView_Dup(arena, content.ImageData);
-        content.ImageMimeType = StrView_Dup(arena, content.ImageMimeType);
-        Array_Push(&clone.Tool.Result.Content, content);
-      }
+          Content_CloneArray(arena, source->Tool.Result.Content);
       break;
     }
     case AgentHarnessEventKind::TransientRetryStart:
@@ -224,24 +212,28 @@ SessionResult CloneReduction(Arena* arena, const SessionReduction* source,
   return SessionResult_Ok(copy.RecordCount);
 }
 
-// Builds the snapshot under StateLock, which AgentHarness_SnapshotFull and
-// AgentHarness_Watch already hold. The branch is resolved against the live
-// reduction in a private arena; only the messages it selects are copied out.
-SessionResult BuildSnapshotLocked(Arena* arena, AgentHarness* harness,
-                                  AgentHarnessSnapshot* out) {
+// StateLock keeps the projection's borrowed content stable until selected
+// messages have been cloned. Neither projection scratch nor tree state escapes.
+SessionResult BuildTranscriptLocked(Arena* arena, AgentHarness* harness,
+                                    u32 maxMessages,
+                                    AgentTranscriptSnapshot* out) {
   Arena scratch = ArenaCreate();
-  Array<Message> branch = {};
-  SessionResult context = SessionReducer_Context(
-      &scratch, &harness->Reduction, harness->Reduction.HeadId, &branch);
+  Array<Message> transcript = {};
+  SessionResult context =
+      SessionReducer_Context(&scratch, &harness->Reduction,
+                             harness->Reduction.HeadId, &transcript);
   if (!SessionResult_IsOk(context)) {
     ArenaRelease(&scratch);
     return context;
   }
-  AgentHarnessSnapshot snapshot = {};
-  snapshot.Transcript =
-      Array_Make<Message>(arena, branch.Count ? branch.Count : 1);
-  for (u32 i = 0; i < branch.Count; i++)
-    Array_Push(&snapshot.Transcript, Message_Clone(arena, branch.Data[i]));
+  u32 count = transcript.Count;
+  if (maxMessages && count > maxMessages) count = maxMessages;
+  u32 first = transcript.Count - count;
+  AgentTranscriptSnapshot snapshot = {};
+  snapshot.Transcript = Array_Make<Message>(arena, count);
+  for (u32 i = first; i < transcript.Count; i++)
+    Array_Push(&snapshot.Transcript, Message_Clone(arena, transcript.Data[i]));
+  snapshot.HeadId = harness->Reduction.HeadId;
   // The materialized context cannot say whether its newest usage predates a
   // compaction, so the measurement walks the raw records instead.
   Array<const SessionRecord*> records = {};
@@ -249,11 +241,12 @@ SessionResult BuildSnapshotLocked(Arena* arena, AgentHarness* harness,
           &harness->Reduction, &scratch, harness->Reduction.HeadId, &records)))
     snapshot.ContextTokens =
         AgentCompaction_BranchContextTokens(records.Data, records.Count);
-  ArenaRelease(&scratch);
   snapshot.Cursor =
       harness->Records.Count ? harness->Records.Data[harness->Records.Count - 1].Seq : 0;
   snapshot.Running = harness->Running;
   snapshot.Faulted = harness->Faulted;
+  snapshot.HasEarlierMessages = first != 0;
+  ArenaRelease(&scratch);
   *out = snapshot;
   return SessionResult_Ok(snapshot.Cursor);
 }
@@ -273,14 +266,21 @@ void CloseRegisteredWatchers(AgentHarness* harness) {
 
 // Requires WatcherLock.
 void PublishToWatchersLocked(AgentHarness* harness, AgentHarnessEvent* event) {
+  if (event->Kind == AgentHarnessEventKind::DurableRecord)
+    harness->PublishedCursor = event->Record->Seq;
+  event->Cursor = harness->PublishedCursor;
+  const AgentHarnessEventObserver& observer = harness->Config.Events;
+  if (observer.OnEvent) observer.OnEvent(observer.User, event);
   for (u32 i = 0; i < harness->WatcherCount; i++) {
     AgentHarnessWatch* watch = harness->Watchers[i];
-    event->Cursor = watch->Cursor;
+    if (event->Kind == AgentHarnessEventKind::DurableRecord &&
+        event->Cursor <= watch->Cursor)
+      continue;
     EnqueueWatcherEvent(watch, event);
   }
 }
 
-// Generic "publish to every registered watcher" used by every Publish* below.
+// Observe synchronously, then publish to presentation watches.
 // Takes only WatcherLock, so a streamed token never waits on snapshot work.
 // Safe to call with StateLock already held; that is the declared lock order.
 void PublishToWatchers(AgentHarness* harness, AgentHarnessEvent* event) {
@@ -312,10 +312,6 @@ void ResetQueuesIfEmptyLocked(AgentHarness* harness) {
   harness->Queues.FollowUp = Array_Make<Message>(&harness->Queued, 4);
   harness->Queues.NextTurn = Array_Make<Message>(&harness->Queued, 4);
 }
-
-// Committed pages kept on Work between runs. Enough that back-to-back short
-// runs never re-fault, small enough that a long run's peak does not linger.
-constexpr usize WORK_ARENA_KEEP_BYTES = (usize)1 << 20;
 
 // Ends the run: publishes agent_end, then recycles Work and hands its pages
 // back. `result` is rewritten in place because its message may point into Work
@@ -395,10 +391,7 @@ SessionResult AgentHarness_Append(AgentHarness* harness, SessionRecord* records,
     event.Cursor = records[i].Seq;
     event.Record = &records[i];
     ScopedLock registry(&harness->WatcherLock);
-    for (u32 w = 0; w < harness->WatcherCount; w++) {
-      AgentHarnessWatch* watch = harness->Watchers[w];
-      if (records[i].Seq > watch->Cursor) EnqueueWatcherEvent(watch, &event);
-    }
+    PublishToWatchersLocked(harness, &event);
   }
   return SessionResult_Ok(records[count - 1].Seq);
 }
@@ -644,6 +637,7 @@ SessionResult AgentHarness_Init(AgentHarness* harness, SessionLog log,
     AgentHarness_Close(harness);
     return reduced;
   }
+  harness->PublishedCursor = loaded.Count ? loaded.Data[loaded.Count - 1].Seq : 0;
   return reduced;
 }
 
@@ -679,12 +673,13 @@ SessionResult AgentHarness_Snapshot(Arena* arena, AgentHarness* harness,
   return CloneReduction(arena, &harness->Reduction, out);
 }
 
-SessionResult AgentHarness_SnapshotFull(Arena* arena, AgentHarness* harness,
-                                        AgentHarnessSnapshot* out) {
+SessionResult AgentHarness_SnapshotTranscript(Arena* arena, AgentHarness* harness,
+                                              u32 maxMessages,
+                                              AgentTranscriptSnapshot* out) {
   if (!arena || !harness || !harness->Initialized || !out)
     return SessionResult_Invalid("snapshot arguments are invalid");
   ScopedLock lock(&harness->StateLock);
-  return BuildSnapshotLocked(arena, harness, out);
+  return BuildTranscriptLocked(arena, harness, maxMessages, out);
 }
 
 SessionResult AgentHarness_Summarize(Arena* arena, AgentHarness* harness,
@@ -719,8 +714,9 @@ SessionResult AgentHarness_DescribeSession(Arena* arena, AgentHarness* harness,
                                harness->Records.Count, &options, out);
 }
 
-SessionResult AgentHarness_Watch(Arena* arena, AgentHarness* harness, u32 capacity,
-                                 AgentHarnessSnapshot* outSnapshot,
+static SessionResult StartWatch(Arena* arena, AgentHarness* harness, u32 capacity,
+                                 u32 maxMessages,
+                                 AgentTranscriptSnapshot* outSnapshot,
                                  AgentHarnessWatch* outWatch) {
   if (!harness || !harness->Initialized || (outSnapshot && !arena) || !outWatch ||
       outWatch->Initialized)
@@ -743,23 +739,31 @@ SessionResult AgentHarness_Watch(Arena* arena, AgentHarness* harness, u32 capaci
     // The snapshot and the registration have to be atomic with respect to
     // appends: a record landing between them would reach neither the snapshot
     // nor the watcher. Appends publish durable records under StateLock, so
-    // holding it across both is enough; WatcherLock is taken only to register,
-    // which keeps streamed tokens from waiting on the snapshot copy.
+    // holding it across both is enough; WatcherLock is taken only to check and
+    // register, which keeps streamed tokens from waiting on the snapshot copy.
+    // Registration also requires StateLock, so the count checked here cannot
+    // grow before this watch registers, and a rejected watch never touches
+    // the caller's arena.
     ScopedLock lock(&harness->StateLock);
+    bool full = false;
+    {
+      ScopedLock registry(&harness->WatcherLock);
+      full = harness->WatcherCount == AGENT_HARNESS_MAX_WATCHERS;
+    }
     u64 cursor = harness->Records.Count
                      ? harness->Records.Data[harness->Records.Count - 1].Seq
                      : 0;
-    result = outSnapshot ? BuildSnapshotLocked(arena, harness, outSnapshot)
-                         : SessionResult_Ok(cursor);
+    if (full)
+      result = SessionResult_Error(SessionStatus::Busy, SVL("watcher limit reached"));
+    else
+      result = outSnapshot
+                   ? BuildTranscriptLocked(arena, harness, maxMessages, outSnapshot)
+                   : SessionResult_Ok(cursor);
     if (SessionResult_IsOk(result)) {
       ScopedLock registry(&harness->WatcherLock);
-      if (harness->WatcherCount == AGENT_HARNESS_MAX_WATCHERS) {
-        result = SessionResult_Error(SessionStatus::Busy, SVL("watcher limit reached"));
-      } else {
-        outWatch->Cursor = cursor;
-        outWatch->Registered = true;
-        harness->Watchers[harness->WatcherCount++] = outWatch;
-      }
+      outWatch->Cursor = cursor;
+      outWatch->Registered = true;
+      harness->Watchers[harness->WatcherCount++] = outWatch;
     }
   }
   if (!SessionResult_IsOk(result)) {
@@ -769,6 +773,20 @@ SessionResult AgentHarness_Watch(Arena* arena, AgentHarness* harness, u32 capaci
     *outWatch = AgentHarnessWatch{};
   }
   return result;
+}
+
+SessionResult AgentHarness_Watch(AgentHarness* harness, u32 capacity,
+                                 AgentHarnessWatch* outWatch) {
+  return StartWatch(nullptr, harness, capacity, 0, nullptr, outWatch);
+}
+
+SessionResult AgentHarness_WatchTranscript(Arena* arena, AgentHarness* harness,
+                                           u32 capacity, u32 maxMessages,
+                                           AgentTranscriptSnapshot* outSnapshot,
+                                           AgentHarnessWatch* outWatch) {
+  if (!arena || !outSnapshot)
+    return SessionResult_Invalid("watch transcript arguments are invalid");
+  return StartWatch(arena, harness, capacity, maxMessages, outSnapshot, outWatch);
 }
 
 SessionResult AgentHarness_WatchNext(Arena* arena, AgentHarnessWatch* watch,
@@ -1015,6 +1033,8 @@ SessionResult AgentHarness_LabelBranch(AgentHarness* harness, StrView label) {
     ScopedLock lock(&harness->StateLock);
     SessionResult idle = EnsureIdleLocked(harness, SVL("agent harness is running"));
     if (!SessionResult_IsOk(idle)) return idle;
+    harness->Running = true;
+    ArenaReset(&harness->LastResult);
     head = harness->Reduction.HeadId;
   }
   SessionRecord branchLabel = {};
@@ -1022,7 +1042,14 @@ SessionResult AgentHarness_LabelBranch(AgentHarness* harness, StrView label) {
   branchLabel.Kind = SessionRecordKind::BranchLabel;
   branchLabel.BranchLabelEntry.ParentId = head;
   branchLabel.BranchLabelEntry.Label = label;
-  return AgentHarness_Append(harness, &branchLabel, 1);
+  SessionResult result = AgentHarness_Append(harness, &branchLabel, 1);
+  {
+    ScopedLock lock(&harness->StateLock);
+    if (result.Message.Length)
+      result.Message = StrView_Dup(&harness->LastResult, result.Message);
+    harness->Running = false;
+  }
+  return result;
 }
 
 SessionResult AgentHarness_SetName(AgentHarness* harness, StrView name) {
@@ -1031,12 +1058,21 @@ SessionResult AgentHarness_SetName(AgentHarness* harness, StrView name) {
     ScopedLock lock(&harness->StateLock);
     SessionResult idle = EnsureIdleLocked(harness, SVL("agent harness is running"));
     if (!SessionResult_IsOk(idle)) return idle;
+    harness->Running = true;
+    ArenaReset(&harness->LastResult);
   }
   SessionRecord record = {};
   record.EntryId = DurableId_Generate();
   record.Kind = SessionRecordKind::SessionName;
   record.SessionNameEntry.Name = name;
-  return AgentHarness_Append(harness, &record, 1);
+  SessionResult result = AgentHarness_Append(harness, &record, 1);
+  {
+    ScopedLock lock(&harness->StateLock);
+    if (result.Message.Length)
+      result.Message = StrView_Dup(&harness->LastResult, result.Message);
+    harness->Running = false;
+  }
+  return result;
 }
 
 SessionResult AgentHarness_SetModel(AgentHarness* harness, Model model, Provider provider,
@@ -1071,6 +1107,8 @@ SessionResult AgentHarness_SetModel(AgentHarness* harness, Model model, Provider
       harness->Config.Stream.Auth = {};
       harness->Config.Stream.Profile = profile;
     }
+    if (result.Message.Length)
+      result.Message = StrView_Dup(&harness->LastResult, result.Message);
     harness->Running = false;
   }
   return result;
@@ -1094,6 +1132,10 @@ SessionResult AgentHarness_Fork(Arena* arena, AgentHarness* harness,
       return SessionResult_Error(SessionStatus::Busy, SVL("agent harness is running"));
     if (harness->Records.Count == 0)
       return SessionResult_Error(SessionStatus::InvalidState, SVL("agent harness has no session root"));
+    // The repository may read the live source log until Fork returns. Keep
+    // its head and lifetime stable, while allowing read-only snapshots.
+    harness->Running = true;
+    ArenaReset(&harness->LastResult);
     const SessionRecord* root = &harness->Records.Data[0];
     sessionId = root->SessionId;
     headId = DurableId_IsSet(sourceHeadId) ? sourceHeadId : harness->Reduction.HeadId;
@@ -1108,7 +1150,14 @@ SessionResult AgentHarness_Fork(Arena* arena, AgentHarness* harness,
   options.ProjectKey = projectKey;
   options.WorkingDirectory = workingDirectory;
   options.Label = label;
-  return repository->Fork(repository->Ctx, arena, &options, outLog, outInfo);
+  SessionResult result = repository->Fork(repository->Ctx, arena, &options, outLog, outInfo);
+  {
+    ScopedLock lock(&harness->StateLock);
+    if (result.Message.Length)
+      result.Message = StrView_Dup(&harness->LastResult, result.Message);
+    harness->Running = false;
+  }
+  return result;
 }
 
 SessionResult AgentHarness_RequestCancel(AgentHarness* harness) {

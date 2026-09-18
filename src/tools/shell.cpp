@@ -4,6 +4,7 @@
 #include "crypto/random.h"
 #include "tools/exec.h"
 #include "tools/fs.h"
+#include "tools/shell_capture.h"
 #include "tools/tools.h"
 #include "tools/truncate.h"
 
@@ -26,11 +27,11 @@ static void Shell_AppendHex16(StrBuf* b, u64 v) {
   for (i32 i = 15; i >= 0; --i) StrBuf_AppendChar(b, hex[(v >> ((u32)i * 4u)) & 0xFu]);
 }
 
-static StrView Shell_WriteTempOutput(Arena* arena, StrView output, StrView directory) {
+static void* Shell_OpenOutput(void*, Arena* arena, StrView directory, StrView* outPath) {
   StrBuf path = StrBuf_Make(arena, 256);
   if (directory.Length) {
     // Created lazily: a session that never overflows leaves no directory.
-    if (!Fs_MkdirP(arena, directory)) return StrView{};
+    if (!Fs_MkdirP(arena, directory)) return nullptr;
     StrBuf_Append(&path, directory);
     char last = path.Data[path.Length - 1];
     if (last != '/' && last != '\\') StrBuf_AppendChar(&path, '/');
@@ -41,7 +42,7 @@ static StrView Shell_WriteTempOutput(Arena* arena, StrView output, StrView direc
     DWORD n = GetTempPathW(MAX_PATH + 1, temp);
     StrView tempDir = {};
     if (n == 0 || n > MAX_PATH || !Win32_Utf8(arena, temp, n, &tempDir))
-      return StrView{};
+      return nullptr;
     StrBuf_Append(&path, tempDir);
     if (path.Length && path.Data[path.Length - 1] != '\\' &&
         path.Data[path.Length - 1] != '/')
@@ -87,35 +88,139 @@ static StrView Shell_WriteTempOutput(Arena* arena, StrView output, StrView direc
 #endif
     if (!f) continue;
 
-    usize written = fwrite(output.Data, 1, output.Length, f);
-    bool ok = fclose(f) == 0 && written == output.Length;
-    if (!ok) {
-      File_Remove(arena, StrBuf_View(&path));
-      return StrView{};
-    }
-    return StrBuf_View(&path);
+    *outPath = StrBuf_View(&path);
+    return f;
   }
-  return StrView{};
+  return nullptr;
 }
 
-static void Shell_AppendTruncNotice(StrBuf* b, TruncResult tr, StrView path) {
-  u32 a = tr.TotalLines > tr.OutputLines ? tr.TotalLines - tr.OutputLines + 1u : 1u;
-  u32 c = tr.TotalLines;
+static bool Shell_WriteOutput(void*, void* file, StrView bytes) {
+  return fwrite(bytes.Data, 1, bytes.Length, (FILE*)file) == bytes.Length;
+}
+
+static bool Shell_CloseOutput(void*, void* file) {
+  return fclose((FILE*)file) == 0;
+}
+
+// The extra byte preserves whether the byte-limited tail starts immediately
+// after a newline. Trunc_Tail also uses it when snapping a UTF-8 boundary.
+static constexpr u32 SHELL_TAIL_CAPACITY = TRUNC_MAX_BYTES + 1;
+
+void ShellCapture_Init(ShellCapture* capture, Arena* arena, StrView directory,
+                       const ShellCaptureIo* io) {
+  *capture = {};
+  capture->Mem = arena;
+  capture->Directory = directory;
+  capture->Tail = ArenaPushArray(arena, char, SHELL_TAIL_CAPACITY);
+  capture->Io = io ? *io : ShellCaptureIo{nullptr, Shell_OpenOutput,
+                                         Shell_WriteOutput, Shell_CloseOutput};
+  FFI(!capture->Io.Open || !capture->Io.Write || !capture->Io.Close);
+}
+
+u64 ShellCapture_LineCount(const ShellCapture* capture) {
+  return capture->Newlines +
+         (capture->TotalBytes && capture->LastByte != '\n' ? 1u : 0u);
+}
+
+static bool ShellCapture_Write(ShellCapture* capture, StrView bytes) {
+  if (!bytes.Length) return true;
+  if (capture->Io.Write(capture->Io.User, capture->File, bytes)) return true;
+  capture->Error = SVL("failed to write shell output log");
+  return false;
+}
+
+bool ShellCapture_Feed(ShellCapture* capture, StrView chunk) {
+  FFI(capture->Finished);
+  if (capture->Error.Length) return false;
+  if (!chunk.Length) return true;
+  if (capture->TotalBytes > ~(u64)0 - chunk.Length) {
+    capture->Error = SVL("shell output exceeded the supported byte count");
+    return false;
+  }
+  capture->TotalBytes += chunk.Length;
+  for (u32 i = 0; i < chunk.Length; i++)
+    if (chunk.Data[i] == '\n') capture->Newlines++;
+  capture->LastByte = chunk.Data[chunk.Length - 1];
+
+  if (!capture->File &&
+      (capture->TotalBytes > TRUNC_MAX_BYTES ||
+       ShellCapture_LineCount(capture) > TRUNC_MAX_LINES)) {
+    capture->File = capture->Io.Open(capture->Io.User, capture->Mem,
+                                      capture->Directory, &capture->Path);
+    if (!capture->File) {
+      capture->Error = SVL("failed to create shell output log");
+    } else {
+      // Before the first overflow the ring still holds every earlier byte.
+      u32 first = ClankerMin(capture->Count, SHELL_TAIL_CAPACITY - capture->Head);
+      if (ShellCapture_Write(capture, StrView{capture->Tail + capture->Head, first}))
+        ShellCapture_Write(capture, StrView{capture->Tail, capture->Count - first});
+    }
+  }
+  if (capture->File && !capture->Error.Length)
+    ShellCapture_Write(capture, chunk);
+
+  if (chunk.Length >= SHELL_TAIL_CAPACITY) {
+    memcpy(capture->Tail, chunk.Data + chunk.Length - SHELL_TAIL_CAPACITY,
+           SHELL_TAIL_CAPACITY);
+    capture->Head = 0;
+    capture->Count = SHELL_TAIL_CAPACITY;
+  } else {
+    u32 dropped = capture->Count + chunk.Length > SHELL_TAIL_CAPACITY
+                      ? capture->Count + chunk.Length - SHELL_TAIL_CAPACITY : 0;
+    capture->Head = (capture->Head + dropped) % SHELL_TAIL_CAPACITY;
+    capture->Count -= dropped;
+    u32 end = (capture->Head + capture->Count) % SHELL_TAIL_CAPACITY;
+    u32 first = ClankerMin(chunk.Length, SHELL_TAIL_CAPACITY - end);
+    memcpy(capture->Tail + end, chunk.Data, first);
+    memcpy(capture->Tail, chunk.Data + first, chunk.Length - first);
+    capture->Count += chunk.Length;
+  }
+  return !capture->Error.Length;
+}
+
+bool ShellCapture_Finish(ShellCapture* capture) {
+  if (!capture->Finished && capture->File) {
+    bool closed = capture->Io.Close(capture->Io.User, capture->File);
+    capture->File = nullptr;
+    if (!closed && !capture->Error.Length)
+      capture->Error = SVL("failed to close shell output log");
+  }
+  capture->Finished = true;
+  return !capture->Error.Length;
+}
+
+StrView ShellCapture_Tail(Arena* scratch, const ShellCapture* capture, bool* byBytes) {
+  char* text = ArenaPushArray(scratch, char, capture->Count + 1);
+  u32 first = ClankerMin(capture->Count, SHELL_TAIL_CAPACITY - capture->Head);
+  memcpy(text, capture->Tail + capture->Head, first);
+  memcpy(text + first, capture->Tail, capture->Count - first);
+  text[capture->Count] = '\0';
+  TruncResult tail = Trunc_Tail(scratch, StrView{text, capture->Count},
+                               TRUNC_MAX_LINES, TRUNC_MAX_BYTES);
+  if (byBytes) *byBytes = tail.ByBytes;
+  return tail.Content;
+}
+
+static void Shell_AppendTruncNotice(StrBuf* b, const ShellCapture* capture,
+                                    StrView tail, bool byBytes) {
+  u64 c = ShellCapture_LineCount(capture);
+  u32 outputLines = Trunc_CountLines(tail);
+  u64 a = c > outputLines ? c - outputLines + 1u : 1u;
   StrBuf_AppendCStr(b, "\n\n[Showing lines ");
   StrBuf_AppendU64(b, a);
   StrBuf_AppendChar(b, '-');
   StrBuf_AppendU64(b, c);
   StrBuf_AppendCStr(b, " of ");
-  StrBuf_AppendU64(b, tr.TotalLines);
-  if (tr.ByBytes) StrBuf_AppendCStr(b, " (50.0KB limit)");
+  StrBuf_AppendU64(b, c);
+  if (byBytes) StrBuf_AppendCStr(b, " (50.0KB limit)");
   StrBuf_AppendCStr(b, ". Full output: ");
-  StrBuf_Append(b, path);
+  StrBuf_Append(b, capture->Path);
   StrBuf_AppendChar(b, ']');
 }
 
 struct ShellStreamCapture {
   Arena Snapshot;
-  StrBuf Output;
+  ShellCapture Output;
   const ToolUpdateSink* Updates;
   u64 LastUpdateMs;
   bool Dirty;
@@ -130,12 +235,10 @@ static void Shell_EmitPartial(ShellStreamCapture* capture, bool force) {
     return;
 
   ArenaReset(&capture->Snapshot);
-  TruncResult truncated =
-      Trunc_Tail(&capture->Snapshot, StrBuf_View(&capture->Output),
-                 TRUNC_MAX_LINES, TRUNC_MAX_BYTES);
+  StrView tail = ShellCapture_Tail(&capture->Snapshot, &capture->Output);
   ToolResult partial = {};
   partial.Content = Array_Make<Content>(&capture->Snapshot, 1);
-  Array_Push(&partial.Content, Content_Text(truncated.Content));
+  Array_Push(&partial.Content, Content_Text(tail));
   ToolUpdateSink_Emit(capture->Updates, &partial);
   capture->LastUpdateMs = now;
   capture->Dirty = false;
@@ -143,10 +246,10 @@ static void Shell_EmitPartial(ShellStreamCapture* capture, bool force) {
 
 static bool Shell_OnData(void* user, StrView chunk) {
   ShellStreamCapture* capture = (ShellStreamCapture*)user;
-  (void)chunk;
+  bool ok = ShellCapture_Feed(&capture->Output, chunk);
   capture->Dirty = true;
   Shell_EmitPartial(capture, false);
-  return true;
+  return ok;
 }
 
 static constexpr u32 SHELL_PERMISSION_MAX_COMMAND = 8192;
@@ -350,13 +453,16 @@ static bool ShellExec(void* ctx, Arena* arena, StrView id,
                       const ToolUpdateSink* updates, ToolResult* out,
                       StrBuf* err) {
   (void)id;
-  (void)updates;
   StrView command = ToolArgs_GetStr(args, "command");
   if (command.Length == 0) {
     StrBuf_AppendCStr(err, "missing 'command' argument");
     return false;
   }
   i64 sec = ToolArgs_GetInt(args, "timeout", 0);
+  if (sec > 0xFFFFFFFFu / 1000u) {
+    StrBuf_AppendCStr(err, "timeout exceeds the supported duration");
+    return false;
+  }
   u32 ms = sec > 0 ? (u32)(sec * 1000) : 0;
 
   ToolResult initial = {};
@@ -364,45 +470,63 @@ static bool ShellExec(void* ctx, Arena* arena, StrView id,
   Array_Push(&initial.Content, Content_Text(SVL("")));
   ToolUpdateSink_Emit(updates, &initial);
 
+  Arena work = ArenaCreate();
   ShellStreamCapture capture = {};
-  capture.Snapshot = ArenaCreate((usize)16 << 20);
-  capture.Output = StrBuf_Make(arena, 4096);
+  capture.Snapshot = ArenaCreate((usize)256 << 10);
+  const ShellToolContext* shell = (const ShellToolContext*)ctx;
+  ShellCapture_Init(&capture.Output, &work, shell ? shell->Directory : StrView{},
+                     shell ? shell->OutputIo : nullptr);
   capture.Updates = updates;
   ExecResult r =
-      Exec_RunStreaming(arena, command, ms, abort, Shell_OnData, &capture,
-                        &capture.Output);
+      Exec_RunStreaming(&work, command, ms, abort, Shell_OnData, &capture);
+  ShellCapture_Finish(&capture.Output);
   Shell_EmitPartial(&capture, true);
-  ArenaRelease(&capture.Snapshot);
   if (!r.Spawned) {
     StrBuf_AppendCStr(err, "failed to run command: ");
     StrBuf_Append(err, r.Output);
+    ArenaRelease(&capture.Snapshot);
+    ArenaRelease(&work);
     return false;
   }
 
-  TruncResult tr = Trunc_Tail(arena, r.Output, TRUNC_MAX_LINES, TRUNC_MAX_BYTES);
-  StrBuf text = StrBuf_Make(arena, r.Output.Length ? tr.Content.Length + 256 : 64);
-  if (r.Output.Length == 0) {
+  ArenaReset(&capture.Snapshot);
+  bool byBytes = false;
+  StrView tail = ShellCapture_Tail(&capture.Snapshot, &capture.Output, &byBytes);
+  StrBuf text = StrBuf_Make(arena, tail.Length + capture.Output.Path.Length + 256);
+  if (capture.Output.TotalBytes == 0) {
     StrBuf_AppendCStr(&text, "(no output)");
   } else {
-    StrBuf_Append(&text, tr.Content);
+    StrBuf_Append(&text, tail);
   }
-  if (tr.Truncated) {
-    const ShellToolContext* shell = (const ShellToolContext*)ctx;
-    StrView path = Shell_WriteTempOutput(arena, r.Output,
-                                         shell ? shell->Directory : StrView{});
-    if (path.Length) Shell_AppendTruncNotice(&text, tr, path);
+  bool failed = false;
+  StrView failure = capture.Output.Error.Length ? capture.Output.Error : r.Output;
+  if (failure.Length) {
+    StrBuf_AppendCStr(&text, "\n\n");
+    StrBuf_Append(&text, failure);
+    if (capture.Output.Path.Length) {
+      StrBuf_AppendCStr(&text, ". Incomplete output: ");
+      StrBuf_Append(&text, capture.Output.Path);
+    }
+    failed = true;
+  } else if (capture.Output.TotalBytes > tail.Length) {
+    Shell_AppendTruncNotice(&text, &capture.Output, tail, byBytes);
   }
-
-  if (r.TimedOut) {
+  if (abort && Atomic_LoadI32(abort)) {
+    StrBuf_AppendCStr(&text, "\n\nCommand cancelled");
+    failed = true;
+  } else if (r.TimedOut) {
     StrBuf_AppendCStr(&text, "\n\nCommand timed out after ");
     StrBuf_AppendI64(&text, sec);
     StrBuf_AppendCStr(&text, " seconds");
-    StrBuf_Append(err, StrBuf_View(&text));
-    return false;
-  }
-  if (r.ExitCode != 0) {
+    failed = true;
+  } else if (r.ExitCode != 0 && !failed) {
     StrBuf_AppendCStr(&text, "\n\nCommand exited with code ");
     StrBuf_AppendI64(&text, r.ExitCode);
+    failed = true;
+  }
+  ArenaRelease(&capture.Snapshot);
+  ArenaRelease(&work);
+  if (failed) {
     StrBuf_Append(err, StrBuf_View(&text));
     return false;
   }

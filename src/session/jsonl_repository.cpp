@@ -61,6 +61,11 @@ namespace {
 SessionResult CopyHandleRecordsLocked(JsonlLogHandle* handle, Arena* arena,
                                       Array<SessionRecord>* out);
 
+JsonlLogHandle* AllocateHandle(JsonlRepository* repository) {
+  ScopedLock lock(&repository->Lock);
+  return ArenaPushStruct(&repository->Mem, JsonlLogHandle);
+}
+
 SessionResult IoError(const char* message) {
   return SessionResult_Error(SessionStatus::IoError, SV(message));
 }
@@ -330,6 +335,8 @@ SessionResult DecodeRecords(Arena* arena, Arena* scratch, StrView path,
   Array<SessionRecord> records = Array_Make<SessionRecord>(arena, lineCount);
   u32 lineStart = 0;
   u32 lastGoodNewline = 0;
+  bool tornTail = false;
+  bool missingNewline = false;
   while (lineStart < content.Length) {
     const char* newline = (const char*)memchr(content.Data + lineStart, '\n',
                                               content.Length - lineStart);
@@ -362,8 +369,7 @@ SessionResult DecodeRecords(Arena* arena, Arena* scratch, StrView path,
       if (records.Count == 0)
         return SessionResult_Error(SessionStatus::Corrupt,
                                    SVL("session file has no valid prefix"));
-      if (repair && !TruncateFile(scratch, path, lastGoodNewline))
-        return IoError("failed to repair torn session tail");
+      tornTail = true;
       break;
     }
     SessionRecord record = {};
@@ -376,14 +382,17 @@ SessionResult DecodeRecords(Arena* arena, Arena* scratch, StrView path,
       lastGoodNewline = lineEnd + 1;
       lineStart = lineEnd + 1;
     } else {
-      if (repair && !AppendNewline(scratch, path))
-        return IoError("failed to terminate final session record");
+      missingNewline = true;
       lineStart = content.Length;
     }
   }
 
   SessionResult valid = SessionRecords_Validate(records.Data, records.Count);
   if (!SessionResult_IsOk(valid)) return valid;
+  if (repair && tornTail && !TruncateFile(scratch, path, lastGoodNewline))
+    return IoError("failed to repair torn session tail");
+  if (repair && missingNewline && !AppendNewline(scratch, path))
+    return IoError("failed to terminate final session record");
   *out = records;
   return SessionResult_Ok(records.Data[records.Count - 1].Seq);
 }
@@ -533,7 +542,7 @@ SessionResult AppendBatch(void* context, SessionRecord* input, u32 count) {
     return SessionResult_Error(SessionStatus::Faulted, SVL("session log is faulted"));
 
   Arena scratch = ArenaCreate();
-  // Two-phase, O(1)-per-record validation against the already-folded
+  // Two-phase validation against the already-folded
   // `handle->Reduction` (plus a bounded scan over just this small batch);
   // never rebuilds a full existing+new candidate array or re-validates
   // prior history.
@@ -648,7 +657,7 @@ SessionResult InitializeHandle(JsonlRepository* repository, Arena* callerArena,
                                StrView path, StrView lockPath, bool writable,
                                u32 claimIndex, ProcessFileLock writerLock,
                                JsonlLogHandle** outHandle, SessionInfo* outInfo) {
-  JsonlLogHandle* handle = ArenaPushStruct(&repository->Mem, JsonlLogHandle);
+  JsonlLogHandle* handle = AllocateHandle(repository);
   *handle = JsonlLogHandle{};
   handle->Repository = repository;
   handle->ClaimIndex = claimIndex;
@@ -770,7 +779,7 @@ SessionResult Create(void* context, Arena* arena, const SessionCreateOptions* op
   // Deliberately no file write here: the session starts life in memory and is
   // materialized by the first append that warrants persisting. The writer lock
   // already reserves the id, so nothing else can claim it meanwhile.
-  JsonlLogHandle* handle = ArenaPushStruct(&repository->Mem, JsonlLogHandle);
+  JsonlLogHandle* handle = AllocateHandle(repository);
   *handle = JsonlLogHandle{};
   handle->Repository = repository;
   handle->ClaimIndex = claimIndex;

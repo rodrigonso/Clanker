@@ -76,8 +76,10 @@ void AdvanceCopyNotice(Tui* t, u64 nowMs);
 // ---- display pipeline ----------------------------------------------------
 
 TuiDisplayEvent* QueueDisplayEvent(Tui* t, TuiDisplayEventKind kind);
-void SetDisplayPayload(Tui* t, TuiDisplayEvent* ev, StrView text);
+void SetDisplayPayload(TuiDisplayEvent* ev, StrView text);
 void QueueText(Tui* t, StrView text);
+void ResetDisplay(Tui* t);
+void SetTransientText(TuiTransientText* field, StrView text);
 void ResetToolUpdates(Tui* t);
 TuiToolUpdateSlot* FindToolUpdate(Tui* t, StrView toolCallId);
 TuiToolUpdateSlot* AcquireToolUpdate(Tui* t, StrView toolCallId, u16* outIndex);

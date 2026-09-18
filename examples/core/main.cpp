@@ -61,14 +61,12 @@ int main() {
   // Init takes ownership of the log; config and provider context outlive Run.
   bool ok = Report(AgentHarness_Init(&harness, log, &config));
   if (ok) ok = Report(AgentHarness_Run(&harness, SVL("Say hello")));
-  SessionReduction snapshot = {};
-  Array<Message> messages = {};
-  if (ok) ok = Report(AgentHarness_Snapshot(&arena, &harness, &snapshot));
-  if (ok) ok = Report(SessionReducer_Context(&arena, &snapshot,
-                                             snapshot.HeadId, &messages));
+  AgentTranscriptSnapshot snapshot = {};
+  if (ok)
+    ok = Report(AgentHarness_SnapshotTranscript(&arena, &harness, 0, &snapshot));
   if (ok) {
-    for (u32 i = 0; i < messages.Count; i++) {
-      const Message& message = messages.Data[i];
+    for (u32 i = 0; i < snapshot.Transcript.Count; i++) {
+      const Message& message = snapshot.Transcript.Data[i];
       if (message.Kind != Role::Assistant) continue;
       for (u32 j = 0; j < message.Content.Count; j++) {
         const Content& content = message.Content.Data[j];

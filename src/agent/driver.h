@@ -21,6 +21,9 @@ bool AgentDriver_ReviewPermission(
 
 // Internal seams shared by harness.cpp and driver.cpp.
 
+// Keep short turns warm without retaining committed pages from a large spike.
+constexpr usize WORK_ARENA_KEEP_BYTES = (usize)1 << 20;
+
 // Normalizes a hook's result into a HookError, keeping the hook's own message
 // when it supplied one.
 inline SessionResult AgentHook_Failure(SessionResult result, const char* fallback) {

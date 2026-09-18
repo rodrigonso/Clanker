@@ -183,7 +183,7 @@ inline void StrBuf_AppendUtf8(StrBuf* b, u32 cp) {
   }
 }
 
-inline StrView StrBuf_View(StrBuf* b) { return StrView{b->Data, b->Length}; }
+inline StrView StrBuf_View(const StrBuf* b) { return StrView{b->Data, b->Length}; }
 inline const char* StrBuf_CStr(StrBuf* b) { return b->Data; }
 
 inline void StrBuf_Clear(StrBuf* b) {

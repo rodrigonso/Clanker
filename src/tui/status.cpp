@@ -101,12 +101,12 @@ void FormatStatus(Tui* t, char* left, u32 leftCap, u32* ll, char* right,
   } else if (t->OperationActive) {
     Put(left, leftCap, ll, kSpinner[t->Spinner % 10]);
     Put(left, leftCap, ll, " ");
-    for (u32 i = 0; i < t->Sess.OperationLabel.Length && *ll < leftCap - 1; i++)
-      left[(*ll)++] = t->Sess.OperationLabel.Data[i];
-    if (t->Sess.OperationStatus.Length) {
+    for (u32 i = 0; i < t->OperationLabel.Text.Length && *ll < leftCap - 1; i++)
+      left[(*ll)++] = t->OperationLabel.Text.Data[i];
+    if (t->OperationStatus.Text.Length) {
       Put(left, leftCap, ll, ": ");
-      for (u32 i = 0; i < t->Sess.OperationStatus.Length && *ll < leftCap - 1; i++)
-        left[(*ll)++] = t->Sess.OperationStatus.Data[i];
+      for (u32 i = 0; i < t->OperationStatus.Text.Length && *ll < leftCap - 1; i++)
+        left[(*ll)++] = t->OperationStatus.Text.Data[i];
     }
   } else if (t->State == TuiState::Idle) {
     Put(left, leftCap, ll, "ready");
@@ -115,16 +115,16 @@ void FormatStatus(Tui* t, char* left, u32 leftCap, u32* ll, char* right,
     Put(left, leftCap, ll, " ");
     if (t->State == TuiState::Tool) {
       Put(left, leftCap, ll, "running ");
-      for (u32 i = 0; i < t->Sess.StateTool.Length && *ll < leftCap - 1; i++)
-        left[(*ll)++] = t->Sess.StateTool.Data[i];
+      for (u32 i = 0; i < t->StateTool.Text.Length && *ll < leftCap - 1; i++)
+        left[(*ll)++] = t->StateTool.Text.Data[i];
     } else if (t->State == TuiState::Retry) {
       Put(left, leftCap, ll, "retrying ");
-      for (u32 i = 0; i < t->Sess.RetryStatus.Length && *ll < leftCap - 1; i++)
-        left[(*ll)++] = t->Sess.RetryStatus.Data[i];
+      for (u32 i = 0; i < t->RetryStatus.Text.Length && *ll < leftCap - 1; i++)
+        left[(*ll)++] = t->RetryStatus.Text.Data[i];
     } else if (t->State == TuiState::PermissionReview) {
       Put(left, leftCap, ll, "reviewing ");
-      for (u32 i = 0; i < t->Sess.StateTool.Length && *ll < leftCap - 1; i++)
-        left[(*ll)++] = t->Sess.StateTool.Data[i];
+      for (u32 i = 0; i < t->StateTool.Text.Length && *ll < leftCap - 1; i++)
+        left[(*ll)++] = t->StateTool.Text.Data[i];
       Put(left, leftCap, ll, " permission");
     } else if (t->State == TuiState::Streaming) {
       Put(left, leftCap, ll, "responding");

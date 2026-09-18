@@ -13,14 +13,20 @@
 #include "tools/fs.h"
 #include "tools/imagemime.h"
 #include "tools/search_regex.h"
+#include "tools/shell_capture.h"
 #include "tools/tools.h"
 #include "tools/truncate.h"
 #include "tests.h"
 
 #if defined(_WIN32)
 #include <direct.h>
+#include <windows.h>
 #define CLANKER_RMDIR _rmdir
 #else
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #define CLANKER_RMDIR rmdir
 #endif
@@ -277,6 +283,7 @@ static void TestToolPermissions(Arena* a) {
 // ---- read ----------------------------------------------------------------
 
 static void TestRead(Arena* a) {
+  CHECK(Fs_MkdirP(a, SVL("out")));
   const struct {
     StrView Extension;
     StrView Mime;
@@ -290,7 +297,7 @@ static void TestRead(Arena* a) {
   for (u32 i = 0; i < sizeof(images) / sizeof(images[0]); i++)
     CHECK(StrView_Eq(Img_MimeForExt(images[i].Extension), images[i].Mime));
 
-  const char* path = "clanker_tool_read_test.txt";
+  const char* path = "out/clanker_tool_read_test.txt";
   MakeFile(path, "line1\nline2\n");
 
   Tool rt = ReadTool();
@@ -317,19 +324,19 @@ static void TestRead(Arena* a) {
   CHECK_ALL(directoryResult.Content.Count == 0, directoryError.Length > 0);
 
   // offset + limit window with a continuation notice
-  const char* p2 = "clanker_tool_read_ol.txt";
+  const char* p2 = "out/clanker_tool_read_ol.txt";
   MakeFile(p2, "l1\nl2\nl3\nl4\nl5\n");
   ToolResult o4 = {};
   StrBuf e4 = StrBuf_Make(a, 32);
-  CHECK(RunTool(rt, a, SV("{\"path\":\"clanker_tool_read_ol.txt\",\"offset\":2,\"limit\":2}"), &o4, &e4));
+  CHECK(RunTool(rt, a, SV("{\"path\":\"out/clanker_tool_read_ol.txt\",\"offset\":2,\"limit\":2}"), &o4, &e4));
   CHECK_ALL(StrView_Contains(o4.Content.Data[0].Text, "l2"),
             StrView_Contains(o4.Content.Data[0].Text, "l3"),
             !StrView_Contains(o4.Content.Data[0].Text, "l5"),
             StrView_Contains(o4.Content.Data[0].Text, "more lines in file"));
   remove(p2);
 
-  // image file => text + image content blocks
-  const char* pimg = "clanker_tool_read.png";
+  // Sniffed image type wins over the extension.
+  const char* pimg = "out/clanker_tool_read.gif";
   unsigned char png[12] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13};
   {
     FILE* f = fopen(pimg, "wb");
@@ -345,9 +352,11 @@ static void TestRead(Arena* a) {
             StrView_Contains(o5.Content.Data[0].Text, "image/png"),
             o5.Content.Data[1].Kind == ContentKind::Image,
             StrView_EqCStr(o5.Content.Data[1].ImageMimeType, "image/png"),
-            o5.Content.Data[1].ImageData.Length > 0);
+            StrView_EqCStr(o5.Content.Data[1].ImageData, "iVBORw0KGgoAAAAN"));
   remove(pimg);
 }
+
+static void TestReadStreamCancellation();
 
 static void TestReadTruncation(Arena* a) {
   struct ReadCase {
@@ -365,9 +374,9 @@ static void TestReadTruncation(Arena* a) {
        "\n\n[Showing lines 2-51 of 60 (50.0KB limit). Use offset=52 to continue.]"},
       {61440, 3, 2, 1, 51200,
        "\n\n[Line 2 is 60.0KB, exceeds 50.0KB limit. Use shell: sed -n '2p' "
-       "clanker_tool_read_truncation.txt | head -c 51200]"},
+       "out/clanker_tool_read_truncation.txt | head -c 51200]"},
   };
-  const char* path = "clanker_tool_read_truncation.txt";
+  const char* path = "out/clanker_tool_read_truncation.txt";
   for (u32 i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
     const ReadCase& test = cases[i];
     StrBuf input = StrBuf_Make(a, (test.LineBytes + 1) * test.Lines + 1);
@@ -378,7 +387,7 @@ static void TestReadTruncation(Arena* a) {
     }
     MakeFile(path, input.Data);
     StrBuf args = StrBuf_Make(a, 128);
-    StrBuf_AppendCStr(&args, "{\"path\":\"clanker_tool_read_truncation.txt\",\"offset\":");
+    StrBuf_AppendCStr(&args, "{\"path\":\"out/clanker_tool_read_truncation.txt\",\"offset\":");
     StrBuf_AppendU64(&args, test.Offset);
     StrBuf_AppendCStr(&args, ",\"limit\":");
     StrBuf_AppendU64(&args, test.Limit);
@@ -400,9 +409,685 @@ static void TestReadTruncation(Arena* a) {
     }
     remove(path);
   }
+
+  auto oracle = [](Arena* memory, StrView input, StrView file, i64 offset,
+                   i64 limit, StrBuf* expected) {
+    u32 total = Trunc_CountLines(input);
+    u64 start = offset > 0 ? (u64)(offset - 1) : 0;
+    if (total && start >= total) {
+      StrBuf_AppendCStr(expected, "Offset ");
+      StrBuf_AppendI64(expected, offset);
+      StrBuf_AppendCStr(expected, " is beyond end of file (");
+      StrBuf_AppendU64(expected, total);
+      StrBuf_AppendCStr(expected, " lines total)");
+      return false;
+    }
+    u64 end = limit > 0 ? ClankerMin(start + (u64)limit, (u64)total) : total;
+    auto lineStart = [](StrView content, u64 line) {
+      if (!line) return 0u;
+      for (u32 i = 0; i < content.Length; i++)
+        if (content.Data[i] == '\n' && !--line) return i + 1u;
+      return content.Length;
+    };
+    u32 beginByte = lineStart(input, start);
+    u32 endByte = lineStart(input, end);
+    if (endByte && input.Data[endByte - 1] == '\n') endByte--;
+    if (endByte < beginByte) endByte = beginByte;
+    StrView selected{input.Data + beginByte, endByte - beginByte};
+    TruncResult tr = Trunc_Head(memory, selected, TRUNC_MAX_LINES, TRUNC_MAX_BYTES);
+    StrBuf_Append(expected, tr.Content);
+    if (tr.Truncated) {
+      u32 first = 0;
+      if (tr.ByBytes && tr.OutputLines <= 1)
+        while (first < selected.Length && selected.Data[first] != '\n') first++;
+      if (expected->Length) StrBuf_AppendCStr(expected, "\n\n");
+      if (first > TRUNC_MAX_BYTES) {
+        StrBuf_AppendCStr(expected, "[Line ");
+        StrBuf_AppendU64(expected, start + 1);
+        StrBuf_AppendCStr(expected, " is ");
+        Trunc_AppendKb(expected, first);
+        StrBuf_AppendCStr(expected, ", exceeds 50.0KB limit. Use shell: sed -n '");
+        StrBuf_AppendU64(expected, start + 1);
+        StrBuf_AppendCStr(expected, "p' ");
+        StrBuf_Append(expected, file);
+        StrBuf_AppendCStr(expected, " | head -c 51200]");
+      } else {
+        StrBuf_AppendCStr(expected, "[Showing lines ");
+        StrBuf_AppendU64(expected, start + 1);
+        StrBuf_AppendChar(expected, '-');
+        StrBuf_AppendU64(expected, start + tr.OutputLines);
+        StrBuf_AppendCStr(expected, " of ");
+        StrBuf_AppendU64(expected, total);
+        if (tr.ByBytes) StrBuf_AppendCStr(expected, " (50.0KB limit)");
+        StrBuf_AppendCStr(expected, ". Use offset=");
+        StrBuf_AppendU64(expected, start + 1 + tr.OutputLines);
+        StrBuf_AppendCStr(expected, " to continue.]");
+      }
+    } else if (limit > 0 && start + (u64)limit < total) {
+      if (expected->Length) StrBuf_AppendCStr(expected, "\n\n");
+      StrBuf_AppendChar(expected, '[');
+      StrBuf_AppendU64(expected, total - start - (u64)limit);
+      StrBuf_AppendCStr(expected, " more lines in file. Use offset=");
+      StrBuf_AppendU64(expected, start + (u64)limit + 1);
+      StrBuf_AppendCStr(expected, " to continue.]");
+    }
+    return true;
+  };
+
+  const char* boundedPath = "out/clanker_tool_read_bounded.txt";
+  auto checkText = [&](StrView input, i64 offset, i64 limit) {
+    FILE* file = fopen(boundedPath, "wb");
+    CHECK(file != nullptr);
+    if (!file) return;
+    CHECK(fwrite(input.Data, 1, input.Length, file) == input.Length);
+    CHECK(fclose(file) == 0);
+    Arena reference = ArenaCreate();
+    StrBuf expected = StrBuf_Make(&reference, TRUNC_MAX_BYTES + 512);
+    bool expectedOk = oracle(&reference, input, SV(boundedPath), offset, limit, &expected);
+    Arena actual = ArenaCreate(256u * 1024u);
+    StrBuf args = StrBuf_Make(&actual, 256);
+    StrBuf_AppendCStr(&args, "{\"path\":\"out/clanker_tool_read_bounded.txt\",\"offset\":");
+    StrBuf_AppendI64(&args, offset);
+    StrBuf_AppendCStr(&args, ",\"limit\":");
+    StrBuf_AppendI64(&args, limit);
+    StrBuf_AppendChar(&args, '}');
+    ToolResult output = {};
+    StrBuf error = StrBuf_Make(&actual, 256);
+    bool ok = RunTool(ReadTool(), &actual, StrBuf_View(&args), &output, &error);
+    CHECK(ok == expectedOk);
+    if (ok && output.Content.Count == 1)
+      CHECK(StrView_Eq(output.Content.Data[0].Text, StrBuf_View(&expected)));
+    else if (!ok)
+      CHECK(StrView_Eq(StrBuf_View(&error), StrBuf_View(&expected)));
+    CHECK(output.Content.Count == (expectedOk ? 1u : 0u));
+    CHECK_ALL(actual.Used < 64u * 1024u, actual.Committed <= 64u * 1024u);
+    ArenaRelease(&actual);
+    ArenaRelease(&reference);
+  };
+  const StrView edges[] = {
+      SVL(""), SVL("\n"), SVL("\n\n"), SVL("x"), SVL("x\n"),
+      SVL("x\n\n"), SVL("x\r\n\r\nz\r"), SVL("\r\n"), SVL("x\0y\nz"),
+      SVL("\xC3\xA9\n\xF0\x9F\x98\x80\r\nlast")};
+  const i64 offsets[] = {-1, 0, 1, 2, 3, 4294967297LL};
+  const i64 limits[] = {-1, 0, 1, 2, 4294967297LL};
+  for (StrView input : edges)
+    for (i64 offset : offsets)
+      for (i64 limit : limits) checkText(input, offset, limit);
+
+  Arena fixtures = ArenaCreate();
+  char* edge = ArenaPushArray(&fixtures, char, 150000);
+  const u32 lengths[] = {51199, 51200, 51201, 65551, 65552, 131089};
+  for (u32 length : lengths) {
+    memset(edge, 'x', length);
+    checkText(StrView{edge, length}, 1, 0);
+    edge[length - 1] = '\n';
+    checkText(StrView{edge, length}, 1, 0);
+    // The byte cut and the 64KiB chunk boundary bisect UTF-8 and CRLF.
+    memcpy(edge + 51199, "\xF0\x9F\x98\x80", 4);
+    if (length > 65552) memcpy(edge + 65551, "\r\n", 2);
+    if (length > 51203) checkText(StrView{edge, length}, 1, 0);
+  }
+  for (u32 i = 0; i < 12000; i++) edge[i] = i % 3u ? '\n' : 'x';
+  checkText(StrView{edge, 12000}, 1, 0);
+  checkText(StrView{edge, 12000}, 2000, 2000);
+  checkText(StrView{edge, 12000}, 2001, 2001);
+  u32 random = 0x8d29f651u;
+  for (u32 sample = 0; sample < 32; sample++) {
+    u32 length = 66000u + sample * 137u;
+    for (u32 i = 0; i < length; i++) {
+      random = random * 1664525u + 1013904223u;
+      edge[i] = random % 97u == 0 ? '\n' : random % 83u == 0 ? '\r' : 'x';
+    }
+    checkText(StrView{edge, length}, sample % 5u, sample % 3u ? 0 : 2);
+  }
+  ArenaRelease(&fixtures);
+  CHECK(remove(boundedPath) == 0);
+
+  const char* largePath = "out/clanker_tool_read_large.txt";
+  char block[65536];
+  auto writeLarge = [&](bool newlines) {
+    memset(block, 'x', sizeof(block));
+    if (newlines)
+      for (u32 i = 1; i < sizeof(block); i += 2) block[i] = '\n';
+    FILE* file = fopen(largePath, "wb");
+    CHECK(file != nullptr);
+    if (!file) return false;
+    bool ok = true;
+    for (u32 i = 0; i < 1024; i++)
+      if (fwrite(block, 1, sizeof(block), file) != sizeof(block)) ok = false;
+    if (fclose(file)) ok = false;
+    CHECK(ok);
+    return ok;
+  };
+  for (u32 mode = 0; mode < 2; mode++) {
+    if (!writeLarge(mode != 0)) continue;
+    Arena memory = ArenaCreate(256u * 1024u);
+    ToolResult output = {};
+    StrBuf error = StrBuf_Make(&memory, 128);
+    CHECK(RunTool(ReadTool(), &memory, Args1(&memory, "path", largePath), &output, &error));
+    CHECK(output.Content.Count == 1);
+    if (output.Content.Count == 1) {
+      StrView text = output.Content.Data[0].Text;
+      CHECK(text.Length <= TRUNC_MAX_BYTES + 256);
+      CHECK(StrView_Contains(text, mode
+          ? "[Showing lines 1-2000 of 33554432. Use offset=2001 to continue.]"
+          : "[Line 1 is 65536.0KB, exceeds 50.0KB limit."));
+    }
+    CHECK_ALL(memory.Used < 64u * 1024u, memory.Committed <= 64u * 1024u);
+    ArenaRelease(&memory);
+  }
+
+  // Pre-cancelled regular files must not allocate their contents.
+  auto checkCancellation = [](const char* filePath) {
+    Arena memory = ArenaCreate(16u * 1024u * 1024u);
+    Tool tool = ReadTool();
+    ToolArgs args = {Json_Parse(&memory, Args1(&memory, "path", filePath)), {}};
+    volatile i32 abort = 1;
+    ToolResult output = {};
+    StrBuf error = StrBuf_Make(&memory, 128);
+    CHECK(!tool.Execute(tool.Ctx, &memory, SVL("id"), &args, &abort, nullptr,
+                        &output, &error));
+    CHECK(StrView_Contains(StrBuf_View(&error), "aborted"));
+    CHECK_ALL(output.Content.Count == 0, memory.Used < 64u * 1024u);
+    ArenaRelease(&memory);
+  };
+  checkCancellation(largePath);
+  CHECK(remove(largePath) == 0);
+
+  const char* imagePath = "out/clanker_tool_read_boundary.png";
+  const u32 imageSizes[] = {0, 1, 2, 3, 15, 16, 17, 65535, 65536, 65537,
+                           20u * 1024u * 1024u - 1u,
+                           20u * 1024u * 1024u,
+                           20u * 1024u * 1024u + 1u};
+  memset(block, 'x', sizeof(block));
+  for (u32 size : imageSizes) {
+    FILE* file = fopen(imagePath, "wb");
+    CHECK(file != nullptr);
+    if (!file) continue;
+    for (u32 written = 0; written < size;) {
+      u32 count = ClankerMin((u32)sizeof(block), size - written);
+      CHECK(fwrite(block, 1, count, file) == count);
+      written += count;
+    }
+    CHECK(fclose(file) == 0);
+    Arena memory = ArenaCreate(32u * 1024u * 1024u);
+    ToolResult output = {};
+    StrBuf error = StrBuf_Make(&memory, 256);
+    bool ok = RunTool(ReadTool(), &memory, Args1(&memory, "path", imagePath), &output, &error);
+    if (size > 20u * 1024u * 1024u) {
+      CHECK_ALL(!ok, output.Content.Count == 0,
+                StrView_Contains(StrBuf_View(&error), "20 MiB"),
+                memory.Used < 64u * 1024u, memory.Committed <= 64u * 1024u);
+    } else {
+      CHECK_ALL(ok, output.Content.Count == 2);
+      if (ok && output.Content.Count == 2) {
+        StrView encoded = output.Content.Data[1].ImageData;
+        CHECK(encoded.Length == ((size + 2u) / 3u) * 4u);
+        bool same = true;
+        for (u32 i = 0; i < size / 3u * 4u; i++)
+          if (encoded.Data[i] != "eHh4"[i % 4u]) same = false;
+        if (size % 3u)
+          same = same && StrView_EqCStr(
+              StrView{encoded.Data + encoded.Length - 4u, 4},
+              size % 3u == 1 ? "eA==" : "eHg=");
+        CHECK(same);
+        CHECK(memory.Used < encoded.Length + 4096u);
+      }
+    }
+    ArenaRelease(&memory);
+    if (size == 20u * 1024u * 1024u) checkCancellation(imagePath);
+  }
+  CHECK(remove(imagePath) == 0);
+  TestReadStreamCancellation();
+}
+
+static void TestReadStreamCancellation() {
+  for (u32 image = 0; image < 2; image++) {
+    Arena memory = ArenaCreate(16u * 1024u * 1024u);
+    StrBuf name = StrBuf_Make(&memory, 128);
+#if defined(_WIN32)
+    StrBuf_AppendCStr(&name, "\\\\.\\pipe\\clanker-read-cancel-");
+#else
+    StrBuf_AppendCStr(&name, "out/clanker-read-cancel-");
+#endif
+    StrBuf_AppendU64(&name, MonotonicMicros());
+    StrBuf_AppendU64(&name, image);
+#if defined(_WIN32)
+    HANDLE pipe = CreateNamedPipeA(StrBuf_CStr(&name),
+                                  PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED,
+                                  PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                                  1, 65536, 65536, 0, nullptr);
+    CHECK(pipe != INVALID_HANDLE_VALUE);
+    if (pipe == INVALID_HANDLE_VALUE) {
+      ArenaRelease(&memory);
+      continue;
+    }
+    OVERLAPPED operation = {};
+    operation.hEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+    CHECK(operation.hEvent != nullptr);
+    if (!operation.hEvent) {
+      CloseHandle(pipe);
+      ArenaRelease(&memory);
+      continue;
+    }
+#else
+    CHECK(mkfifo(StrBuf_CStr(&name), 0600) == 0);
+    int pipe = open(StrBuf_CStr(&name), O_RDWR | O_NONBLOCK);
+    CHECK(pipe >= 0);
+    if (pipe < 0) {
+      remove(StrBuf_CStr(&name));
+      ArenaRelease(&memory);
+      continue;
+    }
+#endif
+    StrBuf json = StrBuf_Make(&memory, 256);
+    StrBuf_AppendCStr(&json, "{\"path\":");
+    Json_WriteString(&json, StrBuf_View(&name));
+    StrBuf_AppendChar(&json, '}');
+    struct ReadRequest {
+      Arena* Memory;
+      ToolArgs Args;
+      ToolResult Output;
+      StrBuf Error;
+      volatile i32 Abort;
+      bool Ok;
+    } request = {};
+    request.Memory = &memory;
+    request.Args = {Json_Parse(&memory, StrBuf_View(&json)), {}};
+    request.Error = StrBuf_Make(&memory, 256);
+    Thread reader = {};
+    bool started = Thread_Start(&reader, [](void* user) {
+      ReadRequest* request = (ReadRequest*)user;
+      Tool tool = ReadTool();
+      request->Ok = tool.Execute(tool.Ctx, request->Memory, SVL("id"),
+                                 &request->Args, &request->Abort, nullptr,
+                                 &request->Output, &request->Error);
+    }, &request);
+    CHECK(started);
+    if (started) {
+      char bytes[65552];
+      memset(bytes, 'x', sizeof(bytes));
+      if (image) memcpy(bytes, "\x89PNG\r\n\x1a\n", 8);
+      bool drained = false;
+#if defined(_WIN32)
+      bool connected = ConnectNamedPipe(pipe, &operation) != FALSE;
+      if (!connected) {
+        DWORD error = GetLastError();
+        connected = error == ERROR_PIPE_CONNECTED;
+        if (error == ERROR_IO_PENDING) {
+          DWORD transferred = 0;
+          connected = WaitForSingleObject(operation.hEvent, 5000) == WAIT_OBJECT_0 &&
+                      GetOverlappedResult(pipe, &operation, &transferred, FALSE);
+        }
+      }
+      CHECK(connected);
+      if (connected) {
+        ResetEvent(operation.hEvent);
+        DWORD written = 0;
+        bool sent = WriteFile(pipe, bytes, sizeof(bytes), &written, &operation) != FALSE;
+        if (!sent && GetLastError() == ERROR_IO_PENDING)
+          sent = WaitForSingleObject(operation.hEvent, 5000) == WAIT_OBJECT_0 &&
+                 GetOverlappedResult(pipe, &operation, &written, FALSE);
+        CHECK(sent && written == sizeof(bytes));
+        // A server flush waits for the client to consume all supplied bytes,
+        // including the sniff and the first full chunk. It is not a sleep.
+        drained = sent && written == sizeof(bytes) && FlushFileBuffers(pipe);
+      }
+#else
+      u32 written = 0;
+      u64 deadline = MonotonicMillis() + 5000;
+      while (written < sizeof(bytes) && MonotonicMillis() < deadline) {
+        ssize_t count = write(pipe, bytes + written, sizeof(bytes) - written);
+        if (count > 0) written += (u32)count;
+        else if (count < 0 && errno != EAGAIN && errno != EINTR) break;
+        else Sleep_Ms(1);
+      }
+      CHECK(written == sizeof(bytes));
+      while (written == sizeof(bytes) && MonotonicMillis() < deadline) {
+        int unread = 0;
+        if (ioctl(pipe, FIONREAD, &unread) != 0) break;
+        if (!unread) {
+          drained = true;
+          break;
+        }
+        Sleep_Ms(1);
+      }
+#endif
+      CHECK(drained);
+      Atomic_StoreI32(&request.Abort, 1);
+    }
+#if defined(_WIN32)
+    CancelIoEx(pipe, nullptr);
+    CloseHandle(pipe);
+    CloseHandle(operation.hEvent);
+#else
+    close(pipe);
+#endif
+    if (started) {
+      Thread_Join(&reader);
+      CHECK_ALL(!request.Ok, request.Output.Content.Count == 0,
+                StrView_Contains(StrBuf_View(&request.Error), "aborted"),
+                memory.Used < 64u * 1024u, memory.Committed <= 64u * 1024u);
+    }
+#if !defined(_WIN32)
+    CHECK(remove(StrBuf_CStr(&name)) == 0);
+#endif
+    ArenaRelease(&memory);
+  }
 }
 
 // ---- shell ---------------------------------------------------------------
+
+struct CaptureFileTest {
+  u64 Bytes;
+  u64 Hash = 14695981039346656037ull;
+  u32 Opens;
+  u32 Writes;
+  u32 Closes;
+  bool FailOpen;
+  u32 FailWrite;
+  bool FailClose;
+};
+
+static u64 CaptureHash(u64 hash, StrView bytes) {
+  for (u32 i = 0; i < bytes.Length; i++)
+    hash = (hash ^ (u8)bytes.Data[i]) * 1099511628211ull;
+  return hash;
+}
+
+static ShellCaptureIo CaptureTestIo(CaptureFileTest* file) {
+  ShellCaptureIo io = {};
+  io.User = file;
+  io.Open = [](void* user, Arena*, StrView, StrView* path) -> void* {
+    CaptureFileTest* file = (CaptureFileTest*)user;
+    file->Opens++;
+    if (file->FailOpen) return nullptr;
+    *path = SVL("injected-shell.log");
+    return file;
+  };
+  io.Write = [](void*, void* handle, StrView bytes) {
+    CaptureFileTest* file = (CaptureFileTest*)handle;
+    file->Writes++;
+    if (file->Writes == file->FailWrite) return false;
+    file->Bytes += bytes.Length;
+    file->Hash = CaptureHash(file->Hash, bytes);
+    return true;
+  };
+  io.Close = [](void*, void* handle) {
+    CaptureFileTest* file = (CaptureFileTest*)handle;
+    file->Closes++;
+    return !file->FailClose;
+  };
+  return io;
+}
+
+static void TestShellCapture() {
+  Arena source = ArenaCreate((usize)1 << 20);
+  Arena retained = ArenaCreate((usize)256 << 10);
+  Arena snapshot = ArenaCreate((usize)256 << 10);
+  Arena oracle = ArenaCreate((usize)1 << 20);
+  const u32 lengths[] = {0, 1, 1999, 2000, 2001, 51199, 51200, 51201, 150003};
+  const u32 chunks[] = {1, 7, 4096, 65536};
+  const StrView patterns[] = {
+      SVL("x"), SVL("\n"), SVL("abc\r\n"), SVL("\xF0\x9F\x98\x80"),
+      SVL("\nabcdefghijklmnopqrstuvwxyz"), SVL("x\n\n\r"),
+  };
+  for (StrView pattern : patterns) {
+    for (u32 length : lengths) {
+      ArenaReset(&source);
+      char* bytes = ArenaPushArray(&source, char, length + 1);
+      for (u32 i = 0; i < length; i++) bytes[i] = pattern.Data[i % pattern.Length];
+      bytes[length] = '\0';
+      StrView input = {bytes, length};
+      ArenaReset(&oracle);
+      TruncResult expected = Trunc_Tail(&oracle, input, TRUNC_MAX_LINES, TRUNC_MAX_BYTES);
+      for (u32 chunkSize : chunks) {
+        ArenaReset(&retained);
+        CaptureFileTest file = {};
+        ShellCaptureIo io = CaptureTestIo(&file);
+        ShellCapture capture = {};
+        ShellCapture_Init(&capture, &retained, {}, &io);
+        usize initial = retained.Used;
+        bool fed = true;
+        for (u32 offset = 0; offset < length;) {
+          u32 count = ClankerMin(chunkSize, length - offset);
+          fed = ShellCapture_Feed(&capture, StrView{bytes + offset, count}) && fed;
+          offset += count;
+        }
+        CHECK(fed);
+        ArenaReset(&snapshot);
+        bool byBytes = false;
+        StrView actual = ShellCapture_Tail(&snapshot, &capture, &byBytes);
+        CHECK_ALL(StrView_Eq(actual, expected.Content), byBytes == expected.ByBytes,
+                  capture.TotalBytes == length,
+                  ShellCapture_LineCount(&capture) == expected.TotalLines,
+                  retained.Used == initial,
+                  retained.Used + snapshot.Used <= (256u << 10));
+        CHECK(ShellCapture_Finish(&capture));
+        CHECK(ShellCapture_Finish(&capture));
+        CHECK_ALL(file.Opens == (expected.Truncated ? 1u : 0u),
+                  file.Closes == file.Opens,
+                  file.Bytes == (expected.Truncated ? length : 0u));
+        if (expected.Truncated)
+          CHECK(file.Hash == CaptureHash(14695981039346656037ull, input));
+      }
+    }
+  }
+
+  // 100x more output must not grow retained storage, including when previews
+  // are rebuilt after every chunk rather than throttled by wall-clock time.
+  char block[4096];
+  memset(block, 'x', sizeof(block));
+  block[sizeof(block) - 1] = '\n';
+  ArenaReset(&retained);
+  CaptureFileTest file = {};
+  ShellCaptureIo io = CaptureTestIo(&file);
+  ShellCapture capture = {};
+  ShellCapture_Init(&capture, &retained, {}, &io);
+  usize initial = retained.Used;
+  bool fed = true;
+  usize peak = 0;
+  for (u32 i = 0; i < 6400; i++) {
+    fed = ShellCapture_Feed(&capture, StrView{block, sizeof(block)}) && fed;
+    ArenaReset(&snapshot);
+    ShellCapture_Tail(&snapshot, &capture);
+    usize used = retained.Used + snapshot.Used;
+    if (used > peak) peak = used;
+  }
+  CHECK_ALL(fed, capture.TotalBytes == (u64)6400 * sizeof(block),
+            retained.Used == initial, peak <= (256u << 10));
+  CHECK(ShellCapture_Finish(&capture));
+  CHECK(file.Bytes == capture.TotalBytes);
+
+  ArenaReset(&retained);
+  file = CaptureFileTest{};
+  io = CaptureTestIo(&file);
+  ShellCapture_Init(&capture, &retained, {}, &io);
+  CHECK(ShellCapture_Feed(&capture, StrView{(const char*)source.Base, 60000}));
+  capture.TotalBytes += (u64)1 << 32;
+  capture.Newlines += (u64)1 << 32;
+  u64 previousLines = ShellCapture_LineCount(&capture);
+  CHECK(ShellCapture_Feed(&capture, SVL("\nx")));
+  CHECK_ALL(capture.TotalBytes == ((u64)1 << 32) + 60002,
+            ShellCapture_LineCount(&capture) == previousLines + 1);
+  CHECK(ShellCapture_Finish(&capture));
+
+  for (u32 failure = 0; failure < 4; failure++) {
+    ArenaReset(&retained);
+    file = CaptureFileTest{};
+    file.FailOpen = failure == 0;
+    file.FailWrite = failure == 1 ? 1u : failure == 2 ? 2u : 0u;
+    file.FailClose = failure == 3;
+    io = CaptureTestIo(&file);
+    ShellCapture_Init(&capture, &retained, {}, &io);
+    CHECK(ShellCapture_Feed(&capture, SVL("prefix\n")));
+    StrView large = {(const char*)source.Base, 60000};
+    bool accepted = ShellCapture_Feed(&capture, large);
+    CHECK(accepted == (failure == 3));
+    CHECK(!ShellCapture_Finish(&capture));
+    CHECK_ALL(capture.Error.Length > 0, file.Closes == (failure == 0 ? 0u : 1u),
+              (capture.Path.Length > 0) == (failure != 0));
+    CHECK(!ShellCapture_Finish(&capture));
+    CHECK(file.Closes <= 1);
+  }
+  ArenaRelease(&oracle);
+  ArenaRelease(&snapshot);
+  ArenaRelease(&retained);
+  ArenaRelease(&source);
+}
+
+static StrView ShellTestCommand(Arena* arena, const char* subcommand,
+                                const char* argument) {
+  StrView exe = Fs_RealPath(arena, SV(g_test_executable));
+  StrBuf command = StrBuf_Make(arena, exe.Length + 64);
+  StrBuf_AppendChar(&command, '"');
+  StrBuf_Append(&command, exe);
+  StrBuf_AppendCStr(&command, "\" ");
+  StrBuf_AppendCStr(&command, subcommand);
+  StrBuf_AppendChar(&command, ' ');
+  StrBuf_AppendCStr(&command, argument);
+  return StrBuf_View(&command);
+}
+
+struct ShellProcessTest {
+  Arena Mem;
+  ShellCapture Capture;
+  ExecResult Result;
+  StrView Command;
+  StrView Directory;
+};
+
+static void RunShellProcessTest(void* user) {
+  ShellProcessTest* test = (ShellProcessTest*)user;
+  test->Mem = ArenaCreate((usize)256 << 10);
+  ShellCapture_Init(&test->Capture, &test->Mem, test->Directory);
+  test->Result = Exec_RunStreaming(
+      &test->Mem, test->Command, 30000, nullptr,
+      [](void* user, StrView chunk) {
+        return ShellCapture_Feed((ShellCapture*)user, chunk);
+      }, &test->Capture);
+  ShellCapture_Finish(&test->Capture);
+}
+
+static void TestShellStreamingProcess(Arena* arena) {
+  StrBuf directory = StrBuf_Make(arena, 80);
+  StrBuf_AppendCStr(&directory, "out/clanker-shell-stream-");
+  StrBuf_AppendU64(&directory, MonotonicMillis());
+  StrView flood = ShellTestCommand(arena, "--flood-stdout", "4000");
+  ShellProcessTest processes[2] = {};
+  Thread threads[2] = {};
+  bool started[2] = {};
+  for (u32 i = 0; i < 2; i++) {
+    processes[i].Command = flood;
+    processes[i].Directory = StrBuf_View(&directory);
+    started[i] = Thread_Start(&threads[i], RunShellProcessTest, &processes[i]);
+    CHECK(started[i]);
+  }
+  for (u32 i = 0; i < 2; i++) {
+    if (!started[i]) continue;
+    Thread_Join(&threads[i]);
+    ShellProcessTest* test = &processes[i];
+    CHECK_ALL(test->Result.Spawned, test->Result.ExitCode == 0,
+              test->Result.Output.Length == 0, !test->Capture.Error.Length,
+              ShellCapture_LineCount(&test->Capture) == 4000,
+              test->Mem.Used < (256u << 10), test->Capture.Path.Length > 0);
+    FILE* file = fopen(StrView_DupCStr(arena, test->Capture.Path), "rb");
+    CHECK(file != nullptr);
+    if (file) {
+      u64 bytes = 0;
+      u64 lines = 0;
+      bool valid = true;
+      char block[4096];
+      size_t count;
+      const char* pattern =
+#if defined(_WIN32)
+          "0123456789012345678901234567890123456789012345678901234567890123\r\n";
+#else
+          "0123456789012345678901234567890123456789012345678901234567890123\n";
+#endif
+      u32 patternLength = (u32)strlen(pattern);
+      while ((count = fread(block, 1, sizeof(block), file)) != 0) {
+        for (u32 j = 0; j < count; j++) {
+          valid = valid && block[j] == pattern[(bytes + j) % patternLength];
+          if (block[j] == '\n') lines++;
+        }
+        bytes += count;
+      }
+      CHECK_ALL(valid, bytes == test->Capture.TotalBytes, lines == 4000,
+                ferror(file) == 0);
+      CHECK(fclose(file) == 0);
+    }
+  }
+  if (started[0] && started[1])
+    CHECK(!StrView_Eq(processes[0].Capture.Path, processes[1].Capture.Path));
+  for (u32 i = 0; i < 2; i++) {
+    if (!started[i]) continue;
+    if (processes[i].Capture.Path.Length)
+      CHECK(remove(StrView_DupCStr(arena, processes[i].Capture.Path)) == 0);
+    ArenaRelease(&processes[i].Mem);
+  }
+  if (Fs_IsDir(StrBuf_View(&directory)))
+    CHECK(CLANKER_RMDIR(StrBuf_CStr(&directory)) == 0);
+
+  StrBuf arguments = StrBuf_Make(arena, flood.Length + 32);
+  StrBuf_AppendCStr(&arguments, "{\"command\":");
+  Json_WriteString(&arguments, flood);
+  StrBuf_AppendChar(&arguments, '}');
+  for (u32 failure = 0; failure < 3; failure++) {
+    CaptureFileTest file = {};
+    file.FailOpen = failure == 0;
+    file.FailWrite = failure == 1 ? 1u : 0u;
+    file.FailClose = failure == 2;
+    ShellCaptureIo io = CaptureTestIo(&file);
+    ShellToolContext context = {};
+    context.OutputIo = &io;
+    ToolResult result = {};
+    StrBuf error = StrBuf_Make(arena, 64);
+    CHECK(!RunTool(ShellTool(&context), arena, StrBuf_View(&arguments), &result, &error));
+    CHECK_ALL(result.Content.Count == 0,
+              StrView_Contains(StrBuf_View(&error), "shell output log"),
+              !StrView_Contains(StrBuf_View(&error), "Full output: "),
+              StrView_Contains(StrBuf_View(&error), "Incomplete output: injected-shell.log") ==
+                  (failure != 0),
+              file.Closes == (failure == 0 ? 0u : 1u));
+  }
+
+  StrView hang = ShellTestCommand(arena, "--hang", "10000");
+  u64 start = MonotonicMillis();
+  ExecResult timed = Exec_RunStreaming(arena, hang, 100, nullptr, nullptr, nullptr);
+  CHECK_ALL(timed.Spawned, timed.TimedOut, MonotonicMillis() - start < 5000);
+
+  volatile i32 abort = 0;
+  Thread canceller = {};
+  bool cancelStarted = Thread_Start(&canceller, [](void* user) {
+    Sleep_Ms(100);
+    Atomic_StoreI32((volatile i32*)user, 1);
+  }, (void*)&abort);
+  CHECK(cancelStarted);
+  if (cancelStarted) {
+    start = MonotonicMillis();
+    ExecResult cancelled =
+        Exec_RunStreaming(arena, hang, 3000, &abort, nullptr, nullptr);
+    Thread_Join(&canceller);
+    CHECK_ALL(cancelled.Spawned, !cancelled.TimedOut,
+              MonotonicMillis() - start < 5000);
+  }
+  u32 calls = 0;
+  ExecResult stopped = Exec_RunStreaming(
+      arena, ShellTestCommand(arena, "--flood-stdout", "1000000"),
+      5000, nullptr, [](void* user, StrView) {
+        (*(u32*)user)++;
+        return false;
+      }, &calls);
+  CHECK_ALL(stopped.Spawned, !stopped.TimedOut, calls == 1);
+
+#if !defined(_WIN32)
+  start = MonotonicMillis();
+  ExecResult closedPipe = Exec_RunStreaming(
+      arena, SVL("exec 1>&- 2>&-; sleep 10"), 100, nullptr, nullptr, nullptr);
+  CHECK_ALL(closedPipe.Spawned, closedPipe.TimedOut, MonotonicMillis() - start < 5000);
+#endif
+}
 
 // The path the truncation notice reports, i.e. everything between
 // "Full output: " and the closing bracket.
@@ -447,6 +1132,11 @@ static void TestShellOverflow(Arena* a) {
   context.Directory = SV(sessionDir);
   Tool scoped = ShellTool(&context);
 
+  ToolResult small = {};
+  StrBuf smallErr = StrBuf_Make(a, 64);
+  CHECK(RunTool(scoped, a, SVL("{\"command\":\"echo small\"}"), &small, &smallErr));
+  CHECK(!Fs_Exists(SV(sessionDir)));
+
   ToolResult out = {};
   StrBuf err = StrBuf_Make(a, 64);
   CHECK(RunTool(scoped, a, command, &out, &err));
@@ -469,6 +1159,15 @@ static void TestShellOverflow(Arena* a) {
   RemoveEmptyDir(sessionDir);
   CHECK(!Fs_Exists(SV(sessionDir)));
 
+  ShellToolContext blocked = {};
+  blocked.Directory = SV(source);
+  ToolResult failed = {};
+  StrBuf failedErr = StrBuf_Make(a, 64);
+  CHECK(!RunTool(ShellTool(&blocked), a, command, &failed, &failedErr));
+  CHECK_ALL(failed.Content.Count == 0,
+            StrView_Contains(StrBuf_View(&failedErr), "failed to create shell output log"),
+            !StrView_Contains(StrBuf_View(&failedErr), "Full output: "));
+
   // With no session directory the tool falls back to the OS temp directory.
   Tool unscoped = ShellTool();
   ToolResult fallback = {};
@@ -487,6 +1186,8 @@ static void TestShellOverflow(Arena* a) {
 }
 
 static void TestShell(Arena* a) {
+  TestShellCapture();
+  TestShellStreamingProcess(a);
   Tool shell = ShellTool();
   CHECK_ALL(StrView_Eq(shell.Name, SVL("shell")), StrView_Eq(shell.Label, SVL("Shell")));
 

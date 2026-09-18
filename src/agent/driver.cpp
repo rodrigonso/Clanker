@@ -7,6 +7,90 @@
 
 namespace {
 
+bool WorkOwns(const Arena* arena, const void* data, usize bytes) {
+  usize offset = (usize)data - (usize)arena->Base;
+  return arena->Base && offset <= arena->Used && bytes <= arena->Used - offset;
+}
+
+StrView MutableText(Arena* arena, StrView text) {
+  return !text.Length || WorkOwns(arena, text.Data, text.Length)
+             ? text : StrView_Dup(arena, text);
+}
+
+template <typename T>
+void OwnMutableArray(Arena* arena, Array<T>* array) {
+  if (array->Backing == arena &&
+      WorkOwns(arena, array->Data, (usize)array->Capacity * sizeof(T))) return;
+  Array<T> owned = Array_Make<T>(arena, array->Count);
+  for (u32 i = 0; i < array->Count; i++) Array_Push(&owned, array->Data[i]);
+  *array = owned;
+}
+
+void OwnMutableMessage(Arena* arena, Message* message) {
+  OwnMutableArray(arena, &message->Content);
+  for (u32 i = 0; i < message->Content.Count; i++) {
+    Content* content = &message->Content.Data[i];
+    content->Text = MutableText(arena, content->Text);
+    content->ToolId = MutableText(arena, content->ToolId);
+    content->ToolName = MutableText(arena, content->ToolName);
+    content->ToolArgsJson = MutableText(arena, content->ToolArgsJson);
+    content->ImageData = MutableText(arena, content->ImageData);
+    content->ImageMimeType = MutableText(arena, content->ImageMimeType);
+    content->Signature = MutableText(arena, content->Signature);
+  }
+  message->ErrorMessage = MutableText(arena, message->ErrorMessage);
+  message->Model = MutableText(arena, message->Model);
+  message->Provider = MutableText(arena, message->Provider);
+  message->ToolCallId = MutableText(arena, message->ToolCallId);
+  message->ToolName = MutableText(arena, message->ToolName);
+}
+
+// Hooks may replace owned fields with borrowed slices/arrays. Recheck at each
+// mutable boundary, but keep already detached Work storage across retries.
+void OwnMutableMessages(Arena* arena, Array<Message>* messages) {
+  OwnMutableArray(arena, messages);
+  for (u32 i = 0; i < messages->Count; i++)
+    OwnMutableMessage(arena, &messages->Data[i]);
+}
+
+void OwnMutableProviderInput(Arena* arena, AgentHarnessProviderInput* input) {
+  Model* model = &input->ModelInfo;
+  model->Id = MutableText(arena, model->Id);
+  model->Name = MutableText(arena, model->Name);
+  model->Provider = MutableText(arena, model->Provider);
+  model->BaseUrl = MutableText(arena, model->BaseUrl);
+  LlmContext* context = &input->Context;
+  context->SystemPrompt = MutableText(arena, context->SystemPrompt);
+  Array<Message> messages = {(Message*)context->Messages, context->MessageCount,
+                             context->MessageCount, arena};
+  OwnMutableMessages(arena, &messages);
+  context->Messages = messages.Data;
+  Array<ToolDef> tools = {(ToolDef*)context->Tools, context->ToolCount,
+                          context->ToolCount, arena};
+  OwnMutableArray(arena, &tools);
+  for (u32 i = 0; i < tools.Count; i++) {
+    ToolDef* tool = &tools.Data[i];
+    tool->Name = MutableText(arena, tool->Name);
+    tool->Description = MutableText(arena, tool->Description);
+    tool->ParamsJsonSchema = MutableText(arena, tool->ParamsJsonSchema);
+  }
+  context->Tools = tools.Data;
+  input->Options.Auth.Token = MutableText(arena, input->Options.Auth.Token);
+  input->Options.Request.ToolName = MutableText(arena, input->Options.Request.ToolName);
+}
+
+void OwnMutableTurnContext(Arena* arena, AgentTurnContext* context) {
+  if (context->Assistant) {
+    Message* assistant = ArenaPushStruct(arena, Message);
+    *assistant = *context->Assistant;
+    OwnMutableMessage(arena, assistant);
+    context->Assistant = assistant;
+  }
+  OwnMutableMessages(arena, &context->ToolResults);
+  OwnMutableMessages(arena, &context->Context);
+  OwnMutableMessages(arena, &context->NewMessages);
+}
+
 SessionRecord NewMessageRecord(DurableId parentId, const Message& value) {
   SessionRecord record = {};
   record.EntryId = DurableId_Generate();
@@ -77,13 +161,19 @@ struct TurnRunResult {
 // Per-run, memory-only state: the messages this run has appended so far, plus
 // the replacement model/effort/context PrepareNextTurn asked for. None of this
 // is persisted and none of it touches AgentHarnessConfig, so overrides expire
-// when the run returns. Backed by harness->Work, which lives for the run.
+// when the run returns. Only NewMessages uses RunMem: replacement owners must
+// be reclaimable without discarding that run-long list of State-owned messages.
 struct AgentRunState {
   Array<Message> NewMessages;
   bool HasContext;
   Array<Message> Context;
+  // Stable arena addresses keep nested Array/StrBuf backing pointers valid.
+  // Stage into the other slot before releasing anything the update may borrow.
+  Arena ContextMem[2];
+  u32 ContextSlot;
   bool HasModel;
   Model ModelInfo;
+  Arena ModelMem;
   bool HasProfile;
   ModelRequestProfile Profile;
   // Consecutive turns the model drove on its own. Reset whenever the user
@@ -117,33 +207,67 @@ void AgentRunState_Record(AgentRunState* run, const SessionRecord* records, u32 
   }
 }
 
-SessionResult AgentRunState_Apply(Arena* arena, AgentRunState* run,
+void AgentRunState_DropContext(AgentRunState* run) {
+  run->HasContext = false;
+  run->Context = {};
+  ArenaRelease(&run->ContextMem[run->ContextSlot]);
+}
+
+bool AgentRunState_OwnsText(const AgentRunState* run, StrView text) {
+  const Arena* owners[] = {&run->ContextMem[run->ContextSlot], &run->ModelMem};
+  for (const Arena* owner : owners) {
+    usize offset = (usize)text.Data - (usize)owner->Base;
+    if (owner->Base && offset < owner->Used) return true;
+  }
+  return false;
+}
+
+SessionResult AgentRunState_Apply(AgentRunState* run,
                                   const AgentNextTurnUpdate* update) {
   if (!run || !update) return SessionResult_Ok();
+  if (update->HasModel &&
+      (update->ModelInfo.Provider.Length == 0 || update->ModelInfo.Id.Length == 0))
+    return SessionResult_Error(SessionStatus::HookError,
+                               SVL("prepare-next-turn hook produced an invalid model"));
+
+  Arena modelMem = {};
+  Model model = {};
+  Array<Message> context = {};
+  u32 contextSlot = run->ContextSlot ^ 1;
   if (update->HasModel) {
-    if (update->ModelInfo.Provider.Length == 0 || update->ModelInfo.Id.Length == 0)
-      return SessionResult_Error(SessionStatus::HookError,
-                                 SVL("prepare-next-turn hook produced an invalid model"));
+    modelMem = ArenaCreate();
+    model = update->ModelInfo;
+    model.Id = StrView_Dup(&modelMem, model.Id);
+    model.Name = StrView_Dup(&modelMem, model.Name);
+    model.Provider = StrView_Dup(&modelMem, model.Provider);
+    model.BaseUrl = StrView_Dup(&modelMem, model.BaseUrl);
+  }
+  if (update->HasContext) {
+    Arena* mem = &run->ContextMem[contextSlot];
+    *mem = ArenaCreate();
+    context = Array_Make<Message>(mem, update->Context.Count + 8);
+    for (u32 i = 0; i < update->Context.Count; i++)
+      Array_Push(&context, Message_Clone(mem, update->Context.Data[i]));
+  }
+
+  // Both fields may borrow either old owner or Work. Finish all copies before
+  // releasing either owner, including when context and model borrow each other.
+  if (update->HasModel) {
+    ArenaRelease(&run->ModelMem);
+    // Model contains only views, not arena-backed builders.
+    run->ModelMem = modelMem;
     run->HasModel = true;
-    run->ModelInfo = update->ModelInfo;
-    run->ModelInfo.Id = StrView_Dup(arena, update->ModelInfo.Id);
-    run->ModelInfo.Name = StrView_Dup(arena, update->ModelInfo.Name);
-    run->ModelInfo.Provider = StrView_Dup(arena, update->ModelInfo.Provider);
-    run->ModelInfo.BaseUrl = StrView_Dup(arena, update->ModelInfo.BaseUrl);
+    run->ModelInfo = model;
   }
   if (update->HasProfile) {
     run->HasProfile = true;
     run->Profile = update->Profile;
   }
   if (update->HasContext) {
-    // Deep-copied into `arena`, not just the array: the hook is handed this
-    // turn's context and assistant message, and echoing either back is the
-    // obvious thing for it to do. Both live in the turn arena, which is
-    // recycled before this override is read again on the next turn.
+    AgentRunState_DropContext(run);
+    run->ContextSlot = contextSlot;
     run->HasContext = true;
-    run->Context = Array_Make<Message>(arena, update->Context.Count + 8);
-    for (u32 i = 0; i < update->Context.Count; i++)
-      Array_Push(&run->Context, Message_Clone(arena, update->Context.Data[i]));
+    run->Context = context;
   }
   return SessionResult_Ok();
 }
@@ -247,6 +371,7 @@ SessionResult RunAssistantTurn(AgentHarness* harness, AgentTurnKind turnKind, Du
   if (extraTrailingMessage) Array_Push(&contextMessages, *extraTrailingMessage);
 
   if (harness->Config.Hooks.BeforeContext) {
+    OwnMutableMessages(&harness->Work, &contextMessages);
     SessionResult hooked = AgentHook_Failure(
         harness->Config.Hooks.BeforeContext(harness->Config.Hooks.User, &harness->Work,
                                             turnKind, headId, &contextMessages),
@@ -255,6 +380,7 @@ SessionResult RunAssistantTurn(AgentHarness* harness, AgentTurnKind turnKind, Du
   }
 
   if (harness->Config.Hooks.ConvertToLlm) {
+    OwnMutableMessages(&harness->Work, &contextMessages);
     SessionResult hooked = AgentHook_Failure(
         harness->Config.Hooks.ConvertToLlm(harness->Config.Hooks.User, &harness->Work,
                                            turnKind, headId, &contextMessages),
@@ -276,7 +402,13 @@ SessionResult RunAssistantTurn(AgentHarness* harness, AgentTurnKind turnKind, Du
     effective.Context = request.Context;
     effective.Options = harness->Config.Stream;
     if (run && run->HasProfile) effective.Options.Profile = run->Profile;
+    HttpRetryPolicy hookRetry = {};
     if (harness->Config.Hooks.BeforeProvider) {
+      OwnMutableProviderInput(&harness->Work, &effective);
+      if (effective.Options.Retry) {
+        hookRetry = *effective.Options.Retry;
+        effective.Options.Retry = &hookRetry;
+      }
       SessionResult hooked = AgentHook_Failure(
           harness->Config.Hooks.BeforeProvider(harness->Config.Hooks.User, &harness->Work,
                                                turnKind, attemptIndex, &effective),
@@ -310,6 +442,7 @@ SessionResult RunAssistantTurn(AgentHarness* harness, AgentTurnKind turnKind, Du
     AgentProviderAttemptResult attempt = AgentProvider_RunAttempt(&input);
 
     if (harness->Config.Hooks.AfterProvider) {
+      OwnMutableMessage(&harness->Work, &attempt.Assistant);
       SessionResult hooked = AgentHook_Failure(
           harness->Config.Hooks.AfterProvider(harness->Config.Hooks.User, &harness->Work,
                                               turnKind, attemptIndex, &attempt.Assistant),
@@ -362,9 +495,10 @@ SessionResult RunToolBatch(AgentHarness* harness, DurableId* ioHead, const Messa
     if (content.Kind == ContentKind::ToolCall && !Atomic_LoadI32(&harness->AbortFlag) &&
         harness->Config.Hooks.BeforeTool &&
         SessionResult_IsOk(beforeToolFailure)) {
-      StrView arguments = content.ToolArgsJson;
+      StrView arguments = MutableText(arena, content.ToolArgsJson);
+      StrView toolName = MutableText(arena, content.ToolName);
       SessionResult hooked = AgentHook_Failure(
-          harness->Config.Hooks.BeforeTool(harness->Config.Hooks.User, arena, content.ToolName,
+          harness->Config.Hooks.BeforeTool(harness->Config.Hooks.User, arena, toolName,
                                            &arguments),
           "before-tool hook failed");
       if (!SessionResult_IsOk(hooked)) {
@@ -673,8 +807,9 @@ SessionResult ContinueRun(AgentHarness* harness, DurableId* ioHead, AgentRunStat
     // each record with a State-owned clone. Without this a run that takes N
     // turns stacks N materialized contexts and N request bodies, which is what
     // took one real session's Work arena to 62 MB. Anything that does span
-    // turns lives in RunMem instead.
+    // turns lives in RunMem or the run's replaceable override owners instead.
     ArenaReset(&harness->Work);
+    ArenaTrim(&harness->Work, WORK_ARENA_KEEP_BYTES);
 
     // Runaway guard. Checked here, before anything for this turn is built, so a
     // turn that would exceed the budget is never started and no provider
@@ -732,7 +867,7 @@ SessionResult ContinueRun(AgentHarness* harness, DurableId* ioHead, AgentRunStat
       // the compacted branch. Because ShouldAutoCompact sizes against the
       // override itself, this only happens when the override genuinely
       // outgrew the window, never because the branch behind it did.
-      if (run) run->HasContext = false;
+      if (run) AgentRunState_DropContext(run);
     }
 
     AgentHarness_PublishTurnStart(harness, AgentTurnKind::Run);
@@ -800,23 +935,21 @@ SessionResult ContinueRun(AgentHarness* harness, DurableId* ioHead, AgentRunStat
     // turn after turn_end and before either steering source is polled.
     if (harness->Config.Hooks.PrepareNextTurn || harness->Config.Hooks.ShouldStopAfterTurn) {
       AgentTurnContext turnContext = {};
-      // The appended record's message, not turn.Assistant: Append rewrote it
-      // with a State-owned clone, so a hook that keeps it holds memory that
-      // outlives this turn's arena.
       SessionResult built = BuildTurnContext(harness, *ioHead, &assistantRecord.MessageEntry.Value,
                                              toolResults, run, &turnContext);
       if (!SessionResult_IsOk(built)) return built;
 
       if (harness->Config.Hooks.PrepareNextTurn) {
+        OwnMutableTurnContext(&harness->Work, &turnContext);
         AgentNextTurnUpdate update = {};
-        // RunMem, not Work: a context override this hook returns is read on
-        // every later turn, and Work is recycled between them.
+        // Construction scratch only; Apply owns the accepted fields before
+        // Work is recycled, and abandoned hook allocations die with this turn.
         SessionResult hooked = AgentHook_Failure(
-            harness->Config.Hooks.PrepareNextTurn(harness->Config.Hooks.User, &harness->RunMem,
+            harness->Config.Hooks.PrepareNextTurn(harness->Config.Hooks.User, &harness->Work,
                                                   &turnContext, &update),
             "prepare-next-turn hook failed");
         if (!SessionResult_IsOk(hooked)) return hooked;
-        SessionResult applied = AgentRunState_Apply(&harness->RunMem, run, &update);
+        SessionResult applied = AgentRunState_Apply(run, &update);
         if (!SessionResult_IsOk(applied)) return applied;
         // pi hands shouldStopAfterTurn the already-updated context, so a stop
         // decision sees what the next request would actually carry.
@@ -824,6 +957,7 @@ SessionResult ContinueRun(AgentHarness* harness, DurableId* ioHead, AgentRunStat
       }
 
       if (harness->Config.Hooks.ShouldStopAfterTurn) {
+        OwnMutableTurnContext(&harness->Work, &turnContext);
         bool stop = false;
         SessionResult hooked = AgentHook_Failure(
             harness->Config.Hooks.ShouldStopAfterTurn(harness->Config.Hooks.User, &harness->Work,
@@ -1054,7 +1188,8 @@ SessionResult AgentDriver_Run(AgentHarness* harness, StrView prompt) {
   if (harness->Config.Hooks.AfterTurn) {
     SessionResult afterTurn = AgentHook_Failure(
         harness->Config.Hooks.AfterTurn(harness->Config.Hooks.User, &harness->Work,
-                                        AgentTurnKind::Run, outcome, error),
+                                        AgentTurnKind::Run, outcome,
+                                        MutableText(&harness->Work, error)),
         "after-turn hook failed");
     if (SessionResult_IsOk(result) && !SessionResult_IsOk(afterTurn)) {
       result = afterTurn;
@@ -1062,6 +1197,12 @@ SessionResult AgentDriver_Run(AgentHarness* harness, StrView prompt) {
       error = result.Message;
     }
   }
+  // Any hook/provider error (or successful stop notice) can borrow an override.
+  // CompleteAgentTurnLocked copies from Work only after the driver returns.
+  if (result.Message.Length && AgentRunState_OwnsText(&run, result.Message))
+    result.Message = StrView_Dup(&harness->Work, result.Message);
+  AgentRunState_DropContext(&run);
+  ArenaRelease(&run.ModelMem);
   return result;
 }
 
@@ -1096,7 +1237,8 @@ SessionResult AgentDriver_Compact(AgentHarness* harness, StrView instructions) {
   if (harness->Config.Hooks.AfterTurn) {
     SessionResult afterTurn = AgentHook_Failure(
         harness->Config.Hooks.AfterTurn(harness->Config.Hooks.User, &harness->Work,
-                                        AgentTurnKind::Compaction, outcome, error),
+                                        AgentTurnKind::Compaction, outcome,
+                                        MutableText(&harness->Work, error)),
         "after-turn hook failed");
     if (SessionResult_IsOk(result) && !SessionResult_IsOk(afterTurn)) {
       result = afterTurn;

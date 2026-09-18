@@ -66,6 +66,24 @@ void DrainDisplay(Tui* t, u64 startMs = 1000) {
   g_displayDrainsOk = !Tui_HasPendingDisplay(t) && g_displayDrainsOk;
 }
 
+u32 QueuedDisplayCount(const Tui* t) {
+  u32 count = 0;
+  for (const TuiDisplayBatch* batch = t->DisplayFirst; batch; batch = batch->Next)
+    count += batch->Count - batch->Head;
+  return count;
+}
+
+bool DisplayStorageIdle(const Tui* t) {
+  return !Tui_HasPendingDisplay(t) && !t->DisplayFirst && !t->DisplayLast &&
+         !t->RevealBatch && t->Reveal.Pending.Backing == &t->RevealMem &&
+         t->RevealMem.Used <= (64u << 10) &&
+         t->RevealMem.Committed <= (64u << 10) &&
+         (!t->DisplaySpare ||
+          (!t->DisplaySpare->Next && !t->DisplaySpare->Count &&
+           t->DisplaySpare->Mem.Used <= (64u << 10) &&
+           t->DisplaySpare->Mem.Committed <= (64u << 10)));
+}
+
 struct BlockingSelect {
   Tui* Controller;
   const StrView* Options;
@@ -291,9 +309,9 @@ bool SessionUiCleared(const Tui* t, usize usedBefore) {
          LineModel_Count(&t->Model) == 0 && LineEdit_Empty(&t->Edit) &&
          t->Edit.History.Count == 0 && LineEdit_Empty(&t->ModalEdit) &&
          t->ModalEdit.History.Count == 0 && !Tui_HasPendingDisplay(t) &&
-         t->DisplayHead == 0 && t->Use.Input == 0 && t->Use.Output == 0 &&
+         DisplayStorageIdle(t) && t->Use.Input == 0 && t->Use.Output == 0 &&
          t->ContextTokens == 0 &&
-         t->State == TuiState::Idle && t->Sess.StateTool.Length == 0 &&
+         t->State == TuiState::Idle && t->StateTool.Text.Length == 0 &&
          t->QueuedCount == 0 && t->Follow && t->Top == 0 && t->LastTop == 0 &&
          t->LastPaneH == 0 && t->HoveredEntryId == 0 && t->PressedEntryId == 0 &&
          !t->HasMouse && !t->InputUi.Dragging && t->Ui.Captured == 0 &&
@@ -330,6 +348,403 @@ bool InitTestHarness(Arena* arena, MemoryRepository* memory,
   config.ProviderImpl = ScriptProvider_Make(script);
   config.ToolExec = ToolExecution::Parallel;
   return SessionResult_IsOk(AgentHarness_Init(harness, log, &config));
+}
+
+StrView RepeatText(Arena* arena, StrView part, u32 count) {
+  u32 length = part.Length * count;
+  char* data = ArenaPushArray(arena, char, length);
+  for (u32 i = 0; i < count; i++)
+    memcpy(data + i * part.Length, part.Data, part.Length);
+  return StrView{data, length};
+}
+
+StrView LargeReadArgs(Arena* arena) {
+  StrView padding = RepeatText(arena, SVL("x"), 320u << 10);
+  StrBuf args = StrBuf_Make(arena, padding.Length + 64);
+  StrBuf_AppendCStr(&args, "{\"path\":\"owned.txt\",\"padding\":\"");
+  StrBuf_Append(&args, padding);
+  StrBuf_AppendCStr(&args, "\"}");
+  return StrBuf_View(&args);
+}
+
+void TestToolPayloadOwnership(Arena* outer) {
+  Arena input = ArenaCreate();
+  StrView args = LargeReadArgs(&input);
+  StrView result = RepeatText(&input, SVL("line\n"), 65536);
+  Tui t;
+  InitHeadlessTui(&t, outer, false);
+  usize baseline = t.SessionMem.Used;
+  usize committed = t.SessionMem.Committed;
+  for (u32 i = 0; i < 16; i++) {
+    StrBuf id = StrBuf_Make(&input, 32);
+    StrBuf_AppendCStr(&id, "large-read-");
+    StrBuf_AppendU64(&id, i);
+    usize beforeQueue = t.SessionMem.Used;
+    Tui_ToolStarted(&t, StrBuf_View(&id), SVL("read"), args);
+    Tui_ToolEnded(&t, StrBuf_View(&id), result, false);
+    CHECK(t.SessionMem.Used == beforeQueue);
+    CHECK_ALL(t.DisplayFirst != nullptr, t.DisplayLast != t.DisplayFirst);
+    DrainDisplay(&t, 1000 + i * 1000ull);
+    CHECK_ALL(t.Model.Entries.Count == i + 1, DisplayStorageIdle(&t),
+              t.StateTool.Mem.Used == 0, t.StateTool.Mem.Committed == 0);
+    ToolEntry& tool = t.Model.Entries.Data[i].Tool;
+    CHECK_ALL(tool.Done, !tool.Error,
+              StrView_Eq(StrBuf_View(&tool.View.Detail), SVL("owned.txt")),
+              StrView_Eq(StrBuf_View(&tool.View.Outcome), SVL("65536 lines read")),
+              StrView_Eq(StrBuf_View(&tool.Preview), StrView{result.Data, 1500}));
+  }
+  // Cards and their previews are live transcript data; the megabytes of raw
+  // arguments/results used to produce those cards are not.
+  CHECK_ALL(t.SessionMem.Used <= baseline + (128u << 10),
+            t.SessionMem.Committed <= committed + (192u << 10));
+  Tui_Stop(&t);
+  ArenaRelease(&input);
+}
+
+void TestDisplayBatchOwnership(Arena* outer) {
+  Arena input = ArenaCreate();
+  Tui t;
+  InitHeadlessTui(&t, outer, false);
+  for (u32 i = 0; i < 65; i++) Tui_CommandNotice(&t, SVL("batch boundary"));
+  CHECK(QueuedDisplayCount(&t) == 65);
+  u32 batches = 0;
+  for (const TuiDisplayBatch* batch = t.DisplayFirst; batch; batch = batch->Next) {
+    CHECK(batch->Count == (batches < 2 ? 32u : 1u));
+    for (u32 i = batch->Head; i < batch->Count; i++)
+      CHECK(batch->Events[i].Mem == &batch->Mem);
+    batches++;
+  }
+  CHECK(batches == 3);
+  DrainDisplay(&t);
+  CHECK(DisplayStorageIdle(&t));
+  CHECK(Tui_ClearSession(&t));
+
+  StrView args = LargeReadArgs(&input);
+  StrView body = RepeatText(&input, SVL("stream \xc3\xa9 "), 128);
+  auto enqueue = [&](u32 number) {
+    StrBuf id = StrBuf_Make(&input, 32);
+    StrBuf_AppendCStr(&id, "continuous-");
+    StrBuf_AppendU64(&id, number);
+    Tui_ToolStarted(&t, StrBuf_View(&id), SVL("read"), args);
+    Tui_ToolEnded(&t, StrBuf_View(&id), SVL("one line"), false);
+    Tui_AppendAssistantText(&t, body);
+    Tui_AssistantMessageEnded(&t, StopReason::Stop, Usage{}, {});
+  };
+  enqueue(0);
+  enqueue(1);
+  u64 now = 1000;
+  u32 retiredWhileBusy = 0;
+  for (u32 turn = 0; turn < 16; turn++) {
+    u32 targetEntries = turn * 2 + 1;
+    for (u32 frame = 0; t.Model.Entries.Count < targetEntries && frame < 64; frame++) {
+      Tui_AdvanceStream(&t, now);
+      now += 16;
+      CHECK_ALL(Tui_HasPendingDisplay(&t), t.DisplayFirst != nullptr);
+    }
+    CHECK_ALL(t.Model.Entries.Count == targetEntries,
+              t.State == TuiState::Tool,
+              StrView_Eq(t.StateTool.Text, SVL("read")));
+    usize used = 0;
+    usize committed = 0;
+    for (const TuiDisplayBatch* batch = t.DisplayFirst; batch; batch = batch->Next) {
+      CHECK(batch->Head < batch->Count);
+      used += batch->Mem.Used;
+      committed += batch->Mem.Committed;
+    }
+    CHECK_ALL(used <= (2u << 20), committed <= (2u << 20));
+    if (t.DisplaySpare) {
+      retiredWhileBusy++;
+      Arena* spare = &t.DisplaySpare->Mem;
+      CHECK_ALL(spare->Used <= (64u << 10), spare->Committed <= (64u << 10),
+                !t.DisplaySpare->Next, !t.DisplaySpare->Count);
+      // Poison only reclaimed payload storage, leaving the cached batch's
+      // descriptor intact. The running-tool status must own its name.
+      memset(spare->Base + spare->Used, 0xa5, spare->Committed - spare->Used);
+      CHECK(StrView_Eq(t.StateTool.Text, SVL("read")));
+    }
+    enqueue(turn + 2);
+  }
+  CHECK(retiredWhileBusy != 0);
+  DrainDisplay(&t, now);
+  CHECK_ALL(DisplayStorageIdle(&t), t.Model.Entries.Count == 36);
+  for (u32 i = 0; i + 1 < t.Model.Entries.Count; i += 2) {
+    CHECK_ALL(t.Model.Entries.Data[i].Kind == EntryKind::Tool,
+              t.Model.Entries.Data[i].Tool.Done,
+              t.Model.Entries.Data[i + 1].Kind == EntryKind::Assistant,
+              StrView_Eq(StrBuf_View(&t.Model.Entries.Data[i + 1].Text.Content), body));
+  }
+  Tui_Stop(&t);
+  ArenaRelease(&input);
+}
+
+void TestRevealOwnership(Arena* outer) {
+  Arena input = ArenaCreate();
+  // A small adopted event shares its batch with the delayed completion; a
+  // large one is dequeued into a pinned batch before it has finished revealing.
+  for (u32 mode = 0; mode < 4; mode++) {
+    Tui t;
+    InitHeadlessTui(&t, outer, false);
+    StrView body = RepeatText(&input, SVL("a\xc3\xa9"), mode == 0 ? 1024 : 110000);
+    StrBuf supplied = StrBuf_Make(&input, body.Length + 1);
+    StrBuf_Append(&supplied, body);
+    bool adopted = mode != 2;
+    if (adopted) Tui_CommandNotice(&t, SVL("before reveal"));
+    usize baseline = t.SessionMem.Used;
+    Tui_AppendAssistantText(&t, StrBuf_View(&supplied));
+    if (mode != 3) {
+      Tui_AssistantMessageEnded(&t, StopReason::Stop, Usage{}, {});
+      Tui_CommandNotice(&t, SVL("after reveal"));
+    }
+    CHECK(t.SessionMem.Used == baseline);
+    memset(supplied.Data, '!', supplied.Length);
+
+    CHECK(Tui_AdvanceStream(&t, 1000));
+    CHECK_ALL(StreamReveal_HasPending(&t.Reveal),
+              (t.DisplayFirst == nullptr) == (mode == 3),
+              t.Model.Entries.Count == (adopted ? 2u : 1u));
+    if (adopted) {
+      CHECK(t.RevealBatch != nullptr);
+      CHECK((t.RevealBatch == t.DisplayFirst) == (mode == 0));
+      if (t.RevealBatch)
+        CHECK(t.Reveal.Pending.Backing == &t.RevealBatch->Mem);
+      if ((mode == 1 || mode == 3) && t.RevealBatch)
+        CHECK(t.RevealBatch->Head == t.RevealBatch->Count);
+    } else {
+      CHECK_ALL(!t.RevealBatch, t.Reveal.Pending.Backing == &t.RevealMem,
+                t.RevealMem.Used >= body.Length,
+                t.RevealMem.Committed >= body.Length);
+    }
+    u32 assistant = adopted ? 1u : 0u;
+    CHECK(StrView_Eq(StrBuf_View(&t.Model.Entries.Data[assistant].Text.Content),
+                     StrView{body.Data, 1}));
+    if (mode == 3) {
+      // New deltas can grow the adopted buffer after its queue has become
+      // empty. Its detached batch is still the owner until the reveal drains.
+      StrView tail = SVL(" \xf0\x9f\x98\x80");
+      Tui_AppendAssistantText(&t, tail);
+      StrBuf expected = StrBuf_Make(&input, body.Length + tail.Length + 1);
+      StrBuf_Append(&expected, body);
+      StrBuf_Append(&expected, tail);
+      body = StrBuf_View(&expected);
+      Tui_AssistantMessageEnded(&t, StopReason::Stop, Usage{}, {});
+      Tui_CommandNotice(&t, SVL("after reveal"));
+    }
+    Tui_AdvanceStream(&t, 1032);
+    CHECK_ALL(StreamReveal_HasPending(&t.Reveal),
+              t.Model.Entries.Count == assistant + 1);
+    Tui_AdvanceStream(&t, (mode == 3 ? 1032 : 1000) + kRevealDeadlineMs);
+    CHECK_ALL(DisplayStorageIdle(&t), t.Model.Entries.Count == assistant + 2,
+              StrView_Eq(StrBuf_View(&t.Model.Entries.Data[assistant].Text.Content), body),
+              StrView_Eq(StrBuf_View(&t.Model.Entries.Data[assistant + 1].Text.Content),
+                         SVL("after reveal")));
+    Tui_AppendAssistantText(&t, SVL("next reply"));
+    Tui_AssistantMessageEnded(&t, StopReason::Stop, Usage{}, {});
+    DrainDisplay(&t, 2000);
+    CHECK_ALL(DisplayStorageIdle(&t),
+              StrView_Eq(StrBuf_View(&t.Model.Entries.Data[assistant + 2].Text.Content),
+                         SVL("next reply")));
+    Tui_Stop(&t);
+  }
+  ArenaRelease(&input);
+}
+
+void TestPendingStorageReset(Arena* outer) {
+  Arena input = ArenaCreate();
+  StrView body = RepeatText(&input, SVL("pending "), 50000);
+  for (u32 action = 0; action < 3; action++) {
+    for (u32 adopted = 0; adopted < 2; adopted++) {
+      Tui t;
+      InitHeadlessTui(&t, outer, false);
+      if (adopted) Tui_CommandNotice(&t, SVL("before"));
+      Tui_AppendAssistantText(&t, body);
+      Tui_AssistantMessageEnded(&t, StopReason::Stop, Usage{}, {});
+      Tui_ToolProgress(&t, SVL("pending-slot"), body);
+      CHECK(Tui_AdvanceStream(&t, 1000));
+      CHECK_ALL(Tui_HasPendingDisplay(&t), t.ToolUpdateMem.Used != 0);
+      if (adopted) CHECK(t.RevealBatch != nullptr);
+      else CHECK(t.RevealMem.Committed >= body.Length);
+      Tui_PermissionReviewStarted(&t, body);
+      if (action == 0) CHECK(Tui_ClearSession(&t));
+      else if (action == 1) Tui_ReplaceTranscript(&t, nullptr, 0);
+      else Tui_Stop(&t);
+      CHECK_ALL(!t.DisplayFirst, !t.DisplayLast, !t.DisplaySpare, !t.RevealBatch,
+                !Tui_HasPendingDisplay(&t),
+                t.ToolUpdateMem.Used == 0, t.ToolUpdateMem.Committed == 0,
+                t.StateTool.Mem.Used == 0, t.StateTool.Mem.Committed == 0,
+                t.RevealMem.Used <= (64u << 10),
+                t.RevealMem.Committed <= (64u << 10));
+      if (action != 2) {
+        CHECK_ALL(DisplayStorageIdle(&t), t.Model.Entries.Count == 0);
+        Tui_CommandNotice(&t, SVL("fresh display"));
+        DrainDisplay(&t, 2000);
+        CHECK_ALL(t.Model.Entries.Count == 1,
+                  StrView_Eq(StrBuf_View(&t.Model.Entries.Data[0].Text.Content),
+                             SVL("fresh display")));
+      } else {
+        CHECK_ALL(!t.RevealMem.Base, !t.ToolUpdateMem.Base, !t.StateTool.Mem.Base);
+      }
+      Tui_Stop(&t);
+    }
+  }
+  ArenaRelease(&input);
+}
+
+void TestToolUpdateOwnership(Arena* outer) {
+  Arena input = ArenaCreate();
+  StrView largeId = RepeatText(&input, SVL("long-id-"), 32768);
+  StrView largePreview = RepeatText(&input, SVL("x"), 1500);
+  Tui t;
+  InitHeadlessTui(&t, outer, false);
+  CHECK_ALL(t.ToolUpdateMem.Used == 0, t.ToolUpdateMem.Committed == 0);
+  Tui_ToolStarted(&t, SVL("keeper"), SVL("shell"), SVL("{\"command\":\"wait\"}"));
+  DrainDisplay(&t);
+  Tui_ToolProgress(&t, SVL("keeper"), SVL("initial"));
+  DrainDisplay(&t);
+  usize baseline = t.SessionMem.Used;
+  for (u32 i = 0; i < 24; i++) {
+    // A progress-only ID can arrive after lag recovery dropped its tool card.
+    // Its retirement still must compact around the other live/queued slot.
+    Tui_ToolProgress(&t, largeId, largePreview);
+    Tui_ToolProgress(&t, largeId, SVL("small"));
+    Tui_ToolEnded(&t, largeId, SVL("done"), false);
+    StrBuf latest = StrBuf_Make(&input, 32);
+    StrBuf_AppendCStr(&latest, "still running ");
+    StrBuf_AppendU64(&latest, i);
+    Tui_ToolProgress(&t, SVL("keeper"), largePreview);
+    Tui_ToolProgress(&t, SVL("keeper"), StrBuf_View(&latest));
+    CHECK(QueuedDisplayCount(&t) == 3);
+    CHECK(t.ToolUpdateMem.Used >= largeId.Length);
+    DrainDisplay(&t, 2000 + i * 1000ull);
+    CHECK_ALL(t.ToolUpdateMem.Used <= (64u << 10),
+              t.ToolUpdateMem.Committed <= (64u << 10),
+              !t.Model.Entries.Data[0].Tool.Done,
+              StrView_Eq(StrBuf_View(&t.Model.Entries.Data[0].Tool.Preview),
+                         StrBuf_View(&latest)));
+    Tui_ToolProgress(&t, SVL("small-reused"), largePreview);
+    Tui_ToolProgress(&t, SVL("small-reused"), SVL("small"));
+    Tui_ToolEnded(&t, SVL("small-reused"), SVL("done"), false);
+    Tui_ToolProgress(&t, SVL("keeper"), SVL("after small"));
+    DrainDisplay(&t, 2500 + i * 1000ull);
+    CHECK_ALL(t.ToolUpdateMem.Used <= (64u << 10),
+              t.ToolUpdateMem.Committed <= (64u << 10),
+              StrView_Eq(StrBuf_View(&t.Model.Entries.Data[0].Tool.Preview),
+                         SVL("after small")));
+  }
+  CHECK_ALL(t.SessionMem.Used <= baseline + (128u << 10),
+            t.SessionMem.Committed <= baseline + (192u << 10));
+  Tui_ToolEnded(&t, SVL("keeper"), SVL("finished"), false);
+  DrainDisplay(&t, 30000);
+  CHECK_ALL(t.ToolUpdateMem.Used == 0, t.ToolUpdateMem.Committed == 0,
+            t.Model.Entries.Data[0].Tool.Done,
+            StrView_Eq(StrBuf_View(&t.Model.Entries.Data[0].Tool.Preview), SVL("finished")));
+  for (const TuiToolUpdateSlot& slot : t.ToolUpdates)
+    CHECK_ALL(!slot.Active, !slot.Queued, !slot.ToolCallId.Length, !slot.Payload.Data);
+  Tui_Stop(&t);
+  ArenaRelease(&input);
+}
+
+void TestTransientStatusOwnership(Arena* outer) {
+  Arena input = ArenaCreate();
+  StrView huge = RepeatText(&input, SVL("status-"), 50000);
+  Tui t;
+  InitHeadlessTui(&t, outer, false);
+  usize baseline = t.SessionMem.Used;
+  usize committed = t.SessionMem.Committed;
+  for (u32 i = 0; i < 16; i++) {
+    Tui_PermissionReviewStarted(&t, huge);
+    Tui_BeginOperation(&t, huge);
+    Tui_SetOperationStatus(&t, huge);
+    CHECK_ALL(t.StateTool.Mem.Used >= huge.Length,
+              t.OperationLabel.Mem.Used >= huge.Length,
+              t.OperationStatus.Mem.Used >= huge.Length,
+              t.StateTool.Mem.Committed >= huge.Length,
+              t.OperationLabel.Mem.Committed >= huge.Length,
+              t.OperationStatus.Mem.Committed >= huge.Length);
+    Tui_PermissionReviewStarted(&t, StrView{t.StateTool.Text.Data + huge.Length - 7, 6});
+    Tui_BeginOperation(&t, StrView{t.OperationLabel.Text.Data + huge.Length - 7, 6});
+    Tui_SetOperationStatus(&t, huge);
+    Tui_SetOperationStatus(&t, StrView{t.OperationStatus.Text.Data + huge.Length - 7, 6});
+    CHECK_ALL(StrView_Eq(t.StateTool.Text, SVL("status")),
+              StrView_Eq(t.OperationLabel.Text, SVL("status")),
+              StrView_Eq(t.OperationStatus.Text, SVL("status")),
+              t.StateTool.Mem.Used <= 64, t.StateTool.Mem.Committed <= (64u << 10),
+              t.OperationLabel.Mem.Used <= 64,
+              t.OperationLabel.Mem.Committed <= (64u << 10),
+              t.OperationStatus.Mem.Used <= 64,
+              t.OperationStatus.Mem.Committed <= (64u << 10));
+    Tui_RetryStarted(&t, true, i + 1, 1, 3);
+    CHECK_ALL(StrView_Contains(t.RetryStatus.Text, "provider request"),
+              t.RetryStatus.Mem.Used <= 96, t.RetryStatus.Mem.Committed <= (64u << 10));
+    Tui_RetryEnded(&t);
+    Tui_PermissionReviewEnded(&t);
+    CHECK(!Tui_EndOperation(&t));
+    CHECK_ALL(t.StateTool.Mem.Used == 0, t.StateTool.Mem.Committed == 0,
+              t.RetryStatus.Mem.Used == 0, t.RetryStatus.Mem.Committed == 0,
+              t.OperationLabel.Mem.Used == 0, t.OperationLabel.Mem.Committed == 0,
+              t.OperationStatus.Mem.Used == 0, t.OperationStatus.Mem.Committed == 0);
+  }
+  CHECK_ALL(t.SessionMem.Used == baseline, t.SessionMem.Committed == committed);
+  Tui_Stop(&t);
+  CHECK_ALL(!t.StateTool.Mem.Base, !t.RetryStatus.Mem.Base,
+            !t.OperationLabel.Mem.Base, !t.OperationStatus.Mem.Base);
+  ArenaRelease(&input);
+}
+
+void TestHydrationPayloadOwnership(Arena* outer) {
+  Arena input = ArenaCreate();
+  StrView args = LargeReadArgs(&input);
+  StrView resultPart = RepeatText(&input, SVL("line\n"), 40000);
+  StrView userPart = RepeatText(&input, SVL("user "), 14000);
+  for (u32 multipart = 0; multipart < 2; multipart++) {
+    Tui t;
+    InitHeadlessTui(&t, outer, false);
+    usize baseline = t.SessionMem.Used;
+    usize committed = t.SessionMem.Committed;
+    Array<Message> messages = Array_Make<Message>(&input, 17);
+    Message user = Message_User(&input, userPart);
+    StrBuf expected = StrBuf_Make(&input, userPart.Length * 2 + 2);
+    StrBuf_Append(&expected, userPart);
+    if (multipart) {
+      Array_Push(&user.Content, Content_Image(SVL("ignored"), SVL("image/png")));
+      Array_Push(&user.Content, Content_Text(userPart));
+      StrBuf_AppendChar(&expected, '\n');
+      StrBuf_Append(&expected, userPart);
+    }
+    Array_Push(&messages, user);
+    for (u32 i = 0; i < 8; i++) {
+      StrBuf id = StrBuf_Make(&input, 32);
+      StrBuf_AppendCStr(&id, "hydrated-");
+      StrBuf_AppendU64(&id, i);
+      Message call = Message_AssistantEmpty(&input);
+      Array_Push(&call.Content, Content_ToolCall(StrBuf_View(&id), SVL("read"), args));
+      Array_Push(&messages, call);
+      Message result = Message_ToolResult(&input, StrBuf_View(&id), SVL("read"),
+                                         resultPart, false);
+      Array_Push(&result.Content, Content_Text(resultPart));
+      Array_Push(&messages, result);
+    }
+    Tui_ReplaceTranscript(&t, messages.Data, messages.Count);
+    CHECK_ALL(DisplayStorageIdle(&t), t.Model.Entries.Count == 9,
+              t.Model.Entries.Data[0].Kind == EntryKind::User,
+              StrView_Eq(StrBuf_View(&t.Model.Entries.Data[0].Text.Content),
+                         StrBuf_View(&expected)));
+    for (u32 i = 1; i < t.Model.Entries.Count; i++) {
+      ToolEntry& tool = t.Model.Entries.Data[i].Tool;
+      CHECK_ALL(t.Model.Entries.Data[i].Kind == EntryKind::Tool, tool.Done, !tool.Error,
+                StrView_Eq(StrBuf_View(&tool.View.Detail), SVL("owned.txt")),
+                StrView_Eq(StrBuf_View(&tool.View.Outcome), SVL("80001 lines read")),
+                StrView_Eq(StrBuf_View(&tool.Preview), StrView{resultPart.Data, 1500}));
+    }
+    // The row index is SessionMem-owned and grows geometrically. Its live
+    // allocation plus all abandoned capacities sum to less than twice the
+    // final capacity; none of that storage is a hydration payload leak.
+    usize rowStorage = (usize)2 * t.Model.Lines.Capacity * sizeof(SpanLine);
+    CHECK_ALL(t.SessionMem.Used <= baseline + expected.Length + rowStorage + (64u << 10),
+              t.SessionMem.Committed <=
+                  committed + expected.Length + rowStorage + (128u << 10));
+    Tui_Stop(&t);
+  }
+  ArenaRelease(&input);
 }
 
 }  // namespace
@@ -440,11 +855,92 @@ void TestSessionMemoryCompaction(Arena* outer) {
   Tui_Stop(&t);
 }
 
+static void TestEditorAndQueueMigration(Arena* outer) {
+  for (u32 clear = 0; clear < 2; clear++) {
+    Tui t;
+    InitHeadlessTui(&t, outer, false);
+    LineEdit_InsertText(&t.Edit, SVL("first history"));
+    LineEdit_Submit(&t.Edit);
+    LineEdit_InsertText(&t.Edit, SVL("second history"));
+    LineEdit_Submit(&t.Edit);
+    LineEdit_InsertText(&t.Edit, SVL("saved draft"));
+    LineEdit_HistoryPrev(&t.Edit);
+    LineEdit_HistoryPrev(&t.Edit);
+    LineEdit_SetCursor(&t.Edit, 2);
+    LineEdit_SetCursor(&t.Edit, 7, true);
+    t.Edit.DesiredCol = 19;
+    t.InputUi.FirstRow = 3;
+    t.InputUi.Dragging = true;
+    const char* oldText = t.Edit.Text.Data;
+    const char* oldStash = t.Edit.Stash.Data;
+    const StrView* oldHistory = t.Edit.History.Data;
+
+    const TuiSubmission expected[] = {
+        {TuiSubmissionKind::PermissionMode, SVL("auto"), TuiPermissionMode::Auto},
+        {TuiSubmissionKind::PermissionMode, StrView{}, TuiPermissionMode::Yolo},
+        {TuiSubmissionKind::PermissionAcknowledged, SVL("ack"), TuiPermissionMode::Yolo},
+        {TuiSubmissionKind::Command, SVL("/status"), TuiPermissionMode::Ask}};
+    t.QHead = 62;
+    t.QTail = 2;
+    t.QCount = 4;
+    for (u32 i = 0; i < 4; i++) {
+      TuiSubmission queued = expected[i];
+      queued.Text = StrView_Dup(&t.SessionMem, queued.Text);
+      t.Queue[(62 + i) % 64] = queued;
+    }
+    if (clear) {
+      CHECK(Tui_ClearSession(&t));
+      CHECK_ALL(LineEdit_Empty(&t.Edit), t.Edit.History.Count == 0,
+                t.Edit.Stash.Length == 0, t.Edit.HistPos == -1,
+                !LineEdit_HasSelection(&t.Edit), t.InputUi.FirstRow == 0,
+                !t.InputUi.Dragging);
+    } else {
+      CHECK(Tui_CompactSessionMemory(&t, nullptr, 0));
+      CHECK_ALL(t.Edit.Text.Data != oldText, t.Edit.Stash.Data != oldStash,
+                t.Edit.History.Data != oldHistory, t.Edit.HistPos == 0,
+                t.Edit.Cursor == 7, t.Edit.Anchor == 2, t.Edit.DesiredCol == 19,
+                StrView_Eq(LineEdit_SelectedText(&t.Edit), SVL("rst h")),
+                t.InputUi.FirstRow == 3, t.InputUi.Dragging);
+      LineEdit_HistoryNext(&t.Edit);
+      CHECK(StrView_Eq(LineEdit_Text(&t.Edit), SVL("second history")));
+      LineEdit_HistoryNext(&t.Edit);
+      CHECK_ALL(t.Edit.HistPos == -1,
+                StrView_Eq(LineEdit_Text(&t.Edit), SVL("saved draft")));
+      for (u32 i = 0; i < 256; i++) LineEdit_InsertChar(&t.Edit, 'x');
+      CHECK(t.Edit.Text.Length == 267);
+      for (u32 i = 0; i < 32; i++) {
+        LineEdit_Submit(&t.Edit);
+        LineEdit_InsertText(&t.Edit, SVL("new history"));
+      }
+      CHECK(t.Edit.History.Count == 34);
+    }
+    CHECK_ALL(t.InputUi.Edit == &t.Edit, t.Edit.Mem == &t.SessionMem,
+              t.Edit.Text.Backing == &t.SessionMem, t.Edit.Stash.Backing == &t.SessionMem,
+              t.Edit.History.Backing == &t.SessionMem, t.QCount == 4);
+    for (u32 i = 0; i < 4 && t.QCount; i++) {
+      TuiSubmission actual = {};
+      CHECK(Tui_WaitForSubmit(&t, &actual));
+      CHECK_ALL(actual.Kind == expected[i].Kind, actual.Permission == expected[i].Permission,
+                StrView_Eq(actual.Text, expected[i].Text));
+    }
+    CHECK(t.QCount == 0);
+    Tui_Stop(&t);
+  }
+}
+
 void TestTui() {
   g_displayDrainsOk = true;
   Arena a = ArenaCreate();
   TestPerfSampling();
   TestSessionMemoryCompaction(&a);
+  TestEditorAndQueueMigration(&a);
+  TestToolPayloadOwnership(&a);
+  TestDisplayBatchOwnership(&a);
+  TestRevealOwnership(&a);
+  TestPendingStorageReset(&a);
+  TestToolUpdateOwnership(&a);
+  TestTransientStatusOwnership(&a);
+  TestHydrationPayloadOwnership(&a);
   TuiOpts o;
   o.ModelName = SVL("test-model");
   o.Color = true;
@@ -632,11 +1128,11 @@ void TestTui() {
   ev.Retry.DelayMs = 250;
   TuiBridge_HarnessEvent(&t, &ev);
   CHECK_ALL(t.State == TuiState::Retry,
-            StrView_Contains(t.Sess.RetryStatus, "assistant turn"),
-            StrView_Contains(t.Sess.RetryStatus, "250 ms"));
+            StrView_Contains(t.RetryStatus.Text, "assistant turn"),
+            StrView_Contains(t.RetryStatus.Text, "250 ms"));
   ev.Kind = AgentHarnessEventKind::TransientRetryEnd;
   TuiBridge_HarnessEvent(&t, &ev);
-  CHECK_ALL(t.State == TuiState::Thinking, !t.Sess.RetryStatus.Length);
+  CHECK_ALL(t.State == TuiState::Thinking, !t.RetryStatus.Text.Length);
 
   ev = {};
   ev.Kind = AgentHarnessEventKind::TransientPermissionReviewStart;
@@ -644,12 +1140,12 @@ void TestTui() {
   ev.PermissionReview.Model = SVL("reviewer");
   TuiBridge_HarnessEvent(&t, &ev);
   CHECK_ALL(t.State == TuiState::PermissionReview,
-            StrView_Eq(t.Sess.StateTool, SVL("shell")));
+            StrView_Eq(t.StateTool.Text, SVL("shell")));
   ev.Kind = AgentHarnessEventKind::TransientPermissionReviewEnd;
   ev.PermissionReview.Outcome = AgentPermissionReviewOutcome::Allow;
   TuiBridge_HarnessEvent(&t, &ev);
   CHECK_ALL(t.State == TuiState::Thinking,
-            !t.Sess.StateTool.Length);
+            !t.StateTool.Text.Length);
 
   // The assistant entry is begun lazily on the first text delta, so a turn that
   // streams no text (tool-only) renders no assistant header at all.
@@ -1329,10 +1825,10 @@ void TestTui() {
     t3.Agent = TuiBridge_AgentHooks(&harness);
 
     CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SV("ask"))));
-    AgentHarnessSnapshot snapshot = {};
+    AgentTranscriptSnapshot snapshot = {};
     CHECK(SessionResult_IsOk(
-        AgentHarness_SnapshotFull(&a3, &harness, &snapshot)));
-    Tui_HydrateTranscript(&t3, snapshot.Transcript.Data,
+        AgentHarness_SnapshotTranscript(&a3, &harness, 0, &snapshot)));
+    Tui_ReplaceTranscript(&t3, snapshot.Transcript.Data,
                           snapshot.Transcript.Count);
     Tui_SetContextTokens(&t3, snapshot.ContextTokens);
     u32 hydratedEntries = t3.Model.Entries.Count;
@@ -1674,8 +2170,8 @@ void TestTui() {
     update.Tool.CallId = SVL("streaming-shell");
     update.Tool.Result = partial;
     for (u32 i = 0; i < 100; i++) TuiBridge_HarnessEvent(&tu, &update);
-    CHECK_ALL(tu.DisplayEvents.Count == 2,
-              tu.ToolUpdateMem.Used <= 1501);
+    CHECK_ALL(QueuedDisplayCount(&tu) == 2,
+              tu.ToolUpdateMem.Used <= 1536);
     DrainDisplay(&tu);
     CHECK_ALL(tu.Model.Entries.Count == 1,
               !tu.Model.Entries.Data[0].Tool.Done,
@@ -1686,7 +2182,7 @@ void TestTui() {
       TuiBridge_HarnessEvent(&tu, &update);
       DrainDisplay(&tu);
     }
-    CHECK(tu.ToolUpdateMem.Used <= 1501);
+    CHECK(tu.ToolUpdateMem.Used <= 1536);
 
     ToolResult complete = {};
     complete.Content = Array_Make<Content>(&au, 1);
@@ -1713,7 +2209,7 @@ void TestTui() {
       TuiBridge_HarnessEvent(&tu, &finish);
       DrainDisplay(&tu);
     }
-    CHECK(tu.ToolUpdateMem.Used <= 3002);
+    CHECK(tu.ToolUpdateMem.Used <= (64u << 10));
 
     Tui_Stop(&tu);
     ArenaRelease(&au);
@@ -2437,8 +2933,8 @@ void TestTui() {
 
     Tui_BeginOperation(&tc, SVL("login"));
     Tui_SetOperationStatus(&tc, SVL("waiting for approval"));
-    CHECK_ALL(tc.OperationActive, StrView_Eq(tc.Sess.OperationLabel, SVL("login")),
-              StrView_Eq(tc.Sess.OperationStatus, SVL("waiting for approval")),
+    CHECK_ALL(tc.OperationActive, StrView_Eq(tc.OperationLabel.Text, SVL("login")),
+              StrView_Eq(tc.OperationStatus.Text, SVL("waiting for approval")),
               *Tui_OperationAbort(&tc) == 0);
     Feed(&tc, "\x03");
     CHECK_ALL(*Tui_OperationAbort(&tc) == 1, !tc.Quit, !tc.Stop);
@@ -2599,8 +3095,7 @@ void TestTui() {
     resetTui.Use.Input = 11;
     resetTui.Use.Output = 7;
     resetTui.ContextTokens = 500;
-    resetTui.State = TuiState::Streaming;
-    resetTui.Sess.StateTool = SVL("old tool");
+    Tui_PermissionReviewStarted(&resetTui, SVL("old tool"));
     resetTui.QueuedCount = 3;
     resetTui.Top = 4;
     resetTui.LastTop = 3;

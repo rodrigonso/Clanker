@@ -18,6 +18,8 @@ struct JsonlWriterClaim {
 };
 
 struct JsonlRepository {
+  // Shared handle/claim allocations are guarded by Lock. Each handle owns
+  // its records and IO separately; initialization/destruction are exclusive.
   Arena Mem;
   Mutex Lock;
   StrView Root;
