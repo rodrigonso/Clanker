@@ -130,6 +130,7 @@ struct TuiCommandSpec {
   StrView Alias;
   StrView Description;
   TuiCommandInline Inline = TuiCommandInline::None;
+  bool PrivateArguments = false;
 };
 
 // Strings whose storage belongs to SessionMem and which nothing rebuilds when
@@ -138,15 +139,14 @@ struct TuiCommandSpec {
 // added here is covered automatically, and a SessionMem-backed StrView added
 // anywhere else on Tui is now visibly the wrong thing to do.
 //
-// Model, Edit and ModalEdit are explicitly re-initialised against the new
-// arena. Display events, reveal and status strings own separate storage.
+// Model and Edit are explicitly re-initialised against the new arena.
+// Modal input, display events, reveal and status strings own separate storage.
 struct TuiSessionStrings {
   StrView ModalTitle;
   StrView ModalCategory;    // breadcrumb before the title; empty hides it
   StrView ModalPrompt;
   StrView* ModalOptions;    // array itself is also SessionMem-owned
   u32 ModalOptionCount;
-  StrView ModalTextResult;
 };
 
 struct TuiOpts {
@@ -169,6 +169,7 @@ struct Tui {
   // transcript. Compaction waits for the arena to double past it.
   usize SessionMemBaseline;
   Arena CommandMem;
+  Arena ModalMem;
   Arena ToolUpdateMem;
   Arena RevealMem;
   Arena ScreenMem;
@@ -241,6 +242,9 @@ struct Tui {
   // Modal selection / text entry.
   TuiModalKind ModalKind;
   TuiModalResult ModalResult;
+  TextInputMode ModalInputMode;
+  bool ModalInputTooLong;
+  bool ModalTextReady;
   u32 ModalSelected;
   u32 ModalFirst;
 
@@ -368,13 +372,16 @@ bool Tui_EndOperation(Tui* t);
 volatile i32* Tui_OperationAbort(Tui* t);
 
 // Non-blocking modal entry points are useful to controllers and headless tests.
-// Result remains available until the next modal begins.
+// Selection results remain available until the next modal begins; text is consumed.
 bool Tui_BeginSelection(Tui* t, StrView title, const StrView* options, u32 optionCount,
                         u32 initialSelection = 0,
                         StrView category = SVL("Commands"));
 bool Tui_BeginTextEntry(Tui* t, StrView title, StrView prompt, StrView initial = {},
-                        StrView category = SVL("Commands"));
-TuiModalResult Tui_GetModalResult(Tui* t, u32* selected, StrView* text);
+                        StrView category = SVL("Commands"),
+                        TextInputMode mode = TextInputMode::Plain);
+// Requesting text consumes the result and copies it to the required arena.
+TuiModalResult Tui_GetModalResult(Tui* t, u32* selected, StrView* text,
+                                 Arena* arena = nullptr);
 
 // Blocking conveniences. Cond_Wait releases the TUI lock, so input and render
 // threads remain active while the caller waits.
@@ -382,9 +389,10 @@ TuiModalResult Tui_Select(Tui* t, StrView title, const StrView* options,
                          u32 optionCount, u32* selected,
                          u32 initialSelection = 0,
                          StrView category = SVL("Commands"));
-TuiModalResult Tui_ReadText(Tui* t, StrView title, StrView prompt,
+TuiModalResult Tui_ReadText(Tui* t, Arena* arena, StrView title, StrView prompt,
                            StrView initial, StrView* out,
-                           StrView category = SVL("Commands"));
+                           StrView category = SVL("Commands"),
+                           TextInputMode mode = TextInputMode::Plain);
 void Tui_OpenCommandPalette(Tui* t);
 
 // Progress reporting. Each call is what the driver has just observed, in the

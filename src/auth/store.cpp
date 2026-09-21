@@ -12,9 +12,44 @@ struct Entry {
   Credential Cred;
 };
 
+bool CompleteStoreDocument(StrView content) {
+  // The shared parser accepts unterminated empty containers. Bound nesting and
+  // require closed strings/containers before inspecting the credential schema.
+  char stack[16] = {};
+  u32 depth = 0;
+  bool quoted = false;
+  for (u32 i = 0; i < content.Length; i++) {
+    char c = content.Data[i];
+    if (quoted) {
+      if ((u8)c < 0x20) return false;
+      if (c == '\\') {
+        if (++i == content.Length) return false;
+      } else if (c == '"') {
+        quoted = false;
+      }
+    } else if (c == '"') {
+      quoted = true;
+    } else if (c == '{' || c == '[') {
+      if (depth == sizeof(stack)) return false;
+      stack[depth++] = c;
+    } else if (c == '}' || c == ']') {
+      if (!depth || stack[--depth] != (c == '}' ? '{' : '[')) return false;
+    } else if ((u8)c < 0x20 && c != '\t' && c != '\r' && c != '\n') {
+      return false;
+    }
+  }
+  return !quoted && depth == 0;
+}
+
 bool ParseCred(JsonValue* v, Credential* out) {
   *out = {};
+  if (!Json_IsObject(v)) return false;
+  for (u32 i = 0; i < v->MemberCount; i++)
+    for (u32 j = 0; j < i; j++)
+      if (StrView_Eq(v->Members[i].Key, v->Members[j].Key)) return false;
   if (!StrView_EqCStr(Json_GetStr(v, "type"), "api_key")) return false;
+  JsonValue* key = Json_Get(v, "key");
+  if (!key || key->Kind != JsonKind::String) return false;
   out->ApiKey = Json_GetStr(v, "key");
   return true;
 }
@@ -25,18 +60,25 @@ void WriteCred(StrBuf* b, const Credential* c) {
   StrBuf_AppendChar(b, '}');
 }
 
-Array<Entry> LoadEntries(Arena* a, StrView path) {
-  Array<Entry> entries = Array_Make<Entry>(a, 8);
+bool LoadEntries(Arena* a, StrView path, Array<Entry>* entries) {
+  *entries = Array_Make<Entry>(a, 8);
   StrView content = {};
-  if (ConfigFile_ReadAll(a, path, &content) != ConfigFileReadResult::Success) return entries;
+  ConfigFileReadResult loaded = ConfigFile_ReadAll(a, path, &content);
+  if (loaded == ConfigFileReadResult::Missing) return true;
+  if (loaded != ConfigFileReadResult::Success || !CompleteStoreDocument(content))
+    return false;
   JsonValue* root = Json_Parse(a, content);
-  if (!Json_IsObject(root)) return entries;
+  if (!Json_IsObject(root)) return false;
   for (u32 i = 0; i < root->MemberCount; i++) {
-    Entry e;
+    Entry e = {};
     e.Id = root->Members[i].Key;
-    if (ParseCred(root->Members[i].Value, &e.Cred)) Array_Push(&entries, e);
+    JsonValue* value = root->Members[i].Value;
+    if (!ParseCred(value, &e.Cred) || value->MemberCount != 2) return false;
+    for (u32 j = 0; j < entries->Count; j++)
+      if (StrView_Eq(entries->Data[j].Id, e.Id)) return false;
+    Array_Push(entries, e);
   }
-  return entries;
+  return true;
 }
 
 bool WriteEntries(Arena* a, StrView path, const Array<Entry>* entries) {
@@ -64,18 +106,25 @@ StrView AuthStore_DefaultPath(Arena* a) {
 }
 
 bool AuthStore_Read(Arena* a, StrView path, StrView providerId, Credential* out) {
-  Array<Entry> entries = LoadEntries(a, path);
-  for (u32 i = 0; i < entries.Count; i++) {
-    if (StrView_Eq(entries.Data[i].Id, providerId)) {
-      *out = entries.Data[i].Cred;
-      return true;
-    }
+  *out = {};
+  StrView content = {};
+  if (ConfigFile_ReadAll(a, path, &content) != ConfigFileReadResult::Success)
+    return false;
+  if (!CompleteStoreDocument(content)) return false;
+  JsonValue* root = Json_Parse(a, content);
+  if (!Json_IsObject(root)) return false;
+  JsonValue* credential = nullptr;
+  for (u32 i = 0; i < root->MemberCount; i++) {
+    if (!StrView_Eq(root->Members[i].Key, providerId)) continue;
+    if (credential) return false;
+    credential = root->Members[i].Value;
   }
-  return false;
+  return ParseCred(credential, out);
 }
 
 bool AuthStore_Write(Arena* a, StrView path, StrView providerId, const Credential* cred) {
-  Array<Entry> entries = LoadEntries(a, path);
+  Array<Entry> entries = {};
+  if (!LoadEntries(a, path, &entries)) return false;
   bool replaced = false;
   for (u32 i = 0; i < entries.Count; i++) {
     if (StrView_Eq(entries.Data[i].Id, providerId)) {
@@ -94,7 +143,8 @@ bool AuthStore_Write(Arena* a, StrView path, StrView providerId, const Credentia
 }
 
 bool AuthStore_Delete(Arena* a, StrView path, StrView providerId) {
-  Array<Entry> entries = LoadEntries(a, path);
+  Array<Entry> entries = {};
+  if (!LoadEntries(a, path, &entries)) return false;
   Array<Entry> kept = Array_Make<Entry>(a, entries.Count + 1);
   for (u32 i = 0; i < entries.Count; i++) {
     if (!StrView_Eq(entries.Data[i].Id, providerId)) Array_Push(&kept, entries.Data[i]);

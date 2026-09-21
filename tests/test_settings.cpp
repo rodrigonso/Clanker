@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <math.h>
 
 #if defined(_WIN32)
 #include <direct.h>
@@ -44,6 +45,9 @@ void TestSettings() {
             loaded.PermissionMode == AgentPermissionMode::Auto,
             StrView_Eq(loaded.PermissionReviewerModel,
                        AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL),
+            !loaded.PermissionReviewerInvalid,
+            loaded.PermissionReviewerThreshold == 0.95,
+            !loaded.PermissionReviewerThresholdInvalid,
             !loaded.YoloAcknowledged);
   // An absent compaction block leaves the built-in defaults in place.
   CHECK_ALL(loaded.Compaction.Enabled,
@@ -59,6 +63,116 @@ void TestSettings() {
 
   CHECK_ALL(loaded.TurnLimit.Enabled,
             loaded.TurnLimit.MaxTurns == AGENT_TURN_LIMIT_DEFAULT_MAX_TURNS);
+
+  const char* invalidThresholds[] = {
+      "\"0.9\"", "null", "true", "[]", "{}", "-0.01", "1.01", "1e999", "-1e999"};
+  for (const char* threshold : invalidThresholds) {
+    StrBuf content = StrBuf_Make(&a, 160);
+    StrBuf_AppendCStr(&content,
+        "{\"provider\":\"openrouter\",\"model\":\"chat\",\"permissionReviewerThreshold\":");
+    StrBuf_AppendCStr(&content, threshold);
+    StrBuf_AppendChar(&content, '}');
+    CHECK(ConfigFile_WriteAtomic(&a, SV(path), StrBuf_View(&content)));
+    CHECK(AppSettings_Load(&a, SV(path), &loaded) == AppSettingsLoadResult::Malformed);
+    // A non-finite number is rejected by the JSON parser itself, before the
+    // threshold field can be singled out.
+    bool parsable = !StrView_Contains(SV(threshold), "e999");
+    CHECK(loaded.PermissionReviewerThresholdInvalid == parsable);
+  }
+  AppSettings thresholdSettings = {};
+  thresholdSettings.Provider = SVL("openrouter");
+  thresholdSettings.Model = SVL("chat");
+  const f64 thresholds[] = {0, 1, 0.95, 0.9000000000000001};
+  for (f64 threshold : thresholds) {
+    thresholdSettings.PermissionReviewerThreshold = threshold;
+    CHECK(AppSettings_Save(&a, SV(path), &thresholdSettings));
+    CHECK(AppSettings_Load(&a, SV(path), &loaded) == AppSettingsLoadResult::Success);
+    CHECK_ALL(loaded.PermissionReviewerThreshold == threshold,
+              !loaded.PermissionReviewerThresholdInvalid);
+  }
+  const f64 invalidValues[] = {-0.01, 1.01, (f64)NAN, (f64)INFINITY, -(f64)INFINITY};
+  for (f64 threshold : invalidValues) {
+    thresholdSettings.PermissionReviewerThreshold = threshold;
+    CHECK(!AppSettings_Save(&a, SV(path), &thresholdSettings));
+    CHECK(AppSettings_Load(&a, SV(path), &loaded) == AppSettingsLoadResult::Success);
+    CHECK(loaded.PermissionReviewerThreshold == 0.9000000000000001);
+  }
+
+  const char* invalidReviewers[] = {
+      "\"\"", "null", "true", "42", "[]", "{}", "\"   \"", "\"jev-\"",
+      "\"jev-1.13.0/invalid\"", "\" Jev-1.13.0\"", "\"z-ai/glm-5.2\"",
+      "\"openrouter/auto\"", "\"reviewer/model\""};
+  for (u32 i = 0; i < sizeof(invalidReviewers) / sizeof(invalidReviewers[0]);
+       i++) {
+    StrBuf content = StrBuf_Make(&a, 160);
+    StrBuf_AppendCStr(
+        &content,
+        "{\"provider\":\"openrouter\",\"model\":\"chat\","
+        "\"permissionReviewerModel\":");
+    StrBuf_AppendCStr(&content, invalidReviewers[i]);
+    StrBuf_AppendChar(&content, '}');
+    CHECK(ConfigFile_WriteAtomic(&a, SV(path), StrBuf_View(&content)));
+    CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+          AppSettingsLoadResult::Malformed);
+    CHECK(loaded.PermissionReviewerInvalid);
+  }
+
+  const char* jevReviewers[] = {"jev-1.13.0", "jev-1", "jev-latest"};
+  for (u32 i = 0; i < sizeof(jevReviewers) / sizeof(jevReviewers[0]); i++) {
+    AppSettings valid = {};
+    valid.Provider = SVL("openrouter");
+    valid.Model = SVL("chat");
+    valid.PermissionReviewerModel = SV(jevReviewers[i]);
+    CHECK(AppSettings_Save(&a, SV(path), &valid));
+    CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+          AppSettingsLoadResult::Success);
+    CHECK_ALL(!loaded.PermissionReviewerInvalid,
+              StrView_EqCStr(loaded.PermissionReviewerModel, jevReviewers[i]));
+  }
+
+  CHECK(ConfigFile_WriteAtomic(
+      &a, SV(path),
+      SVL("{\"provider\":\"openrouter\",\"model\":\"chat\","
+          "\"permissionReviewerModel\":\"jev-1.12.0\","
+          "\"permissionMode\":\"ask\",\"yoloAcknowledged\":true,"
+          "\"defaultProjectTrust\":\"never\",\"effort\":\"high\","
+          "\"contextWindow\":1000000,\"rounded\":false,"
+          "\"compaction\":{\"enabled\":false,\"reserveTokens\":4096,"
+          "\"keepRecentTokens\":8192},\"retry\":{\"enabled\":false,"
+          "\"maxRetries\":5,\"baseDelayMs\":250,\"maxDelayMs\":3000},"
+          "\"turnLimit\":{\"enabled\":false,\"maxTurns\":42},"
+          "\"skills\":[\"skills/a\"],\"promptTemplates\":[\"prompts/a\"]}")));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+        AppSettingsLoadResult::Success);
+  CHECK(AppSettings_Save(&a, SV(path), &loaded));
+  CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+        AppSettingsLoadResult::Success);
+  CHECK_ALL(StrView_EqCStr(loaded.PermissionReviewerModel, "jev-1.12.0"),
+            StrView_EqCStr(loaded.Provider, "openrouter"),
+            StrView_EqCStr(loaded.Model, "chat"),
+            loaded.PermissionMode == AgentPermissionMode::Ask,
+            loaded.YoloAcknowledged, !loaded.Rounded,
+            loaded.DefaultTrust == DefaultProjectTrust::Never,
+            loaded.Profile.Effort == ModelEffort::High,
+            loaded.Profile.ContextWindow == 1000000);
+  CHECK_ALL(!loaded.Compaction.Enabled,
+            loaded.Compaction.ReserveTokens == 4096,
+            loaded.Compaction.KeepRecentTokens == 8192,
+            !loaded.Retry.Enabled, loaded.Retry.MaxRetries == 5,
+            loaded.Retry.BaseDelayMs == 250, loaded.Retry.MaxDelayMs == 3000,
+            !loaded.TurnLimit.Enabled, loaded.TurnLimit.MaxTurns == 42,
+            loaded.Skills.Count == 1, loaded.PromptTemplates.Count == 1);
+  CHECK_ALL(StrView_EqCStr(loaded.Skills.Data[0], "skills/a"),
+            StrView_EqCStr(loaded.PromptTemplates.Data[0], "prompts/a"));
+  const char* unsupportedReviewers[] = {
+      "jev-", "z-ai/glm-5.2", "openrouter/auto", "reviewer/model"};
+  for (const char* reviewer : unsupportedReviewers) {
+    loaded.PermissionReviewerModel = SV(reviewer);
+    CHECK(!AppSettings_Save(&a, SV(path), &loaded));
+    CHECK(AppSettings_Load(&a, SV(path), &loaded) ==
+          AppSettingsLoadResult::Success);
+    CHECK(StrView_EqCStr(loaded.PermissionReviewerModel, "jev-1.12.0"));
+  }
 
   // A partial compaction block overrides only the keys it names.
   CHECK(ConfigFile_WriteAtomic(
@@ -277,7 +391,7 @@ void TestSettings() {
   saved.TurnLimit.Enabled = true;
   saved.TurnLimit.MaxTurns = 42;
   saved.PermissionMode = AgentPermissionMode::Yolo;
-  saved.PermissionReviewerModel = SVL("z-ai/glm-5.2");
+  saved.PermissionReviewerModel = SVL("jev-1.13.0");
   saved.YoloAcknowledged = true;
   CHECK(AppSettings_Save(&a, SV(path), &saved));
   CHECK(AppSettings_Load(&a, SV(path), &loaded) == AppSettingsLoadResult::Success);
@@ -292,7 +406,7 @@ void TestSettings() {
             loaded.Retry.BaseDelayMs == 250, loaded.Retry.MaxDelayMs == 3000);
   CHECK_ALL(loaded.TurnLimit.Enabled, loaded.TurnLimit.MaxTurns == 42);
   CHECK_ALL(loaded.PermissionMode == AgentPermissionMode::Yolo,
-            StrView_EqCStr(loaded.PermissionReviewerModel, "z-ai/glm-5.2"),
+            StrView_EqCStr(loaded.PermissionReviewerModel, "jev-1.13.0"),
             loaded.YoloAcknowledged);
 
   saved.Rounded = false;

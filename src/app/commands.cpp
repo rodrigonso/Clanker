@@ -1,17 +1,22 @@
 #include "app/commands.h"
 
 #include <stdio.h>
+#include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "app/auth_flow.h"
 #include "app/event_pump.h"
 #include "app/hook_runner.h"
 #include "app/plain_select.h"
+#include "app/permission_reviewer.h"
 #include "app/session_switch.h"
 #include "app/settings.h"
 #include "app/tui_bridge.h"
+#include "auth/store.h"
 #include "base/config_file.h"
 #include "base/sysinfo.h"
+#include "json/json.h"
 #include "session/metadata.h"
 #include "tools/fs.h"
 
@@ -403,22 +408,247 @@ static AppCommandHandlerResult HandleCompactCommand(
                        SVL("session compacted"));
 }
 
+static void AppendPermissionThreshold(StrBuf* out, f64 threshold) {
+  char number[64];
+  u32 length = Json_FormatNumber(number, sizeof(number), threshold);
+  StrBuf_Append(out, StrView{number, length});
+}
+
+static AppCommandHandlerResult HandlePermissionModel(
+    InteractiveRuntime* rt, StrView arguments) {
+  if (arguments.Length) {
+    if (!TypeSafePermissionReviewer_ModelSupported(arguments))
+      return {AppCommandHandlerStatus::Failed,
+              SVL("Usage: /permissions model [jev-...]")};
+    if (rt->Harness->Running)
+      return {AppCommandHandlerStatus::Failed,
+              SVL("The permission reviewer model can only be changed while the agent is idle.")};
+
+    StrView previous = rt->PermissionReviewerModel;
+    rt->PermissionReviewerModel = arguments;
+    if (!RuntimePersistSettings(rt)) {
+      rt->PermissionReviewerModel = previous;
+      StrBuf message = StrBuf_Make(&rt->CommandMem, rt->SettingsPath.Length + 128);
+      StrBuf_AppendCStr(&message, "Permission reviewer model was not changed; settings could not be saved to ");
+      StrBuf_Append(&message, rt->SettingsPath);
+      StrBuf_AppendChar(&message, '.');
+      return {AppCommandHandlerStatus::Failed, StrBuf_View(&message)};
+    }
+    rt->PermissionReviewerModel = StrView_Dup(rt->Mem, arguments);
+    if (!RuntimeRefreshPermissionReviewer(rt))
+      return {AppCommandHandlerStatus::Failed,
+              SVL("Permission reviewer model was saved, but the reviewer could not be refreshed. Restart Clanker to apply it.")};
+  }
+
+  StrView model = rt->Harness->Config.PermissionReviewerModel;
+  if (!model.Length) model = rt->PermissionReviewerModel;
+  StrBuf message = StrBuf_Make(&rt->CommandMem, model.Length + 64);
+  StrBuf_AppendCStr(&message, arguments.Length
+      ? "Permission reviewer model saved and set to "
+      : "Permission reviewer model: ");
+  StrBuf_Append(&message, model.Length ? model : SVL("(none)"));
+  if (arguments.Length) StrBuf_AppendChar(&message, '.');
+  return {AppCommandHandlerStatus::Success, StrBuf_View(&message)};
+}
+
+static bool ParsePermissionThreshold(StrView arguments, f64* threshold) {
+  char value[65] = {};
+  if (!arguments.Length || arguments.Length >= sizeof(value)) return false;
+  memcpy(value, arguments.Data, arguments.Length);
+  char* end = nullptr;
+  errno = 0;
+  *threshold = strtod(value, &end);
+  bool valid = errno != ERANGE && end == value + arguments.Length &&
+               TypeSafePermissionReviewer_ThresholdIsValid(*threshold);
+  Memory_Zero(value, sizeof(value));
+  return valid;
+}
+
+static AppCommandHandlerResult HandlePermissionThreshold(
+    InteractiveRuntime* rt, StrView arguments) {
+  if (arguments.Length) {
+    f64 threshold = 0;
+    if (!ParsePermissionThreshold(arguments, &threshold))
+      return {AppCommandHandlerStatus::Failed,
+              SVL("Usage: /permissions threshold [0-1]")};
+    if (rt->Harness->Running)
+      return {AppCommandHandlerStatus::Failed,
+              SVL("The permission reviewer threshold can only be changed while the agent is idle.")};
+
+    f64 previous = rt->PermissionReviewerThreshold;
+    rt->PermissionReviewerThreshold = threshold;
+    if (!RuntimePersistSettings(rt)) {
+      rt->PermissionReviewerThreshold = previous;
+      StrBuf message = StrBuf_Make(&rt->CommandMem, rt->SettingsPath.Length + 128);
+      StrBuf_AppendCStr(&message, "Permission reviewer threshold was not changed; settings could not be saved to ");
+      StrBuf_Append(&message, rt->SettingsPath);
+      StrBuf_AppendChar(&message, '.');
+      return {AppCommandHandlerStatus::Failed, StrBuf_View(&message)};
+    }
+    if (!RuntimeRefreshPermissionReviewer(rt))
+      return {AppCommandHandlerStatus::Failed,
+              SVL("Permission reviewer threshold was saved, but the reviewer could not be refreshed. Restart Clanker to apply it.")};
+  }
+
+  StrBuf message = StrBuf_Make(&rt->CommandMem, 128);
+  StrBuf_AppendCStr(&message, arguments.Length
+      ? "Permission reviewer threshold saved and set to "
+      : "Permission reviewer threshold: ");
+  AppendPermissionThreshold(&message, rt->Harness->Config.PermissionReviewerThreshold);
+  if (arguments.Length) StrBuf_AppendChar(&message, '.');
+  return {AppCommandHandlerStatus::Success, StrBuf_View(&message)};
+}
+
+static AppCommandHandlerResult HandlePermissionKey(
+    InteractiveRuntime* rt, const AppCommandUx* ux, StrView arguments) {
+  bool clear = StrView_Eq(arguments, SVL("clear"));
+  if (arguments.Length && !clear)
+    return {AppCommandHandlerStatus::Failed,
+            SVL("Use /permissions key to enter a key securely, or /permissions key clear to remove the saved key. Inline API keys are not accepted.")};
+  if (rt->Harness->Running)
+    return {AppCommandHandlerStatus::Failed,
+            SVL("The Jev API key can only be changed while the agent is idle.")};
+
+  if (!clear) {
+    AppCommandHandlerResult result = RuntimeEnterApiKey(
+        rt, SVL("typesafe"), SVL("Jev API key"), SVL("Permissions"), ux);
+    if (result.Status == AppCommandHandlerStatus::Success)
+      AgentPermissionEngine_InvalidateReviews(&rt->Harness->Permissions);
+    return result;
+  }
+  Arena scratch = ArenaCreate((usize)8 << 20);
+  bool saved = AuthStore_Delete(&scratch, rt->AuthPath, SVL("typesafe"));
+  ArenaReleaseSecure(&scratch);
+  if (!saved)
+    return {AppCommandHandlerStatus::Failed,
+            SVL("The Jev API key was not changed; the authentication store could not be saved. Check its format and file permissions.")};
+  AgentPermissionEngine_InvalidateReviews(&rt->Harness->Permissions);
+  return {AppCommandHandlerStatus::Success,
+          SVL("Saved Jev API key removed. TYPESAFE_API_KEY remains supported.")};
+}
+
 static AppCommandHandlerResult HandlePermissionsCommand(
-    void* user, const AppCommandUx*, StrView arguments) {
+    void* user, const AppCommandUx* ux, StrView arguments);
+
+static AppCommandHandlerResult RunPermissionSettingsMenu(
+    InteractiveRuntime* rt, const AppCommandUx* ux) {
+  Arena scratch = ArenaCreate((usize)8 << 20);
+  u32 selected = 0;
+  for (;;) {
+    ArenaResetSecure(&scratch);
+    StrBuf mode = StrBuf_Make(&scratch, 64);
+    StrBuf_AppendCStr(&mode, "Permission mode: ");
+    StrBuf_Append(&mode, AgentPermissionMode_Name(AgentHarness_GetPermissionMode(rt->Harness)));
+    StrBuf model = StrBuf_Make(&scratch, 160);
+    StrBuf_AppendCStr(&model, "Jev model: ");
+    StrBuf_Append(&model, rt->PermissionReviewerModel);
+    StrBuf threshold = StrBuf_Make(&scratch, 80);
+    StrBuf_AppendCStr(&threshold, "Automatic approval threshold: ");
+    AppendPermissionThreshold(&threshold, rt->PermissionReviewerThreshold);
+    StrView options[] = {
+        StrBuf_View(&mode),
+        TypeSafePermissionReviewer_KeyConfigured(rt->AuthPath)
+            ? SVL("Jev API key: configured") : SVL("Jev API key: not configured"),
+        StrBuf_View(&model), StrBuf_View(&threshold),
+        SVL("Reset session grants"), SVL("Clear saved Jev API key")};
+    RuntimeInputResult choice = RuntimeSelect(rt, SVL("Permission settings"),
+        options, (u32)(sizeof(options) / sizeof(options[0])), &selected, selected,
+        SVL("Permissions"));
+    if (choice != RuntimeInputResult::Confirmed) {
+      ArenaReleaseSecure(&scratch);
+      return choice == RuntimeInputResult::Back
+                 ? ReturnToCommandPalette(rt)
+                 : AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled, {}};
+    }
+    AppCommandHandlerResult result = {};
+    if (selected == 0) {
+      StrView modes[] = {SVL("ask"), SVL("auto"), SVL("yolo")};
+      u32 picked = 0;
+      AgentPermissionMode current = AgentHarness_GetPermissionMode(rt->Harness);
+      u32 initial = current == AgentPermissionMode::Ask ? 0
+                    : current == AgentPermissionMode::Auto ? 1 : 2;
+      if (RuntimeSelect(rt, SVL("Permission mode"), modes, 3, &picked, initial,
+                        SVL("Permissions")) != RuntimeInputResult::Confirmed)
+        continue;
+      result = HandlePermissionsCommand(rt, ux, modes[picked]);
+    } else if (selected == 1 || selected == 5) {
+      result = HandlePermissionKey(rt, ux, selected == 5 ? SVL("clear") : StrView{});
+    } else if (selected == 2 || selected == 3) {
+      bool editingModel = selected == 2;
+      StrBuf initialNumber = StrBuf_Make(&scratch, 32);
+      AppendPermissionThreshold(&initialNumber, rt->PermissionReviewerThreshold);
+      StrView initial = editingModel ? rt->PermissionReviewerModel
+                                     : StrBuf_View(&initialNumber);
+      for (;;) {
+        StrView value = {};
+        RuntimeInputResult entry = RuntimeReadText(
+            rt, &scratch,
+            editingModel ? SVL("Jev permission reviewer model") : SVL("Automatic approval threshold"),
+            editingModel ? SVL("Model ID (jev-...)") : SVL("Number from 0 to 1"),
+            initial, &value, SVL("Permissions"));
+        if (entry != RuntimeInputResult::Confirmed) break;
+        value = StrView_Trim(value);
+        f64 number = 0;
+        bool valid = editingModel ? TypeSafePermissionReviewer_ModelSupported(value)
+                                  : ParsePermissionThreshold(value, &number);
+        if (!valid) {
+          EmitCommandError(ux, editingModel
+              ? SVL("Use a Jev model ID such as jev-latest; chat-provider models are not supported.")
+              : SVL("Enter a number from 0 to 1, for example 0.95."));
+          continue;
+        }
+        result = editingModel ? HandlePermissionModel(rt, value)
+                              : HandlePermissionThreshold(rt, value);
+        break;
+      }
+    } else {
+      result = HandlePermissionsCommand(rt, ux, SVL("reset"));
+    }
+    if (result.Status == AppCommandHandlerStatus::Failed)
+      EmitCommandError(ux, result.Message);
+    else
+      EmitCommandNotice(ux, result.Message);
+  }
+}
+
+static AppCommandHandlerResult HandlePermissionsCommand(
+    void* user, const AppCommandUx* ux, StrView arguments) {
   InteractiveRuntime* rt = (InteractiveRuntime*)user;
   if (!rt->Harness)
     return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
                                    SVL("Permission controls are unavailable.")};
 
+  u32 verbLength = 0;
+  while (verbLength < arguments.Length && !Ascii_IsSpace(arguments.Data[verbLength]))
+    verbLength++;
+  if (StrView_Eq(StrView{arguments.Data, verbLength}, SVL("key")))
+    return HandlePermissionKey(
+        rt, ux, StrView_Trim(StrView{arguments.Data + verbLength,
+                                   arguments.Length - verbLength}));
+  if (StrView_Eq(StrView{arguments.Data, verbLength}, SVL("model")))
+    return HandlePermissionModel(
+        rt, StrView_Trim(StrView{arguments.Data + verbLength,
+                                arguments.Length - verbLength}));
+  if (StrView_Eq(StrView{arguments.Data, verbLength}, SVL("threshold")))
+    return HandlePermissionThreshold(
+        rt, StrView_Trim(StrView{arguments.Data + verbLength,
+                                arguments.Length - verbLength}));
+
   if (!arguments.Length) {
+    if (rt->TuiView) return RunPermissionSettingsMenu(rt, ux);
     AgentPermissionMode mode = AgentHarness_GetPermissionMode(rt->Harness);
-    StrView reviewer = rt->Harness->Config.PermissionReviewerModel.Id;
+    StrView reviewer = rt->Harness->Config.PermissionReviewerModel;
     if (!reviewer.Length) reviewer = rt->PermissionReviewerModel;
     StrBuf report = StrBuf_Make(&rt->CommandMem, reviewer.Length + 128);
     StrBuf_AppendCStr(&report, "Permission mode: ");
     StrBuf_Append(&report, AgentPermissionMode_Name(mode));
+    StrBuf_AppendCStr(&report, "\nJev API key: ");
+    StrBuf_AppendCStr(&report, TypeSafePermissionReviewer_KeyConfigured(rt->AuthPath)
+                                 ? "configured" : "not configured");
     StrBuf_AppendCStr(&report, "\nPermission reviewer model: ");
     StrBuf_Append(&report, reviewer.Length ? reviewer : SVL("(none)"));
+    StrBuf_AppendCStr(&report, "\nPermission reviewer threshold: ");
+    AppendPermissionThreshold(&report, rt->Harness->Config.PermissionReviewerThreshold);
     StrBuf_AppendCStr(&report, "\nSession grants: ");
     StrBuf_AppendU64(&report, AgentHarness_PermissionGrantCount(rt->Harness));
     return AppCommandHandlerResult{AppCommandHandlerStatus::Success,
@@ -545,6 +775,7 @@ static AppCommandHandlerResult HandleReloadCommand(
   AgentTurnLimitPolicy turnLimit = AgentTurnLimitPolicy_Default();
   AgentPermissionMode permissionMode = AgentPermissionMode::Auto;
   StrView permissionReviewerModel = AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL;
+  f64 permissionReviewerThreshold = AGENT_PERMISSION_DEFAULT_REVIEWER_THRESHOLD;
   bool yoloAcknowledged = false;
   bool rounded = rt->Rounded;
   AppSettings settings = {};
@@ -557,6 +788,7 @@ static AppCommandHandlerResult HandleReloadCommand(
     turnLimit = settings.TurnLimit;
     permissionMode = settings.PermissionMode;
     permissionReviewerModel = settings.PermissionReviewerModel;
+    permissionReviewerThreshold = settings.PermissionReviewerThreshold;
     yoloAcknowledged = settings.YoloAcknowledged;
     rounded = settings.Rounded;
   } else if (settingsResult == AppSettingsLoadResult::Malformed ||
@@ -602,6 +834,7 @@ static AppCommandHandlerResult HandleReloadCommand(
       StrView_Dup(rt->Mem, permissionReviewerModel.Length
                               ? permissionReviewerModel
                               : AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL);
+  rt->PermissionReviewerThreshold = permissionReviewerThreshold;
   if (!RuntimeRefreshPermissionReviewer(rt)) {
     PromptContext_Release(&next);
     ArenaRelease(&scratch);
@@ -825,6 +1058,9 @@ TuiCommandSpec* RuntimeCommandCatalog(InteractiveRuntime* rt, Arena* arena,
     commands[n++] =
         TuiCommandSpec{command->Name, command->Alias, command->Description,
                        InlineActionFor(command->Kind)};
+    commands[n - 1].PrivateArguments =
+        command->Kind == AppCommandKind::Auth ||
+        command->Kind == AppCommandKind::Permissions;
   }
   for (u32 i = 0; i < skillCount; i++) {
     const Skill& skill = rt->Prompt->Skills.Skills.Data[i];

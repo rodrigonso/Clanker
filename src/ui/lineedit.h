@@ -2,6 +2,8 @@
 #include "base/array.h"
 #include "base/str.h"
 
+enum class TextInputMode : u8 { Plain, Secret };
+
 // Reusable multi-line UTF-8 input editor. Holds a buffer (which may contain '\n'),
 // a cursor as a byte offset, and a submit history. Pure / terminal-free.
 struct LineEdit {

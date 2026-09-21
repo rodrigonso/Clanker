@@ -14,7 +14,11 @@ constexpr u32 AGENT_PERMISSION_MAX_RATIONALE_BYTES = 512;
 constexpr u32 AGENT_PERMISSION_MAX_TRUSTED_TEXT_BYTES = 8192;
 
 StrView Bounded(StrView value, u32 limit) {
-  if (value.Length > limit) value.Length = limit;
+  if (value.Length > limit) {
+    value.Length = limit;
+    while (value.Length && ((u8)value.Data[value.Length] & 0xc0) == 0x80)
+      value.Length--;
+  }
   return value;
 }
 
@@ -64,7 +68,8 @@ StrView SanitizeAction(Arena* arena, StrView action, bool* clipped) {
   return StrBuf_View(&safe);
 }
 
-StrView TrustedUserText(Arena* arena, const AgentPermissionGate* gate) {
+StrView TrustedUserText(Arena* arena, const AgentPermissionGate* gate,
+                        bool* incomplete) {
   StrBuf text = StrBuf_Make(arena, 512);
   if (!gate) return StrBuf_View(&text);
   for (u32 i = 0; i < gate->NewMessageCount; i++) {
@@ -72,12 +77,19 @@ StrView TrustedUserText(Arena* arena, const AgentPermissionGate* gate) {
     if (message->Kind != Role::User) continue;
     for (u32 j = 0; j < message->Content.Count; j++) {
       const Content* content = &message->Content.Data[j];
-      if (content->Kind != ContentKind::Text || !content->Text.Length) continue;
-      if (text.Length) StrBuf_AppendChar(&text, '\n');
+      if (content->Kind != ContentKind::Text) {
+        *incomplete = true;
+        continue;
+      }
+      if (!content->Text.Length) continue;
+      if (text.Length && text.Length < AGENT_PERMISSION_MAX_TRUSTED_TEXT_BYTES)
+        StrBuf_AppendChar(&text, '\n');
       u32 room = AGENT_PERMISSION_MAX_TRUSTED_TEXT_BYTES - text.Length;
       StrBuf_Append(&text, Bounded(content->Text, room));
-      if (text.Length >= AGENT_PERMISSION_MAX_TRUSTED_TEXT_BYTES)
+      if (content->Text.Length > room) {
+        *incomplete = true;
         return StrBuf_View(&text);
+      }
     }
   }
   return StrBuf_View(&text);
@@ -126,6 +138,18 @@ i32 FindApprovedRequestLocked(const AgentPermissionEngine* engine,
       return (i32)i;
   }
   return -1;
+}
+
+bool HasDeniedRequestLocked(const AgentPermissionEngine* engine,
+                            StrView toolName, StrView argumentsJson) {
+  for (u32 i = 0; i < engine->Requests.Count; i++) {
+    const AgentPermissionRequest* request = &engine->Requests.Data[i];
+    if (request->Approval == AgentPermissionApproval::Denied &&
+        StrView_Eq(request->ToolName, toolName) &&
+        StrView_Eq(request->ArgumentsJson, argumentsJson))
+      return true;
+  }
+  return false;
 }
 
 StrView DenialJson(Arena* arena, const AgentPermissionRequest* request) {
@@ -212,15 +236,20 @@ AgentPermissionRequest* AddRequestLocked(
 
 void CacheLocked(AgentPermissionEngine* engine, StrView key, bool allow,
                  u32 requestIndex) {
-  if (!key.Length || key.Length > AGENT_PERMISSION_MAX_KEY_BYTES ||
-      engine->Cache.Count >= AGENT_PERMISSION_MAX_CACHE)
-    return;
+  if (!key.Length || key.Length > AGENT_PERMISSION_MAX_KEY_BYTES) return;
+  i32 existing = FindCacheLocked(engine, key);
+  if (existing < 0 && engine->Cache.Count >= AGENT_PERMISSION_MAX_CACHE) return;
   AgentPermissionCacheEntry cached = {};
-  cached.Key =
-      StrView_Dup(&engine->Run, Bounded(key, AGENT_PERMISSION_MAX_KEY_BYTES));
+  cached.Key = existing >= 0 ? engine->Cache.Data[existing].Key
+                            : StrView_Dup(&engine->Run, key);
   cached.Allow = allow;
   cached.RequestIndex = requestIndex;
-  Array_Push(&engine->Cache, cached);
+  cached.Revision = Atomic_LoadI32(&engine->Revision);
+  cached.ContextRevision = engine->ContextRevision;
+  if (existing >= 0)
+    engine->Cache.Data[existing] = cached;
+  else
+    Array_Push(&engine->Cache, cached);
 }
 
 }  // namespace
@@ -296,6 +325,10 @@ void AgentPermissionEngine_BeginRun(AgentPermissionEngine* engine) {
   engine->Cache =
       Array_Make<AgentPermissionCacheEntry>(&engine->Run,
                                             AGENT_PERMISSION_MAX_CACHE);
+  engine->ReviewContext =
+      StrBuf_Make(&engine->Run, AGENT_PERMISSION_MAX_TRUSTED_TEXT_BYTES + 1);
+  engine->ReviewContextIncomplete = false;
+  engine->ContextRevision = 0;
   engine->RunActive = true;
 }
 
@@ -304,6 +337,7 @@ void AgentPermissionEngine_EndRun(AgentPermissionEngine* engine) {
   ScopedLock lock(&engine->Lock);
   engine->Requests = {};
   engine->Cache = {};
+  engine->ReviewContext = {};
   engine->RunActive = false;
   ArenaReset(&engine->Run);
 }
@@ -316,6 +350,12 @@ AgentPermissionMode AgentPermissionEngine_GetMode(
       value > (i32)AgentPermissionMode::Yolo)
     return AgentPermissionMode::Auto;
   return (AgentPermissionMode)value;
+}
+
+void AgentPermissionEngine_InvalidateReviews(AgentPermissionEngine* engine) {
+  if (!engine || !engine->Initialized) return;
+  ScopedLock lock(&engine->Lock);
+  Atomic_StoreI32(&engine->Revision, Atomic_LoadI32(&engine->Revision) + 1);
 }
 
 AgentPermissionMode AgentPermissionEngine_SetMode(AgentPermissionEngine* engine,
@@ -393,15 +433,24 @@ void AgentPermission_Decide(Arena* arena, const AgentPermissionGate* gate,
       return;
     }
   }
-  if (!info.Action.Length)
+  if (!info.Action.Length) {
     info.Action = BuildFallbackAction(arena, tool->Name);
+    info.ReviewIncomplete = true;
+  }
   bool actionClipped = false;
-  info.Action = SanitizeAction(arena, info.Action, &actionClipped);
+  StrView displayAction = SanitizeAction(arena, info.Action, &actionClipped);
+  AgentPermissionReviewRequest request = {};
+  request.ToolName = tool->Name;
+  // The reviewer would judge only the visible prefix of a clipped action, so
+  // such an action always goes to a person.
+  request.ActionIncomplete = info.ReviewIncomplete || actionClipped;
+  request.Action = Bounded(info.Action, AGENT_PERMISSION_MAX_ACTION_BYTES);
   if (!info.GrantKey.Length)
     info.GrantKey = BuildExactKey(arena, tool->Name, args->Json);
   if (info.GrantKey.Length > AGENT_PERMISSION_MAX_KEY_BYTES)
     info.GrantKey = {};
   StrView exactKey = BuildExactKey(arena, tool->Name, args->Json);
+  bool hasReviewContext = false;
 
   for (u32 restart = 0; restart < 8; restart++) {
     i32 revision = 0;
@@ -415,15 +464,21 @@ void AgentPermission_Decide(Arena* arena, const AgentPermissionGate* gate,
       i32 approved =
           FindApprovedRequestLocked(engine, tool->Name, args->Json);
       if (approved >= 0) {
-        AgentPermissionRequest* request = &engine->Requests.Data[approved];
-        if (request->Approval == AgentPermissionApproval::Once)
-          request->Approval = AgentPermissionApproval::Consumed;
+        AgentPermissionRequest* approvedRequest = &engine->Requests.Data[approved];
+        if (approvedRequest->Approval == AgentPermissionApproval::Once)
+          approvedRequest->Approval = AgentPermissionApproval::Consumed;
+        return;
+      }
+      if (mode == AgentPermissionMode::Auto &&
+          HasDeniedRequestLocked(engine, tool->Name, args->Json)) {
+        out->Block = true;
+        out->Reason = PlainDenial(arena, SVL("The user denied this action."));
         return;
       }
     }
 
     if (mode == AgentPermissionMode::Ask) {
-      HandleAsk(engine, arena, info.Action, info.GrantKey, out);
+      HandleAsk(engine, arena, displayAction, info.GrantKey, out);
       return;
     }
     if (info.AutoAllow) {
@@ -432,18 +487,40 @@ void AgentPermission_Decide(Arena* arena, const AgentPermissionGate* gate,
       return;
     }
 
+    if (!hasReviewContext) {
+      request.TrustedUserText =
+          TrustedUserText(arena, gate, &request.TrustedUserTextIncomplete);
+      hasReviewContext = true;
+    }
+    u32 contextRevision = 0;
     {
       ScopedLock lock(&engine->Lock);
       if (Atomic_LoadI32(&engine->Revision) != revision) continue;
+      if (!engine->RunActive) {
+        out->Block = true;
+        out->Reason =
+            PlainDenial(arena, SVL("Permission review state is unavailable."));
+        return;
+      }
+      if (!StrView_Eq(StrBuf_View(&engine->ReviewContext), request.TrustedUserText) ||
+          engine->ReviewContextIncomplete != request.TrustedUserTextIncomplete) {
+        StrBuf_Clear(&engine->ReviewContext);
+        StrBuf_Append(&engine->ReviewContext, request.TrustedUserText);
+        engine->ReviewContextIncomplete = request.TrustedUserTextIncomplete;
+        engine->ContextRevision++;
+      }
+      contextRevision = engine->ContextRevision;
       i32 cached = FindCacheLocked(engine, exactKey);
       if (cached >= 0) {
         AgentPermissionCacheEntry* entry =
             &engine->Cache.Data[cached];
-        if (entry->Allow) return;
-        if (entry->RequestIndex < engine->Requests.Count) {
+        bool fresh = entry->Revision == revision &&
+                     entry->ContextRevision == contextRevision;
+        if (entry->Allow && fresh) return;
+        if (!entry->Allow && entry->RequestIndex < engine->Requests.Count) {
           AgentPermissionRequest* pending =
               &engine->Requests.Data[entry->RequestIndex];
-          if (pending->Approval == AgentPermissionApproval::Pending) {
+          if (pending->Approval == AgentPermissionApproval::Pending && fresh) {
             out->Block = true;
             out->Reason = DenialJson(arena, pending);
             return;
@@ -454,38 +531,38 @@ void AgentPermission_Decide(Arena* arena, const AgentPermissionGate* gate,
                 PlainDenial(arena, SVL("The user denied this action."));
             return;
           }
-          if (pending->Approval == AgentPermissionApproval::Consumed)
-            entry->Key = {};
         }
       }
     }
 
     AgentPermissionReviewResult reviewed = {};
-    bool reviewOk = false;
-    // The reviewer would judge only the visible prefix of a clipped action,
-    // so such an action always goes to a person.
-    if (!actionClipped) {
-      AgentPermissionReviewRequest request = {};
-      request.ToolName = tool->Name;
-      request.Action = info.Action;
-      // Only the bounded action projection reaches the reviewer; exact
-      // arguments remain in the run-scoped revalidation record.
-      request.TrustedUserText = TrustedUserText(arena, gate);
-      reviewOk =
-          engine->Reviewer.Review &&
-          engine->Reviewer.Review(engine->Reviewer.User, arena, &request,
-                                  gate->Abort, &reviewed);
-    }
-    if (!reviewOk) {
-      reviewed.Rationale = {};
+    bool reviewOk = true;
+    if (actionClipped) {
+      reviewed.Rationale = SVL("The action is too long to review automatically.");
+    } else if (request.ActionIncomplete || request.TrustedUserTextIncomplete) {
+      reviewed.Rationale = SVL("The action or user request is incomplete; human approval is required.");
+    } else if (gate->Abort && Atomic_LoadI32(gate->Abort)) {
+      reviewOk = false;
+      reviewed.Rationale = SVL("Permission review was cancelled.");
+    } else {
+      reviewOk = engine->Reviewer.Review &&
+                 engine->Reviewer.Review(engine->Reviewer.User, arena, &request,
+                                         gate->Abort, &reviewed);
     }
 
     ScopedLock lock(&engine->Lock);
-    if (Atomic_LoadI32(&engine->Revision) != revision) continue;
+    if (Atomic_LoadI32(&engine->Revision) != revision ||
+        engine->ContextRevision != contextRevision)
+      continue;
     if (!engine->RunActive) {
       out->Block = true;
       out->Reason =
           PlainDenial(arena, SVL("Permission review state is unavailable."));
+      return;
+    }
+    if (gate->Abort && Atomic_LoadI32(gate->Abort)) {
+      out->Block = true;
+      out->Reason = PlainDenial(arena, SVL("Permission review was cancelled."));
       return;
     }
     if (reviewOk &&
@@ -497,8 +574,6 @@ void AgentPermission_Decide(Arena* arena, const AgentPermissionGate* gate,
     StrView rationale =
         reviewed.Rationale.Length
             ? reviewed.Rationale
-        : actionClipped
-            ? SVL("The action is too long to review automatically.")
         : !reviewOk
             ? SVL("Automatic permission review was unavailable or invalid.")
             : SVL("Automatic review requires human approval.");
@@ -511,7 +586,7 @@ void AgentPermission_Decide(Arena* arena, const AgentPermissionGate* gate,
     }
     AgentPermissionRequest* pending =
         AddRequestLocked(engine, tool->Name, args->Json, info.GrantKey,
-                         info.Action, rationale);
+                         displayAction, rationale);
     if (!pending) {
       out->Block = true;
       out->Reason =

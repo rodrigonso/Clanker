@@ -48,6 +48,14 @@ void TestKeys() {
   CHECK(NextCodepoint(&d, 'a') && NextCodepoint(&d, 'b') &&
         NextCodepoint(&d, 'c'));
   CHECK(!KeyDecoder_Next(&d, &k));  // drained
+  bool cleared = true;
+  for (char value : d.Buf) cleared = cleared && value == 0;
+  CHECK(cleared);
+  Push(&d, "SYNTHETIC_INPUT_ONLY");
+  KeyDecoder_Init(&d);
+  cleared = true;
+  for (char value : d.Buf) cleared = cleared && value == 0;
+  CHECK_ALL(cleared, d.Len == 0, !d.InPaste, !d.PendingEscape);
 
   // Enter vs newline.
   KeyDecoder_Init(&d);

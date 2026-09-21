@@ -89,6 +89,7 @@ void TestPromptAssembly(Arena* scratch, StrView root, StrView cwd,
   options.Tools = tools;
   options.ToolCount = 3;
   options.NoContextFiles = true;
+  options.NoSkills = true;
   options.ProjectTrusted = true;
   PromptContext context = {};
   StrBuf error = StrBuf_Make(scratch, 128);

@@ -6,6 +6,7 @@
 #include "app/auth_flow.h"
 #include "app/config_paths.h"
 #include "app/event_pump.h"
+#include "app/permission_reviewer.h"
 #include "app/plain_select.h"
 #include "base/sysinfo.h"
 #include "session/metadata.h"
@@ -288,10 +289,8 @@ SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
   StrView reviewerId = rt->PermissionReviewerModel.Length
                            ? rt->PermissionReviewerModel
                            : AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL;
-  config.PermissionReviewerModel =
-      targetSpec->CreateModel(rt->Mem, targetSpec, reviewerId);
-  if (!config.PermissionReviewerModel.Id.Length ||
-      !Model_MetadataIsValid(&config.PermissionReviewerModel)) {
+  if (!TypeSafePermissionReviewer_ModelSupported(reviewerId) ||
+      !TypeSafePermissionReviewer_ThresholdIsValid(rt->PermissionReviewerThreshold)) {
     SessionLog_Close(&target);
     PromptContext_Release(&nextPrompt);
     ArenaRelease(&scratch);
@@ -299,6 +298,14 @@ SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
         SessionStatus::InvalidState,
         SVL("the target session has no usable permission reviewer"));
   }
+  if (!config.PermissionReviewer.Review ||
+      !StrView_Eq(config.PermissionReviewerModel, reviewerId) ||
+      config.PermissionReviewerThreshold != rt->PermissionReviewerThreshold)
+    config.PermissionReviewer =
+        TypeSafePermissionReviewer_Make(rt->Mem, reviewerId,
+                                        rt->PermissionReviewerThreshold, rt->AuthPath);
+  config.PermissionReviewerModel = reviewerId;
+  config.PermissionReviewerThreshold = rt->PermissionReviewerThreshold;
 
   if (rt->EventPump) StopHarnessEventPump(rt->EventPump);
   SessionResult closed = AgentHarness_Close(rt->Harness);

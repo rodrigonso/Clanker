@@ -16,6 +16,9 @@ struct RuntimeSelection {
   AgentTurnLimitPolicy TurnLimit;
   AgentPermissionMode PermissionMode = AgentPermissionMode::Auto;
   StrView PermissionReviewerModel = AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL;
+  f64 PermissionReviewerThreshold = AGENT_PERMISSION_DEFAULT_REVIEWER_THRESHOLD;
+  bool PermissionReviewerInvalid = false;
+  bool PermissionReviewerThresholdInvalid = false;
   bool YoloAcknowledged = false;
   bool Rounded = true;
   Array<StrView> Skills;
@@ -41,6 +44,10 @@ RuntimeSelection LoadRuntimeSelection(Arena* arena, StrView settingsPath,
 // Reports whether the active provider has usable credentials, as a notice or an
 // error depending on `asError`.
 bool RuntimeCheckAuth(InteractiveRuntime* rt, const AppCommandUx* ux, bool asError);
+
+AppCommandHandlerResult RuntimeEnterApiKey(
+    InteractiveRuntime* rt, StrView credentialId, StrView title,
+    StrView category, const AppCommandUx* ux);
 
 // Installs a provider/model selection on the live harness and persists it.
 bool ActivateRuntimeSelection(InteractiveRuntime* rt, const ProviderSpec* spec,

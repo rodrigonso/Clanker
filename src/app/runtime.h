@@ -74,6 +74,7 @@ struct InteractiveRuntime {
   AgentPermissionMode PermissionMode = AgentPermissionMode::Auto;
   AgentPermissionMode PersistedPermissionMode = AgentPermissionMode::Auto;
   StrView PermissionReviewerModel = AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL;
+  f64 PermissionReviewerThreshold = AGENT_PERMISSION_DEFAULT_REVIEWER_THRESHOLD;
   bool YoloAcknowledged = false;
   // Keeps a one-run CLI mode from leaking into unrelated settings saves.
   bool PermissionModeOverridden = false;
@@ -121,7 +122,7 @@ void TuiCommandError(void* user, StrView message);
 void EmitCommandNotice(const AppCommandUx* ux, StrView message);
 void EmitCommandError(const AppCommandUx* ux, StrView message);
 
-enum class RuntimeInputResult : u8 { Confirmed, Back, Cancelled };
+enum class RuntimeInputResult : u8 { Confirmed, Back, Cancelled, Failed };
 enum class RuntimeChoiceStatus : u8 { Selected, Back, Cancelled, Failed };
 
 RuntimeInputResult RuntimeSelect(InteractiveRuntime* rt, StrView title,
@@ -131,7 +132,8 @@ RuntimeInputResult RuntimeSelect(InteractiveRuntime* rt, StrView title,
 RuntimeInputResult RuntimeReadText(InteractiveRuntime* rt, Arena* arena,
                                    StrView title, StrView prompt,
                                    StrView initial, StrView* out,
-                                   StrView category = SVL("Commands"));
+                                   StrView category = SVL("Commands"),
+                                   TextInputMode mode = TextInputMode::Plain);
 
 // The `ask_user` seam, backed by the two calls above. Safe to invoke from a
 // tool worker thread: under the TUI the modal is served by the TUI's own input

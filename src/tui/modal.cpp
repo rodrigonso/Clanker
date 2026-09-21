@@ -51,6 +51,20 @@ void PaintModalEdit(const UiNode* node, UiCanvas* canvas, Tui* t, u16 textX,
                     u16 textEnd, u16 editY, Style edit) {
   StrView text = LineEdit_Text(&t->ModalEdit);
   u32 avail = textEnd > textX ? (u32)(textEnd - textX) : 0;
+  if (t->ModalInputMode == TextInputMode::Secret) {
+    u32 count = 0;
+    u32 cursor = 0;
+    for (u32 at = 0; at < text.Length; count++) {
+      Utf8Decode(text, &at);
+      if (at <= LineEdit_Cursor(&t->ModalEdit)) cursor++;
+    }
+    u32 first = avail && cursor >= avail ? cursor - avail + 1 : 0;
+    for (u32 i = first; i < count && i - first < avail; i++)
+      UiCanvas_PutChar(canvas, textX + i - first, editY, '*', edit);
+    UiCanvas_SetCursor(canvas, node->Id, true,
+                        (u16)(textX + (avail ? cursor - first : 0)), editY);
+    return;
+  }
   u32 cursorW = TextWidth(StrView{text.Data, LineEdit_Cursor(&t->ModalEdit)});
   u32 skip = 0;
   u32 offset = 0;
@@ -127,7 +141,8 @@ void PaintModalNode(UiContext*, const UiNode* node, UiCanvas* canvas) {
   title.Attr |= ATTR_BOLD;
   UiCanvas_PutTextClipped(
       canvas, titleX, (u16)(y0 + 1),
-      compactText ? t->Sess.ModalPrompt : t->Sess.ModalTitle, title,
+      t->ModalInputTooLong ? SVL("Input too long (8192 bytes maximum)")
+                          : compactText ? t->Sess.ModalPrompt : t->Sess.ModalTitle, title,
       (u16)(x1 - 1));
 
   if (t->ModalKind == TuiModalKind::Select) {
@@ -208,7 +223,26 @@ void PaintModalNode(UiContext*, const UiNode* node, UiCanvas* canvas) {
   PaintModalEdit(node, canvas, t, textX, textEnd, editY, edit);
 }
 
+void ResetModalInput(Tui* t) {
+  ArenaResetSecure(&t->ModalMem);
+  LineEdit_Init(&t->ModalEdit, &t->ModalMem);
+  t->ModalInputMode = TextInputMode::Plain;
+  t->ModalInputTooLong = false;
+  t->ModalTextReady = false;
+}
+
+static void TakeModalText(Tui* t, Arena* arena, StrView* out) {
+  FFI(!arena || !out || arena == &t->ModalMem);
+  FFI(t->ModalInputMode == TextInputMode::Secret && arena == &t->SessionMem);
+  *out = {};
+  if (t->ModalResult != TuiModalResult::Confirmed || !t->ModalTextReady) return;
+  *out = StrView_Dup(arena, LineEdit_Text(&t->ModalEdit));
+  ResetModalInput(t);
+  t->ModalResult = TuiModalResult::None;
+}
+
 void FinishModal(Tui* t, TuiModalResult result) {
+  if (result != TuiModalResult::Confirmed) ResetModalInput(t);
   t->ModalResult = result;
   // The modal is no longer on screen. Leaving Kind set made it look permanently
   // open, which silently disabled session-memory compaction for the rest of the
@@ -222,8 +256,9 @@ void RequestStopLocked(Tui* t) {
   Atomic_StoreI32(&t->OperationAbortFlag, 1);
   t->Quit = true;
   t->Stop = true;
-  if (t->ModalResult == TuiModalResult::Pending)
-    t->ModalResult = TuiModalResult::Cancelled;
+  KeyDecoder_Init(&t->Dec);
+  if (t->ModalResult == TuiModalResult::Pending || t->ModalTextReady)
+    FinishModal(t, TuiModalResult::Cancelled);
   Cond_Signal(&t->SubmitCv);
   Cond_Broadcast(&t->ModalCv);
   Wake(t);
@@ -295,15 +330,28 @@ void HandleSelectKey(Tui* t, const Key& k) {
 void HandleTextKey(Tui* t, const Key& k) {
   switch (k.Kind) {
     case KeyKind::Char:
-      if (!k.Alt && k.Codepoint >= 0x20) LineEdit_InsertChar(&t->ModalEdit, k.Codepoint);
+      if (!k.Alt && k.Codepoint >= 0x20 && !t->ModalInputTooLong) {
+        u32 bytes = k.Codepoint < 0x80 ? 1 : k.Codepoint < 0x800 ? 2
+                                        : k.Codepoint < 0x10000 ? 3 : 4;
+        if (LineEdit_Text(&t->ModalEdit).Length + bytes > 8192) {
+          TextInputMode mode = t->ModalInputMode;
+          ResetModalInput(t);
+          t->ModalInputMode = mode;
+          t->ModalInputTooLong = true;
+        } else {
+          LineEdit_InsertChar(&t->ModalEdit, k.Codepoint);
+        }
+      }
       break;
     case KeyKind::Enter:
-      t->Sess.ModalTextResult =
-          StrView_Dup(&t->SessionMem, LineEdit_Text(&t->ModalEdit));
+      if (t->ModalInputTooLong) break;
+      t->ModalTextReady = true;
       FinishModal(t, TuiModalResult::Confirmed);
       break;
     case KeyKind::Backspace:
-      if (LineEdit_Empty(&t->ModalEdit))
+      if (t->ModalInputTooLong)
+        t->ModalInputTooLong = false;
+      else if (LineEdit_Empty(&t->ModalEdit))
         FinishModal(t, TuiModalResult::Back);
       else
         LineEdit_Backspace(&t->ModalEdit);
@@ -316,7 +364,10 @@ void HandleTextKey(Tui* t, const Key& k) {
     case KeyKind::WordLeft: LineEdit_WordLeft(&t->ModalEdit); break;
     case KeyKind::WordRight: LineEdit_WordRight(&t->ModalEdit); break;
     case KeyKind::CtrlW: LineEdit_DeleteWordBack(&t->ModalEdit); break;
-    case KeyKind::CtrlU: LineEdit_KillToStart(&t->ModalEdit); break;
+    case KeyKind::CtrlU:
+      t->ModalInputTooLong = false;
+      LineEdit_KillToStart(&t->ModalEdit);
+      break;
     case KeyKind::CtrlK: LineEdit_KillToEnd(&t->ModalEdit); break;
     case KeyKind::Escape: FinishModal(t, TuiModalResult::Cancelled); break;
     case KeyKind::CtrlC:
@@ -340,7 +391,7 @@ bool Tui_BeginSelection(Tui* t, StrView title, const StrView* options, u32 optio
     return false;
   }
   Ui_CancelPointer(&t->Ui);
-  LineEdit_Clear(&t->ModalEdit);
+  ResetModalInput(t);
   t->Sess.ModalOptions = ArenaPushArray(&t->SessionMem, StrView, optionCount);
   for (u32 i = 0; i < optionCount; i++)
     t->Sess.ModalOptions[i] = StrView_Dup(&t->SessionMem, options[i]);
@@ -350,7 +401,6 @@ bool Tui_BeginSelection(Tui* t, StrView title, const StrView* options, u32 optio
   t->Sess.ModalTitle = DupModalLine(&t->SessionMem, title);
   t->Sess.ModalCategory = StrView_Dup(&t->SessionMem, category);
   t->Sess.ModalPrompt = {};
-  t->Sess.ModalTextResult = {};
   t->ModalKind = TuiModalKind::Select;
   t->ModalResult = TuiModalResult::Pending;
   Wake(t);
@@ -359,14 +409,16 @@ bool Tui_BeginSelection(Tui* t, StrView title, const StrView* options, u32 optio
 }
 
 bool Tui_BeginTextEntry(Tui* t, StrView title, StrView prompt, StrView initial,
-                        StrView category) {
+                        StrView category, TextInputMode mode) {
+  FFI(mode == TextInputMode::Secret && initial.Length);
   Mutex_Lock(&t->Lock);
   if (t->Stop || t->Quit || t->ModalResult == TuiModalResult::Pending) {
     Mutex_Unlock(&t->Lock);
     return false;
   }
   Ui_CancelPointer(&t->Ui);
-  LineEdit_Clear(&t->ModalEdit);
+  ResetModalInput(t);
+  t->ModalInputMode = mode;
   LineEdit_InsertText(&t->ModalEdit, initial);
   t->Sess.ModalTitle = DupModalLine(&t->SessionMem, title);
   t->Sess.ModalCategory = StrView_Dup(&t->SessionMem, category);
@@ -375,7 +427,6 @@ bool Tui_BeginTextEntry(Tui* t, StrView title, StrView prompt, StrView initial,
   t->Sess.ModalOptionCount = 0;
   t->ModalSelected = 0;
   t->ModalFirst = 0;
-  t->Sess.ModalTextResult = {};
   t->ModalKind = TuiModalKind::Text;
   t->ModalResult = TuiModalResult::Pending;
   Wake(t);
@@ -383,11 +434,11 @@ bool Tui_BeginTextEntry(Tui* t, StrView title, StrView prompt, StrView initial,
   return true;
 }
 
-TuiModalResult Tui_GetModalResult(Tui* t, u32* selected, StrView* text) {
+TuiModalResult Tui_GetModalResult(Tui* t, u32* selected, StrView* text, Arena* arena) {
   Mutex_Lock(&t->Lock);
   TuiModalResult result = t->ModalResult;
   if (selected) *selected = t->ModalSelected;
-  if (text) *text = t->Sess.ModalTextResult;
+  if (text) TakeModalText(t, arena, text);
   Mutex_Unlock(&t->Lock);
   return result;
 }
@@ -406,16 +457,18 @@ TuiModalResult Tui_Select(Tui* t, StrView title, const StrView* options,
   return result;
 }
 
-TuiModalResult Tui_ReadText(Tui* t, StrView title, StrView prompt,
-                           StrView initial, StrView* out, StrView category) {
-  if (!Tui_BeginTextEntry(t, title, prompt, initial, category))
+TuiModalResult Tui_ReadText(Tui* t, Arena* arena, StrView title, StrView prompt,
+                           StrView initial, StrView* out, StrView category,
+                           TextInputMode mode) {
+  FFI(!arena || !out);
+  *out = {};
+  if (!Tui_BeginTextEntry(t, title, prompt, initial, category, mode))
     return TuiModalResult::Cancelled;
   Mutex_Lock(&t->Lock);
   while (t->ModalResult == TuiModalResult::Pending && !t->Stop)
     Cond_Wait(&t->ModalCv, &t->Lock);
   TuiModalResult result = t->ModalResult;
-  if (out)
-    *out = result == TuiModalResult::Confirmed ? t->Sess.ModalTextResult : StrView{};
+  TakeModalText(t, arena, out);
   Mutex_Unlock(&t->Lock);
   return result;
 }
@@ -423,6 +476,7 @@ TuiModalResult Tui_ReadText(Tui* t, StrView title, StrView prompt,
 void Tui_OpenCommandPalette(Tui* t) {
   Mutex_Lock(&t->Lock);
   if (!t->Stop && !t->Quit) {
+    ResetModalInput(t);
     t->ModalKind = TuiModalKind::None;
     t->ModalResult = TuiModalResult::None;
     LineEdit_Clear(&t->Edit);

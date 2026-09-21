@@ -45,6 +45,9 @@ struct XferCtx {
   volatile i32* abort;
   bool aborted;
   bool bufferNonSuccessBody;
+  u32 maxResponseBytes;
+  u32 responseBytes;
+  bool bodyLimitExceeded;
   i32 status;          // -1 until a status line is seen
   bool bodyStarted;    // true once any body byte reached `sink`
   HttpRetryMeta meta;
@@ -62,6 +65,7 @@ size_t HeaderCb(char* buffer, size_t size, size_t nitems, void* userdata) {
     w->meta = HttpRetryMeta{};
     w->meta.RetryAfterMs = -1;
     w->errBody = {};
+    w->responseBytes = 0;
     w->status = HttpRetryMeta_ParseStatusLine(line);
     return n;
   }
@@ -76,6 +80,11 @@ size_t WriteCb(char* ptr, size_t size, size_t nmemb, void* userdata) {
     w->aborted = true;
     return 0;
   }
+  if (w->maxResponseBytes && n > w->maxResponseBytes - w->responseBytes) {
+    w->bodyLimitExceeded = true;
+    return 0;
+  }
+  if (w->maxResponseBytes) w->responseBytes += (u32)n;
   StrView chunk{ptr, (u32)n};
   bool success = w->status >= 200 && w->status < 300;
   if (!success && w->bufferNonSuccessBody) {
@@ -207,6 +216,7 @@ HttpResult Http_Stream(Arena* arena, const HttpRequest* req, HttpStreamSink sink
   w.sink = sink;
   w.abort = abort;
   w.bufferNonSuccessBody = req->BufferNonSuccessBody;
+  w.maxResponseBytes = req->MaxResponseBytes;
   w.status = -1;
   w.meta.RetryAfterMs = -1;
   curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, HeaderCb);
@@ -222,15 +232,18 @@ HttpResult Http_Stream(Arena* arena, const HttpRequest* req, HttpStreamSink sink
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
   }
-  long timeout = req->TimeoutSeconds ? (long)req->TimeoutSeconds : 600L;
-  curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout);
-  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, timeout < 30L ? timeout : 30L);
+  long timeoutMs = req->TimeoutMs ? (long)req->TimeoutMs : 600000L;
+  curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeoutMs);
+  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS,
+                   timeoutMs < 30000L ? timeoutMs : 30000L);
 
   CURLcode rc = curl_easy_perform(curl);
   if (rc == CURLE_OK) {
     long code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
     res.Status = (i32)code;
+  } else if (w.bodyLimitExceeded) {
+    res.Error = SVL("HTTP response exceeds size limit");
   } else if (w.aborted) {
     res.Error = SV("aborted");
   } else {
@@ -238,6 +251,7 @@ HttpResult Http_Stream(Arena* arena, const HttpRequest* req, HttpStreamSink sink
   }
   res.Meta = w.meta;
   res.BodyStarted = w.bodyStarted;
+  res.BodyLimitExceeded = w.bodyLimitExceeded;
   if (w.errBody.Data && w.errBody.Length) res.Body = StrBuf_View(&w.errBody);
 
   if (hdrs) curl_slist_free_all(hdrs);
@@ -327,6 +341,7 @@ HttpResult Http_StreamWithRetryDeps(Arena* arena, const HttpRequest* req, HttpSt
 
     if (!policy || !policy->Enabled) return r;  // policy off -> single attempt, passthrough
     if (r.BodyStarted) return r;                // already forwarded success bytes -> never retry
+    if (r.BodyLimitExceeded) return r;
     if (abort && Atomic_LoadI32(abort)) return r;              // user cancellation isn't masked by a retry
 
     bool transportFailure = r.Status < 0;

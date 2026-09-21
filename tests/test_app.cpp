@@ -7,6 +7,7 @@
 
 #if defined(_WIN32)
 #include <direct.h>
+#include <io.h>
 #else
 #include <unistd.h>
 #endif
@@ -15,18 +16,23 @@
 #include "app/auth_flow.h"
 #include "app/commands.h"
 #include "app/event_pump.h"
+#include "app/permission_reviewer.h"
+#include "app/plain_select.h"
 #include "app/provider_registry.h"
 #include "app/runtime.h"
 #include "app/session_switch.h"
 #include "app/settings.h"
 #include "app/tui_bridge.h"
+#include "auth/store.h"
 #include "base/arena.h"
 #include "base/config_file.h"
+#include "base/sysinfo.h"
 #include "check.h"
 #include "json/json.h"
 #include "script_provider.h"
 #include "session/metadata.h"
 #include "session/memory_repository.h"
+#include "tools/fs.h"
 
 namespace {
 
@@ -183,13 +189,28 @@ void CaptureRuntimeError(void* user, StrView message) {
   capture->LastError = message;
 }
 
-Model TestReviewerModel(Arena* arena, const ProviderSpec* spec,
-                        StrView modelId) {
+Model TestChatModel(Arena* arena, const ProviderSpec* spec, StrView modelId) {
   Model model = {};
   model.Id = StrView_Dup(arena, modelId);
   model.Name = StrView_Dup(arena, modelId);
   model.Provider = spec ? StrView_Dup(arena, spec->Id) : StrView{};
   return model;
+}
+
+bool UnexpectedChatStream(void*, Arena*, const Model*, const LlmContext*,
+                           const StreamOptions*, StreamSink, Message*) {
+  CHECK(false);
+  return false;
+}
+
+Provider TestChatProvider(Arena*, const ProviderSpec*) {
+  Provider provider = {};
+  provider.Stream = UnexpectedChatStream;
+  return provider;
+}
+
+bool NoRuntimeAuth(void*, Arena*, StrView, volatile i32*, ProviderAuth*) {
+  return false;
 }
 
 }  // namespace
@@ -275,7 +296,8 @@ void TestRuntimePersistSettings() {
   rt.CurrentModel.Id = rt.Spec->DefaultModel;
   rt.SettingsPath = SV(path);
   rt.PermissionMode = AgentPermissionMode::Yolo;
-  rt.PermissionReviewerModel = SVL("reviewer/model");
+  rt.PermissionReviewerModel = SVL("jev-1.13.0");
+  rt.PermissionReviewerThreshold = 0.85;
   rt.YoloAcknowledged = true;
   rt.Rounded = false;
   CHECK(RuntimePersistSettings(&rt));
@@ -284,7 +306,8 @@ void TestRuntimePersistSettings() {
   CHECK(AppSettings_Load(&arena, SV(path), &loaded) ==
         AppSettingsLoadResult::Success);
   CHECK_ALL(!loaded.Rounded, loaded.PermissionMode == AgentPermissionMode::Yolo,
-            StrView_EqCStr(loaded.PermissionReviewerModel, "reviewer/model"),
+            loaded.PermissionReviewerThreshold == 0.85,
+            StrView_EqCStr(loaded.PermissionReviewerModel, "jev-1.13.0"),
             loaded.YoloAcknowledged);
 
   rt.PermissionMode = AgentPermissionMode::Ask;
@@ -346,8 +369,9 @@ void TestRuntimePermissionCommandEdges() {
   config.ModelInfo = model;
   config.ProviderImpl = spec->CreateProvider(&arena, spec);
   config.PermissionMode = AgentPermissionMode::Auto;
-  config.PermissionReviewerModel =
-      spec->CreateModel(&arena, spec, AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL);
+  config.PermissionReviewerModel = AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL;
+  config.PermissionReviewer =
+      TypeSafePermissionReviewer_Make(&arena, config.PermissionReviewerModel);
   config.WorkingDirectory = create.WorkingDirectory;
 
   AgentHarness harness = {};
@@ -376,6 +400,9 @@ void TestRuntimePermissionCommandEdges() {
               StrView_Eq(catalog[catalogIndex].Alias, command->Alias),
               StrView_Eq(catalog[catalogIndex].Description,
                          command->Description));
+    CHECK(catalog[catalogIndex].PrivateArguments ==
+          (command->Kind == AppCommandKind::Auth ||
+           command->Kind == AppCommandKind::Permissions));
     if (command->Kind == AppCommandKind::Permissions)
       CHECK(catalogIndex == 12);
     catalogIndex++;
@@ -391,8 +418,212 @@ void TestRuntimePermissionCommandEdges() {
             capture.Notices == 1,
             StrView_Contains(capture.LastNotice, "Permission mode: auto"),
             StrView_Contains(capture.LastNotice,
-                             "Permission reviewer model: z-ai/glm-5.2"),
+                             "Permission reviewer model: jev-latest"),
             StrView_Contains(capture.LastNotice, "Session grants: 0"));
+
+  {
+    i32 revision = Atomic_LoadI32(&harness.Permissions.Revision);
+    RuntimeDispatchCommand(&rt, SVL("/permissions threshold"), &handlers, &ux);
+    CHECK_ALL(StrView_Contains(capture.LastNotice, "Permission reviewer threshold: 0.95"),
+              Atomic_LoadI32(&harness.Permissions.Revision) == revision,
+              !Fs_Exists(SV(path)));
+    RuntimeDispatchCommand(&rt, SVL("/permissions model"), &handlers, &ux);
+    CHECK_ALL(StrView_Contains(capture.LastNotice, "Permission reviewer model: jev-latest"),
+              Atomic_LoadI32(&harness.Permissions.Revision) == revision,
+              !Fs_Exists(SV(path)));
+    AgentPermissionGrant grant = {};
+    grant.Key = StrView_Dup(&harness.Permissions.GrantMem, SVL("test-grant"));
+    Array_Push(&harness.Permissions.Grants, grant);
+    struct ThresholdCase {
+      StrView Command;
+      f64 Value;
+    };
+    const ThresholdCase valid[] = {
+        {SVL("/permissions threshold 0.9"), 0.9},
+        {SVL("/permissions threshold 0"), 0},
+        {SVL("/permissions threshold 1"), 1},
+        {SVL("/permissions threshold   .85  "), 0.85},
+        {SVL("/permissions threshold 9e-1"), 0.9}};
+    AppSettings saved = {};
+    for (const ThresholdCase& test : valid) {
+      u32 errors = capture.Errors;
+      revision = Atomic_LoadI32(&harness.Permissions.Revision);
+      void* reviewer = harness.Config.PermissionReviewer.User;
+      RuntimeDispatchCommand(&rt, test.Command, &handlers, &ux);
+      CHECK_ALL(capture.Errors == errors,
+                StrView_Contains(capture.LastNotice, "threshold saved and set to"),
+                rt.PermissionReviewerThreshold == test.Value,
+                harness.Config.PermissionReviewerThreshold == test.Value,
+                harness.Config.PermissionReviewer.User != reviewer,
+                Atomic_LoadI32(&harness.Permissions.Revision) == revision + 1,
+                AgentHarness_PermissionGrantCount(&harness) == 1,
+                AgentHarness_GetPermissionMode(&harness) == AgentPermissionMode::Auto);
+      CHECK(AppSettings_Load(&arena, SV(path), &saved) == AppSettingsLoadResult::Success);
+      CHECK_ALL(saved.PermissionReviewerThreshold == test.Value,
+                saved.PermissionMode == AgentPermissionMode::Auto);
+    }
+
+    revision = Atomic_LoadI32(&harness.Permissions.Revision);
+    void* reviewer = harness.Config.PermissionReviewer.User;
+    const StrView invalidThresholds[] = {
+        SVL("/permissions threshold -0.1"), SVL("/permissions threshold 1.1"),
+        SVL("/permissions threshold nope"), SVL("/permissions threshold nan"),
+        SVL("/permissions threshold inf"), SVL("/permissions threshold null"),
+        SVL("/permissions threshold 0.9 extra"), SVL("/permissions threshold 0.9%"),
+        SVL("/permissions threshold 1e999"), SVL("/permissions threshold 1e-999"),
+        SVL("/permissions thresholdx 0.9")};
+    for (StrView command : invalidThresholds) {
+      u32 errors = capture.Errors;
+      RuntimeDispatchCommand(&rt, command, &handlers, &ux);
+      CHECK_ALL(capture.Errors == errors + 1,
+                StrView_Contains(capture.LastError, "Usage: /permissions"),
+                rt.PermissionReviewerThreshold == 0.9,
+                harness.Config.PermissionReviewer.User == reviewer,
+                Atomic_LoadI32(&harness.Permissions.Revision) == revision);
+    }
+    CHECK(AppSettings_Load(&arena, SV(path), &saved) == AppSettingsLoadResult::Success);
+    CHECK(saved.PermissionReviewerThreshold == 0.9);
+
+    harness.Running = true;
+    u32 errors = capture.Errors;
+    RuntimeDispatchCommand(&rt, SVL("/permissions threshold"), &handlers, &ux);
+    CHECK_ALL(capture.Errors == errors,
+              StrView_Contains(capture.LastNotice, "Permission reviewer threshold: 0.9"));
+    RuntimeDispatchCommand(&rt, SVL("/permissions threshold 0.8"), &handlers, &ux);
+    harness.Running = false;
+    CHECK_ALL(capture.Errors == errors + 1,
+              StrView_Contains(capture.LastError, "idle"),
+              rt.PermissionReviewerThreshold == 0.9,
+              harness.Config.PermissionReviewer.User == reviewer,
+              Atomic_LoadI32(&harness.Permissions.Revision) == revision);
+
+    rt.SettingsPath = Fs_Join(&arena, SV(path), SVL("not-a-directory.json"));
+    errors = capture.Errors;
+    RuntimeDispatchCommand(&rt, SVL("/permissions threshold 0.8"), &handlers, &ux);
+    rt.SettingsPath = SV(path);
+    CHECK_ALL(capture.Errors == errors + 1,
+              StrView_Contains(capture.LastError, "was not changed"),
+              rt.PermissionReviewerThreshold == 0.9,
+              harness.Config.PermissionReviewerThreshold == 0.9,
+              harness.Config.PermissionReviewer.User == reviewer,
+              Atomic_LoadI32(&harness.Permissions.Revision) == revision);
+    CHECK(AppSettings_Load(&arena, SV(path), &saved) == AppSettingsLoadResult::Success);
+    CHECK(saved.PermissionReviewerThreshold == 0.9);
+
+    rt.PermissionModeOverridden = true;
+    rt.PersistedPermissionMode = AgentPermissionMode::Ask;
+    RuntimeDispatchCommand(&rt, SVL("/permissions threshold 0.8"), &handlers, &ux);
+    CHECK(AppSettings_Load(&arena, SV(path), &saved) == AppSettingsLoadResult::Success);
+    CHECK_ALL(saved.PermissionReviewerThreshold == 0.8,
+              saved.PermissionMode == AgentPermissionMode::Ask,
+              rt.PermissionModeOverridden,
+              AgentHarness_GetPermissionMode(&harness) == AgentPermissionMode::Auto,
+              AgentHarness_PermissionGrantCount(&harness) == 1);
+    rt.PermissionModeOverridden = false;
+    rt.PersistedPermissionMode = AgentPermissionMode::Auto;
+  }
+
+  {
+    struct ModelCase {
+      StrView Command;
+      StrView Model;
+    };
+    const ModelCase valid[] = {
+        {SVL("/permissions model jev-latest"), SVL("jev-latest")},
+        {SVL("/permissions model   jev-preview  "), SVL("jev-preview")},
+        {SVL("/permissions model jev-1.13.0"), SVL("jev-1.13.0")}};
+    AppSettings saved = {};
+    for (const ModelCase& test : valid) {
+      u32 errors = capture.Errors;
+      i32 revision = Atomic_LoadI32(&harness.Permissions.Revision);
+      void* reviewer = harness.Config.PermissionReviewer.User;
+      char input[96];
+      memcpy(input, test.Command.Data, test.Command.Length);
+      RuntimeDispatchCommand(&rt, StrView{input, test.Command.Length}, &handlers, &ux);
+      memset(input, 'x', sizeof(input));
+      CHECK_ALL(capture.Errors == errors,
+                StrView_Contains(capture.LastNotice, "model saved and set to"),
+                StrView_Eq(rt.PermissionReviewerModel, test.Model),
+                StrView_Eq(harness.Config.PermissionReviewerModel, test.Model),
+                StrView_Eq(harness.Config.ModelInfo.Id, model.Id),
+                rt.PermissionReviewerThreshold == 0.8,
+                harness.Config.PermissionReviewerThreshold == 0.8,
+                harness.Config.PermissionReviewer.User != reviewer,
+                Atomic_LoadI32(&harness.Permissions.Revision) == revision + 1,
+                AgentHarness_PermissionGrantCount(&harness) == 1,
+                AgentHarness_GetPermissionMode(&harness) == AgentPermissionMode::Auto);
+      CHECK(AppSettings_Load(&arena, SV(path), &saved) == AppSettingsLoadResult::Success);
+      CHECK_ALL(StrView_Eq(saved.PermissionReviewerModel, test.Model),
+                StrView_Eq(saved.Model, model.Id),
+                saved.PermissionReviewerThreshold == 0.8,
+                saved.PermissionMode == AgentPermissionMode::Auto);
+      RuntimeDispatchCommand(&rt, SVL("/permissions model"), &handlers, &ux);
+      CHECK_ALL(StrView_Contains(capture.LastNotice, test.Model.Data),
+                Atomic_LoadI32(&harness.Permissions.Revision) == revision + 1);
+    }
+
+    i32 revision = Atomic_LoadI32(&harness.Permissions.Revision);
+    StrView previousModel = rt.PermissionReviewerModel;
+    void* reviewer = harness.Config.PermissionReviewer.User;
+    const StrView invalidModels[] = {
+        SVL("/permissions model z-ai/glm-5.2"),
+        SVL("/permissions model openrouter/auto"),
+        SVL("/permissions model null"),
+        SVL("/permissions model jev-"),
+        SVL("/permissions model JEV-1.13.0"),
+        SVL("/permissions model jev-latest extra"),
+        SVL("/permissions model jev-1.13.0/other"),
+        SVL("/permissions modelx jev-latest")};
+    for (StrView command : invalidModels) {
+      u32 errors = capture.Errors;
+      RuntimeDispatchCommand(&rt, command, &handlers, &ux);
+      CHECK_ALL(capture.Errors == errors + 1,
+                StrView_Contains(capture.LastError, "Usage: /permissions"),
+                rt.PermissionReviewerModel.Data == previousModel.Data,
+                harness.Config.PermissionReviewer.User == reviewer,
+                Atomic_LoadI32(&harness.Permissions.Revision) == revision);
+    }
+
+    harness.Running = true;
+    u32 errors = capture.Errors;
+    RuntimeDispatchCommand(&rt, SVL("/permissions model"), &handlers, &ux);
+    CHECK_ALL(capture.Errors == errors,
+              StrView_Contains(capture.LastNotice, "Permission reviewer model: jev-1.13.0"));
+    RuntimeDispatchCommand(&rt, SVL("/permissions model jev-latest"), &handlers, &ux);
+    harness.Running = false;
+    CHECK_ALL(capture.Errors == errors + 1,
+              StrView_Contains(capture.LastError, "idle"),
+              rt.PermissionReviewerModel.Data == previousModel.Data,
+              harness.Config.PermissionReviewer.User == reviewer,
+              Atomic_LoadI32(&harness.Permissions.Revision) == revision);
+
+    rt.SettingsPath = Fs_Join(&arena, SV(path), SVL("not-a-directory.json"));
+    errors = capture.Errors;
+    RuntimeDispatchCommand(&rt, SVL("/permissions model jev-latest"), &handlers, &ux);
+    rt.SettingsPath = SV(path);
+    CHECK_ALL(capture.Errors == errors + 1,
+              StrView_Contains(capture.LastError, "was not changed"),
+              rt.PermissionReviewerModel.Data == previousModel.Data,
+              StrView_Eq(harness.Config.PermissionReviewerModel, previousModel),
+              harness.Config.PermissionReviewer.User == reviewer,
+              Atomic_LoadI32(&harness.Permissions.Revision) == revision);
+    CHECK(AppSettings_Load(&arena, SV(path), &saved) == AppSettingsLoadResult::Success);
+    CHECK(StrView_Eq(saved.PermissionReviewerModel, previousModel));
+
+    rt.PermissionModeOverridden = true;
+    rt.PersistedPermissionMode = AgentPermissionMode::Ask;
+    RuntimeDispatchCommand(&rt, SVL("/permissions model jev-latest"), &handlers, &ux);
+    CHECK(AppSettings_Load(&arena, SV(path), &saved) == AppSettingsLoadResult::Success);
+    CHECK_ALL(StrView_EqCStr(saved.PermissionReviewerModel, "jev-latest"),
+              saved.PermissionMode == AgentPermissionMode::Ask,
+              rt.PermissionModeOverridden,
+              AgentHarness_GetPermissionMode(&harness) == AgentPermissionMode::Auto,
+              AgentHarness_PermissionGrantCount(&harness) == 1);
+    RuntimeDispatchCommand(&rt, SVL("/permissions"), &handlers, &ux);
+    CHECK(StrView_Contains(capture.LastNotice, "Permission reviewer model: jev-latest"));
+    rt.PermissionModeOverridden = false;
+    rt.PersistedPermissionMode = AgentPermissionMode::Auto;
+  }
 
   rt.PermissionMode = AgentPermissionMode::Ask;
   rt.PersistedPermissionMode = AgentPermissionMode::Yolo;
@@ -461,38 +692,317 @@ void TestRuntimePermissionCommandEdges() {
 
 void TestRuntimeRefreshPermissionReviewer() {
   Arena arena = ArenaCreate();
-  ProviderSpec first = {
-      SVL("provider-one"), SVL("Provider One"), SVL("model-one"),
-      nullptr,           nullptr,           nullptr,
-      TestReviewerModel, nullptr};
-  ProviderSpec second = {
-      SVL("provider-two"), SVL("Provider Two"), SVL("model-two"),
-      nullptr,            nullptr,            nullptr,
-      TestReviewerModel, nullptr};
-
   InteractiveRuntime rt = {};
   InteractiveRuntime_Init(&rt, &arena);
   AgentHarness harness = {};
   rt.Harness = &harness;
-  rt.Spec = &first;
-  rt.PermissionReviewerModel = SVL("reviewer-one");
+  rt.PermissionReviewerModel = {};
   CHECK(RuntimeRefreshPermissionReviewer(&rt));
-  CHECK_ALL(StrView_EqCStr(harness.Config.PermissionReviewerModel.Id,
-                           "reviewer-one"),
-            StrView_Eq(harness.Config.PermissionReviewerModel.Provider,
-                       first.Id));
+  CHECK_ALL(rt.Spec == nullptr,
+            StrView_Eq(harness.Config.PermissionReviewerModel,
+                       AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL),
+            harness.Config.PermissionReviewer.Review != nullptr,
+            harness.Config.PermissionReviewer.User != nullptr,
+            harness.Config.PermissionReviewerThreshold == 0.95);
+  AgentPermissionReviewFn review = harness.Config.PermissionReviewer.Review;
+  AgentPermissionEngine_Init(&harness.Permissions, AgentPermissionMode::Auto,
+                              {}, nullptr, harness.Config.PermissionReviewer);
+  i32 revision = Atomic_LoadI32(&harness.Permissions.Revision);
 
-  rt.Spec = &second;
-  rt.PermissionReviewerModel = SVL("reviewer-two");
+  ProviderSpec provider = {};
+  provider.Id = SVL("chat-provider-without-model-factory");
+  rt.Spec = &provider;
+  rt.PermissionReviewerModel = SVL("jev-1.12.0");
   CHECK(RuntimeRefreshPermissionReviewer(&rt));
-  CHECK_ALL(StrView_EqCStr(harness.Config.PermissionReviewerModel.Id,
-                           "reviewer-two"),
-            StrView_Eq(harness.Config.PermissionReviewerModel.Provider,
-                       second.Id),
-            !StrView_Eq(harness.Config.PermissionReviewerModel.Provider,
-                        first.Id));
+  CHECK_ALL(StrView_EqCStr(harness.Config.PermissionReviewerModel,
+                           "jev-1.12.0"),
+            harness.Config.PermissionReviewer.Review == review,
+            Atomic_LoadI32(&harness.Permissions.Revision) == revision + 1);
+  revision = Atomic_LoadI32(&harness.Permissions.Revision);
+  rt.PermissionReviewerThreshold = 0.9;
+  CHECK(RuntimeRefreshPermissionReviewer(&rt));
+  CHECK_ALL(Atomic_LoadI32(&harness.Permissions.Revision) == revision + 1,
+            harness.Config.PermissionReviewerThreshold == 0.9,
+            AgentPermissionEngine_GetMode(&harness.Permissions) ==
+                AgentPermissionMode::Auto);
+  revision = Atomic_LoadI32(&harness.Permissions.Revision);
+
+  AgentPermissionReviewer previous = harness.Config.PermissionReviewer;
+  rt.PermissionReviewerModel = SVL("jev-");
+  CHECK(!RuntimeRefreshPermissionReviewer(&rt));
+  CHECK_ALL(StrView_EqCStr(harness.Config.PermissionReviewerModel,
+                           "jev-1.12.0"),
+            harness.Config.PermissionReviewer.Review == previous.Review,
+            harness.Config.PermissionReviewer.User == previous.User,
+            Atomic_LoadI32(&harness.Permissions.Revision) == revision);
+  rt.PermissionReviewerModel = SVL("z-ai/glm-5.2");
+  CHECK(!RuntimeRefreshPermissionReviewer(&rt));
+  rt.PermissionReviewerModel = SVL("jev-1.12.0");
+  rt.PermissionReviewerThreshold = 1.1;
+  CHECK(!RuntimeRefreshPermissionReviewer(&rt));
+  CHECK_ALL(harness.Config.PermissionReviewerThreshold == 0.9,
+            harness.Config.PermissionReviewer.User == previous.User,
+            Atomic_LoadI32(&harness.Permissions.Revision) == revision);
+
+  AgentPermissionEngine_Close(&harness.Permissions);
+  InteractiveRuntime_Release(&rt);
+  ArenaRelease(&arena);
+}
+
+void TestRuntimeReviewerProviderIndependence() {
+  Arena arena = ArenaCreate();
+  const char* dir = "clanker_reviewer_provider_test";
+  const char* path = "clanker_reviewer_provider_test/settings.json";
+  remove(path);
+
+  ProviderSpec first = {};
+  first.Id = SVL("provider-one");
+  first.Name = SVL("Provider One");
+  first.DefaultModel = SVL("chat-one");
+  first.CreateProvider = TestChatProvider;
+  ProviderSpec second = first;
+  second.Id = SVL("provider-two");
+  second.Name = SVL("Provider Two");
+  second.DefaultModel = SVL("chat-two");
+
+  MemoryRepository memory = {};
+  MemoryRepository_Init(&memory);
+  SessionRepository sessions = MemoryRepository_AsRepository(&memory);
+  SessionCreateOptions create = {};
+  create.ProjectKey = SVL("reviewer-provider-test");
+  create.WorkingDirectory = Sys_CurrentDir(&arena);
+  SessionLog log = {};
+  SessionInfo info = {};
+  CHECK(SessionResult_IsOk(
+      sessions.Create(sessions.Ctx, &arena, &create, &log, &info)));
+
+  Model firstModel = TestChatModel(&arena, &first, first.DefaultModel);
+  AgentHarnessConfig config = {};
+  config.ModelInfo = firstModel;
+  config.ProviderImpl = TestChatProvider(&arena, &first);
+  config.ResolveAuth = NoRuntimeAuth;
+  config.PermissionReviewerModel = SVL("jev-1.12.0");
+  config.PermissionReviewerThreshold = 0.85;
+  config.PermissionReviewer =
+      TypeSafePermissionReviewer_Make(&arena, config.PermissionReviewerModel,
+                                      config.PermissionReviewerThreshold);
+  config.WorkingDirectory = create.WorkingDirectory;
+  AgentPermissionReviewer reviewer = config.PermissionReviewer;
+  AgentHarness harness = {};
+  CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+
+  InteractiveRuntime rt = {};
+  InteractiveRuntime_Init(&rt, &arena);
+  rt.Spec = &first;
+  rt.CurrentModel = firstModel;
+  rt.SettingsPath = SV(path);
+  rt.Harness = &harness;
+  rt.Sessions = &sessions;
+  rt.ProjectKey = create.ProjectKey;
+  rt.WorkingDirectory = create.WorkingDirectory;
+  rt.PermissionReviewerModel = config.PermissionReviewerModel;
+  rt.PermissionReviewerThreshold = config.PermissionReviewerThreshold;
+  AppCommandUx ux = {};
+  Model secondModel = TestChatModel(&arena, &second, second.DefaultModel);
+  CHECK(ActivateRuntimeSelection(&rt, &second, secondModel, {}, &ux));
+  CHECK_ALL(rt.Spec == &second,
+            harness.Config.PermissionReviewerThreshold == 0.85,
+            StrView_EqCStr(harness.Config.ModelInfo.Id, "chat-two"),
+            StrView_EqCStr(harness.Config.PermissionReviewerModel, "jev-1.12.0"),
+            harness.Config.PermissionReviewer.Review == reviewer.Review,
+            harness.Config.PermissionReviewer.User == reviewer.User);
+
+  AppSettings loaded = {};
+  CHECK(AppSettings_Load(&arena, SV(path), &loaded) ==
+        AppSettingsLoadResult::Success);
+  CHECK_ALL(StrView_Eq(loaded.Provider, second.Id),
+            loaded.PermissionReviewerThreshold == 0.85,
+            StrView_EqCStr(loaded.PermissionReviewerModel, "jev-1.12.0"));
+
+  SessionLog restoredLog = {};
+  SessionInfo restoredInfo = {};
+  CHECK(SessionResult_IsOk(sessions.Create(sessions.Ctx, &arena, &create,
+                                           &restoredLog, &restoredInfo)));
+  restoredInfo.CurrentProvider = ProviderRegistry_At(0)->Id;
+  restoredInfo.CurrentModel = SVL("restored-chat");
+  CHECK(SessionResult_IsOk(
+      RuntimeSwitchToLog(&rt, restoredLog, &restoredInfo, &ux)));
+  CHECK_ALL(rt.Spec == ProviderRegistry_At(0),
+            harness.Config.PermissionReviewerThreshold == 0.85,
+            StrView_EqCStr(harness.Config.ModelInfo.Id, "restored-chat"),
+            StrView_EqCStr(harness.Config.PermissionReviewerModel, "jev-1.12.0"),
+            harness.Config.PermissionReviewer.Review == reviewer.Review,
+            harness.Config.PermissionReviewer.User == reviewer.User);
+  CHECK(RuntimeResetSession(&rt, &ux));
+  CHECK_ALL(StrView_EqCStr(harness.Config.PermissionReviewerModel, "jev-1.12.0"),
+            harness.Config.PermissionReviewerThreshold == 0.85,
+            harness.Config.PermissionReviewer.Review == reviewer.Review,
+            harness.Config.PermissionReviewer.User == reviewer.User);
+
+  // A rebuilt harness can also install a missing callback without borrowing
+  // the closing harness's arenas.
+  harness.Config.PermissionReviewer = {};
+  CHECK(RuntimeResetSession(&rt, &ux));
+  CHECK_ALL(StrView_EqCStr(harness.Config.PermissionReviewerModel, "jev-1.12.0"),
+            harness.Config.PermissionReviewer.Review == reviewer.Review,
+            harness.Config.PermissionReviewer.User != nullptr);
+  void* previousReviewer = harness.Config.PermissionReviewer.User;
+  rt.PermissionReviewerThreshold = 0.99;
+  CHECK(RuntimeResetSession(&rt, &ux));
+  CHECK_ALL(harness.Config.PermissionReviewerThreshold == 0.99,
+            harness.Config.PermissionReviewer.User != previousReviewer);
 
   InteractiveRuntime_Release(&rt);
+  CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+  sessions.Close(sessions.Ctx);
+  remove(path);
+#if defined(_WIN32)
+  _rmdir(dir);
+#else
+  rmdir(dir);
+#endif
+  ArenaRelease(&arena);
+}
+
+void TestRuntimeReviewerReload() {
+  Arena arena = ArenaCreate();
+  const char* dir = "clanker_reviewer_reload_test";
+  const char* path = "clanker_reviewer_reload_test/settings.json";
+  remove(path);
+  CHECK(ConfigFile_WriteAtomic(
+      &arena, SV(path),
+      SVL("{\"provider\":\"openrouter\",\"model\":\"settings-chat\","
+          "\"permissionMode\":\"ask\","
+          "\"permissionReviewerThreshold\":0.82,"
+          "\"permissionReviewerModel\":\"jev-latest\"}")));
+
+  MemoryRepository memory = {};
+  MemoryRepository_Init(&memory);
+  SessionRepository sessions = MemoryRepository_AsRepository(&memory);
+  SessionCreateOptions create = {};
+  create.ProjectKey = SVL("reviewer-reload-test");
+  create.WorkingDirectory = Fs_RealPath(&arena, SV(dir));
+  SessionLog log = {};
+  SessionInfo info = {};
+  CHECK(SessionResult_IsOk(
+      sessions.Create(sessions.Ctx, &arena, &create, &log, &info)));
+  const ProviderSpec* spec = ProviderRegistry_At(0);
+  Model chatModel = TestChatModel(&arena, spec, SVL("active-chat"));
+  AgentHarnessConfig config = {};
+  config.ModelInfo = chatModel;
+  config.ProviderImpl = TestChatProvider(&arena, spec);
+  config.PermissionReviewerModel = SVL("jev-1.12.0");
+  config.PermissionReviewer =
+      TypeSafePermissionReviewer_Make(&arena, config.PermissionReviewerModel);
+  config.WorkingDirectory = create.WorkingDirectory;
+  AgentHarness harness = {};
+  CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+
+  InteractiveRuntime rt = {};
+  InteractiveRuntime_Init(&rt, &arena);
+  rt.SettingsPath = SV(path);
+  rt.CurrentModel = chatModel;
+  rt.Harness = &harness;
+  rt.WorkingDirectory = create.WorkingDirectory;
+  rt.AgentDirectory = create.WorkingDirectory;
+  rt.TrustOverride = ProjectTrustOverride::Untrusted;
+  rt.PermissionReviewerModel = config.PermissionReviewerModel;
+  PromptContext prompt = {};
+  rt.Prompt = &prompt;
+  PromptContextOptions options = {};
+  options.WorkingDirectory = rt.WorkingDirectory;
+  options.AgentDirectory = rt.AgentDirectory;
+  options.NoContextFiles = true;
+  options.NoSkills = true;
+  options.NoPromptTemplates = true;
+  options.HasExplicitSystemPrompt = true;
+  options.ExplicitSystemPrompt = SVL("Reviewer reload test.");
+  RuntimeSetPromptOptions(&rt, &options);
+  RuntimeCommandCapture capture = {};
+  AppCommandUx ux = {&capture, CaptureRuntimeNotice, CaptureRuntimeError};
+  AppCommandHandlers handlers = RuntimeCommandHandlers(&rt);
+  RuntimeDispatchCommand(&rt, SVL("/reload"), &handlers, &ux);
+  CHECK_ALL(capture.Errors == 0,
+            rt.PermissionReviewerThreshold == 0.82,
+            harness.Config.PermissionReviewerThreshold == 0.82,
+            rt.Spec == nullptr,
+            StrView_EqCStr(harness.Config.ModelInfo.Id, "active-chat"),
+            harness.Config.ProviderImpl.Stream == UnexpectedChatStream,
+            harness.Config.PermissionReviewer.Review ==
+                config.PermissionReviewer.Review,
+            StrView_EqCStr(harness.Config.PermissionReviewerModel, "jev-latest"),
+            AgentHarness_GetPermissionMode(&harness) == AgentPermissionMode::Ask);
+
+  RuntimeDispatchCommand(&rt, SVL("/permissions"), &handlers, &ux);
+  CHECK(StrView_Contains(capture.LastNotice, "Permission reviewer threshold: 0.82"));
+  i32 revision = Atomic_LoadI32(&harness.Permissions.Revision);
+  CHECK(ConfigFile_WriteAtomic(
+      &arena, SV(path),
+      SVL("{\"provider\":\"openrouter\",\"model\":\"settings-chat\","
+          "\"permissionMode\":\"ask\",\"permissionReviewerThreshold\":0.99}")));
+  RuntimeDispatchCommand(&rt, SVL("/reload"), &handlers, &ux);
+  CHECK_ALL(capture.Errors == 0, rt.PermissionReviewerThreshold == 0.99,
+            harness.Config.PermissionReviewerThreshold == 0.99,
+            Atomic_LoadI32(&harness.Permissions.Revision) > revision);
+
+  AgentPermissionReviewer reviewer = harness.Config.PermissionReviewer;
+  StrView previousPrompt = prompt.SystemPrompt;
+  u32 notices = capture.Notices;
+  revision = Atomic_LoadI32(&harness.Permissions.Revision);
+  const char* invalidReviewers[] = {"jev-", "z-ai/glm-5.2"};
+  for (u32 i = 0; i < sizeof(invalidReviewers) / sizeof(invalidReviewers[0]); i++) {
+    StrBuf content = StrBuf_Make(&arena, 160);
+    StrBuf_AppendCStr(
+        &content,
+        "{\"provider\":\"openrouter\",\"model\":\"settings-chat\","
+        "\"permissionMode\":\"yolo\",\"permissionReviewerThreshold\":0.5,"
+        "\"permissionReviewerModel\":\"");
+    StrBuf_AppendCStr(&content, invalidReviewers[i]);
+    StrBuf_AppendCStr(&content, "\"}");
+    CHECK(ConfigFile_WriteAtomic(&arena, SV(path), StrBuf_View(&content)));
+    RuntimeDispatchCommand(&rt, SVL("/reload"), &handlers, &ux);
+    CHECK_ALL(capture.Errors == i + 1, capture.Notices == notices,
+              StrView_Contains(capture.LastError, "Settings are malformed"),
+              prompt.SystemPrompt.Data == previousPrompt.Data,
+              harness.Config.PermissionReviewer.User == reviewer.User,
+              StrView_Eq(harness.Config.PermissionReviewerModel,
+                         AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL),
+              StrView_Eq(rt.PermissionReviewerModel,
+                         AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL),
+              rt.PermissionReviewerThreshold == 0.99,
+              harness.Config.PermissionReviewerThreshold == 0.99,
+              AgentHarness_GetPermissionMode(&harness) == AgentPermissionMode::Ask,
+              Atomic_LoadI32(&harness.Permissions.Revision) == revision);
+  }
+
+  CHECK(ConfigFile_WriteAtomic(
+      &arena, SV(path),
+      SVL("{\"provider\":\"openrouter\",\"model\":\"settings-chat\","
+          "\"permissionReviewerThreshold\":1.1}")));
+  RuntimeDispatchCommand(&rt, SVL("/reload"), &handlers, &ux);
+  CHECK_ALL(capture.Errors == 3,
+            prompt.SystemPrompt.Data == previousPrompt.Data,
+            harness.Config.PermissionReviewer.User == reviewer.User,
+            rt.PermissionReviewerThreshold == 0.99,
+            harness.Config.PermissionReviewerThreshold == 0.99);
+
+  rt.Spec = spec;
+  CHECK(RuntimePersistSettings(&rt));
+  RuntimeDispatchCommand(&rt, SVL("/reload"), &handlers, &ux);
+  CHECK_ALL(capture.Errors == 3, rt.PermissionReviewerThreshold == 0.99,
+            StrView_Eq(harness.Config.PermissionReviewerModel,
+                       AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL));
+
+  PromptContext_Release(&prompt);
+  InteractiveRuntime_Release(&rt);
+  CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+  sessions.Close(sessions.Ctx);
+  remove(path);
+#if defined(_WIN32)
+  _rmdir(dir);
+#else
+  rmdir(dir);
+#endif
   ArenaRelease(&arena);
 }
 
@@ -513,20 +1023,50 @@ void TestRuntimeSelectionPrecedence() {
             defaults.PermissionMode == AgentPermissionMode::Auto,
             StrView_Eq(defaults.PermissionReviewerModel,
                        AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL),
+            !defaults.PermissionReviewerInvalid,
+            defaults.PermissionReviewerThreshold == 0.95,
+            !defaults.PermissionReviewerThresholdInvalid,
             !defaults.YoloAcknowledged);
 
   CHECK(ConfigFile_WriteAtomic(
       &arena, SV(path),
       SVL("{\"provider\":\"openrouter\",\"model\":\"configured\","
           "\"permissionMode\":\"yolo\","
-          "\"permissionReviewerModel\":\"reviewer/model\","
+          "\"permissionReviewerModel\":\"jev-1.12.0\","
+          "\"permissionReviewerThreshold\":0.85,"
           "\"yoloAcknowledged\":true}")));
   RuntimeSelection configured = LoadRuntimeSelection(&arena, SV(path), "override");
   CHECK_ALL(StrView_EqCStr(configured.ModelId, "override"),
+            configured.PermissionReviewerThreshold == 0.85,
             configured.PermissionMode == AgentPermissionMode::Yolo,
             StrView_EqCStr(configured.PermissionReviewerModel,
-                           "reviewer/model"),
+                           "jev-1.12.0"),
+            !configured.PermissionReviewerInvalid,
             configured.YoloAcknowledged);
+
+  CHECK(ConfigFile_WriteAtomic(
+      &arena, SV(path),
+      SVL("{\"provider\":\"openrouter\",\"model\":\"configured\","
+          "\"permissionMode\":\"ask\","
+          "\"permissionReviewerModel\":\"z-ai/glm-5.2\"}")));
+  RuntimeSelection unsupported = LoadRuntimeSelection(&arena, SV(path), "override");
+  CHECK_ALL(unsupported.PermissionReviewerInvalid,
+            StrView_EqCStr(unsupported.ModelId, "override"));
+
+  CHECK(ConfigFile_WriteAtomic(
+      &arena, SV(path),
+      SVL("{\"provider\":\"openrouter\",\"model\":\"configured\","
+          "\"permissionReviewerModel\":\"jev-\"}")));
+  RuntimeSelection invalid = LoadRuntimeSelection(&arena, SV(path), nullptr);
+  CHECK(invalid.PermissionReviewerInvalid);
+
+  CHECK(ConfigFile_WriteAtomic(
+      &arena, SV(path),
+      SVL("{\"provider\":\"openrouter\",\"model\":\"configured\","
+          "\"permissionReviewerThreshold\":-1}")));
+  RuntimeSelection invalidThreshold = LoadRuntimeSelection(&arena, SV(path), nullptr);
+  CHECK_ALL(invalidThreshold.PermissionReviewerThresholdInvalid,
+            !invalidThreshold.PermissionReviewerInvalid);
 
   CHECK(ConfigFile_WriteAtomic(&arena, SV(path), SVL("{bad")));
   RuntimeSelection malformed = LoadRuntimeSelection(&arena, SV(path), nullptr);
@@ -995,6 +1535,355 @@ void TestJsonOutput() {
   ArenaRelease(&arena);
 }
 
+namespace {
+
+struct SecretCommandRun {
+  InteractiveRuntime* Runtime;
+  AppCommandUx Ux;
+  StrView Command;
+  AppCommandHandlerResult EntryResult;
+  bool DirectEntry;
+};
+
+void RunSecretCommand(void* user) {
+  SecretCommandRun* run = (SecretCommandRun*)user;
+  if (run->DirectEntry) {
+    run->EntryResult = RuntimeEnterApiKey(run->Runtime, SVL("synthetic-provider"),
+        SVL("Synthetic provider API key"), SVL("Authentication"), &run->Ux);
+  } else {
+    AppCommandHandlers handlers = RuntimeCommandHandlers(run->Runtime);
+    RuntimeDispatchCommand(run->Runtime, run->Command, &handlers, &run->Ux);
+  }
+}
+
+bool WaitSettingsModal(Tui* tui, TuiModalKind kind, StrView title,
+                       TextInputMode mode = TextInputMode::Plain,
+                       StrView initial = {}) {
+  for (u32 i = 0; i < 5000; i++) {
+    Mutex_Lock(&tui->Lock);
+    bool ready = tui->ModalKind == kind &&
+                 tui->ModalResult == TuiModalResult::Pending &&
+                 StrView_Eq(tui->Sess.ModalTitle, title);
+    if (ready && kind == TuiModalKind::Text) {
+      CHECK(tui->ModalInputMode == mode);
+      CHECK(StrView_Eq(LineEdit_Text(&tui->ModalEdit), initial));
+    }
+    Mutex_Unlock(&tui->Lock);
+    if (ready) return true;
+    Sleep_Ms(1);
+  }
+  CHECK(false);
+  return false;
+}
+
+void FeedSettings(Tui* tui, const char* text) {
+  Tui_FeedInput(tui, text, (u32)strlen(text));
+}
+
+bool ChooseSettingsItem(Tui* tui, u32 selected) {
+  if (!WaitSettingsModal(tui, TuiModalKind::Select, SVL("Permission settings")))
+    return false;
+  FeedSettings(tui, "\x1b[H");
+  for (u32 i = 0; i < selected; i++) FeedSettings(tui, "\x1b[B");
+  FeedSettings(tui, "\r");
+  return true;
+}
+
+void StopSettingsWorker(Tui* tui, Thread* thread) {
+  Mutex_Lock(&tui->Lock);
+  tui->Stop = true;
+  Cond_Broadcast(&tui->ModalCv);
+  Mutex_Unlock(&tui->Lock);
+  Thread_Join(thread);
+}
+
+bool ArenaContainsSyntheticKey(const Arena* arena) {
+  return StrView_Contains(StrView{(const char*)arena->Base, (u32)arena->Used},
+                          "synthetic-private-key");
+}
+
+void TestSecretSettingsCommands() {
+  Arena arena = ArenaCreate();
+  Arena fixture = ArenaCreate();
+  Arena tuiArena = ArenaCreate();
+  const char* authPath = "clanker_secret_settings_auth_test.json";
+  const char* settingsPath = "clanker_secret_settings_config_test.json";
+  remove(authPath);
+  remove(settingsPath);
+  Credential key = {};
+  key.ApiKey = SVL("synthetic-private-key-original");
+  CHECK(AuthStore_Write(&fixture, SV(authPath), SVL("typesafe"), &key));
+  CHECK(AuthStore_Write(&fixture, SV(authPath), SVL("synthetic-provider"), &key));
+
+  MemoryRepository memory = {};
+  MemoryRepository_Init(&memory);
+  SessionRepository sessions = MemoryRepository_AsRepository(&memory);
+  SessionCreateOptions create = {};
+  create.ProjectKey = SVL("secret-settings-test");
+  create.WorkingDirectory = SVL("C:\\synthetic");
+  SessionLog log = {};
+  SessionInfo info = {};
+  CHECK(SessionResult_IsOk(sessions.Create(sessions.Ctx, &arena, &create, &log, &info)));
+  const ProviderSpec* spec = ProviderRegistry_At(0);
+  Model model = spec->CreateModel(&arena, spec, spec->DefaultModel);
+  AgentHarnessConfig config = {};
+  config.ModelInfo = model;
+  config.ProviderImpl = TestChatProvider(&arena, spec);
+  config.PermissionReviewerModel = SVL("jev-latest");
+  config.PermissionReviewerThreshold = 0.95;
+  AgentHarness harness = {};
+  CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+  SessionReduction before = {};
+  CHECK(SessionResult_IsOk(AgentHarness_Snapshot(&fixture, &harness, &before)));
+
+  Tui tui = {};
+  TuiOpts options = {};
+  options.ModelName = model.Id;
+  Tui_InitModel(&tui, &tuiArena, options);
+  InteractiveRuntime rt = {};
+  InteractiveRuntime_Init(&rt, &arena);
+  rt.AuthPath = SV(authPath);
+  rt.SettingsPath = SV(settingsPath);
+  rt.Spec = spec;
+  rt.CurrentModel = model;
+  rt.Harness = &harness;
+  rt.Sessions = &sessions;
+  rt.TuiView = &tui;
+  RuntimeCommandCapture capture = {};
+  AppCommandUx ux = {&capture, CaptureRuntimeNotice, CaptureRuntimeError};
+  SecretCommandRun run = {&rt, ux, SVL("/permissions key"), {}, false};
+  Thread worker = {};
+  i32 revision = Atomic_LoadI32(&harness.Permissions.Revision);
+  CHECK(Thread_Start(&worker, RunSecretCommand, &run));
+  bool ready = WaitSettingsModal(&tui, TuiModalKind::Text, SVL("Jev API key"),
+                                 TextInputMode::Secret);
+  if (ready) {
+    FeedSettings(&tui, "synthetic-private-key-updated\r");
+    Thread_Join(&worker);
+  } else {
+    StopSettingsWorker(&tui, &worker);
+  }
+  CHECK_ALL(capture.Errors == 0, capture.Notices == 1,
+            Atomic_LoadI32(&harness.Permissions.Revision) == revision + 1,
+            !StrView_Contains(capture.LastNotice, "synthetic-private-key"));
+  Credential read = {};
+  CHECK(AuthStore_Read(&fixture, SV(authPath), SVL("typesafe"), &read));
+  CHECK(StrView_EqCStr(read.ApiKey, "synthetic-private-key-updated"));
+  CHECK(!ArenaContainsSyntheticKey(&arena));
+  CHECK(!ArenaContainsSyntheticKey(&rt.CommandMem));
+  CHECK(!ArenaContainsSyntheticKey(&tui.SessionMem));
+  CHECK_ALL(rt.PendingPrompt.Length == 0, tui.Edit.History.Count == 0,
+            tui.ModalEdit.History.Count == 0, LineEdit_Empty(&tui.ModalEdit));
+
+  revision = Atomic_LoadI32(&harness.Permissions.Revision);
+  CHECK(Thread_Start(&worker, RunSecretCommand, &run));
+  ready = WaitSettingsModal(&tui, TuiModalKind::Text, SVL("Jev API key"),
+                            TextInputMode::Secret);
+  if (ready) {
+    FeedSettings(&tui, "synthetic-private-key-cancelled");
+    FeedSettings(&tui, "\x1b");
+    Thread_Join(&worker);
+  } else {
+    StopSettingsWorker(&tui, &worker);
+  }
+  CHECK(Atomic_LoadI32(&harness.Permissions.Revision) == revision);
+  CHECK(AuthStore_Read(&fixture, SV(authPath), SVL("typesafe"), &read));
+  CHECK(StrView_EqCStr(read.ApiKey, "synthetic-private-key-updated"));
+  CHECK(!StrView_Contains(capture.LastNotice, "synthetic-private-key"));
+
+  StrView preserved = SVL(
+      "{\"typesafe\":{\"type\":\"api_key\",\"key\":\"synthetic-private-key-updated\"},"
+      "\"other\":false}");
+  CHECK(ConfigFile_WriteAtomic(&fixture, SV(authPath), preserved));
+  CHECK(Thread_Start(&worker, RunSecretCommand, &run));
+  ready = WaitSettingsModal(&tui, TuiModalKind::Text, SVL("Jev API key"),
+                            TextInputMode::Secret);
+  if (ready) {
+    FeedSettings(&tui, "synthetic-private-key-rejected\r");
+    Thread_Join(&worker);
+  } else {
+    StopSettingsWorker(&tui, &worker);
+  }
+  CHECK_ALL(capture.Errors == 1,
+            !StrView_Contains(capture.LastError, "synthetic-private-key"),
+            Atomic_LoadI32(&harness.Permissions.Revision) == revision);
+  StrView unchanged = {};
+  CHECK(ConfigFile_ReadAll(&fixture, SV(authPath), &unchanged) == ConfigFileReadResult::Success);
+  CHECK(StrView_Eq(unchanged, preserved));
+  CHECK(AuthStore_Read(&fixture, SV(authPath), SVL("typesafe"), &read));
+  CHECK(StrView_EqCStr(read.ApiKey, "synthetic-private-key-updated"));
+
+
+  // `/auth` signs in through OpenRouter's browser flow; the masked entry it
+  // used to open is still how other credentials are entered.
+  remove(authPath);
+  CHECK(AuthStore_Write(&fixture, SV(authPath), SVL("typesafe"), &key));
+  run.DirectEntry = true;
+  CHECK(Thread_Start(&worker, RunSecretCommand, &run));
+  ready = WaitSettingsModal(&tui, TuiModalKind::Text, SVL("Synthetic provider API key"),
+                            TextInputMode::Secret);
+  if (ready) {
+    FeedSettings(&tui, "synthetic-private-key-provider\r");
+    Thread_Join(&worker);
+  } else {
+    StopSettingsWorker(&tui, &worker);
+  }
+  CHECK(run.EntryResult.Status == AppCommandHandlerStatus::Success);
+  CHECK(!StrView_Contains(run.EntryResult.Message, "synthetic-private-key"));
+  CHECK(AuthStore_Read(&fixture, SV(authPath), SVL("synthetic-provider"), &read));
+  CHECK(StrView_EqCStr(read.ApiKey, "synthetic-private-key-provider"));
+  CHECK(AuthStore_Read(&fixture, SV(authPath), SVL("typesafe"), &read));
+  CHECK(StrView_Eq(read.ApiKey, key.ApiKey));
+
+  run.DirectEntry = false;
+  run.Command = SVL("/permissions");
+  capture = {};
+  CHECK(Thread_Start(&worker, RunSecretCommand, &run));
+  ready = ChooseSettingsItem(&tui, 3) &&
+      WaitSettingsModal(&tui, TuiModalKind::Text, SVL("Automatic approval threshold"),
+                        TextInputMode::Plain, SVL("0.95"));
+  if (ready) {
+    FeedSettings(&tui, "\x01\x0binvalid\r");
+    ready = WaitSettingsModal(&tui, TuiModalKind::Text,
+        SVL("Automatic approval threshold"), TextInputMode::Plain, SVL("0.95"));
+  }
+  if (ready) {
+    FeedSettings(&tui, "\x01\x0b" "0.8\r");
+    ready = ChooseSettingsItem(&tui, 2) &&
+        WaitSettingsModal(&tui, TuiModalKind::Text, SVL("Jev permission reviewer model"),
+                          TextInputMode::Plain, SVL("jev-latest"));
+  }
+  if (ready) {
+    FeedSettings(&tui, "\x01\x0b" "chat-model\r");
+    ready = WaitSettingsModal(&tui, TuiModalKind::Text,
+        SVL("Jev permission reviewer model"), TextInputMode::Plain, SVL("jev-latest"));
+  }
+  if (ready) {
+    FeedSettings(&tui, "\x01\x0b" "jev-preview\r");
+    ready = WaitSettingsModal(&tui, TuiModalKind::Select, SVL("Permission settings"));
+  }
+  if (ready) {
+    FeedSettings(&tui, "\x1b");
+    Thread_Join(&worker);
+  } else {
+    StopSettingsWorker(&tui, &worker);
+  }
+  CHECK_ALL(capture.Errors == 2, rt.PermissionReviewerThreshold == 0.8,
+            StrView_EqCStr(rt.PermissionReviewerModel, "jev-preview"));
+  AppSettings saved = {};
+  CHECK(AppSettings_Load(&fixture, SV(settingsPath), &saved) == AppSettingsLoadResult::Success);
+  CHECK_ALL(saved.PermissionReviewerThreshold == 0.8,
+            StrView_EqCStr(saved.PermissionReviewerModel, "jev-preview"));
+  StrView settings = {};
+  CHECK(ConfigFile_ReadAll(&fixture, SV(settingsPath), &settings) == ConfigFileReadResult::Success);
+  CHECK(!StrView_Contains(settings, "synthetic-private-key"));
+
+  AppCommandHandlers handlers = RuntimeCommandHandlers(&rt);
+  revision = Atomic_LoadI32(&harness.Permissions.Revision);
+  RuntimeDispatchCommand(&rt, SVL("/permissions key synthetic-private-key-inline"), &handlers, &ux);
+  CHECK(!StrView_Contains(capture.LastError, "synthetic-private-key"));
+  RuntimeDispatchCommand(&rt, SVL("/auth synthetic-private-key-inline"), &handlers, &ux);
+  CHECK(!StrView_Contains(capture.LastError, "synthetic-private-key"));
+  CHECK_ALL(Atomic_LoadI32(&harness.Permissions.Revision) == revision,
+            rt.PendingPrompt.Length == 0);
+  RuntimeDispatchCommand(&rt, SVL("/permissions key clear"), &handlers, &ux);
+  CHECK(Atomic_LoadI32(&harness.Permissions.Revision) == revision + 1);
+  CHECK(!AuthStore_Read(&fixture, SV(authPath), SVL("typesafe"), &read));
+  CHECK(AuthStore_Read(&fixture, SV(authPath), SVL("synthetic-provider"), &read));
+  CHECK(!StrView_Contains(capture.LastNotice, "synthetic-private-key"));
+  SessionReduction after = {};
+  CHECK(SessionResult_IsOk(AgentHarness_Snapshot(&fixture, &harness, &after)));
+  CHECK_ALL(after.RecordCount == before.RecordCount,
+            !ArenaContainsSyntheticKey(&arena),
+            !ArenaContainsSyntheticKey(&rt.CommandMem),
+            !ArenaContainsSyntheticKey(&tui.SessionMem));
+
+  Tui_Stop(&tui);
+  InteractiveRuntime_Release(&rt);
+  AgentHarness_Close(&harness);
+  MemoryRepository_Destroy(&memory);
+  remove(authPath);
+  remove(settingsPath);
+  ArenaReleaseSecure(&fixture);
+  ArenaRelease(&tuiArena);
+  ArenaRelease(&arena);
+}
+
+void TestPlainTextInputPrivacy() {
+  const char* path = "clanker_plain_input_test.txt";
+  FILE* input = fopen(path, "w+b");
+  CHECK(input != nullptr);
+  if (!input) return;
+  fputs("unconsumed-input\nabcdefghijk\nnext\n", input);
+  fputs("/auth ", input);
+  for (u32 i = 0; i < 9000; i++) fputc('x', input);
+  fputs("synthetic-private-key-tail\n/permissions model\n/permissions key ", input);
+  for (u32 i = 0; i < 9000; i++) fputc('y', input);
+  fputs("synthetic-private-key-tail\n/exit\n\n  ordinary prompt text  \n", input);
+  fflush(input);
+  rewind(input);
+#if defined(_WIN32)
+  int saved = _dup(_fileno(stdin));
+  int redirected = saved < 0 ? -1 : _dup2(_fileno(input), _fileno(stdin));
+#else
+  int saved = dup(fileno(stdin));
+  int redirected = saved < 0 ? -1 : dup2(fileno(input), fileno(stdin));
+#endif
+  CHECK(redirected >= 0);
+  if (redirected >= 0) {
+    clearerr(stdin);
+    char buffer[64] = "synthetic-private-key";
+    StrView text = {};
+    bool failed = false;
+    CHECK(!Plain_ReadText(SVL("Secret"), buffer, sizeof(buffer), &text,
+                          TextInputMode::Secret, &failed));
+    CHECK_ALL(failed, text.Length == 0);
+    for (u32 i = 0; i < sizeof(buffer); i++) CHECK(buffer[i] == 0);
+    CHECK(Plain_ReadText(SVL("Plain"), buffer, sizeof(buffer), &text));
+    CHECK(StrView_EqCStr(text, "unconsumed-input"));
+    CHECK(!Plain_ReadText(SVL("Bounded"), buffer, 8, &text,
+                          TextInputMode::Plain, &failed));
+    CHECK_ALL(failed, text.Length == 0);
+    CHECK(Plain_ReadText(SVL("Next"), buffer, sizeof(buffer), &text));
+    CHECK(StrView_EqCStr(text, "next"));
+    char command[8192] = {};
+    CHECK(Plain_ReadLine(command, sizeof(command)) == PlainLineResult::TooLong);
+    bool wiped = true;
+    for (u32 i = 0; i < sizeof(command); i++) wiped = wiped && command[i] == 0;
+    CHECK(wiped);
+    CHECK(Plain_ReadLine(command, sizeof(command)) == PlainLineResult::Read);
+    AppCommand parsed = AppCommand_Parse(SV(command));
+    CHECK_ALL(parsed.Kind == AppCommandKind::Permissions,
+              StrView_EqCStr(parsed.Arguments, "model"));
+    CHECK(Plain_ReadLine(command, sizeof(command)) == PlainLineResult::TooLong);
+    CHECK(command[0] == 0);
+    CHECK(Plain_ReadLine(command, sizeof(command)) == PlainLineResult::Read);
+    CHECK(AppCommand_Parse(SV(command)).Kind == AppCommandKind::Exit);
+    CHECK(Plain_ReadLine(command, sizeof(command)) == PlainLineResult::Read);
+    CHECK(StrView_Trim(SV(command)).Length == 0);
+    CHECK(Plain_ReadLine(command, sizeof(command)) == PlainLineResult::Read);
+    CHECK(StrView_EqCStr(SV(command), "  ordinary prompt text  \n"));
+    CHECK(Plain_ReadLine(command, sizeof(command)) == PlainLineResult::End);
+    CHECK(command[0] == 0);
+    Memory_Zero(command, sizeof(command));
+    Memory_Zero(buffer, sizeof(buffer));
+  }
+  if (saved >= 0) {
+#if defined(_WIN32)
+    _dup2(saved, _fileno(stdin));
+    _close(saved);
+#else
+    dup2(saved, fileno(stdin));
+    close(saved);
+#endif
+    clearerr(stdin);
+  }
+  fclose(input);
+  remove(path);
+}
+
+}  // namespace
+
 void TestApp() {
   TestSessionProjectKey();
   TestProjectKeyComparison();
@@ -1003,10 +1892,14 @@ void TestApp() {
   TestRuntimePersistSettings();
   TestRuntimePermissionCommandEdges();
   TestRuntimeRefreshPermissionReviewer();
+  TestRuntimeReviewerProviderIndependence();
+  TestRuntimeReviewerReload();
   TestRuntimeSelectionPrecedence();
   TestRuntimeAskUserNonInteractive();
   TestEventPumpTranscriptLifecycle();
   TestJsonOutput();
+  TestSecretSettingsCommands();
+  TestPlainTextInputPrivacy();
   TestConfigPaths();
   TestTrustChoiceMenu();
   TestCommandResultMapping();

@@ -409,6 +409,7 @@ void Cleanup(const char* root) {
       "clanker_skills_test/work/.clanker/skills",
       "clanker_skills_test/work/.clanker",
       "clanker_skills_test/work",
+      "clanker_skills_test/.git",
   };
   for (u32 i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) RemoveDir(dirs[i]);
   RemoveDir(root);
@@ -420,6 +421,8 @@ void TestSkills() {
   Arena scratch = ArenaCreate((usize)64 << 20);
   StrView root = SVL("clanker_skills_test");
   CHECK(Fs_MkdirP(&scratch, root));
+  // Stop ancestor skill discovery at the fixture, not the enclosing worktree.
+  CHECK(Fs_MkdirP(&scratch, Fs_Join(&scratch, root, SVL(".git"))));
 
   TestFrontmatter(&scratch);
   TestPromptBlock(&scratch);

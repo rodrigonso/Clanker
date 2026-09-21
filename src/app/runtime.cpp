@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include "app/plain_select.h"
+#include "app/permission_reviewer.h"
 #include "app/settings.h"
 #include "base/thread.h"
 
@@ -69,28 +70,30 @@ RuntimeInputResult RuntimeSelect(InteractiveRuntime* rt, StrView title,
 RuntimeInputResult RuntimeReadText(InteractiveRuntime* rt, Arena* arena,
                                    StrView title, StrView prompt,
                                    StrView initial, StrView* out,
-                                   StrView category) {
+                                   StrView category, TextInputMode mode) {
+  *out = {};
   if (rt->TuiView) {
-    StrView value = {};
     TuiModalResult result =
-        Tui_ReadText(rt->TuiView, title, prompt, initial, &value, category);
+        Tui_ReadText(rt->TuiView, arena, title, prompt, initial, out, category, mode);
     if (result == TuiModalResult::Back) return RuntimeInputResult::Back;
     if (result != TuiModalResult::Confirmed)
       return RuntimeInputResult::Cancelled;
-    *out = StrView_Dup(arena, value);
     return RuntimeInputResult::Confirmed;
   }
 
-  char buffer[1024];
+  char buffer[8194] = {};
   StrView value = {};
   // Plain_ReadText prints only the prompt, so the title has to be surfaced
   // here or the context it carries -- the question, the provider -- is lost.
   if (title.Length && !StrView_Eq(title, prompt))
     printf("%.*s\n", (int)title.Length, title.Data);
-  if (!Plain_ReadText(prompt, buffer, (u32)sizeof(buffer), &value))
-    return RuntimeInputResult::Cancelled;
-  *out = StrView_Dup(arena, value);
-  return RuntimeInputResult::Confirmed;
+  bool failed = false;
+  bool confirmed =
+      Plain_ReadText(prompt, buffer, (u32)sizeof(buffer), &value, mode, &failed);
+  if (confirmed) *out = StrView_Dup(arena, value);
+  Memory_Zero(buffer, sizeof(buffer));
+  return confirmed ? RuntimeInputResult::Confirmed
+                   : failed ? RuntimeInputResult::Failed : RuntimeInputResult::Cancelled;
 }
 
 static bool RuntimeAskUserImpl(void* user, Arena* arena,
@@ -225,6 +228,7 @@ bool RuntimePersistSettings(InteractiveRuntime* rt) {
           ? rt->PermissionReviewerModel
           : AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL;
   settings.YoloAcknowledged = rt->YoloAcknowledged;
+  settings.PermissionReviewerThreshold = rt->PermissionReviewerThreshold;
   settings.Rounded = rt->Rounded;
   if (rt->Prompt) {
     settings.Skills = rt->Prompt->SettingsSkillPaths;
@@ -236,14 +240,20 @@ bool RuntimePersistSettings(InteractiveRuntime* rt) {
 }
 
 bool RuntimeRefreshPermissionReviewer(InteractiveRuntime* rt) {
-  if (!rt || !rt->Harness || !rt->Spec || !rt->Spec->CreateModel)
+  if (!rt || !rt->Mem || !rt->Harness) return false;
+  StrView reviewerId = rt->PermissionReviewerModel.Length
+                           ? rt->PermissionReviewerModel
+                           : AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL;
+  if (!TypeSafePermissionReviewer_ModelSupported(reviewerId) ||
+      !TypeSafePermissionReviewer_ThresholdIsValid(rt->PermissionReviewerThreshold))
     return false;
-  if (!rt->PermissionReviewerModel.Length)
-    rt->PermissionReviewerModel = AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL;
-  Model reviewer = rt->Spec->CreateModel(
-      rt->Mem, rt->Spec, rt->PermissionReviewerModel);
-  if (!reviewer.Id.Length || !Model_MetadataIsValid(&reviewer)) return false;
-  rt->Harness->Config.PermissionReviewerModel = reviewer;
+  rt->PermissionReviewerModel = reviewerId;
+  rt->Harness->Config.PermissionReviewerModel = reviewerId;
+  rt->Harness->Config.PermissionReviewerThreshold = rt->PermissionReviewerThreshold;
+  rt->Harness->Config.PermissionReviewer =
+      TypeSafePermissionReviewer_Make(rt->Mem, reviewerId,
+                                      rt->PermissionReviewerThreshold, rt->AuthPath);
+  AgentPermissionEngine_InvalidateReviews(&rt->Harness->Permissions);
   return true;
 }
 

@@ -13,7 +13,8 @@ bool AgentPermissionMode_Parse(StrView value, AgentPermissionMode* out);
 AgentPermissionMode AgentPermissionMode_Next(AgentPermissionMode mode);
 
 constexpr StrView AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL =
-    SVL("z-ai/glm-5.2");
+    SVL("jev-latest");
+constexpr f64 AGENT_PERMISSION_DEFAULT_REVIEWER_THRESHOLD = 0.95;
 
 enum class AgentPermissionReviewDecision : u8 {
   Ask,
@@ -24,11 +25,14 @@ struct AgentPermissionReviewRequest {
   StrView ToolName;
   StrView Action;
   StrView TrustedUserText;
+  bool ActionIncomplete;
+  bool TrustedUserTextIncomplete;
 };
 
 struct AgentPermissionReviewResult {
   AgentPermissionReviewDecision Decision;
   StrView Rationale;
+  StrView Model;
 };
 
 typedef bool (*AgentPermissionReviewFn)(
@@ -65,6 +69,8 @@ struct AgentPermissionCacheEntry {
   StrView Key;
   bool Allow;
   u32 RequestIndex;
+  i32 Revision;
+  u32 ContextRevision;
 };
 
 struct AgentPermissionEngine {
@@ -78,6 +84,9 @@ struct AgentPermissionEngine {
   Array<AgentPermissionGrant> Grants;
   Array<AgentPermissionRequest> Requests;
   Array<AgentPermissionCacheEntry> Cache;
+  StrBuf ReviewContext;
+  bool ReviewContextIncomplete;
+  u32 ContextRevision;
   volatile i32 Mode;
   volatile i32 Revision;
   bool Initialized;
@@ -104,6 +113,7 @@ void AgentPermissionEngine_Init(AgentPermissionEngine* engine,
 void AgentPermissionEngine_Close(AgentPermissionEngine* engine);
 void AgentPermissionEngine_BeginRun(AgentPermissionEngine* engine);
 void AgentPermissionEngine_EndRun(AgentPermissionEngine* engine);
+void AgentPermissionEngine_InvalidateReviews(AgentPermissionEngine* engine);
 
 AgentPermissionMode AgentPermissionEngine_GetMode(
     const AgentPermissionEngine* engine);

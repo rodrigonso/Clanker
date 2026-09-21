@@ -213,6 +213,7 @@ struct FakeTransportState {
   u32 RetrySequence;
   u32 LastRetryAttempt;
   i32 LastRetryStatus;
+  bool BodyLimitExceeded;
 };
 
 HttpResult FakeTransport(void* user, Arena*, const HttpRequest*, HttpStreamSink, volatile i32*) {
@@ -223,6 +224,7 @@ HttpResult FakeTransport(void* user, Arena*, const HttpRequest*, HttpStreamSink,
   HttpResult r = {};
   r.Status = a.Status;
   r.BodyStarted = a.BodyStarted;
+  r.BodyLimitExceeded = s->BodyLimitExceeded;
   r.Meta.HasShouldRetry = a.HasShouldRetry;
   r.Meta.ShouldRetry = a.ShouldRetry;
   r.Meta.RetryAfterMs = -1;
@@ -317,6 +319,38 @@ void TestRetryLoopNeverRetriesAfterBodyStarted() {
   HttpResult r = Http_StreamWithRetryDeps(&a, &req, sink, nullptr, &policy, &deps);
   CHECK_ALL(state.Calls == 1, state.SleepCalls == 0, r.Status == -1, r.BodyStarted);
 
+  ArenaRelease(&a);
+}
+
+void TestRetryLoopNeverRetriesAfterBodyLimitExceeded() {
+  Arena a = ArenaCreate();
+  HttpRetryPolicy policy = HttpRetryPolicy_Default();
+  policy.Enabled = true;
+  const i32 statuses[] = {-1, 429, 529};
+  for (i32 status : statuses) {
+    FakeAttempt attempts[1] = {{status, false, true, true}};
+    FakeTransportState state = {};
+    state.Attempts = attempts;
+    state.Count = 1;
+    state.BodyLimitExceeded = true;
+
+    HttpRetryDeps deps = {};
+    deps.Transport = FakeTransport;
+    deps.TransportUser = &state;
+    deps.Sleep = FakeSleep;
+    deps.SleepUser = &state;
+    deps.Rand = FakeRandZero;
+
+    HttpRequest req = {};
+    req.MaxResponseBytes = 32;
+    req.BufferNonSuccessBody = true;
+    HttpStreamSink sink = {};
+    HttpResult result = Http_StreamWithRetryDeps(
+        &a, &req, sink, nullptr, &policy, &deps);
+    CHECK_ALL(state.Calls == 1, state.SleepCalls == 0,
+              result.Status == status, !result.BodyStarted,
+              result.BodyLimitExceeded);
+  }
   ArenaRelease(&a);
 }
 
@@ -715,6 +749,7 @@ void TestHttp() {
   TestDelayMsComputation();
   TestRetryLoopStopsAfterRetryableFailures();
   TestRetryLoopNeverRetriesAfterBodyStarted();
+  TestRetryLoopNeverRetriesAfterBodyLimitExceeded();
   TestRetryLoopHonorsShouldRetryFalse();
   TestRetryLoopDisabledPolicyIsPassthrough();
   TestRetryLoopAbortDuringBackoffStopsRetrying();

@@ -60,6 +60,7 @@ struct ToolPermissionInfo {
   StrView Action;
   StrView GrantKey;
   bool AutoAllow;
+  bool ReviewIncomplete;
 };
 
 // A tool the agent can execute. The harness prepares and validates `ToolArgs`

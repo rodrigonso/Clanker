@@ -155,7 +155,7 @@ static void TestToolPermissions(Arena* a) {
   CHECK(DescribeToolPermission(
       a, write, SV("{\"path\":\"../outside.txt\",\"content\":\"x\"}"),
       workingDirectory, &outside, &outsideErr));
-  CHECK(!outside.AutoAllow);
+  CHECK_ALL(!outside.AutoAllow, outside.ReviewIncomplete);
 
   // Writes that steer later execution -- git hooks and config, project hooks,
   // skills -- need review even inside the workspace.
@@ -225,6 +225,14 @@ static void TestToolPermissions(Arena* a) {
       a, shell, SV("{\"command\":\"git status && git diff\"}"),
       workingDirectory, &chain, &chainErr));
   CHECK(chain.AutoAllow);
+
+  ToolPermissionInfo multiline = {};
+  StrBuf multilineErr = StrBuf_Make(a, 64);
+  CHECK(DescribeToolPermission(
+      a, shell, SVL("{\"command\":\"git status\\ngit diff\"}"),
+      workingDirectory, &multiline, &multilineErr));
+  CHECK_ALL(!multiline.AutoAllow, !multiline.ReviewIncomplete,
+            StrView_Eq(multiline.Action, SVL("Run git status\ngit diff")));
 
   const char* reviewerCommands[] = {
       "git status && rm -rf x", "git status | head", "git status > out",

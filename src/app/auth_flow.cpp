@@ -111,6 +111,7 @@ RuntimeSelection LoadRuntimeSelection(Arena* arena, StrView settingsPath,
     selected.TurnLimit = settings.TurnLimit;
     selected.PermissionMode = settings.PermissionMode;
     selected.PermissionReviewerModel = settings.PermissionReviewerModel;
+    selected.PermissionReviewerThreshold = settings.PermissionReviewerThreshold;
     selected.YoloAcknowledged = settings.YoloAcknowledged;
     selected.Rounded = settings.Rounded;
     selected.Skills = settings.Skills;
@@ -129,7 +130,11 @@ RuntimeSelection LoadRuntimeSelection(Arena* arena, StrView settingsPath,
               (int)defaults->DefaultModel.Length, defaults->DefaultModel.Data);
     }
   } else if (load == AppSettingsLoadResult::Malformed) {
-    WarnUsingDefaults(settingsPath, defaults, "settings file is malformed:");
+    selected.PermissionReviewerInvalid = settings.PermissionReviewerInvalid;
+    selected.PermissionReviewerThresholdInvalid =
+        settings.PermissionReviewerThresholdInvalid;
+    if (!selected.PermissionReviewerInvalid && !selected.PermissionReviewerThresholdInvalid)
+      WarnUsingDefaults(settingsPath, defaults, "settings file is malformed:");
   } else if (load == AppSettingsLoadResult::ReadFailure) {
     WarnUsingDefaults(settingsPath, defaults, "could not read settings file:");
   }
@@ -349,9 +354,47 @@ static AppCommandHandlerResult RunOAuthLogin(InteractiveRuntime* rt,
       AppAuth_CacheToken(rt->Auth, spec->Id, credential.ApiKey);
     }
   }
-  ArenaRelease(&scratch);
+  ArenaReleaseSecure(&scratch);
   return result;
 }
+
+AppCommandHandlerResult RuntimeEnterApiKey(
+    InteractiveRuntime* rt, StrView credentialId, StrView title,
+    StrView category, const AppCommandUx* ux) {
+  Arena scratch = ArenaCreate((usize)8 << 20);
+  StrView entered = {};
+  for (;;) {
+    RuntimeInputResult entry =
+        RuntimeReadText(rt, &scratch, title, SVL("API key"),
+                        StrView{}, &entered, category, TextInputMode::Secret);
+    if (entry != RuntimeInputResult::Confirmed) {
+      ArenaReleaseSecure(&scratch);
+      return entry == RuntimeInputResult::Failed
+                 ? AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
+                     SVL("Secure API key input is unavailable; credentials were not changed.")}
+                 : AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled,
+                     SVL("API key unchanged.")};
+    }
+    entered = StrView_Trim(entered);
+    bool valid = entered.Length > 0 && entered.Length <= 8192;
+    for (u32 i = 0; valid && i < entered.Length; i++)
+      valid = (u8)entered.Data[i] > 0x20 && (u8)entered.Data[i] < 0x7f;
+    if (valid) break;
+    ArenaResetSecure(&scratch);
+    entered = {};
+    EmitCommandError(ux, SVL("Enter a non-empty API key of at most 8192 characters, without spaces or control characters."));
+  }
+
+  Credential credential = {};
+  credential.ApiKey = entered;
+  bool saved = AuthStore_Write(&scratch, rt->AuthPath, credentialId, &credential);
+  ArenaReleaseSecure(&scratch);
+  return saved
+      ? AppCommandHandlerResult{AppCommandHandlerStatus::Success, SVL("API key saved.")}
+      : AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
+          SVL("The API key was not changed; the authentication store could not be saved. Check its format and file permissions.")};
+}
+
 struct RuntimeModelChoice {
   RuntimeChoiceStatus Status;
   Model Selected;
@@ -389,7 +432,7 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
   bool cancelled = RuntimeEndOperation(rt);
 
   if (cancelled || (abort && Atomic_LoadI32(abort))) {
-    ArenaRelease(&scratch);
+    ArenaReleaseSecure(&scratch);
     return RuntimeModelChoice{RuntimeChoiceStatus::Cancelled, Model{}, StrView{}};
   }
 
@@ -453,11 +496,11 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
         RuntimeSelect(rt, StrBuf_View(&title), options, optionCount, &selected,
                       initial);
     if (selection == RuntimeInputResult::Back) {
-      ArenaRelease(&scratch);
+      ArenaReleaseSecure(&scratch);
       return RuntimeModelChoice{RuntimeChoiceStatus::Back, Model{}, StrView{}};
     }
     if (selection != RuntimeInputResult::Confirmed) {
-      ArenaRelease(&scratch);
+      ArenaReleaseSecure(&scratch);
       return RuntimeModelChoice{RuntimeChoiceStatus::Cancelled, Model{},
                                 StrView{}};
     }
@@ -481,7 +524,7 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
           break;
         }
         if (entry != RuntimeInputResult::Confirmed) {
-          ArenaRelease(&scratch);
+          ArenaReleaseSecure(&scratch);
           return RuntimeModelChoice{RuntimeChoiceStatus::Cancelled, Model{},
                                     StrView{}};
         }
@@ -498,7 +541,7 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
     chosen.Provider = StrView_Dup(rt->Mem, spec->Id);
     if (!chosen.Name.Length) chosen.Name = chosen.Id;
     if (!Model_MetadataIsValid(&chosen)) {
-      ArenaRelease(&scratch);
+      ArenaReleaseSecure(&scratch);
       return RuntimeModelChoice{
           RuntimeChoiceStatus::Failed, Model{},
           SVL("The selected model has invalid capability metadata.")};
@@ -531,7 +574,7 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
                         effortCount, &effortSelected, effortInitial);
       if (effortResult == RuntimeInputResult::Back) continue;
       if (effortResult != RuntimeInputResult::Confirmed) {
-        ArenaRelease(&scratch);
+        ArenaReleaseSecure(&scratch);
         return RuntimeModelChoice{RuntimeChoiceStatus::Cancelled, Model{},
                                   StrView{}};
       }
@@ -559,7 +602,7 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
                         &contextSelected, contextInitial);
       if (contextResult == RuntimeInputResult::Back) continue;
       if (contextResult != RuntimeInputResult::Confirmed) {
-        ArenaRelease(&scratch);
+        ArenaReleaseSecure(&scratch);
         return RuntimeModelChoice{RuntimeChoiceStatus::Cancelled, Model{},
                                   StrView{}};
       }
@@ -571,7 +614,7 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
     break;
   }
 
-  ArenaRelease(&scratch);
+  ArenaReleaseSecure(&scratch);
   RuntimeModelChoice result = {
       RuntimeChoiceStatus::Selected, chosen, StrView{}};
   result.Profile = chosenProfile;
@@ -631,10 +674,6 @@ bool ActivateRuntimeSelection(InteractiveRuntime* rt, const ProviderSpec* spec,
   rt->Spec = spec;
   rt->CurrentModel = model;
   rt->PreferredProfile = preference;
-  if (!RuntimeRefreshPermissionReviewer(rt)) {
-    EmitCommandError(ux, SVL("The permission reviewer could not be configured."));
-    return false;
-  }
   if (providerChanged &&
       (!rt->Auth ||
        !StrView_Eq(rt->Auth->Cache.Provider, spec->Id)))
@@ -762,7 +801,10 @@ AppCommandHandlerResult HandleAuthCommand(void* user, const AppCommandUx* ux) {
 
 int RunCommandLineLogout(Arena* arena, StrView authPath, const char* providerId) {
   AppCommandUx ux = {nullptr, PlainCommandNotice, PlainCommandError};
-  if (!AuthStore_Delete(arena, authPath, SV(providerId))) {
+  Arena scratch = ArenaCreate((usize)8 << 20);
+  bool removed = AuthStore_Delete(&scratch, authPath, SV(providerId));
+  ArenaReleaseSecure(&scratch);
+  if (!removed) {
     StrBuf message = StrBuf_Make(arena, (u32)strlen(providerId) + authPath.Length + 64);
     StrBuf_AppendCStr(&message, "Failed to remove credentials for '");
     StrBuf_AppendCStr(&message, providerId);

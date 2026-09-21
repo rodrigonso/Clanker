@@ -60,13 +60,61 @@ static void TestStore() {
   CHECK(AuthStore_Read(&a, path, SVL("anthropic"), &read));
   CHECK(StrView_EqCStr(read.ApiKey, "sk-other"));
 
-  // An entry whose type is not api_key is dropped rather than half-parsed.
+  // An entry whose type is not api_key is not read as a key.
   CHECK(ConfigFile_WriteAtomic(
       &a, path, SVL("{\"openai\":{\"type\":\"oauth\",\"access\":\"tok\"}}")));
   CHECK(!AuthStore_Read(&a, path, SVL("provider-a"), &gone));
 
   remove("clanker_auth_test.json");
   ArenaRelease(&a);
+}
+
+static void TestStoreFailurePreservesContent() {
+  Arena arena = ArenaCreate();
+  StrView path = SVL("clanker_auth_failure_test.json");
+  Credential replacement = {};
+  replacement.ApiKey = SVL("synthetic-replacement");
+  const StrView invalidStores[] = {
+      SVL(""), SVL("{"), SVL("{ \r\n\t"), SVL("[]"), SVL("null"),
+      SVL("{\"other\":{"),
+      SVL("{\"other\":{\"type\":\"api_key\",\"key\":\"synthetic-old\"}},"),
+      SVL("{\"other\":{\"type\":\"api_key\",\"key\":\"synthetic-old\"},"),
+      SVL("{\"other\":{\"type\":\"api_key\",\"key\":\"synthetic\nold\"}}"),
+      SVL("{\"other\":{\"type\":\"api_key\",\"key\":\"synthetic\\qold\"}}"),
+      SVL("{\"other\":{\"type\":\"api_key\",\"key\":42}}"),
+      SVL("{\"other\":{\"type\":\"api_key\",\"key\":\"a\",\"key\":\"b\"}}"),
+      SVL("{\"other\":{\"type\":\"api_key\",\"key\":\"a\",\"extra\":\"preserve\"}}"),
+      SVL("{\"other\":{\"type\":\"unsupported\",\"key\":\"synthetic-old\"}}"),
+      SVL("{\"other\":{\"type\":\"api_key\",\"key\":\"a\"},\"other\":{\"type\":\"api_key\",\"key\":\"b\"}}"),
+      SVL("{\"typesafe\":{\"type\":\"api_key\",\"key\":\"synthetic-old\"},\"other\":false}")};
+  for (StrView content : invalidStores) {
+    CHECK(ConfigFile_WriteAtomic(&arena, path, content));
+    CHECK(!AuthStore_Write(&arena, path, SVL("typesafe"), &replacement));
+    CHECK(!AuthStore_Delete(&arena, path, SVL("typesafe")));
+    StrView after = {};
+    CHECK(ConfigFile_ReadAll(&arena, path, &after) == ConfigFileReadResult::Success);
+    CHECK(StrView_Eq(after, content));
+  }
+  Credential usable = {};
+  CHECK(AuthStore_Read(&arena, path, SVL("typesafe"), &usable));
+  CHECK(StrView_EqCStr(usable.ApiKey, "synthetic-old"));
+  StrView complete = SVL("{\"typesafe\":{\"type\":\"api_key\",\"key\":\"synthetic-old\"}}");
+  for (u32 length = 0; length < complete.Length; length++) {
+    StrView truncated = {complete.Data, length};
+    CHECK(ConfigFile_WriteAtomic(&arena, path, truncated));
+    CHECK(!AuthStore_Write(&arena, path, SVL("typesafe"), &replacement));
+    CHECK(!AuthStore_Delete(&arena, path, SVL("typesafe")));
+    CHECK(!AuthStore_Read(&arena, path, SVL("typesafe"), &usable));
+    StrView after = {};
+    CHECK(ConfigFile_ReadAll(&arena, path, &after) == ConfigFileReadResult::Success);
+    CHECK(StrView_Eq(after, truncated));
+  }
+  remove("clanker_auth_failure_test.json");
+  CHECK(AuthStore_Write(&arena, path, SVL("typesafe"), &replacement));
+  CHECK(AuthStore_Read(&arena, path, SVL("typesafe"), &usable));
+  CHECK(StrView_Eq(usable.ApiKey, replacement.ApiKey));
+  remove("clanker_auth_failure_test.json");
+  ArenaReleaseSecure(&arena);
 }
 
 static void TestResolve() {
@@ -114,10 +162,12 @@ static void TestTokenCache() {
   source[0] = 'X';
   CHECK(AuthTokenCache_Get(&cache, SVL("provider-a"), &cached));
   CHECK(StrView_EqCStr(cached, "cached-key"));
+  StrView previous = cached;
 
   // One entry, keyed by provider.
   CHECK(!AuthTokenCache_Get(&cache, SVL("anthropic"), &cached));
   CHECK(AuthTokenCache_Store(&a, &cache, SVL("anthropic"), SVL("other-key")));
+  for (u32 i = 0; i < previous.Length; i++) CHECK(previous.Data[i] == 0);
   CHECK(!AuthTokenCache_Get(&cache, SVL("provider-a"), &cached));
   CHECK(AuthTokenCache_Get(&cache, SVL("anthropic"), &cached));
   CHECK(StrView_EqCStr(cached, "other-key"));
@@ -125,7 +175,9 @@ static void TestTokenCache() {
   CHECK(!AuthTokenCache_Store(&a, &cache, SVL("anthropic"), StrView{}));
   CHECK(!AuthTokenCache_Store(&a, &cache, StrView{}, SVL("key")));
 
+  previous = cached;
   AuthTokenCache_Invalidate(&cache);
+  for (u32 i = 0; i < previous.Length; i++) CHECK(previous.Data[i] == 0);
   CHECK(!AuthTokenCache_Get(&cache, SVL("anthropic"), &cached));
 
   ArenaRelease(&a);
@@ -281,6 +333,7 @@ static void TestLoopbackServer() {
 
 void TestAuth() {
   TestStore();
+  TestStoreFailurePreservesContent();
   TestResolve();
   TestTokenCache();
   TestOAuthUrls();

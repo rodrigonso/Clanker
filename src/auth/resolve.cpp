@@ -5,14 +5,19 @@
 #include "auth/store.h"
 
 void AuthTokenCache_Invalidate(AuthTokenCache* cache) {
-  if (cache) *cache = {};
+  if (!cache) return;
+  if (cache->Value.Length) Memory_Zero((void*)cache->Value.Data, cache->Value.Length);
+  *cache = {};
 }
 
 bool AuthTokenCache_Store(Arena* arena, AuthTokenCache* cache, StrView provider,
                           StrView token) {
   if (!arena || !cache || !provider.Length || !token.Length) return false;
-  cache->Provider = StrView_Dup(arena, provider);
-  cache->Value = StrView_Dup(arena, token);
+  StrView nextProvider = StrView_Dup(arena, provider);
+  StrView nextValue = StrView_Dup(arena, token);
+  AuthTokenCache_Invalidate(cache);
+  cache->Provider = nextProvider;
+  cache->Value = nextValue;
   return true;
 }
 

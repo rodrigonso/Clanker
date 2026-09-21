@@ -36,7 +36,9 @@ struct AgentHarnessConfig {
   // Yolo is the embedding default so a zero-initialized legacy config preserves
   // its previous "run every tool" behavior.
   AgentPermissionMode PermissionMode = AgentPermissionMode::Yolo;
-  Model PermissionReviewerModel;
+  StrView PermissionReviewerModel;
+  f64 PermissionReviewerThreshold = AGENT_PERMISSION_DEFAULT_REVIEWER_THRESHOLD;
+  AgentPermissionReviewer PermissionReviewer;
   StrView WorkingDirectory;
   void* AuthUser;
   AgentResolveAuthFn ResolveAuth;

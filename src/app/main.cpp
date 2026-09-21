@@ -9,6 +9,7 @@
 #include "app/commands.h"
 #include "app/event_pump.h"
 #include "app/hook_runner.h"
+#include "app/permission_reviewer.h"
 #include "app/plain_select.h"
 #include "app/project_trust.h"
 #include "app/prompt_context.h"
@@ -164,9 +165,19 @@ static void RunPlainRepl(InteractiveRuntime* rt) {
   RuntimeCheckAuth(rt, &commandUx, false);
   AppCommandHandlers handlers = RuntimeCommandHandlers(rt);
   for (;;) {
+    Memory_Zero(line, sizeof(line));
     fputs("\n\x1b[1m\xe2\x80\xba \x1b[0m", stdout);
     fflush(stdout);
-    if (!fgets(line, sizeof(line), stdin)) break;
+    PlainLineResult read = Plain_ReadLine(line, (u32)sizeof(line));
+    if (read == PlainLineResult::End) break;
+    if (read == PlainLineResult::TooLong) {
+      EmitCommandError(&commandUx, SVL("Input is too long; nothing was submitted."));
+      continue;
+    }
+    if (read == PlainLineResult::Failed) {
+      EmitCommandError(&commandUx, SVL("Input could not be read; nothing was submitted."));
+      break;
+    }
     size_t L = strlen(line);
     while (L && (line[L - 1] == '\n' || line[L - 1] == '\r')) line[--L] = 0;
     if (L == 0) continue;
@@ -189,6 +200,7 @@ static void RunPlainRepl(InteractiveRuntime* rt) {
    SessionResult run = RunHarnessPrompt(rt->Harness, SV(line));
     ReportHarnessResult(run);
   }
+  Memory_Zero(line, sizeof(line));
   StopHarnessEventPump(&pump);
   rt->EventPump = nullptr;
 }
@@ -556,6 +568,19 @@ int main(int argc, char** argv) {
   appAuth.Path = authPath;
   RuntimeSelection selected =
       LoadRuntimeSelection(&arena, settingsPath, modelOverride);
+  if (selected.PermissionReviewerInvalid) {
+    fprintf(stderr,
+            "error: permissionReviewerModel in settings must be a non-empty, "
+            "supported Jev model name or alias\n");
+    ArenaRelease(&arena);
+    return 1;
+  }
+  if (selected.PermissionReviewerThresholdInvalid) {
+    fprintf(stderr,
+            "error: permissionReviewerThreshold in settings must be a number from 0 to 1\n");
+    ArenaRelease(&arena);
+    return 1;
+  }
   if (!selected.Spec || !selected.Spec->CreateProvider || !selected.Spec->CreateModel) {
     fprintf(stderr, "error: no usable built-in provider is registered\n");
     Http_GlobalShutdown();
@@ -657,15 +682,6 @@ int main(int argc, char** argv) {
   StrView reviewerId = selected.PermissionReviewerModel.Length
                            ? selected.PermissionReviewerModel
                            : AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL;
-  Model permissionReviewerModel =
-      selected.Spec->CreateModel(&arena, selected.Spec, reviewerId);
-  if (!permissionReviewerModel.Id.Length ||
-      !Model_MetadataIsValid(&permissionReviewerModel)) {
-    fprintf(stderr, "error: could not configure the permission reviewer model\n");
-    sessions.Close(sessions.Ctx);
-    ArenaRelease(&arena);
-    return 1;
-  }
   FileLock_Init();
   // Repointed whenever the durable session changes, so shell overflow logs
   // always land beside the log they belong to. Stays empty under
@@ -754,7 +770,11 @@ int main(int argc, char** argv) {
   harnessConfig.Retry = selected.Retry;
   harnessConfig.TurnLimit = selected.TurnLimit;
   harnessConfig.PermissionMode = selected.PermissionMode;
-  harnessConfig.PermissionReviewerModel = permissionReviewerModel;
+  harnessConfig.PermissionReviewerModel = reviewerId;
+  harnessConfig.PermissionReviewerThreshold = selected.PermissionReviewerThreshold;
+  harnessConfig.PermissionReviewer =
+      TypeSafePermissionReviewer_Make(&arena, reviewerId,
+                                      selected.PermissionReviewerThreshold, authPath);
   harnessConfig.WorkingDirectory = workingDirectory;
   // Overrides whatever settings.json configured. 0 means "never stop to ask".
   if (hasMaxTurnsOverride) {
@@ -858,8 +878,6 @@ int main(int argc, char** argv) {
         harness.Config.ModelInfo = model;
         harness.Config.ProviderImpl = restored->CreateProvider(&arena, restored);
         harness.Config.Stream.Profile = profile;
-        harness.Config.PermissionReviewerModel =
-            restored->CreateModel(&arena, restored, reviewerId);
         if (modelOverride) {
           SessionResult overridden = AgentHarness_SetModel(
               &harness, model, harness.Config.ProviderImpl, profile);
@@ -912,6 +930,7 @@ int main(int argc, char** argv) {
   runtime.PermissionMode = selected.PermissionMode;
   runtime.PersistedPermissionMode = persistedPermissionMode;
   runtime.PermissionReviewerModel = reviewerId;
+  runtime.PermissionReviewerThreshold = selected.PermissionReviewerThreshold;
   runtime.YoloAcknowledged = selected.YoloAcknowledged;
   runtime.PermissionModeOverridden = hasPermissionModeOverride;
   runtime.Harness = &harness;

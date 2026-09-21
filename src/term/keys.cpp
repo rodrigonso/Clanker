@@ -3,6 +3,7 @@
 #include <string.h>
 
 void KeyDecoder_Init(KeyDecoder* d) {
+  Memory_Zero(d->Buf, sizeof(d->Buf));
   d->Len = 0;
   d->InPaste = false;
   d->PendingEscape = false;
@@ -16,12 +17,14 @@ void KeyDecoder_Push(KeyDecoder* d, const char* data, u32 n) {
 }
 
 static void Consume(KeyDecoder* d, u32 k) {
+  u32 previous = d->Len;
   if (k >= d->Len) {
     d->Len = 0;
   } else {
     memmove(d->Buf, d->Buf + k, d->Len - k);
     d->Len -= k;
   }
+  Memory_Zero(d->Buf + d->Len, previous - d->Len);
 }
 
 static void Clear(Key* out) {

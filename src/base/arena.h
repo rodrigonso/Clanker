@@ -16,6 +16,7 @@ Arena ArenaCreate(usize reserveBytes = (usize)1 << 30);
 
 void* ArenaAlloc(Arena* a, usize size, usize align);
 void ArenaReset(Arena* a);            // Roll Used back to 0, keep committed pages
+void ArenaResetSecure(Arena* a);
 void ArenaRestore(Arena* a, usize pos);  // Roll Used back to a saved mark
 
 // Hand committed pages above `keepBytes` back to the OS, keeping the
@@ -30,6 +31,7 @@ void ArenaRestore(Arena* a, usize pos);  // Roll Used back to a saved mark
 void ArenaTrim(Arena* a, usize keepBytes);
 
 void ArenaRelease(Arena* a);          // Release the whole reservation
+void ArenaReleaseSecure(Arena* a);
 
 #define ArenaPushStruct(a, T) (T*)ArenaAlloc((a), sizeof(T), alignof(T))
 #define ArenaPushArray(a, T, n) (T*)ArenaAlloc((a), sizeof(T) * (usize)(n), alignof(T))

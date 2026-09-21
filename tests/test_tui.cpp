@@ -56,6 +56,14 @@ void Feed(Tui* t, const char* s) {
   Tui_FeedInput(t, s, n);
 }
 
+bool MemoryContains(const void* memory, usize size, StrView needle) {
+  if (!needle.Length || size < needle.Length) return false;
+  const byte* bytes = (const byte*)memory;
+  for (usize i = 0; i <= size - needle.Length; i++)
+    if (memcmp(bytes + i, needle.Data, needle.Length) == 0) return true;
+  return false;
+}
+
 void DrainDisplay(Tui* t, u64 startMs = 1000) {
   u32 frames = 0;
   while (Tui_HasPendingDisplay(t) && frames < 10000) {
@@ -928,10 +936,123 @@ static void TestEditorAndQueueMigration(Arena* outer) {
   }
 }
 
+static void TestSecretText() {
+  Arena arena = ArenaCreate();
+  Arena resultArena = ArenaCreate();
+  Tui t;
+  InitHeadlessTui(&t, &arena, false);
+  const StrView secret = SVL("SYNTHETIC_SECRET_ONLY");
+  Feed(&t, "draft");
+  CHECK(Tui_BeginTextEntry(&t, SVL("Jev key"), SVL("Paste API key"), {},
+                           SVL("Permissions"), TextInputMode::Secret));
+  Feed(&t, "\x1b[200~SYNTHETIC_SECRET_ONLY\x1b[201~");
+  const u16 widths[] = {80, 20};
+  for (u16 width : widths) {
+    Tui_ComposeFrame(&t, width, 24);
+    CHECK_ALL(ScreenContains(&t, "****"),
+              !ScreenContains(&t, secret.Data), t.Scr.CursorVisible);
+  }
+  CHECK_ALL(t.QCount == 0, t.Edit.History.Count == 0,
+            t.ModalEdit.History.Count == 0,
+            StrView_Eq(LineEdit_Text(&t.Edit), SVL("draft")),
+            !MemoryContains(t.SessionMem.Base, t.SessionMem.Used, secret),
+            !MemoryContains(t.Dec.Buf, sizeof(t.Dec.Buf), secret),
+            !MemoryContains(t.ClipboardRaw.Data, t.ClipboardRaw.Length, secret));
+  Feed(&t, "\rTRAILING_INPUT_MUST_NOT_SUBMIT\r");
+  StrView entered = {};
+  CHECK(Tui_GetModalResult(&t, nullptr, &entered, &resultArena) ==
+        TuiModalResult::Confirmed);
+  CHECK_ALL(StrView_Eq(entered, secret), t.QCount == 0,
+            t.ModalResult == TuiModalResult::None,
+            LineEdit_Empty(&t.ModalEdit),
+            !MemoryContains(t.ModalMem.Base, t.ModalMem.Committed, secret),
+            !MemoryContains(t.SessionMem.Base, t.SessionMem.Used, secret),
+            StrView_Eq(LineEdit_Text(&t.Edit), SVL("draft")));
+  ArenaResetSecure(&resultArena);
+
+  const char* cancellations[] = {"\x1b", "\x03"};
+  for (const char* key : cancellations) {
+    CHECK(Tui_BeginTextEntry(&t, SVL("Key"), SVL("Paste"), {},
+                             SVL("Commands"), TextInputMode::Secret));
+    Feed(&t, secret.Data);
+    Feed(&t, key);
+    CHECK_ALL(t.ModalResult == TuiModalResult::Cancelled,
+              LineEdit_Empty(&t.ModalEdit),
+              !MemoryContains(t.ModalMem.Base, t.ModalMem.Committed, secret),
+              t.QCount == 0, t.ClipboardRaw.Length == 0);
+  }
+
+  CHECK(Tui_BeginTextEntry(&t, SVL("Key"), SVL("Paste"), {},
+                           SVL("Commands"), TextInputMode::Secret));
+  char chunk[1024];
+  memset(chunk, 'x', sizeof(chunk));
+  for (u32 i = 0; i < 8; i++) Tui_FeedInput(&t, chunk, sizeof(chunk));
+  CHECK(LineEdit_Text(&t.ModalEdit).Length == 8192);
+  Feed(&t, "x\r");
+  CHECK_ALL(t.ModalInputTooLong, t.ModalResult == TuiModalResult::Pending,
+            LineEdit_Empty(&t.ModalEdit), t.QCount == 0);
+  Tui_ComposeFrame(&t, 80, 24);
+  CHECK(ScreenContains(&t, "Input too long"));
+  Feed(&t, "\x15");  // Ctrl+U clears the rejected entry.
+  Feed(&t, secret.Data);
+  Feed(&t, "\r");
+  CHECK(Tui_GetModalResult(&t, nullptr, &entered, &resultArena) ==
+        TuiModalResult::Confirmed);
+  CHECK(StrView_Eq(entered, secret));
+  ArenaResetSecure(&resultArena);
+
+  CHECK(Tui_BeginTextEntry(&t, SVL("Key"), SVL("Paste"), {},
+                           SVL("Commands"), TextInputMode::Secret));
+  Feed(&t, secret.Data);
+  CHECK(Tui_ClearSession(&t));
+  CHECK_ALL(LineEdit_Empty(&t.ModalEdit),
+            !MemoryContains(t.ModalMem.Base, t.ModalMem.Committed, secret));
+  CHECK(Tui_BeginTextEntry(&t, SVL("Key"), SVL("Paste"), {},
+                           SVL("Commands"), TextInputMode::Secret));
+  Feed(&t, secret.Data);
+  Feed(&t, "\x04");
+  CHECK_ALL(t.Quit, t.ModalResult == TuiModalResult::Cancelled,
+            !MemoryContains(t.ModalMem.Base, t.ModalMem.Committed, secret));
+  Tui_Stop(&t);
+  ArenaReleaseSecure(&resultArena);
+  ArenaRelease(&arena);
+}
+
+static void TestPrivateCommandArguments() {
+  Arena arena = ArenaCreate();
+  TuiCommandSpec commands[] = {
+      {SVL("auth"), {}, SVL("Authentication"), TuiCommandInline::None, true},
+      {SVL("permissions"), {}, SVL("Permissions"), TuiCommandInline::None, true}};
+  TuiOpts opts = {};
+  opts.Commands = commands;
+  opts.CommandCount = 2;
+  Tui t;
+  Tui_InitModel(&t, &arena, opts);
+  t.AgentRunning = true;
+  Feed(&t, "/auth SYNTHETIC_INLINE_SECRET\r");
+  Feed(&t, "/permissions key SYNTHETIC_INLINE_SECRET\r");
+  CHECK_ALL(t.Edit.History.Count == 2,
+            StrView_Eq(t.Edit.History.Data[0], SVL("/auth")),
+            StrView_Eq(t.Edit.History.Data[1], SVL("/permissions")));
+  DrainDisplay(&t);
+  CHECK_ALL(!AnyRow(&arena, &t, "SYNTHETIC_INLINE_SECRET"),
+            AnyRow(&arena, &t, "Queued command: /auth"),
+            AnyRow(&arena, &t, "Queued command: /permissions"));
+  TuiSubmission submission = {};
+  CHECK(Tui_WaitForSubmit(&t, &submission));
+  CHECK(StrView_Eq(submission.Text, SVL("/auth SYNTHETIC_INLINE_SECRET")));
+  CHECK(Tui_WaitForSubmit(&t, &submission));
+  CHECK(StrView_Eq(submission.Text, SVL("/permissions key SYNTHETIC_INLINE_SECRET")));
+  Tui_Stop(&t);
+  ArenaRelease(&arena);
+}
+
 void TestTui() {
   g_displayDrainsOk = true;
   Arena a = ArenaCreate();
   TestPerfSampling();
+  TestSecretText();
+  TestPrivateCommandArguments();
   TestSessionMemoryCompaction(&a);
   TestEditorAndQueueMigration(&a);
   TestToolPayloadOwnership(&a);
@@ -1557,7 +1678,10 @@ void TestTui() {
     // even though a turn owns the main loop.
     ti.AgentRunning = true;
     CHECK(!ti.Perf.Visible);
-    Feed(&ti, "/debug\r");
+    Feed(&ti, "/deb\t");
+    CHECK_ALL(StrView_Eq(LineEdit_Text(&ti.Edit), SVL("/debug ")),
+              !ti.Perf.Visible, ti.QCount == 0, ti.Edit.History.Count == 0);
+    Feed(&ti, "\r");
     CHECK_ALL(ti.Perf.Visible, ti.QCount == 0);
     DrainDisplay(&ti);
     CHECK(AnyRow(&ai, &ti, "performance overlay on"));
@@ -1577,7 +1701,10 @@ void TestTui() {
     // /clear cancels the turn from here, but the reset itself still queues:
     // it swaps the session log, which cannot happen under a live turn.
     harness.Running = true;
-    Feed(&ti, "/clear\r");
+    Feed(&ti, "/cle\t");
+    CHECK_ALL(StrView_Eq(LineEdit_Text(&ti.Edit), SVL("/clear ")),
+              Atomic_LoadI32(&harness.AbortFlag) == 0, ti.QCount == 0);
+    Feed(&ti, "\x7f\r");
     CHECK_ALL(Atomic_LoadI32(&harness.AbortFlag) == 1, ti.QCount == 1);
     DrainDisplay(&ti);
     CHECK(AnyRow(&ai, &ti, "Cancelling the current turn"));
@@ -1611,7 +1738,11 @@ void TestTui() {
     Feed(&ti, "/exit now\r");  // argument policy is None; dispatcher's problem
     CHECK_ALL(ti.QCount == 1, !ti.Quit);
     CHECK(Tui_WaitForSubmit(&ti, &cleared));
-    Feed(&ti, "/quit\r");
+    Feed(&ti, "/quit\t");
+    CHECK_ALL(StrView_Eq(LineEdit_Text(&ti.Edit), SVL("/exit ")),
+              Atomic_LoadI32(&harness.AbortFlag) == 0, ti.QCount == 0,
+              !ti.Quit, !ti.Stop);
+    Feed(&ti, "\r");
     CHECK_ALL(Atomic_LoadI32(&harness.AbortFlag) == 1, ti.QCount == 0,
               ti.Quit, ti.Stop);
     TuiSubmission none = {};
@@ -1729,8 +1860,8 @@ void TestTui() {
   }
 
   // Slash input opens a case-insensitive substring-filtered command palette.
-  // Arrow keys select a command, Enter submits its canonical name, and Escape
-  // dismisses the flyout without modifying the composer.
+  // Tab completes the selected command without submitting. Enter commits it,
+  // and Escape dismisses the flyout without modifying the composer.
   {
     Arena ap = ArenaCreate();
     TuiCommandSpec commands[] = {
@@ -1796,6 +1927,90 @@ void TestTui() {
     Feed(&tp, "/nam\r");
     CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
     CHECK(StrView_Eq(paletteSubmission.Text, SVL("/name")));
+
+    u32 historyCount = tp.Edit.History.Count;
+    Feed(&tp, "/\x1b[B\x1b[B\t");
+    CHECK_ALL(StrView_Eq(LineEdit_Text(&tp.Edit), SVL("/name ")),
+              LineEdit_Cursor(&tp.Edit) == 6,
+              tp.QCount == 0, tp.Edit.History.Count == historyCount,
+              tp.CommandPaletteSelected == 0);
+    Feed(&tp, "release review\r");
+    CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
+    CHECK_ALL(StrView_Eq(paletteSubmission.Text, SVL("/name release review")),
+              tp.Edit.History.Count == historyCount + 1);
+
+    Feed(&tp, "/DEL");
+    Tui_ComposeFrame(&tp, 80, 24);
+    Feed(&tp, "\t");
+    CHECK_ALL(StrView_Eq(LineEdit_Text(&tp.Edit), SVL("/model ")),
+              tp.QCount == 0);
+    Feed(&tp, "\r");
+    CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
+    CHECK(StrView_Eq(paletteSubmission.Text, SVL("/model ")));
+
+    Feed(&tp, "/ui\x1b[9u");
+    CHECK_ALL(StrView_Eq(LineEdit_Text(&tp.Edit), SVL("/exit ")),
+              tp.QCount == 0, !tp.Quit);
+    Feed(&tp, "\r");
+    CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
+    CHECK(StrView_Eq(paletteSubmission.Text, SVL("/exit ")));
+
+    Feed(&tp, "/versa\t");
+    CHECK_ALL(StrView_Eq(LineEdit_Text(&tp.Edit), SVL("/clear ")),
+              tp.QCount == 0);
+    Feed(&tp, "\t");
+    CHECK_ALL(StrView_Eq(LineEdit_Text(&tp.Edit), SVL("/clear ")),
+              tp.QCount == 0);
+    Feed(&tp, "\r");
+    CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
+    CHECK(StrView_Eq(paletteSubmission.Text, SVL("/clear ")));
+
+    Feed(&tp, "/unknown\t");
+    CHECK_ALL(StrView_Eq(LineEdit_Text(&tp.Edit), SVL("/unknown")),
+              tp.QCount == 0);
+    Feed(&tp, "\r");
+    CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
+    CHECK(StrView_Eq(paletteSubmission.Text, SVL("/unknown")));
+
+    Feed(&tp, "/lo");
+    Feed(&tp, "\x1b");
+    Feed(&tp, "\t");
+    CHECK_ALL(tp.CommandPaletteDismissed,
+              StrView_Eq(LineEdit_Text(&tp.Edit), SVL("/lo")),
+              tp.QCount == 0);
+    Feed(&tp, "\r");
+    CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
+    CHECK(StrView_Eq(paletteSubmission.Text, SVL("/lo")));
+
+    Feed(&tp, "/mod\x1b[D\t");
+    CHECK_ALL(StrView_Eq(LineEdit_Text(&tp.Edit), SVL("/mod")),
+              LineEdit_Cursor(&tp.Edit) == 3, tp.QCount == 0);
+    Feed(&tp, "\x1b[C\r");
+    CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
+    CHECK(StrView_Eq(paletteSubmission.Text, SVL("/model")));
+
+    Feed(&tp, "draft\t");
+    CHECK_ALL(StrView_Eq(LineEdit_Text(&tp.Edit), SVL("draft")),
+              tp.QCount == 0);
+    Feed(&tp, "\r");
+    CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
+    CHECK_ALL(paletteSubmission.Kind == TuiSubmissionKind::Prompt,
+              StrView_Eq(paletteSubmission.Text, SVL("draft")));
+
+    PermissionCycleState permission = {TuiPermissionMode::Ask};
+    tp.Agent.User = &permission;
+    tp.Agent.CyclePermission = CyclePermission;
+    Feed(&tp, "/nam\x1b[Z");
+    CHECK_ALL(StrView_Eq(LineEdit_Text(&tp.Edit), SVL("/nam")),
+              permission.Mode == TuiPermissionMode::Auto);
+    CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
+    CHECK(paletteSubmission.Kind == TuiSubmissionKind::PermissionMode);
+    Feed(&tp, "\t");
+    CHECK_ALL(StrView_Eq(LineEdit_Text(&tp.Edit), SVL("/name ")),
+              tp.QCount == 0, permission.Mode == TuiPermissionMode::Auto);
+    Feed(&tp, "new name\r");
+    CHECK(Tui_WaitForSubmit(&tp, &paletteSubmission));
+    CHECK(StrView_Eq(paletteSubmission.Text, SVL("/name new name")));
 
     Tui_Stop(&tp);
     ArenaRelease(&ap);
@@ -2773,7 +2988,7 @@ void TestTui() {
     CHECK(Tui_BeginTextEntry(&tm, SVL("Model"), SVL("Enter model ID")));
     Feed(&tm, "claude-manual\r");
     StrView entered = {};
-    result = Tui_GetModalResult(&tm, nullptr, &entered);
+    result = Tui_GetModalResult(&tm, nullptr, &entered, &am);
     CHECK_ALL(result == TuiModalResult::Confirmed,
               StrView_Eq(entered, SVL("claude-manual")));
 
@@ -2796,7 +3011,7 @@ void TestTui() {
                   TuiModalResult::Pending);
     Feed(&tm, "\r");
     entered = SVL("not-empty");
-    result = Tui_GetModalResult(&tm, nullptr, &entered);
+    result = Tui_GetModalResult(&tm, nullptr, &entered, &am);
     CHECK_ALL(result == TuiModalResult::Confirmed, entered.Length == 0);
 
     // The breadcrumb defaults to "Commands" so command-invoked modals render

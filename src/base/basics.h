@@ -20,6 +20,11 @@ using f64 = double;
 using byte = uint8_t;
 using usize = size_t;
 
+inline void Memory_Zero(void* memory, usize size) {
+  volatile byte* bytes = (volatile byte*)memory;
+  while (size--) *bytes++ = 0;
+}
+
 #if defined(_MSC_VER)
 #include <intrin.h>
 #define CLANKER_TRAP() __fastfail(0)

@@ -121,6 +121,7 @@ struct ModalComponentData {
 u16 ModalPanelHeight(const Tui* t, u16 rows);
 
 void PaintModalNode(UiContext*, const UiNode* node, UiCanvas* canvas);
+void ResetModalInput(Tui* t);
 void FinishModal(Tui* t, TuiModalResult result);
 void RequestStopLocked(Tui* t);
 void HandleSelectKey(Tui* t, const Key& k);

@@ -1050,6 +1050,16 @@ struct TuiInlineCommand {
   bool DebugEnable;
 };
 
+static const TuiCommandSpec* FindCommand(const Tui* t, StrView name) {
+  for (u32 i = 0; i < t->CommandCount; i++) {
+    const TuiCommandSpec& candidate = t->Commands[i];
+    if (StrView_Eq(candidate.Name, name) ||
+        (candidate.Alias.Length && StrView_Eq(candidate.Alias, name)))
+      return &candidate;
+  }
+  return nullptr;
+}
+
 // Resolves what may run on this thread. Argument forms the dispatcher would
 // reject resolve to None, so the main loop still reports the usage error and
 // the inline path never owns a second copy of that policy.
@@ -1059,13 +1069,7 @@ static TuiInlineCommand InlineCommandFor(const Tui* t, StrView line) {
   StrView name = CommandToken(line, &arguments);
   if (!name.Length) return result;
 
-  const TuiCommandSpec* command = nullptr;
-  for (u32 i = 0; i < t->CommandCount && !command; i++) {
-    const TuiCommandSpec& candidate = t->Commands[i];
-    if (StrView_Eq(candidate.Name, name) ||
-        (candidate.Alias.Length && StrView_Eq(candidate.Alias, name)))
-      command = &candidate;
-  }
+  const TuiCommandSpec* command = FindCommand(t, name);
   if (!command) return result;
 
   switch (command->Inline) {
@@ -1097,7 +1101,24 @@ static void RequestCancelLocked(Tui* t) {
 }
 
 void DoSubmit(Tui* t) {
-  StrView line = LineEdit_Submit(&t->Edit);
+  StrView input = LineEdit_Text(&t->Edit);
+  StrView arguments = {};
+  StrView name = CommandToken(input, &arguments);
+  const TuiCommandSpec* command = name.Length ? FindCommand(t, name) : nullptr;
+  bool privateArguments = command && command->PrivateArguments && arguments.Length;
+  StrView line = {};
+  StrView publicLine = {};
+  if (privateArguments) {
+    line = StrView_Dup(&t->SessionMem, input);
+    publicLine = StrView_Dup(
+        &t->SessionMem, StrView{input.Data, (u32)(name.Data - input.Data) + name.Length});
+    Array_Push(&t->Edit.History, publicLine);
+    Memory_Zero(t->Edit.Text.Data, t->Edit.Text.Capacity);
+    LineEdit_Clear(&t->Edit);
+  } else {
+    line = LineEdit_Submit(&t->Edit);
+    publicLine = line;
+  }
   ResetCommandPalette(t);
   if (line.Length == 0) return;
   if (IsSlashCommand(line)) {
@@ -1140,9 +1161,9 @@ void DoSubmit(Tui* t) {
                                   : SVL("Queued command: ");
       TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::Notice);
       display->Payload =
-          StrBuf_Make(&t->SessionMem, line.Length + prefix.Length + 1);
+          StrBuf_Make(&t->SessionMem, publicLine.Length + prefix.Length + 1);
       StrBuf_Append(&display->Payload, prefix);
-      StrBuf_Append(&display->Payload, line);
+      StrBuf_Append(&display->Payload, publicLine);
       t->Follow = true;
       Wake(t);
     }
@@ -1170,23 +1191,19 @@ void DoSubmit(Tui* t) {
   }
 }
 
-void SubmitPaletteCommand(Tui* t, StrView query) {
+bool CompletePaletteCommand(Tui* t, StrView query) {
   u32 matchCount = CommandMatchCount(t, query);
-  if (matchCount == 0) {
-    DoSubmit(t);
-    return;
-  }
+  if (matchCount == 0) return false;
   if (t->CommandPaletteSelected >= matchCount) t->CommandPaletteSelected = 0;
   const TuiCommandSpec* command =
       CommandMatchAt(t, query, t->CommandPaletteSelected);
-  if (!command) {
-    DoSubmit(t);
-    return;
-  }
+  if (!command) return false;
+  FocusComposer(t);
   LineEdit_Clear(&t->Edit);
   LineEdit_InsertText(&t->Edit, SVL("/"));
   LineEdit_InsertText(&t->Edit, command->Name);
-  DoSubmit(t);
+  ResetCommandPalette(t);
+  return true;
 }
 
 const i32 kWheelStep = 3;  // transcript rows per mouse-wheel notch
@@ -1521,8 +1538,16 @@ void HandleKey(Tui* t, const Key& k) {
       case KeyKind::Down:
         if (t->CommandPaletteSelected + 1 < matchCount) t->CommandPaletteSelected++;
         return;
+      case KeyKind::Tab:
+        if (!k.Shift && !k.Ctrl && !k.Alt) {
+          if (CompletePaletteCommand(t, commandQuery))
+            LineEdit_InsertChar(&t->Edit, ' ');
+          return;
+        }
+        break;
       case KeyKind::Enter:
-        SubmitPaletteCommand(t, commandQuery);
+        CompletePaletteCommand(t, commandQuery);
+        DoSubmit(t);
         return;
       case KeyKind::Escape:
         t->CommandPaletteDismissed = true;
@@ -1690,9 +1715,14 @@ void InputLoop(void* arg) {
     Mutex_Lock(&t->Lock);
     stop = t->Stop;
     Mutex_Unlock(&t->Lock);
-    if (stop) break;
+    if (stop) {
+      Memory_Zero(buf, sizeof(buf));
+      break;
+    }
     Tui_FeedInput(t, buf, n);
+    Memory_Zero(buf, sizeof(buf));
   }
+  Memory_Zero(buf, sizeof(buf));
 }
 
 // Coalesce bursty stream deltas into frames at up to ~60fps.
@@ -1835,6 +1865,7 @@ static void SetCommandsUnlocked(Tui* t, const TuiCommandSpec* commands,
     t->Commands[i].Description =
         StrView_Dup(&t->CommandMem, commands[i].Description);
     t->Commands[i].Inline = commands[i].Inline;
+    t->Commands[i].PrivateArguments = commands[i].PrivateArguments;
   }
 }
 
@@ -1856,6 +1887,7 @@ void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts) {
   t->Profile = opts.Profile;
   SetPermissionMode(t, opts.Permission, opts.YoloAcknowledged);
   t->CommandMem = ArenaCreate((usize)64 << 20);
+  t->ModalMem = ArenaCreate((usize)1 << 20);
   t->CommandMemUp = true;
   SetCommandsUnlocked(t, opts.Commands, opts.CommandCount);
   t->ScreenMem = ArenaCreate();
@@ -1872,7 +1904,7 @@ void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts) {
   LineModel_Init(&t->Model, &t->SessionMem, 80, 5000, opts.Color, opts.Rounded);
   LineEdit_Init(&t->Edit, &t->SessionMem);
   t->InputUi.Edit = &t->Edit;
-  LineEdit_Init(&t->ModalEdit, &t->SessionMem);
+  ResetModalInput(t);
   KeyDecoder_Init(&t->Dec);
   ResetDisplay(t);
   t->ClipboardRaw = StrBuf_Make(mem, 256);
@@ -1915,7 +1947,7 @@ bool Tui_ClearSession(Tui* t) {
   LineModel_Init(&t->Model, &t->SessionMem, width, cap, t->Color, rounded);
   LineEdit_Init(&t->Edit, &t->SessionMem);
   t->InputUi = UiTextInputState{&t->Edit, 0, false};
-  LineEdit_Init(&t->ModalEdit, &t->SessionMem);
+  ResetModalInput(t);
   KeyDecoder_Init(&t->Dec);
   ResetDisplay(t);
 
@@ -1992,6 +2024,7 @@ void Tui_Stop(Tui* t) {
     t->InputThreadUp = false;
   }
   Term_Exit(&t->Trm);
+  ArenaReleaseSecure(&t->ModalMem);
   if (t->UiUp) {
     Ui_Release(&t->Ui);
     t->UiUp = false;
@@ -2175,7 +2208,15 @@ void Tui_FeedInput(Tui* t, const char* data, u32 n) {
   }
   KeyDecoder_Push(&t->Dec, data, n);
   Key k;
-  while (KeyDecoder_Next(&t->Dec, &k)) HandleKey(t, k);
+  while (KeyDecoder_Next(&t->Dec, &k)) {
+    bool secret = t->ModalInputMode == TextInputMode::Secret;
+    HandleKey(t, k);
+    if (secret && t->ModalResult != TuiModalResult::Pending) {
+      KeyDecoder_Init(&t->Dec);
+      break;
+    }
+  }
+  Memory_Zero(&k, sizeof(k));
   WakeInput(t);
   Mutex_Unlock(&t->Lock);
 }

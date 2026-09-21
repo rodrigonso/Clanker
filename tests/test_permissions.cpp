@@ -26,6 +26,7 @@ struct PermissionTestState {
   bool PromptAvailable;
   u32 QuestionLength;
   bool QuestionClipped;
+  StrView SeenAction;
 };
 
 bool Review(void* user, Arena* arena,
@@ -33,6 +34,7 @@ bool Review(void* user, Arena* arena,
             AgentPermissionReviewResult* out) {
   PermissionTestState* state = (PermissionTestState*)user;
   state->Reviews++;
+  state->SeenAction = request->Action;
   CHECK_ALL(StrView_Eq(request->ToolName, SVL("shell")),
             StrView_Contains(request->Action, "shell"),
             StrView_Contains(request->TrustedUserText, "trusted request"));
@@ -70,10 +72,20 @@ bool Ask(void* user, Arena* arena, const AgentAskRequest* request,
   return true;
 }
 
+bool DescribeSensitive(void*, Arena* arena, const ToolArgs* args, StrView,
+                       ToolPermissionInfo* out, StrBuf*) {
+  StrBuf action = StrBuf_Make(arena, 128);
+  StrBuf_AppendCStr(&action, "Run shell ");
+  StrBuf_Append(&action, ToolArgs_GetStr(args, "command"));
+  out->Action = StrBuf_View(&action);
+  return true;
+}
+
 Tool SensitiveTool() {
   Tool tool = {};
   tool.Name = SVL("shell");
   tool.PermissionEffect = ToolPermissionEffect::Sensitive;
+  tool.DescribePermission = DescribeSensitive;
   return tool;
 }
 
@@ -165,11 +177,12 @@ struct AbortReviewState {
 };
 
 bool AbortReview(void* user, Arena*, const AgentPermissionReviewRequest*,
-                 volatile i32* abort, AgentPermissionReviewResult*) {
+                 volatile i32* abort, AgentPermissionReviewResult* out) {
   AbortReviewState* state = (AbortReviewState*)user;
   Atomic_StoreI32(&state->Entered, 1);
   while (!abort || Atomic_LoadI32(abort) == 0) Sleep_Ms(1);
-  return false;
+  out->Decision = AgentPermissionReviewDecision::Allow;
+  return true;
 }
 
 void TestModeHelpers() {
@@ -513,6 +526,107 @@ void TestHeadlessFailClosed() {
   ArenaRelease(&arena);
 }
 
+void TestReviewInputsAndCacheFreshness() {
+  Arena arena = ArenaCreate();
+  PermissionTestState state = {};
+  state.ReviewDecision = AgentPermissionReviewDecision::Allow;
+  AgentPermissionEngine engine = {};
+  AgentPermissionEngine_Init(&engine, AgentPermissionMode::Auto, SVL("C:\\work"),
+                             nullptr, {&state, Review});
+  AgentPermissionEngine_BeginRun(&engine);
+  Tool tool = SensitiveTool();
+  Message messages[2] = {};
+  messages[0] = Message_User(&arena, SVL("trusted request"));
+  messages[1] = Message_User(&arena, SVL("untrusted assistant text"));
+  messages[1].Kind = Role::Assistant;
+  AgentPermissionGate gate = {&engine, messages, 2, nullptr};
+  ToolArgs args = Args(&arena, SVL("{\"command\":\"first\\nsecond\"}"));
+  AgentPermissionDecision decision = {};
+  AgentPermission_Decide(&arena, &gate, &tool, &args, &decision);
+  CHECK_ALL(!decision.Block, state.Reviews == 1,
+            StrView_Contains(state.SeenAction, "first\nsecond"));
+  AgentPermission_Decide(&arena, &gate, &tool, &args, &decision);
+  CHECK_ALL(!decision.Block, state.Reviews == 1);
+  messages[1] = Message_User(&arena, SVL("changed trusted request"));
+  AgentPermission_Decide(&arena, &gate, &tool, &args, &decision);
+  CHECK_ALL(!decision.Block, state.Reviews == 2);
+  AgentPermissionEngine_SetMode(&engine, AgentPermissionMode::Ask);
+  AgentPermissionEngine_SetMode(&engine, AgentPermissionMode::Auto);
+  AgentPermission_Decide(&arena, &gate, &tool, &args, &decision);
+  CHECK_ALL(!decision.Block, state.Reviews == 3, engine.Cache.Count == 1);
+  AgentPermissionEngine_InvalidateReviews(&engine);
+  AgentPermission_Decide(&arena, &gate, &tool, &args, &decision);
+  CHECK_ALL(!decision.Block, state.Reviews == 4, engine.Cache.Count == 1);
+
+  state.ReviewUnavailable = true;
+  state.Rationale = SVL("TypeSafe permission review failed (HTTP 529).");
+  ToolArgs failed = Args(&arena, SVL("{\"command\":\"unavailable\"}"));
+  AgentPermission_Decide(&arena, &gate, &tool, &failed, &decision);
+  CHECK_ALL(decision.Block, state.Reviews == 5,
+            StrView_Contains(decision.Reason, "HTTP 529"),
+            RequestId(&arena, decision.Reason).Length == DURABLE_ID_CHAR_COUNT);
+
+  state.ReviewUnavailable = false;
+  tool.DescribePermission = nullptr;
+  ToolArgs unknown = Args(&arena, SVL("{\"command\":\"no projection\"}"));
+  AgentPermission_Decide(&arena, &gate, &tool, &unknown, &decision);
+  CHECK_ALL(decision.Block, state.Reviews == 5,
+            StrView_Contains(decision.Reason, "incomplete"));
+  tool = SensitiveTool();
+  StrBuf text = StrBuf_Make(&arena, 8194);
+  StrBuf_AppendCStr(&text, "trusted request ");
+  while (text.Length < 8193) StrBuf_AppendChar(&text, 'x');
+  messages[0] = Message_User(&arena, StrBuf_View(&text));
+  gate.NewMessageCount = 1;
+  AgentPermission_Decide(&arena, &gate, &tool, &args, &decision);
+  CHECK_ALL(decision.Block, state.Reviews == 5,
+            StrView_Contains(decision.Reason, "incomplete"));
+
+  messages[0] = Message_User(&arena, SVL("trusted request"));
+  StrBuf command = StrBuf_Make(&arena, 2048);
+  while (command.Length < 2038) StrBuf_AppendChar(&command, 'x');
+  StrBuf json = StrBuf_Make(&arena, 2100);
+  StrBuf_AppendCStr(&json, "{\"command\":");
+  Json_WriteString(&json, StrBuf_View(&command));
+  StrBuf_AppendChar(&json, '}');
+  ToolArgs atLimit = Args(&arena, StrBuf_View(&json));
+  AgentPermission_Decide(&arena, &gate, &tool, &atLimit, &decision);
+  CHECK_ALL(!decision.Block, state.Reviews == 6, state.SeenAction.Length == 2048);
+  StrBuf_AppendChar(&command, 'x');
+  StrBuf jsonOver = StrBuf_Make(&arena, 2100);
+  StrBuf_AppendCStr(&jsonOver, "{\"command\":");
+  Json_WriteString(&jsonOver, StrBuf_View(&command));
+  StrBuf_AppendChar(&jsonOver, '}');
+  ToolArgs overLimit = Args(&arena, StrBuf_View(&jsonOver));
+  AgentPermission_Decide(&arena, &gate, &tool, &overLimit, &decision);
+  CHECK_ALL(decision.Block, state.Reviews == 6,
+            StrView_Contains(decision.Reason, "too long to review automatically"));
+
+  AgentAskUser ask = {&state, Ask};
+  engine.AskUser = &ask;
+  state.PromptAvailable = true;
+  state.PromptChoice = 2;
+  state.ReviewDecision = AgentPermissionReviewDecision::Ask;
+  ToolArgs denied = Args(&arena, SVL("{\"command\":\"deny-context\"}"));
+  AgentPermission_Decide(&arena, &gate, &tool, &denied, &decision);
+  StrView firstRequest = RequestId(&arena, decision.Reason);
+  messages[0] = Message_User(&arena, SVL("trusted request changed again"));
+  AgentPermission_Decide(&arena, &gate, &tool, &denied, &decision);
+  CHECK_ALL(decision.Block, state.Reviews == 8,
+            !StrView_Eq(firstRequest, RequestId(&arena, decision.Reason)));
+  StrView resolved = {};
+  StrBuf error = StrBuf_Make(&arena, 128);
+  CHECK(AgentPermission_ResolveRequest(&engine, &arena, firstRequest, nullptr,
+                                       &resolved, &error));
+  AgentPermission_Decide(&arena, &gate, &tool, &denied, &decision);
+  CHECK_ALL(decision.Block, state.Reviews == 8,
+            StrView_Contains(decision.Reason, "The user denied this action."));
+
+  AgentPermissionEngine_EndRun(&engine);
+  AgentPermissionEngine_Close(&engine);
+  ArenaRelease(&arena);
+}
+
 void TestReviewerAbort() {
   Arena arena = ArenaCreate();
   AbortReviewState reviewState = {};
@@ -542,9 +656,8 @@ void TestReviewerAbort() {
     Atomic_StoreI32(&abort, 1);
     Thread_Join(&thread);
     CHECK(decisionThread.Decision.Block);
-    CHECK(RequestId(&decisionThread.Arena, decisionThread.Decision.Reason)
-              .Length == DURABLE_ID_CHAR_COUNT);
-    CHECK(StrView_Contains(decisionThread.Decision.Reason, "Call ask_user"));
+    CHECK(StrView_Contains(decisionThread.Decision.Reason, "cancelled"));
+    CHECK(engine.Requests.Count == 0);
     ArenaRelease(&decisionThread.Arena);
   }
 
@@ -636,6 +749,17 @@ void AdministrativeBlock(void*, Arena*, StrView, StrView, const ToolArgs*,
   out->Reason = SVL("administrative policy blocked this action");
 }
 
+bool HarnessReview(void* user, Arena*, const AgentPermissionReviewRequest* request,
+                   volatile i32*, AgentPermissionReviewResult* out) {
+  (*(u32*)user)++;
+  CHECK_ALL(StrView_Eq(request->ToolName, SVL("sensitive")),
+            StrView_Eq(request->TrustedUserText, SVL("trusted requested work")));
+  out->Decision = AgentPermissionReviewDecision::Allow;
+  out->Rationale = SVL("requested work");
+  out->Model = SVL("jev-1.13.0");
+  return true;
+}
+
 void TestHarnessReviewerIsolation() {
   Arena arena = ArenaCreate();
   MemoryRepository memory = {};
@@ -651,18 +775,12 @@ void TestHarnessReviewerIsolation() {
 
   ScriptToolCall actionCall[] = {
       {SVL("sensitive"), SVL("action-1"), SVL("{\"value\":1}")}};
-  ScriptToolCall reviewCall[] = {
-      {SVL("permission_decision"), SVL("review-1"),
-       SVL("{\"risk\":\"low\",\"authorization\":\"high\","
-           "\"decision\":\"allow\",\"rationale\":\"requested work\"}")}};
-  ScriptStep steps[3] = {};
+  ScriptStep steps[2] = {};
   steps[0].Tools = actionCall;
   steps[0].ToolCount = 1;
-  steps[1].Tools = reviewCall;
-  steps[1].ToolCount = 1;
-  steps[2].Text = SVL("done");
-  steps[2].Stop = StopReason::Stop;
-  ScriptProvider script = {steps, 3, 0};
+  steps[1].Text = SVL("done");
+  steps[1].Stop = StopReason::Stop;
+  ScriptProvider script = {steps, 2, 0};
 
   u32 executions = 0;
   Tool tool = {};
@@ -672,6 +790,7 @@ void TestHarnessReviewerIsolation() {
   tool.PermissionEffect = ToolPermissionEffect::Sensitive;
   tool.Ctx = &executions;
   tool.Execute = CountExec;
+  tool.DescribePermission = DescribeSensitive;
 
   AgentHarnessConfig config = {};
   config.SystemPrompt = SVL("system");
@@ -681,8 +800,9 @@ void TestHarnessReviewerIsolation() {
   config.ToolCount = 1;
   config.ProviderImpl = ScriptProvider_Make(&script);
   config.PermissionMode = AgentPermissionMode::Auto;
-  config.PermissionReviewerModel.Id = SVL("reviewer");
-  config.PermissionReviewerModel.Provider = SVL("script");
+  u32 reviews = 0;
+  config.PermissionReviewerModel = AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL;
+  config.PermissionReviewer = {&reviews, HarnessReview};
   config.WorkingDirectory = SVL("C:\\work");
 
   AgentHarness harness = {};
@@ -692,7 +812,7 @@ void TestHarnessReviewerIsolation() {
       AgentHarness_Watch(&harness, 64, &watch)));
   CHECK(SessionResult_IsOk(
       AgentHarness_Run(&harness, SVL("trusted requested work"))));
-  CHECK_ALL(executions == 1, script.Index == 3);
+  CHECK_ALL(executions == 1, script.Index == 2, reviews == 1);
   u32 reviewStarts = 0;
   u32 reviewEnds = 0;
   bool sawAgentEnd = false;
@@ -707,6 +827,7 @@ void TestHarnessReviewerIsolation() {
       reviewEnds++;
       CHECK(event.PermissionReview.Outcome ==
             AgentPermissionReviewOutcome::Allow);
+      CHECK(StrView_Eq(event.PermissionReview.Model, SVL("jev-1.13.0")));
     }
     if (event.Kind == AgentHarnessEventKind::TransientAgentEnd)
       sawAgentEnd = true;
@@ -751,25 +872,21 @@ void TestHarnessReviewerIsolation() {
   SessionLog malformedLog = {};
   CHECK(SessionResult_IsOk(repository.Create(repository.Ctx, &arena, &create,
                                               &malformedLog, &info)));
-  ScriptToolCall malformedReview[] = {
-      {SVL("permission_decision"), SVL("review-bad"),
-       SVL("{\"decision\":\"allow\"}")}};
-  ScriptStep malformedSteps[3] = {};
+  ScriptStep malformedSteps[2] = {};
   malformedSteps[0].Tools = actionCall;
   malformedSteps[0].ToolCount = 1;
-  malformedSteps[1].Tools = malformedReview;
-  malformedSteps[1].ToolCount = 1;
-  malformedSteps[2].Text = SVL("replanned");
-  malformedSteps[2].Stop = StopReason::Stop;
-  ScriptProvider malformedScript = {malformedSteps, 3, 0};
+  malformedSteps[1].Text = SVL("replanned");
+  malformedSteps[1].Stop = StopReason::Stop;
+  ScriptProvider malformedScript = {malformedSteps, 2, 0};
   executions = 0;
   config.ProviderImpl = ScriptProvider_Make(&malformedScript);
   config.PermissionMode = AgentPermissionMode::Auto;
   config.ToolHooks = {};
+  config.PermissionReviewer = {};
   CHECK(
       SessionResult_IsOk(AgentHarness_Init(&harness, malformedLog, &config)));
   CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("try it safely"))));
-  CHECK_ALL(executions == 0, malformedScript.Index == 3);
+  CHECK_ALL(executions == 0, malformedScript.Index == 2, reviews == 1);
   AgentTranscriptSnapshot malformedSnapshot = {};
   CHECK(SessionResult_IsOk(
       AgentHarness_SnapshotTranscript(&arena, &harness, 0, &malformedSnapshot)));
@@ -798,6 +915,7 @@ void TestPermissions() {
   TestGrantCapAndUnbindableKeys();
   TestClippedActionNeedsPerson();
   TestHeadlessFailClosed();
+  TestReviewInputsAndCacheFreshness();
   TestReviewerAbort();
   TestConcurrentDecisions();
   TestPermissionPromptModes();

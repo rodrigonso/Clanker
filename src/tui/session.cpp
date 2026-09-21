@@ -108,8 +108,8 @@ bool SessionArenaSwapSafeLocked(const Tui* t) {
 //
 // Only the compaction path passes true. Lag recovery must not: it runs on the
 // event pump thread, concurrently with a main thread that is holding StrViews
-// into SessionMem (the submitted prompt from LineEdit_Submit, a modal's text
-// result) and has no lock over them. Rebuilding without reclaiming there is
+// into SessionMem (the submitted prompt from LineEdit_Submit) and has no lock
+// over them. Rebuilding without reclaiming there is
 // exactly the pre-existing behaviour, and compaction reclaims it later anyway.
 void RebuildTranscriptLocked(Tui* t, const Message* messages, u32 count,
                                     bool allowSwap) {
@@ -143,7 +143,6 @@ void RebuildTranscriptLocked(Tui* t, const Message* messages, u32 count,
   }
   LineModel_Init(&t->Model, &t->SessionMem, width, cap, t->Color, rounded);
   if (swap) {
-    LineEdit_Init(&t->ModalEdit, &t->SessionMem);
     t->InputUi.Edit = &t->Edit;
     memset(t->Queue, 0, sizeof(t->Queue));
     for (u32 i = 0; i < preservedCount; i++) t->Queue[i] = preserved[i];

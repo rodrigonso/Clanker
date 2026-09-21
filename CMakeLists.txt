@@ -140,6 +140,7 @@ if(CLANKER_BUILD_CLI)
     src/app/hook_gate.cpp
     src/app/hook_runner.cpp
     src/app/plain_select.cpp
+    src/app/permission_reviewer.cpp
     src/app/project_trust.cpp
     src/app/prompt_context.cpp
     src/app/prompt_templates.cpp

@@ -82,6 +82,12 @@ Focusable nodes participate in Tab and Shift-Tab traversal. Focus scopes keep
 modal input isolated and restore the prior focus when an overlay disappears.
 Application-wide shutdown and agent-control shortcuts remain controller-owned.
 
+In the slash-command palette, Up/Down selects a match. Tab autocompletes the
+highlighted command's canonical name and adds a space for arguments without
+submitting it; Enter commits the selected command. Tab does nothing when there
+is no match. Escape dismisses the palette, and Shift-Tab keeps its permission-mode
+cycling behavior.
+
 Callbacks run while the TUI lock is held. They may mutate state or queue work,
 but must not block, perform network I/O, or invoke rendering recursively.
 
@@ -127,6 +133,26 @@ paint a panel at all.
 Focus needs no special handling when the composer node disappears: `Ui_Dispatch`
 falls back to the first focusable node, and `Ui_Paint` hides the cursor unless a
 painted component requests it.
+
+Text entry shares a `TextInputMode::Plain` / `TextInputMode::Secret` path.
+Secret fields start empty, render only mask characters, accept bracketed paste,
+and never enter composer history, the submission queue, clipboard output, or
+the transcript. Ctrl+C cancels rather than copying. Text input is limited to
+8192 UTF-8 bytes; an oversized entry is cleared and must be retried, not silently
+truncated.
+
+The modal editor owns a separate arena. `Tui_ReadText` copies a confirmed value
+directly into its caller's arena and consumes the result; nonblocking callers
+pass an arena when requesting text from `Tui_GetModalResult`. Modal storage is
+wiped on consumption, cancellation, session reset, and shutdown. Callers that
+handle credentials must also securely release their scratch arenas. Secret
+values are never duplicated into session-backed modal results.
+
+Commands marked `TuiCommandSpec::PrivateArguments` retain only their command
+name in history and queued-command notices. This keeps mistakenly supplied
+inline credentials out of those surfaces while the dispatcher rejects them.
+Only dedicated masked dialogs accept API keys. Ordinary model/name fields use
+the same editor without masking; numeric settings validate before applying.
 
 ## Stream Reveal
 

@@ -55,6 +55,11 @@ void* ArenaAlloc(Arena* a, usize size, usize align) {
 
 void ArenaReset(Arena* a) { a->Used = 0; }
 
+void ArenaResetSecure(Arena* a) {
+  Memory_Zero(a->Base, a->Used);
+  ArenaReset(a);
+}
+
 void ArenaTrim(Arena* a, usize keepBytes) {
   if (!a->Base) return;
   // Only ever safe once the arena's contents are dead: this hands the pages
@@ -93,4 +98,9 @@ void ArenaRelease(Arena* a) {
   munmap(a->Base, a->Reserved);
 #endif
   *a = Arena{};
+}
+
+void ArenaReleaseSecure(Arena* a) {
+  ArenaResetSecure(a);
+  ArenaRelease(a);
 }

@@ -19,7 +19,7 @@
 namespace {
 
 const u64 UPDATE_CHECK_INTERVAL_MS = 24ull * 60 * 60 * 1000;
-const u32 UPDATE_CHECK_TIMEOUT_SECONDS = 10;
+const u32 UPDATE_CHECK_TIMEOUT_MS = 10000;
 
 #if defined(_WIN32)
 const char* INSTALL_COMMAND =
@@ -69,7 +69,7 @@ void RunUpdateCheck(void* arg) {
   request.Url = SVL(CLANKER_RELEASES_API_URL);
   request.Headers = headers;
   request.HeaderCount = 1;
-  request.TimeoutSeconds = UPDATE_CHECK_TIMEOUT_SECONDS;
+  request.TimeoutMs = UPDATE_CHECK_TIMEOUT_MS;
   request.Isolated = true;
   HttpResponse response = Http_Fetch(&mem, &request, &check->Abort);
   // An interrupted check is retried on the next start rather than recorded.

@@ -1,6 +1,7 @@
 #include "app/settings.h"
 
 #include "app/config_paths.h"
+#include "app/permission_reviewer.h"
 
 #include "base/config_file.h"
 #include "base/sysinfo.h"
@@ -182,9 +183,22 @@ AppSettingsLoadResult AppSettings_Load(Arena* a, StrView path, AppSettings* out)
       Json_Get(root, "permissionReviewerModel");
   if (permissionReviewerValue) {
     if (!Json_IsString(permissionReviewerValue) ||
-        !permissionReviewerValue->Str.Length)
+        !TypeSafePermissionReviewer_ModelSupported(permissionReviewerValue->Str)) {
+      out->PermissionReviewerInvalid = true;
       return AppSettingsLoadResult::Malformed;
+    }
     permissionReviewerModel = permissionReviewerValue->Str;
+  }
+
+  f64 permissionReviewerThreshold = AGENT_PERMISSION_DEFAULT_REVIEWER_THRESHOLD;
+  JsonValue* threshold = Json_Get(root, "permissionReviewerThreshold");
+  if (threshold) {
+    if (threshold->Kind != JsonKind::Number ||
+        !TypeSafePermissionReviewer_ThresholdIsValid(threshold->Number)) {
+      out->PermissionReviewerThresholdInvalid = true;
+      return AppSettingsLoadResult::Malformed;
+    }
+    permissionReviewerThreshold = threshold->Number;
   }
 
   bool yoloAcknowledged = false;
@@ -204,6 +218,7 @@ AppSettingsLoadResult AppSettings_Load(Arena* a, StrView path, AppSettings* out)
   out->TurnLimit = turnLimit;
   out->PermissionMode = permissionMode;
   out->PermissionReviewerModel = permissionReviewerModel;
+  out->PermissionReviewerThreshold = permissionReviewerThreshold;
   out->YoloAcknowledged = yoloAcknowledged;
   out->Rounded = rounded;
   out->Skills = skills;
@@ -217,7 +232,10 @@ bool AppSettings_Save(Arena* a, StrView path, const AppSettings* settings) {
   StrView permissionMode = AgentPermissionMode_Name(settings->PermissionMode);
   if (!trust.Length ||
       !permissionMode.Length ||
-      !settings->PermissionReviewerModel.Length ||
+      !TypeSafePermissionReviewer_ModelSupported(
+          settings->PermissionReviewerModel) ||
+      !TypeSafePermissionReviewer_ThresholdIsValid(
+          settings->PermissionReviewerThreshold) ||
       (settings->Profile.Effort != ModelEffort::None && !effort.Length))
     return false;
   StrBuf content = StrBuf_Make(
@@ -278,6 +296,11 @@ bool AppSettings_Save(Arena* a, StrView path, const AppSettings* settings) {
   Json_WriteString(&content, permissionMode);
   StrBuf_AppendCStr(&content, ",\"permissionReviewerModel\":");
   Json_WriteString(&content, settings->PermissionReviewerModel);
+  StrBuf_AppendCStr(&content, ",\"permissionReviewerThreshold\":");
+  char threshold[64];
+  u32 thresholdLength = Json_FormatNumber(
+      threshold, sizeof(threshold), settings->PermissionReviewerThreshold);
+  StrBuf_Append(&content, StrView{threshold, thresholdLength});
   StrBuf_AppendCStr(&content, ",\"yoloAcknowledged\":");
   StrBuf_AppendCStr(&content, settings->YoloAcknowledged ? "true" : "false");
   StrBuf_AppendCStr(&content, ",\"rounded\":");

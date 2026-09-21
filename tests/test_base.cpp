@@ -61,6 +61,20 @@ void TestArena() {
   CHECK(a.Committed == before);
 
   ArenaRelease(&a);
+
+  Arena secret = ArenaCreate();
+  byte* bytes = (byte*)ArenaAlloc(&secret, 513, 1);
+  memset(bytes, 0x5a, 513);
+  usize committed = secret.Committed;
+  ArenaResetSecure(&secret);
+  bool cleared = true;
+  for (u32 i = 0; i < 513; i++) cleared = cleared && bytes[i] == 0;
+  CHECK_ALL(cleared, secret.Used == 0, secret.Committed == committed);
+  bytes = (byte*)ArenaAlloc(&secret, 513, 1);
+  CHECK(bytes[512] == 0);
+  ArenaReleaseSecure(&secret);
+  CHECK_ALL(secret.Base == nullptr, secret.Used == 0, secret.Committed == 0);
+  ArenaReleaseSecure(&secret);
 }
 
 void TestArray() {

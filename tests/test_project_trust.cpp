@@ -32,6 +32,8 @@ void TestProjectTrust() {
   StrView system = Fs_Join(&scratch, config, SVL("SYSTEM.md"));
   StrView storePath = Fs_Join(&scratch, root, SVL("config/trust.json"));
   CHECK(Fs_MkdirP(&scratch, child));
+  // Stop ancestor skill discovery at the fixture, not the enclosing worktree.
+  CHECK(Fs_MkdirP(&scratch, Fs_Join(&scratch, root, SVL(".git"))));
   CHECK(!ProjectTrust_HasGatedResources(&scratch, child));
   CHECK(ConfigFile_WriteAtomic(&scratch, system, SVL("project system")));
   CHECK(ProjectTrust_HasGatedResources(&scratch, child));
@@ -107,6 +109,7 @@ void TestProjectTrust() {
   RemoveDir("clanker_project_trust_test/parent/child");
   RemoveDir("clanker_project_trust_test/parent");
   RemoveDir("clanker_project_trust_test/config");
+  RemoveDir("clanker_project_trust_test/.git");
   RemoveDir("clanker_project_trust_test");
   ArenaRelease(&scratch);
 }

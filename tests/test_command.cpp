@@ -122,7 +122,7 @@ AppCommandHandlerResult Permissions(void* user, const AppCommandUx* ux,
       !StrView_Eq(arguments, SVL("yolo")) &&
       !StrView_Eq(arguments, SVL("reset")))
     return {AppCommandHandlerStatus::Failed,
-            SVL("Usage: /permissions [ask|auto|yolo|reset]")};
+            AppCommand_Usage(AppCommandKind::Permissions)};
   return {AppCommandHandlerStatus::Success, SVL("permissions updated")};
 }
 
@@ -198,7 +198,7 @@ void TestParse() {
                            "Usage: /debug [on|off]"),
             StrView_EqCStr(
                 AppCommand_Usage(AppCommandKind::Permissions),
-                "Usage: /permissions [ask|auto|yolo|reset]"),
+                "Usage: /permissions [ask|auto|yolo|reset|key [clear]|model [jev-...]|threshold [0-1]]"),
             StrView_EqCStr(AppCommand_Usage(AppCommandKind::Rounded),
                            "Usage: /rounded [on|off]"),
             StrView_EqCStr(AppCommand_Usage(AppCommandKind::Skill),
@@ -251,6 +251,12 @@ void TestParse() {
       {SVL("/permissions"), AppCommandKind::Permissions},
       {SVL("/permissions auto"), AppCommandKind::Permissions},
       {SVL("/permissions reset"), AppCommandKind::Permissions},
+      {SVL("/permissions key"), AppCommandKind::Permissions},
+      {SVL("/permissions key clear"), AppCommandKind::Permissions},
+      {SVL("/permissions model"), AppCommandKind::Permissions},
+      {SVL("/permissions model jev-latest"), AppCommandKind::Permissions},
+      {SVL("/permissions threshold"), AppCommandKind::Permissions},
+      {SVL("/permissions threshold 0.9"), AppCommandKind::Permissions},
       {SVL("/reload"), AppCommandKind::Reload},
       {SVL("/debug"), AppCommandKind::Debug},
       {SVL("/rounded"), AppCommandKind::Rounded},

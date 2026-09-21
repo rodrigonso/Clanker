@@ -19,6 +19,10 @@ struct AppSettings {
   AgentTurnLimitPolicy TurnLimit = AgentTurnLimitPolicy_Default();
   AgentPermissionMode PermissionMode = AgentPermissionMode::Auto;
   StrView PermissionReviewerModel = AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL;
+  f64 PermissionReviewerThreshold = AGENT_PERMISSION_DEFAULT_REVIEWER_THRESHOLD;
+  // Load-only diagnostics; never written to settings.json.
+  bool PermissionReviewerInvalid = false;
+  bool PermissionReviewerThresholdInvalid = false;
   bool YoloAcknowledged = false;
   bool Rounded = true;
   Array<StrView> Skills;

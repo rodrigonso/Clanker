@@ -501,6 +501,8 @@ bool Fs_DescribeMutationPermission(Arena* arena, const ToolArgs* args,
   StrBuf_Append(&action, actionPrefix);
   StrBuf_Append(&action, display);
   out->Action = StrBuf_View(&action);
+  // Contents/edits are deliberately excluded from the external review payload.
+  out->ReviewIncomplete = true;
   if (display.Length + grantPrefix.Length <= 8192u) {
     StrBuf key = StrBuf_Make(arena, grantPrefix.Length + display.Length + 1);
     StrBuf_Append(&key, grantPrefix);

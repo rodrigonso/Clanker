@@ -35,8 +35,10 @@ struct HttpRequest {
   // it so a retryable error page's bytes never reach the event parser (see
   // ChatParse_Feed).
   bool BufferNonSuccessBody;
-  // Whole-transfer limit; 0 keeps the default of 600 seconds.
-  u32 TimeoutSeconds;
+  // Whole-transfer limit; 0 keeps the default of 10 minutes. The connect
+  // phase is capped at the smaller of this and 30 seconds.
+  u32 TimeoutMs;
+  u32 MaxResponseBytes;  // zero leaves the response size unbounded
   // Use a private connection instead of the shared one, which serializes
   // requests, so a background request never delays foreground traffic.
   bool Isolated;
@@ -84,6 +86,7 @@ struct HttpResult {
   // mid-stream). Once true, this attempt's response has partially reached
   // downstream consumers and must never be transparently retried.
   bool BodyStarted;
+  bool BodyLimitExceeded;
 };
 
 // Non-streaming request: accumulates the full response body. For request/response
