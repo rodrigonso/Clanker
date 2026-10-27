@@ -17,7 +17,9 @@ struct Term {
   int OutFd;
   int WakeReadFd;
   int WakeWriteFd;
-  alignas(8) unsigned char SavedTermios[64];
+  // Opaque `struct termios`, which is 72 bytes on 64-bit macOS; sized with
+  // headroom so term.h need not include <termios.h>.
+  alignas(8) unsigned char SavedTermios[128];
 #endif
 };
 

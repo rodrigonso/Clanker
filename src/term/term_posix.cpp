@@ -7,7 +7,9 @@
 #include <termios.h>
 #include <unistd.h>
 
-static_assert(sizeof(struct termios) <= 64, "termios storage too small");
+static_assert(sizeof(struct termios) <= sizeof(((Term*)nullptr)->SavedTermios),
+              "termios storage too small");
+static_assert(alignof(struct termios) <= 8, "termios storage misaligned");
 
 bool Term_IsInteractive() { return isatty(STDIN_FILENO) && isatty(STDOUT_FILENO); }
 
