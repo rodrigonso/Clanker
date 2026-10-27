@@ -117,7 +117,7 @@ static void PrintHelp() {
       "  -na, --no-approve Do not trust project prompt resources for this run\n"
       "  --logout PROV     Remove stored credentials for a provider\n"
      "  --help            Show this help\n\n"
-      "Auth: run `/auth` inside the TUI to store an API key, or set the\n"
+      "Auth: run `/auth` inside the TUI to sign in to OpenRouter, or set the\n"
      "OPENROUTER_API_KEY environment variable.\n"
       "Interactive commands: /session, /name, /sessions, /resume, /tree,\n"
       "/checkout, /fork, /compact, /trust, /reload, /debug, /auth, /model,\n"

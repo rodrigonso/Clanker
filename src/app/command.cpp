@@ -4,7 +4,7 @@ namespace {
 
 const AppCommandSpec kCommands[] = {
     {AppCommandKind::Auth, SVL("auth"), {},
-     SVL("Store a provider API key and choose a model"), SVL("Usage: /auth"),
+     SVL("Sign in to OpenRouter and choose a model"), SVL("Usage: /auth"),
      AppCommandArgumentPolicy::None},
     {AppCommandKind::Model, SVL("model"), {},
      SVL("Change the active model, effort, and context"), SVL("Usage: /model"),

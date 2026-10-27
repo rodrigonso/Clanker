@@ -79,7 +79,8 @@ src/
   llm/     data model, OpenAI Responses protocol
            (request build + SSE parse), retry policy, model registry
   net/     streaming HTTP + non-streaming fetch over libcurl
-  auth/    credential store (api keys) + resolution/caching
+  auth/    credential store (api keys) + resolution/caching + OpenRouter
+           OAuth PKCE
   session/ append-only v2 message tree, reducer, memory + JSONL repositories
   agent/   incremental AgentHarness, in-memory queues, hooks, events, compaction
   tools/   read/write/edit/ls/find/grep/shell/ask_user, direct/shell process
@@ -879,7 +880,7 @@ selectors such as `/auth` and `/model` require a TTY.
 
 Interactive commands:
 
-- `/auth` — store an OpenRouter API key, then choose a model.
+- `/auth` — sign in to OpenRouter in the browser, then choose a model.
 - `/model` — choose a live-discovered or manual OpenRouter model ID, then choose
   the effort and context tier when that model exposes those controls. Fixed
   context windows are displayed without an unnecessary prompt.
@@ -994,9 +995,9 @@ turns.
 
 Deliberate limits:
 
-- **No OAuth.** Subscription tokens (ChatGPT, Claude Pro/Max) are issued for
-  other services. An OpenRouter API key is the only credential: `/auth` stores
-  one, and there is no browser flow.
+- **No subscription OAuth.** Subscription tokens (ChatGPT, Claude Pro/Max) are
+  issued for other services. An OpenRouter API key is the only credential;
+  `/auth` obtains one through OpenRouter's OAuth flow.
 - **Reasoning replay is model-scoped.** Encrypted reasoning and item IDs are
   only valid for the model that produced them, so a mid-session model switch
   drops prior reasoning and regenerates IDs rather than replaying stale ones.
@@ -1009,8 +1010,14 @@ Credentials are stored in `~/.clanker/auth.json` (atomic writes, restricted
 perms). The resolved token is cached in the running app; storing a key, provider
 changes, and `/reload` invalidate or replace the cache.
 
-- **API key** — run `/auth` in the TUI, set `OPENROUTER_API_KEY`, or store a key
-  in `auth.json`. A credential is always required.
+- **Sign in** — run `/auth` in the TUI. Clanker opens your browser to
+  OpenRouter, where you approve it; OpenRouter then mints an API key labeled
+  `Clanker` on your account (OAuth PKCE), which Clanker stores. The redirect is
+  received by a one-shot listener on `127.0.0.1`. Under SSH, or when no
+  browser can be opened, Clanker prints the sign-in URL instead and you paste
+  the code OpenRouter shows. Revoke the key from your OpenRouter key settings.
+- **Environment** — set `OPENROUTER_API_KEY` for `-p`, CI, and other headless
+  runs. A credential is always required.
 
 Resolution priority: stored api_key → env var. `--logout <provider>` removes
 credentials.

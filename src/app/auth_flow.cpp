@@ -3,9 +3,12 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "app/browser.h"
 #include "app/settings.h"
+#include "auth/openrouter_oauth.h"
 #include "auth/store.h"
 #include "base/thread.h"
+#include "net/loopback.h"
 
 void AppAuth_Invalidate(AppAuth* auth) {
   if (auth) AuthTokenCache_Invalidate(&auth->Cache);
@@ -59,10 +62,10 @@ StrView AuthGuidance(Arena* arena, const ProviderSpec* spec, bool interactive) {
   StrBuf_AppendCStr(&b, " ('");
   StrBuf_Append(&b, spec->Id);
   StrBuf_AppendCStr(&b, "'). ");
-  // Interactive `/auth` can take a key directly; the headless path can only
-  // point at the environment.
+  // Interactive `/auth` can sign in through the browser; the headless path can
+  // only point at the environment.
   if (interactive) {
-    StrBuf_AppendCStr(&b, "Run `/auth` and choose ");
+    StrBuf_AppendCStr(&b, "Run `/auth` to sign in to ");
     StrBuf_Append(&b, spec->Name);
     if (spec->ApiKeyEnvVar) StrBuf_AppendCStr(&b, " or ");
   }
@@ -168,63 +171,187 @@ static RuntimeProviderChoice ChooseProvider(InteractiveRuntime* rt) {
                                spec};
 }
 
-static AppCommandHandlerResult RunApiKeyEntry(InteractiveRuntime* rt,
-                                              const ProviderSpec* spec,
-                                              const AppCommandUx* ux) {
-  if (!spec)
+enum class OAuthCodeStatus : u8 { Received, Unavailable, Cancelled, Failed };
+
+struct OAuthCodeResult {
+  OAuthCodeStatus Status;
+  StrView Code;
+  StrView Message;
+};
+
+// OpenRouter's code expires after ten minutes, so waiting longer is pointless.
+static const u32 OAUTH_CALLBACK_WAIT_MS = 10 * 60 * 1000;
+
+// Browser + loopback redirect. Unavailable means fall back to pasting a code.
+static OAuthCodeResult ReceiveOAuthCallback(InteractiveRuntime* rt, Arena* scratch,
+                                            const OAuthPkce* pkce,
+                                            const AppCommandUx* ux) {
+  LoopbackServer server;
+  if (!LoopbackServer_Open(&server))
+    return OAuthCodeResult{OAuthCodeStatus::Unavailable, StrView{}, StrView{}};
+
+  StrBuf callback = StrBuf_Make(scratch, 48);
+  StrBuf_AppendCStr(&callback, "http://localhost:");
+  StrBuf_AppendU64(&callback, server.Port);
+  StrBuf_AppendCStr(&callback, OPENROUTER_OAUTH_CALLBACK_PATH);
+  StrView url = OpenRouterOAuth_AuthorizeUrl(scratch, pkce, StrBuf_View(&callback));
+  if (!Browser_Open(url)) {
+    LoopbackServer_Close(&server);
+    return OAuthCodeResult{OAuthCodeStatus::Unavailable, StrView{}, StrView{}};
+  }
+
+  StrBuf notice = StrBuf_Make(scratch, url.Length + 96);
+  StrBuf_AppendCStr(&notice,
+                    "Opened your browser to sign in to OpenRouter. If it did not "
+                    "open, visit:\n");
+  StrBuf_Append(&notice, url);
+  EmitCommandNotice(ux, StrBuf_View(&notice));
+
+  volatile i32* abort =
+      RuntimeBeginOperation(rt, ux, SVL("Waiting for OpenRouter sign-in"));
+  RuntimeSetOperationStatus(rt, ux, SVL("Approve Clanker in your browser."));
+  OAuthCodeResult result = {OAuthCodeStatus::Failed, StrView{}, StrView{}};
+  u64 deadline = MonotonicMillis() + OAUTH_CALLBACK_WAIT_MS;
+  for (;;) {
+    // Rejected requests roll the arena back so stray connections cannot grow it.
+    usize mark = scratch->Used;
+    u64 now = MonotonicMillis();
+    LoopbackRequest request;
+    LoopbackWait wait = LoopbackServer_Accept(
+        &server, scratch, abort, now < deadline ? (u32)(deadline - now) : 0, &request);
+    if (wait == LoopbackWait::Aborted) {
+      result.Status = OAuthCodeStatus::Cancelled;
+      break;
+    }
+    if (wait == LoopbackWait::TimedOut) {
+      result.Message = SVL("Timed out waiting for OpenRouter sign-in.");
+      break;
+    }
+    if (wait != LoopbackWait::Request) {
+      result.Message = SVL("The sign-in callback listener failed.");
+      break;
+    }
+
+    OAuthCallback callbackResult = OAuthCallback_Parse(scratch, request.Target, pkce->State);
+    if (callbackResult.Status == OAuthCallbackStatus::WrongPath) {
+      LoopbackRequest_Respond(&request, 404, SVL("Not found."));
+      ArenaRestore(scratch, mark);
+      continue;
+    }
+    // A stale tab from an earlier attempt must not end this one.
+    if (callbackResult.Status == OAuthCallbackStatus::StateMismatch ||
+        callbackResult.Status == OAuthCallbackStatus::MissingCode) {
+      LoopbackRequest_Respond(
+          &request, 400,
+          SVL("<!doctype html><meta charset=utf-8><title>Clanker</title>"
+              "<p>This sign-in link is stale. Return to Clanker and run /auth again.</p>"));
+      ArenaRestore(scratch, mark);
+      continue;
+    }
+    if (callbackResult.Status == OAuthCallbackStatus::Denied) {
+      LoopbackRequest_Respond(
+          &request, 200,
+          SVL("<!doctype html><meta charset=utf-8><title>Clanker</title>"
+              "<p>Sign-in was cancelled. You can close this tab.</p>"));
+      StrBuf message = StrBuf_Make(scratch, callbackResult.Error.Length + 48);
+      StrBuf_AppendCStr(&message, "OpenRouter sign-in was denied: ");
+      StrBuf_Append(&message, callbackResult.Error);
+      result.Message = StrBuf_View(&message);
+      break;
+    }
+    LoopbackRequest_Respond(
+        &request, 200,
+        SVL("<!doctype html><meta charset=utf-8><title>Clanker</title>"
+            "<p>Clanker is signed in to OpenRouter. You can close this tab.</p>"));
+    result.Status = OAuthCodeStatus::Received;
+    result.Code = callbackResult.Code;
+    break;
+  }
+  bool cancelled = RuntimeEndOperation(rt);
+  LoopbackServer_Close(&server);
+  if (cancelled && result.Status != OAuthCodeStatus::Received)
+    result.Status = OAuthCodeStatus::Cancelled;
+  return result;
+}
+
+// Headless mode: OpenRouter shows the code and the user pastes it here.
+static OAuthCodeResult ReadPastedOAuthCode(InteractiveRuntime* rt, Arena* scratch,
+                                           const OAuthPkce* pkce,
+                                           const AppCommandUx* ux) {
+  StrView url = OpenRouterOAuth_AuthorizeUrl(scratch, pkce, StrView{});
+  StrBuf notice = StrBuf_Make(scratch, url.Length + 128);
+  StrBuf_AppendCStr(&notice,
+                    "Open this URL in a browser, approve Clanker, then paste the "
+                    "code OpenRouter shows:\n");
+  StrBuf_Append(&notice, url);
+  EmitCommandNotice(ux, StrBuf_View(&notice));
+
+  for (;;) {
+    StrView entered = {};
+    RuntimeInputResult entry =
+        RuntimeReadText(rt, scratch, SVL("Sign in to OpenRouter"),
+                        SVL("Authorization code"), StrView{}, &entered);
+    if (entry != RuntimeInputResult::Confirmed)
+      return OAuthCodeResult{OAuthCodeStatus::Cancelled, StrView{}, StrView{}};
+    entered = StrView_Trim(entered);
+    if (entered.Length)
+      return OAuthCodeResult{OAuthCodeStatus::Received, entered, StrView{}};
+    EmitCommandError(ux, SVL("An authorization code is required."));
+  }
+}
+
+static AppCommandHandlerResult RunOAuthLogin(InteractiveRuntime* rt,
+                                             const ProviderSpec* spec,
+                                             const AppCommandUx* ux) {
+  if (!spec || !spec->Endpoint)
     return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
                                    SVL("No provider is selected.")};
 
   Arena scratch = ArenaCreate((usize)16 << 20);
-  StrBuf title = StrBuf_Make(&scratch, spec->Name.Length + 24);
-  StrBuf_AppendCStr(&title, "API key for ");
-  StrBuf_Append(&title, spec->Name);
+  OAuthPkce pkce = OAuthPkce_Create(&scratch);
+  OAuthCodeResult code = {OAuthCodeStatus::Unavailable, StrView{}, StrView{}};
+  if (!Browser_IsRemoteSession())
+    code = ReceiveOAuthCallback(rt, &scratch, &pkce, ux);
+  if (code.Status == OAuthCodeStatus::Unavailable)
+    code = ReadPastedOAuthCode(rt, &scratch, &pkce, ux);
 
-  StrView entered = {};
-  for (;;) {
-    RuntimeInputResult entry =
-        RuntimeReadText(rt, &scratch, StrBuf_View(&title), SVL("API key"),
-                        StrView{}, &entered);
-    if (entry != RuntimeInputResult::Confirmed) {
-      ArenaRelease(&scratch);
-      return AppCommandHandlerResult{AppCommandHandlerStatus::Cancelled,
-                                     SVL("Authentication cancelled.")};
+  AppCommandHandlerResult result = {AppCommandHandlerStatus::Success, StrView{}};
+  if (code.Status == OAuthCodeStatus::Cancelled) {
+    result = {AppCommandHandlerStatus::Cancelled, SVL("Authentication cancelled.")};
+  } else if (code.Status != OAuthCodeStatus::Received) {
+    result = RuntimeOwnedFailure(rt, code.Message);
+  } else {
+    volatile i32* abort =
+        RuntimeBeginOperation(rt, ux, SVL("Creating an OpenRouter API key"));
+    StrView keysUrl = Responses_Url(
+        &scratch, ResponsesEndpoint_ResolveBaseUrl(&scratch, spec->Endpoint),
+        "auth/keys");
+    OAuthKeyResult key =
+        OpenRouterOAuth_Exchange(&scratch, keysUrl, code.Code, pkce.Verifier, abort);
+    bool cancelled = RuntimeEndOperation(rt);
+
+    Credential credential = {};
+    credential.ApiKey = key.Key;
+    if (cancelled) {
+      result = {AppCommandHandlerStatus::Cancelled, SVL("Authentication cancelled.")};
+    } else if (!key.Ok) {
+      StrBuf message = StrBuf_Make(&scratch, key.Error.Length + 48);
+      StrBuf_AppendCStr(&message, "OpenRouter sign-in failed: ");
+      StrBuf_Append(&message, key.Error);
+      result = RuntimeOwnedFailure(rt, StrBuf_View(&message));
+    } else if (!AuthStore_Write(&scratch, rt->AuthPath, spec->Id, &credential)) {
+      StrBuf message = StrBuf_Make(&scratch, rt->AuthPath.Length + 48);
+      StrBuf_AppendCStr(&message, "Failed to save credentials to ");
+      StrBuf_Append(&message, rt->AuthPath);
+      StrBuf_AppendChar(&message, '.');
+      result = RuntimeOwnedFailure(rt, StrBuf_View(&message));
+    } else {
+      AppAuth_CacheToken(rt->Auth, spec->Id, credential.ApiKey);
     }
-    entered = StrView_Trim(entered);
-    if (entered.Length) break;
-    EmitCommandError(ux, SVL("An API key is required."));
   }
-
-  Credential credential = {};
-  credential.ApiKey = entered;
-  if (!AuthStore_Write(&scratch, rt->AuthPath, spec->Id, &credential)) {
-    StrBuf message = StrBuf_Make(&scratch, rt->AuthPath.Length + 48);
-    StrBuf_AppendCStr(&message, "Failed to save credentials to ");
-    StrBuf_Append(&message, rt->AuthPath);
-    StrBuf_AppendChar(&message, '.');
-    AppCommandHandlerResult result = {
-        AppCommandHandlerStatus::Failed,
-        StrView_Dup(&rt->CommandMem, StrBuf_View(&message))};
-    ArenaRelease(&scratch);
-    return result;
-  }
-  AppAuth_CacheToken(rt->Auth, spec->Id, credential.ApiKey);
-
-  // The key itself is never echoed back into the transcript.
-  StrBuf message =
-      StrBuf_Make(&scratch, spec->Name.Length + rt->AuthPath.Length + 48);
-  StrBuf_AppendCStr(&message, "Saved an API key for ");
-  StrBuf_Append(&message, spec->Name);
-  StrBuf_AppendCStr(&message, " to ");
-  StrBuf_Append(&message, rt->AuthPath);
-  StrBuf_AppendChar(&message, '.');
-  AppCommandHandlerResult result = {
-      AppCommandHandlerStatus::Success,
-      StrView_Dup(&rt->CommandMem, StrBuf_View(&message))};
   ArenaRelease(&scratch);
   return result;
 }
-
 struct RuntimeModelChoice {
   RuntimeChoiceStatus Status;
   Model Selected;
@@ -588,8 +715,8 @@ AppCommandHandlerResult HandleAuthCommand(void* user, const AppCommandUx* ux) {
                                      StrView{}};
 
     if (authenticated != provider.Spec) {
-      AppCommandHandlerResult keyEntry = RunApiKeyEntry(rt, provider.Spec, ux);
-      if (keyEntry.Status != AppCommandHandlerStatus::Success) return keyEntry;
+      AppCommandHandlerResult login = RunOAuthLogin(rt, provider.Spec, ux);
+      if (login.Status != AppCommandHandlerStatus::Success) return login;
       authenticated = provider.Spec;
     }
 
@@ -605,7 +732,7 @@ AppCommandHandlerResult HandleAuthCommand(void* user, const AppCommandUx* ux) {
                                     ModelRequestProfile{}, ux, &persisted))
         return AppCommandHandlerResult{
             AppCommandHandlerStatus::Failed,
-            SVL("The API key was saved, but the provider could not be activated.")};
+            SVL("Signed in, but the provider could not be activated.")};
 
       StrBuf notice =
           StrBuf_Make(&rt->CommandMem, provider.Spec->Name.Length +
@@ -625,7 +752,7 @@ AppCommandHandlerResult HandleAuthCommand(void* user, const AppCommandUx* ux) {
                                          model.Profile, ux)) {
       return AppCommandHandlerResult{
           AppCommandHandlerStatus::Failed,
-          SVL("The API key was saved, but the selected model could not be activated.")};
+          SVL("Signed in, but the selected model could not be activated.")};
     }
 
     return AppCommandHandlerResult{AppCommandHandlerStatus::Success,
