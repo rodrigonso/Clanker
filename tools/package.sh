@@ -8,7 +8,7 @@ copy_notice() {
 audit_runtime() {
   local binary="$1" metadata dependency
   command -v otool >/dev/null || fail "otool is required to audit packages"
-  lipo -verify_arch "$arch" "$binary" || fail "binary does not match package architecture: $binary"
+  lipo "$binary" -verify_arch "$arch" || fail "binary does not match package architecture: $binary"
   metadata="$(otool -arch "$arch" -L "$binary")"
   while IFS= read -r dependency; do
     case "$dependency" in /System/Library/*|/usr/lib/*) ;; *) fail "non-system dependency escapes package: $dependency ($binary)" ;; esac
