@@ -37,7 +37,7 @@ Branch pushes, pull requests, and manual workflow dispatch only build and
 exercise the project. **Only a matching version-tag push prepares a draft.**
 Manually dispatching on a tag still does not create a draft; rerun that tag's
 push workflow to repair an interrupted draft. Runner/action pins and local
-helper commands are documented in [.github/README.md](../.github/README.md).
+helper commands are documented in [CI.md](CI.md).
 
 The workflow prepares a **draft**, never an automatically public release.
 Every native build must succeed first. An already published release must not

@@ -1,6 +1,6 @@
 # Native CI and draft previews
 
-`workflows/native.yml` runs on branch pushes, `v*` tag pushes, pull requests
+[`.github/workflows/native.yml`](../.github/workflows/native.yml) runs on branch pushes, `v*` tag pushes, pull requests
 (including forks), and manual dispatch. Only a matching version-tag **push**
 can prepare a release draft. Manual dispatch tests its selected ref but does
 not create a draft; rerun the successful tag-push workflow to repair a draft.
@@ -64,7 +64,7 @@ github-script tag; do not substitute a tag-object SHA for its commit.
   Do not manually edit or publish a draft while that workflow is running.
 - No signing, notarization, automatic publication, history audit, or secret
   scanning clearance is provided. Checksums offer integrity, not authenticity.
-  Follow [the manual release checklist](../docs/RELEASING.md).
+  Follow [the manual release checklist](RELEASING.md).
 
 These definitions must first run on the configured GitHub repository before
 claiming native CI success. In particular, YAML validation, Windows tests and

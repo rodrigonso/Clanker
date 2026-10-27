@@ -22,49 +22,132 @@ a specific upstream measurement — pi publishes no memory numbers.
 
 Clanker is a **public-alpha candidate**. Release automation prepares unsigned
 previews; it does not automatically publish them. If no release is listed on
-this repository's **Releases** page yet, use [Build](#build).
+this repository's **Releases** page yet, [build from source](#build) instead.
+
+### 1. Install
+
+Run one command in a terminal. It needs no administrator rights, language
+runtime, or helper tools.
+
+**Windows 10+ (x86_64)**, in PowerShell:
 
 ```powershell
-# Windows 10+ (x86_64)
 irm https://raw.githubusercontent.com/rodrigonso/Clanker/main/tools/install/install.ps1 | iex
 ```
 
+**macOS 15+ (Apple Silicon or Intel)**, in Terminal:
+
 ```sh
-# macOS 15+ (Apple Silicon or Intel)
 curl -fsSL https://raw.githubusercontent.com/rodrigonso/Clanker/main/tools/install/install.sh | sh
 ```
 
-The install script downloads the newest release archive for your system,
-verifies its `.sha256` checksum, and installs it with its license notices. It
-needs no administrator rights, language runtime, or helper tools.
+The script downloads the newest release for your system, verifies its
+`.sha256` checksum, installs it with its license notices, and puts `clanker`
+on your `PATH`:
 
 | System | Installs to | On `PATH` via |
 |---|---|---|
-| Windows | `%LOCALAPPDATA%\Programs\clanker` | user `PATH` (open a new terminal) |
-| macOS | `~/.local/share/clanker` | `~/.local/bin/clanker` symlink; the script prints the `export` line if that directory is not on `PATH` |
+| Windows | `%LOCALAPPDATA%\Programs\clanker` | your user `PATH` |
+| macOS | `~/.local/share/clanker` | a `~/.local/bin/clanker` symlink |
 
-Set `CLANKER_INSTALL_VERSION=X.Y.Z` to pin a release, `CLANKER_INSTALL_DIR` to
-install elsewhere, or (Windows) `CLANKER_NO_MODIFY_PATH=1` to leave `PATH`
-alone. `clanker upgrade [--version X.Y.Z]` reruns the script against the running
-copy's install directory; it is a no-op when that version is already installed.
-An interactive Clanker started from a script install checks GitHub for a newer
-release at most once a day in the background and mentions it on a later start;
-set `CLANKER_NO_UPDATE_CHECK=1` to turn that off. Nothing is downloaded until you
-run `clanker upgrade`.
+On macOS, if `~/.local/bin` is not already on your `PATH`, the script prints
+the `export PATH=...` line to add to your shell profile (for example
+`~/.zshrc`).
 
-You can also download a `clanker-<version>-<system>.zip`/`.tar.gz` archive and
-its `.sha256` from **Releases**, extract it anywhere, and run `bin/clanker`
-directly; such copies do not self-upgrade.
+### 2. Check it
 
-Start Clanker **from your project directory**:
+Open a **new** terminal so it picks up the `PATH` change, then run:
+
+```sh
+clanker --version
+```
+
+Releases are unsigned previews, so Windows SmartScreen or macOS Gatekeeper may
+warn on first launch. Do not disable OS-wide protections to run a download you
+do not trust.
+
+### 3. Run it in a project
+
+Start Clanker **from your project directory**, in Ask mode so you approve each
+tool call:
 
 ```sh
 cd ~/work/my-project
 clanker --permission-mode ask
 ```
 
-Follow the first-run setup; [Providers](#providers) describes configuration.
-Start in Ask mode and review tool requests. Clanker can read and modify project
+Run `/auth` to sign in to OpenRouter in your browser (or set
+`OPENROUTER_API_KEY`), then pick a model with `/model`.
+
+### Options
+
+The piped command takes its options from environment variables:
+
+| Variable | Effect |
+|---|---|
+| `CLANKER_INSTALL_VERSION=X.Y.Z` | Install that release instead of the newest |
+| `CLANKER_INSTALL_DIR=<path>` | Install somewhere else |
+| `CLANKER_NO_MODIFY_PATH=1` | Windows: leave your user `PATH` alone |
+
+```powershell
+# Windows
+$env:CLANKER_INSTALL_VERSION = '0.1.0'
+irm https://raw.githubusercontent.com/rodrigonso/Clanker/main/tools/install/install.ps1 | iex
+```
+
+```sh
+# macOS
+curl -fsSL https://raw.githubusercontent.com/rodrigonso/Clanker/main/tools/install/install.sh | CLANKER_INSTALL_VERSION=0.1.0 sh
+```
+
+### Upgrade
+
+```sh
+clanker upgrade                    # newest release
+clanker upgrade --version 0.1.0    # a specific release
+```
+
+`clanker upgrade` reruns the install script against the copy you are running,
+and does nothing if that version is already installed. It works on Windows
+while other Clanker windows are open. Rerunning the install command does the
+same thing.
+
+Interactive sessions check GitHub for a newer release at most once a day, in
+the background, and mention it the next time you start Clanker. Nothing is
+downloaded until you run `clanker upgrade`. Set `CLANKER_NO_UPDATE_CHECK=1` to
+turn the check off.
+
+### Uninstall
+
+**Windows:** delete the install directory, then remove
+`%LOCALAPPDATA%\Programs\clanker\bin` from your user `PATH` (Settings → search
+"Edit environment variables for your account" → **Path**):
+
+```powershell
+Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Programs\clanker"
+```
+
+**macOS:**
+
+```sh
+rm -rf ~/.local/share/clanker ~/.local/bin/clanker
+```
+
+Your sessions, settings, and stored credentials live in `~/.clanker` and are
+not touched by installing, upgrading, or uninstalling. Delete that directory too
+if you want to remove them.
+
+### Manual install
+
+Each release also lists its `clanker-<version>-<system>.zip` / `.tar.gz`
+archive and `.sha256` file. You can extract one anywhere and run
+`bin/clanker` directly. Copies installed this way are not put on `PATH` and do
+not upgrade themselves.
+
+### Safety and limitations
+
+[Providers](#providers) describes configuration. Start in Ask mode and review
+tool requests. Clanker can read and modify project
 files and run shell commands; conversation and tool context are sent to the
 selected model provider. Provider access and model usage are separate from the
 local executable. Ask mode is an approval policy, not an OS sandbox.
