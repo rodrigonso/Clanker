@@ -40,8 +40,12 @@ github-script tag; do not substitute a tag-object SHA for its commit.
   architecture and static-runtime dependency audits.
 - Checkout goes into `source/`. A fresh extraction is created under the
   workspace's sibling `out/`, outside that checkout. Its executable runs
-  `--help` from an empty working directory with an isolated profile and
-  OS-only `PATH`. No developer toolchain or user profile is inherited.
+  `--help` and `--version` from an empty working directory with an isolated
+  profile and OS-only `PATH`. No developer toolchain or user profile is
+  inherited. The platform install script then installs that archive (through
+  `CLANKER_INSTALL_ARCHIVE`, without network access or `PATH` edits) into an
+  isolated home, checks the installed version and notices, and reruns as a
+  no-op upgrade.
 - `tools/ci/package.cjs` verifies archive names, SHA256 sidecars, exact runtime
   contents, required nonempty notices, source notice equality, platform/version
   metadata, static curl 8.11.1 / PCRE2 10.48, native TLS, and unsigned labeling.

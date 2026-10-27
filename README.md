@@ -18,34 +18,49 @@ on the same machine (Node 24.13.0) sits at ~33 MB before loading an agent at
 all. The claim here is the order of magnitude, not a benchmarked ratio against
 a specific upstream measurement — pi publishes no memory numbers.
 
-## Download and run
+## Install and run
 
 Clanker is a **public-alpha candidate**. Release automation prepares unsigned
-previews; it does not automatically publish them. When a maintainer publishes a
-version, download its archive and matching `.sha256` file from this repository's
-**Releases** page. If no release is listed yet, use [Build](#build).
-
-| System | Archive |
-|---|---|
-| Windows 10+ / x86_64 | `clanker-<version>-Windows-x86_64.zip` |
-| macOS 15+ / Apple Silicon | `clanker-<version>-Darwin-arm64.tar.gz` |
-| macOS 15+ / Intel | `clanker-<version>-Darwin-x86_64.tar.gz` |
-
-Extract the entire archive wherever you prefer. There is no installer and no
-need to add anything to `PATH`, install a language runtime, or download helper
-tools. Keep the accompanying license notices. Start Clanker **from your project
-directory**, using the path to the extracted executable:
+previews; it does not automatically publish them. If no release is listed on
+this repository's **Releases** page yet, use [Build](#build).
 
 ```powershell
-# Windows PowerShell; replace the example paths with your own
-Set-Location C:\work\my-project
-& C:\Tools\clanker\bin\clanker.exe --permission-mode ask
+# Windows 10+ (x86_64)
+irm https://raw.githubusercontent.com/rodrigonso/Clanker/main/tools/install/install.ps1 | iex
 ```
 
 ```sh
-# macOS; replace the example paths with your own
+# macOS 15+ (Apple Silicon or Intel)
+curl -fsSL https://raw.githubusercontent.com/rodrigonso/Clanker/main/tools/install/install.sh | sh
+```
+
+The install script downloads the newest release archive for your system,
+verifies its `.sha256` checksum, and installs it with its license notices. It
+needs no administrator rights, language runtime, or helper tools.
+
+| System | Installs to | On `PATH` via |
+|---|---|---|
+| Windows | `%LOCALAPPDATA%\Programs\clanker` | user `PATH` (open a new terminal) |
+| macOS | `~/.local/share/clanker` | `~/.local/bin/clanker` symlink; the script prints the `export` line if that directory is not on `PATH` |
+
+Set `CLANKER_INSTALL_VERSION=X.Y.Z` to pin a release, `CLANKER_INSTALL_DIR` to
+install elsewhere, or (Windows) `CLANKER_NO_MODIFY_PATH=1` to leave `PATH`
+alone. `clanker upgrade [--version X.Y.Z]` reruns the script against the running
+copy's install directory; it is a no-op when that version is already installed.
+An interactive Clanker started from a script install checks GitHub for a newer
+release at most once a day in the background and mentions it on a later start;
+set `CLANKER_NO_UPDATE_CHECK=1` to turn that off. Nothing is downloaded until you
+run `clanker upgrade`.
+
+You can also download a `clanker-<version>-<system>.zip`/`.tar.gz` archive and
+its `.sha256` from **Releases**, extract it anywhere, and run `bin/clanker`
+directly; such copies do not self-upgrade.
+
+Start Clanker **from your project directory**:
+
+```sh
 cd ~/work/my-project
-~/Applications/clanker/bin/clanker --permission-mode ask
+clanker --permission-mode ask
 ```
 
 Follow the first-run setup; [Providers](#providers) describes configuration.
@@ -322,8 +337,10 @@ Native CI and interactive qualification must pass before publishing. Existing
 Windows ANSI filesystem/process operations still require ASCII installation
 and workspace paths.
 
-Each archive contains `share/clanker/DISTRIBUTION.txt` and dependency notices.
-Extract the archive and run the executable in `bin`; adding it to PATH is optional. These
+Each archive contains `share/clanker/DISTRIBUTION.txt` and dependency notices;
+that file also marks a script install, which `clanker upgrade` requires. The
+install scripts (`tools/install/`) take a local archive through
+`CLANKER_INSTALL_ARCHIVE`, which is how native CI exercises them. These
 scripts do not sign, publish, or include user configuration or session data.
 Missing project or upstream notices are packaging errors. The GitHub workflow
 can prepare a draft release after all native jobs succeed; publishing remains

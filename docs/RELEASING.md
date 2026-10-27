@@ -85,6 +85,20 @@ archives. Existing ignore rules are not evidence that no such material entered
 older commits. Do not rewrite or delete shared history as part of a routine
 release; coordinate any required remediation separately.
 
+## Install scripts and upgrades
+
+`tools/install/install.ps1` and `install.sh` are served from `main` on
+raw.githubusercontent.com and download assets by name from
+`releases/download/vX.Y.Z/`, so the archive and checksum filenames are a
+public contract. They resolve "newest" through
+`GET /repos/{owner}/{repo}/releases?per_page=1`, which includes prereleases but
+not drafts: **publishing a draft makes it the version every new install and
+`clanker upgrade` receives.** The same query backs the in-app update notice.
+Native CI installs each fresh archive with its platform script, verifies the
+installed `--version` and notices, and reruns the script to confirm an
+upgrade to the same version is a no-op. Changes to the scripts take effect for
+users as soon as they reach `main`.
+
 ## Local preview archives
 
 ```powershell

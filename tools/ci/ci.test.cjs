@@ -289,7 +289,8 @@ test('missing LICENSE and corrupt downloaded assets block all release writes', f
 }));
 
 test('local native archive smoke', { skip: !process.env.CLANKER_CI_PACKAGE_DIR }, fixture(async () => {
-  for (const file of ['VERSION', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'licenses/pi/LICENSE', 'licenses/jcode/LICENSE']) {
+  for (const file of ['VERSION', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'licenses/pi/LICENSE', 'licenses/jcode/LICENSE',
+    'tools/install/install.ps1', 'tools/install/install.sh']) {
     write(path.join('source', file), fs.readFileSync(path.join(originalRoot, file)));
   }
   const os = process.platform === 'win32' ? 'Windows' : 'Darwin';

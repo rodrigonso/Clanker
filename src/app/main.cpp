@@ -18,6 +18,7 @@
 #include "app/session_switch.h"
 #include "app/settings.h"
 #include "app/tui_bridge.h"
+#include "app/update.h"
 #include "auth/resolve.h"
 #include "auth/store.h"
 #include "base/arena.h"
@@ -78,6 +79,14 @@ static void MaybeReportMem() {
   }
 }
 
+// Owned by main so its refresh is joined before HTTP shuts down.
+static UpdateCheck g_updateCheck;
+
+static void StartUpdateCheck(InteractiveRuntime* rt, const AppCommandUx* ux) {
+  UpdateCheck_Start(&g_updateCheck, rt->Mem);
+  if (g_updateCheck.Notice.Length) EmitCommandNotice(ux, g_updateCheck.Notice);
+}
+
 // ---- command UX ----------------------------------------------------------
 
 
@@ -86,6 +95,8 @@ static void PrintHelp() {
   printf(
       "Clanker - a tiny memory-efficient coding agent\n\n"
       "Usage: clanker [options]\n"
+      "       clanker upgrade [--version X.Y.Z]\n"
+      "                    Install the newest (or given) release over this copy\n\n"
       "  -m <model>        Override the configured model for this run only\n"
       "  --permission-mode <ask|auto|yolo>\n"
       "                    Override tool permissions for this run only\n"
@@ -116,7 +127,8 @@ static void PrintHelp() {
       "  -a, --approve     Trust project prompt resources for this run\n"
       "  -na, --no-approve Do not trust project prompt resources for this run\n"
       "  --logout PROV     Remove stored credentials for a provider\n"
-     "  --help            Show this help\n\n"
+      "  --version         Print the version and exit\n"
+      "  --help            Show this help\n\n"
       "Auth: run `/auth` inside the TUI to sign in to OpenRouter, or set the\n"
      "OPENROUTER_API_KEY environment variable.\n"
       "Interactive commands: /session, /name, /sessions, /resume, /tree,\n"
@@ -151,6 +163,7 @@ static void RunPlainRepl(InteractiveRuntime* rt) {
       PromptContextReport(rt->Mem, rt->Prompt, rt->HasProjectResources,
                           rt->ProjectTrusted, SVL("Prompt context loaded.")));
   EmitPromptDiagnostics(rt->Prompt, &commandUx);
+  StartUpdateCheck(rt, &commandUx);
   RuntimeCheckAuth(rt, &commandUx, false);
   AppCommandHandlers handlers = RuntimeCommandHandlers(rt);
   for (;;) {
@@ -255,6 +268,7 @@ static void RunTuiRepl(InteractiveRuntime* rt) {
       PromptContextReport(rt->Mem, rt->Prompt, rt->HasProjectResources,
                           rt->ProjectTrusted, SVL("Prompt context loaded.")));
   EmitPromptDiagnostics(rt->Prompt, &commandUx);
+  StartUpdateCheck(rt, &commandUx);
   AppCommandHandlers handlers = RuntimeCommandHandlers(rt);
   for (;;) {
     MaybeCompactTuiSession(rt, &tui);
@@ -331,6 +345,20 @@ int main(int argc, char** argv) {
   bool continueSession = false;
   bool hasMaxTurnsOverride = false;
   u32 maxTurnsOverride = 0;
+
+  if (argc > 1 && strcmp(argv[1], "upgrade") == 0) {
+    const char* version = nullptr;
+    if (argc == 4 && strcmp(argv[2], "--version") == 0) {
+      version = argv[3];
+    } else if (argc != 2) {
+      fprintf(stderr, "usage: clanker upgrade [--version X.Y.Z]\n");
+      ArenaRelease(&arena);
+      return 1;
+    }
+    int rc = RunUpgrade(&arena, version);
+    ArenaRelease(&arena);
+    return rc;
+  }
 
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "-m") == 0) {
@@ -497,6 +525,10 @@ int main(int argc, char** argv) {
       }
     } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
       PrintHelp();
+      ArenaRelease(&arena);
+      return 0;
+    } else if (strcmp(argv[i], "--version") == 0) {
+      printf("clanker %s\n", CLANKER_VERSION);
       ArenaRelease(&arena);
       return 0;
     } else {
@@ -1042,6 +1074,7 @@ int main(int argc, char** argv) {
   }
 
   MaybeReportMem();
+  UpdateCheck_Stop(&g_updateCheck);
   EndHookSession();
   AgentHarness_Close(&harness);
   sessions.Close(sessions.Ctx);

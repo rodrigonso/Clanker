@@ -35,6 +35,11 @@ struct HttpRequest {
   // it so a retryable error page's bytes never reach the event parser (see
   // ChatParse_Feed).
   bool BufferNonSuccessBody;
+  // Whole-transfer limit; 0 keeps the default of 600 seconds.
+  u32 TimeoutSeconds;
+  // Use a private connection instead of the shared one, which serializes
+  // requests, so a background request never delays foreground traffic.
+  bool Isolated;
 };
 
 struct HttpStreamSink {

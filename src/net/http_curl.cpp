@@ -170,9 +170,17 @@ HttpResult Http_Stream(Arena* arena, const HttpRequest* req, HttpStreamSink sink
     return res;
   }
 
-  Mutex_Lock(&g_lock);
   CURL* curl = g_curl;
-  curl_easy_reset(curl);
+  if (req->Isolated) {
+    curl = curl_easy_init();
+    if (!curl) {
+      res.Error = SV("curl init failed");
+      return res;
+    }
+  } else {
+    Mutex_Lock(&g_lock);
+    curl_easy_reset(curl);
+  }
 
   StrBuf url = StrBuf_Make(arena, req->Url.Length + 1);
   StrBuf_Append(&url, req->Url);
@@ -209,13 +217,14 @@ HttpResult Http_Stream(Arena* arena, const HttpRequest* req, HttpStreamSink sink
   curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, XferCb);
   curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &w);
   curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
-  curl_easy_setopt(curl, CURLOPT_USERAGENT, "clanker/0.1");
+  curl_easy_setopt(curl, CURLOPT_USERAGENT, "clanker/" CLANKER_VERSION);
   if (req->FollowRedirects) {
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
   }
-  curl_easy_setopt(curl, CURLOPT_TIMEOUT, 600L);
-  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
+  long timeout = req->TimeoutSeconds ? (long)req->TimeoutSeconds : 600L;
+  curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout);
+  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, timeout < 30L ? timeout : 30L);
 
   CURLcode rc = curl_easy_perform(curl);
   if (rc == CURLE_OK) {
@@ -232,7 +241,10 @@ HttpResult Http_Stream(Arena* arena, const HttpRequest* req, HttpStreamSink sink
   if (w.errBody.Data && w.errBody.Length) res.Body = StrBuf_View(&w.errBody);
 
   if (hdrs) curl_slist_free_all(hdrs);
-  Mutex_Unlock(&g_lock);
+  if (req->Isolated)
+    curl_easy_cleanup(curl);
+  else
+    Mutex_Unlock(&g_lock);
   return res;
 }
 

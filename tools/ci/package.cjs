@@ -129,6 +129,38 @@ function verifyExtracted(prefix, source, version, platform) {
   }
 }
 
+// Runs the real install script against the local archive under an isolated
+// home, using its default install location, then reruns it as an upgrade.
+function smokeInstall(source, archive, home, version) {
+  fs.mkdirSync(home);
+  const windows = process.platform === 'win32';
+  const env = { ...process.env, HOME: home, CLANKER_INSTALL_ARCHIVE: archive };
+  delete env.CLANKER_INSTALL_DIR;
+  delete env.CLANKER_INSTALL_VERSION;
+  // Windows PowerShell cannot load the PowerShell 7 modules a pwsh step exports.
+  delete env.PSModulePath;
+  let installer;
+  let args;
+  let installed;
+  if (windows) {
+    Object.assign(env, { LOCALAPPDATA: home, USERPROFILE: home, CLANKER_NO_MODIFY_PATH: '1' });
+    installer = path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(source, 'tools', 'install', 'install.ps1')];
+    installed = path.join(home, 'Programs', 'clanker', 'bin', 'clanker.exe');
+  } else {
+    installer = '/bin/sh';
+    args = [path.join(source, 'tools', 'install', 'install.sh')];
+    installed = path.join(home, '.local', 'bin', 'clanker');
+  }
+  const first = run(installer, args, { env, timeout: 120000 });
+  assert(first.includes(`Installed Clanker ${version}`), `Install script did not install: ${first}`);
+  assert.equal(run(installed, ['--version'], { env, timeout: 15000 }).trim(), `clanker ${version}`);
+  const prefix = path.dirname(path.dirname(fs.realpathSync(installed)));
+  verifyExtracted(prefix, source, version, `${windows ? 'Windows' : 'Darwin'}-${process.arch === 'x64' ? 'x86_64' : process.arch}`);
+  const second = run(installer, args, { env, timeout: 120000 });
+  assert(second.includes('already installed'), `Rerunning the install script was not a no-op: ${second}`);
+}
+
 async function smoke(source, directory, platform) {
   source = fs.realpathSync(source);
   directory = fs.realpathSync(directory);
@@ -164,8 +196,11 @@ async function smoke(source, directory, platform) {
     const executable = path.join(prefix, 'bin', process.platform === 'win32' ? 'clanker.exe' : 'clanker');
     const output = run(executable, ['--help'], { cwd: empty, env, timeout: 15000 });
     assert(/usage:/i.test(output) && output.includes('clanker'), 'Packaged --help returned unexpected output');
+    assert.equal(run(executable, ['--version'], { cwd: empty, env, timeout: 15000 }).trim(),
+      `clanker ${version}`, 'Packaged --version must report VERSION');
     assert.deepEqual(fs.readdirSync(home), [], '--help must not modify the user profile');
-    console.log(`Verified ${archive}: checksum, notices, metadata and isolated --help`);
+    smokeInstall(source, path.join(directory, archive), path.resolve(work, 'install-home'), version);
+    console.log(`Verified ${archive}: checksum, notices, metadata, isolated --help and install script`);
   } finally {
     await fs.promises.rm(work, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }

@@ -17,6 +17,7 @@ cli|tool_select|TestToolSelect|test_tool_select|TagDefault|--tools/--exclude-too
 cli|infra|TestInfra|test_infra|TagDefault|glob, diff, fs, locks
 core|crypto|TestCrypto|test_crypto|TagDefault|base64 and SHA-256
 cli|auth|TestAuth|test_auth|TagDefault|credential store, resolution, and OpenRouter OAuth
+cli|update|TestUpdate|test_update|TagDefault|versions, update notice, install layout
 cli|command|TestCommand|test_command|TagDefault|slash command parsing
 cli|app|TestApp|test_app|TagDefault|app runtime, session keys, trust menu
 cli|hooks|TestHooks|test_hooks|TagDefault|external lifecycle hooks

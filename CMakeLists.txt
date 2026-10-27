@@ -130,6 +130,7 @@ if(CLANKER_BUILD_CLI)
     src/tools/shell.cpp
     src/app/auth_flow.cpp
     src/app/browser.cpp
+    src/app/update.cpp
     src/app/command.cpp
     src/app/commands.cpp
     src/app/config_paths.cpp
@@ -149,6 +150,7 @@ if(CLANKER_BUILD_CLI)
     src/app/skills.cpp
     src/app/tui_bridge.cpp)
   clanker_target(clanker_cli)
+  target_compile_definitions(clanker_cli PUBLIC CLANKER_VERSION="${PROJECT_VERSION}")
   target_link_libraries(clanker_cli PUBLIC clanker_core CURL::libcurl ${CLANKER_PCRE2_TARGET})
   if(WIN32)
     target_sources(clanker_cli PRIVATE src/term/term_win.cpp)
