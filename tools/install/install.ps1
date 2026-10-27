@@ -35,10 +35,12 @@
         }
         $version = $Matches[1]
     } elseif (-not $version) {
-        $releases = @(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases?per_page=1" `
-            -Headers @{ 'User-Agent' = 'clanker-installer'; Accept = 'application/vnd.github+json' })
-        if (-not $releases.Count) { throw 'No Clanker release has been published yet.' }
-        $version = $releases[0].tag_name -replace '^v', ''
+        # Piping enumerates the JSON array; Windows PowerShell returns it as one object.
+        $latest = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases?per_page=1" `
+            -Headers @{ 'User-Agent' = 'clanker-installer'; Accept = 'application/vnd.github+json' } |
+            Select-Object -First 1
+        if (-not $latest) { throw 'No Clanker release has been published yet.' }
+        $version = $latest.tag_name -replace '^v', ''
     }
     if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid version: $version" }
 
