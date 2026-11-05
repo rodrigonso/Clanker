@@ -323,6 +323,51 @@ void TestFileTracking(Arena* arena) {
   CHECK(PathsAre(&messyLists.ReadFiles, messyRead, 1));
 }
 
+void TestBranchContextTokens(Arena* arena) {
+  CHECK(AgentCompaction_BranchContextTokens(nullptr, 0) == 0);
+
+  // No usage anywhere: every message is estimated and the root is skipped.
+  Branch branch = {};
+  BuildBranch(arena, &branch);
+  CHECK(AgentCompaction_BranchContextTokens(branch.Pointers, branch.Count) == 24);
+
+  // Usage replaces everything before it; later messages are estimated on top.
+  Usage use = {};
+  use.Input = 100;
+  use.CacheRead = 10;
+  use.Output = 20;
+  SessionRecord root = RootRecord();
+  SessionRecord user = MessageRecord(root.EntryId, UserMessage(arena, SVL("aaaa")));
+  SessionRecord reply =
+      MessageRecord(user.EntryId, AssistantText(arena, SVL("dddd"), use));
+  SessionRecord result = MessageRecord(
+      reply.EntryId,
+      Message_ToolResult(arena, SVL("call-1"), SVL("t"), SVL("bbbb"), false));
+  const SessionRecord* reported[] = {&root, &user, &reply, &result};
+  CHECK(AgentCompaction_BranchContextTokens(reported, 3) == 130);
+  CHECK(AgentCompaction_BranchContextTokens(reported, 4) == 135);
+
+  // That usage measured the context a compaction has since replaced, so the
+  // branch is unknown until a response after the compaction reports.
+  SessionRecord compaction = CompactionRecord(arena, result.EntryId, user.EntryId,
+                                              user.EntryId, nullptr, 0, nullptr, 0);
+  SessionRecord next =
+      MessageRecord(compaction.EntryId, UserMessage(arena, SVL("eeee")));
+  const SessionRecord* compacted[] = {&root, &user, &reply, &result, &compaction, &next};
+  CHECK(AgentCompaction_BranchContextTokens(compacted, 5) == 0);
+  CHECK(AgentCompaction_BranchContextTokens(compacted, 6) == 0);
+
+  Usage after = {};
+  after.Input = 40;
+  after.Output = 8;
+  SessionRecord answer =
+      MessageRecord(next.EntryId, AssistantText(arena, SVL("ffff"), after));
+  SessionRecord tail = MessageRecord(answer.EntryId, UserMessage(arena, SVL("gggg")));
+  const SessionRecord* measured[] = {&root,       &user, &reply,   &result,
+                                     &compaction, &next, &answer, &tail};
+  CHECK(AgentCompaction_BranchContextTokens(measured, 8) == 48 + 5);
+}
+
 }  // namespace
 
 void TestCompaction() {
@@ -332,5 +377,6 @@ void TestCompaction() {
   TestShouldCompact();
   TestCutPoint(&arena);
   TestFileTracking(&arena);
+  TestBranchContextTokens(&arena);
   ArenaRelease(&arena);
 }

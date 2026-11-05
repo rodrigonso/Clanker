@@ -22,6 +22,12 @@ constexpr u64 kCopyNoticeMs = 1500;
 
 const u8 SELECTION_BG = 238;
 const u8 COPY_NOTICE_FG = 114;
+// Context bar fill escalates at pi's footer thresholds: past 70% and 90%.
+const u8 CONTEXT_FILL_FG = 250;
+const u8 CONTEXT_WARN_FG = 214;
+const u8 CONTEXT_FULL_FG = 196;
+const u8 CONTEXT_TRACK_FG = 238;
+constexpr u32 kContextBarCells = 8;
 
 // ---- shared helpers ------------------------------------------------------
 
@@ -42,8 +48,17 @@ u32 Utf8Count(StrView s);
 
 // ---- status row ----------------------------------------------------------
 
+// Where FormatStatus placed the context bar in the right-hand text, as byte
+// offsets split at the end of the filled part. Start == End when hidden.
+struct TuiStatusBar {
+  u32 Start;
+  u32 FillEnd;
+  u32 End;
+  u8 FillFg;
+};
+
 void FormatStatus(Tui* t, char* left, u32 leftCap, u32* ll, char* right,
-                  u32 rightCap, u32* rl, u16 cols);
+                  u32 rightCap, u32* rl, u16 cols, TuiStatusBar* bar);
 void BuildStatusComponents(Tui* t, u16 statusY, u16 cols);
 void BuildCwdComponent(Tui* t, u16 cwdY, u16 cols);
 UiLayoutStyle Positioned(u16 x, u16 y, u16 width, u16 height);

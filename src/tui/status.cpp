@@ -71,10 +71,26 @@ void PutScaled(char* buf, u32 cap, u32* len, u64 v) {
   Put(buf, cap, len, units[unit]);
 }
 
+// Half-cell resolution, so each of the 16 steps is ~6% of the window. Any
+// nonzero occupancy shows at least one step: an empty bar means unknown.
+void PutContextBar(char* buf, u32 cap, u32* len, u32 tokens, u32 window,
+                   u32* fillEnd) {
+  constexpr u64 kSteps = kContextBarCells * 2;
+  u64 halves = ((u64)tokens * kSteps + window / 2) / window;
+  if (halves > kSteps) halves = kSteps;
+  if (tokens && halves == 0) halves = 1;
+  for (u64 i = 0; i < halves / 2; i++) Put(buf, cap, len, "\xe2\x94\x81");
+  if (halves % 2) Put(buf, cap, len, "\xe2\x95\xb8");
+  *fillEnd = *len;
+  for (u64 i = (halves + 1) / 2; i < kContextBarCells; i++)
+    Put(buf, cap, len, "\xe2\x94\x80");
+}
+
 // ---- queue ----
 
 void FormatStatus(Tui* t, char* left, u32 leftCap, u32* ll, char* right,
-                  u32 rightCap, u32* rl, u16 cols) {
+                  u32 rightCap, u32* rl, u16 cols, TuiStatusBar* bar) {
+  *bar = {};
   *ll = 0;
   if (t->YoloWarningActive) {
     Put(left, leftCap, ll, "YOLO enabled: Clanker permission checks disabled");
@@ -159,28 +175,31 @@ void FormatStatus(Tui* t, char* left, u32 leftCap, u32* ll, char* right,
   }
   u32 usageCells = TextWidth(StrView{usage, usageLength});
   u32 effortCells = TextWidth(StrView{effort, effortLength});
-  if (rightCells + effortCells + usageCells <= rightLimit) {
+
+  // Narrow rows shed segments in reverse priority: effort, then token usage,
+  // then the context bar. The model name always stays.
+  constexpr StrView kContextLabel = SVL("  ctx ");
+  u32 window = t->Profile.ContextWindow;
+  u32 contextCells = window ? kContextLabel.Length + kContextBarCells : 0;
+  bool showContext = window && rightCells + contextCells <= rightLimit;
+  if (!showContext) contextCells = 0;
+  bool showUsage = rightCells + contextCells + usageCells <= rightLimit;
+  if (!showUsage) usageCells = 0;
+  if (rightCells + effortCells + contextCells + usageCells <= rightLimit)
     PutView(right, rightCap, rl, StrView{effort, effortLength});
-    rightCells += effortCells;
+
+  if (showContext) {
+    PutView(right, rightCap, rl, kContextLabel);
+    bar->Start = *rl;
+    PutContextBar(right, rightCap, rl, t->ContextTokens, window, &bar->FillEnd);
+    bar->End = *rl;
+    u64 used = (u64)t->ContextTokens * 10;
+    bar->FillFg = used > (u64)window * 9   ? CONTEXT_FULL_FG
+                  : used > (u64)window * 7 ? CONTEXT_WARN_FG
+                                           : CONTEXT_FILL_FG;
   }
 
-  char context[24] = {};
-  u32 contextLength = 0;
-  if (t->Profile.ContextWindow) {
-    Put(context, 24, &contextLength, "  ctx:");
-    contextLength += ModelContextWindow_Format(
-        context + contextLength, 24 - contextLength,
-        t->Profile.ContextWindow);
-  }
-  u32 contextCells = TextWidth(StrView{context, contextLength});
-  if (rightCells + contextCells + usageCells <= rightLimit) {
-    PutView(right, rightCap, rl, StrView{context, contextLength});
-    rightCells += contextCells;
-  }
-
-  if (rightCells + usageCells <= rightLimit) {
-    PutView(right, rightCap, rl, StrView{usage, usageLength});
-  }
+  if (showUsage) PutView(right, rightCap, rl, StrView{usage, usageLength});
 }
 
 void BuildStatusComponents(Tui* t, u16 statusY, u16 cols) {
@@ -192,7 +211,9 @@ void BuildStatusComponents(Tui* t, u16 statusY, u16 cols) {
   // transcript scrollbar column. Format against the usable width, not `cols`.
   constexpr u16 kStatusInset = 1;
   u16 contentCols = cols > 2 * kStatusInset ? (u16)(cols - 2 * kStatusInset) : 0;
-  FormatStatus(t, left, 256, &leftLength, right, 256, &rightLength, contentCols);
+  TuiStatusBar bar = {};
+  FormatStatus(t, left, 256, &leftLength, right, 256, &rightLength, contentCols,
+               &bar);
 
   UiLayoutStyle row = Positioned(0, statusY, cols, 1);
   row.Padding.Left = kStatusInset;
@@ -209,8 +230,21 @@ void BuildStatusComponents(Tui* t, u16 statusY, u16 cols) {
   rightProps.Layout.Width = Ui_Content();
   rightProps.Layout.Height = Ui_Fill();
   rightProps.StyleValue = style;
-  Ui_Text(&t->Ui, Ui_Key(SVL("right")), StrView{right, rightLength},
-          rightProps);
+  UiTextSpan spans[4];
+  u32 count = 0;
+  auto span = [&](u32 from, u32 to, Style spanStyle) {
+    if (to > from)
+      spans[count++] = UiTextSpan{StrView{right + from, to - from}, spanStyle};
+  };
+  if (bar.End > bar.Start) {
+    span(0, bar.Start, style);
+    span(bar.Start, bar.FillEnd, TuiSt(t, bar.FillFg, ATTR_NONE));
+    span(bar.FillEnd, bar.End, TuiSt(t, CONTEXT_TRACK_FG, ATTR_NONE));
+    span(bar.End, rightLength, style);
+  } else {
+    spans[count++] = UiTextSpan{StrView{right, rightLength}, style};
+  }
+  Ui_StyledText(&t->Ui, Ui_Key(SVL("right")), spans, count, rightProps);
   Ui_EndContainer(&t->Ui);
 }
 

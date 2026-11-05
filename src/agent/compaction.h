@@ -32,6 +32,12 @@ inline AgentCompactionPolicy AgentCompactionPolicy_Default() {
 // the headroom it defends; otherwise compaction could never lower pressure.
 bool AgentCompactionPolicy_IsValid(const AgentCompactionPolicy* policy);
 
+// The context one response occupied: its whole prompt plus its own output.
+// `Usage::Input` excludes cache hits, so they are added back.
+inline u32 AgentCompaction_UsageTokens(const Usage* use) {
+  return AddSaturated(AddSaturated(use->Input, use->CacheRead), use->Output);
+}
+
 // Byte-derived token estimate for one message and for a materialized context.
 u32 AgentCompaction_EstimateMessageTokens(const Message* message);
 u32 AgentCompaction_EstimateContextTokens(const Message* messages, u32 count);
@@ -44,6 +50,13 @@ u32 AgentCompaction_ReportedContextTokens(const Message* messages, u32 count);
 
 // Provider-reported usage when available, byte estimate otherwise.
 u32 AgentCompaction_ContextTokens(const Message* messages, u32 count);
+
+// Context occupied by the branch ending at `branch[count - 1]`, for display.
+// Like ReportedContextTokens, but walks raw records so it can tell when the
+// newest usage predates a compaction: that usage measured the context the
+// compaction replaced, so the result is 0 (unknown) until the next response.
+// Without any usage on the branch, every message is estimated.
+u32 AgentCompaction_BranchContextTokens(const SessionRecord* const* branch, u32 count);
 
 // True once `contextTokens` has eaten into the window's reserved headroom. A
 // zero `contextWindow` means the model published no window, so nothing fires.

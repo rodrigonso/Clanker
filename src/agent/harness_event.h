@@ -121,6 +121,8 @@ struct AgentHarnessEvent {
 struct AgentHarnessSnapshot {
   Array<Message> Transcript;
   u64 Cursor;
+  // AgentCompaction_BranchContextTokens of the same branch; 0 when unknown.
+  u32 ContextTokens;
   bool Running;
   bool Faulted;
 };

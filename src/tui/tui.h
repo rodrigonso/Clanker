@@ -203,6 +203,9 @@ struct Tui {
   // Status.
   TuiState State;
   Usage Use;
+  // Tokens the active branch occupies in the model's context window, shown as
+  // the status bar's usage bar. 0 when unknown, which reads as an empty bar.
+  u32 ContextTokens;
   u32 Spinner;
   u64 SpinnerStartMs;
   StrView ModelName;
@@ -389,6 +392,10 @@ void Tui_RetryEnded(Tui* t);
 void Tui_PermissionReviewStarted(Tui* t, StrView toolName);
 void Tui_PermissionReviewEnded(Tui* t);
 void Tui_SetQueuedCount(Tui* t, u32 count);
+// Context window occupancy, measured by the caller: Set replaces it with a
+// fresh measurement (0 = unknown), Add accounts for a message appended since.
+void Tui_SetContextTokens(Tui* t, u32 tokens);
+void Tui_AddContextTokens(Tui* t, u32 tokens);
 // Progress updates were skipped to keep up; the transcript is still complete.
 void Tui_NoticeDroppedEvents(Tui* t, u32 count);
 

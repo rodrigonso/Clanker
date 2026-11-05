@@ -146,6 +146,40 @@ bool ScreenRowContains(const Tui* t, u16 row, const char* needle) {
 
 u16 ScrollbarColumn(const Tui* t) { return (u16)(t->Scr.Cols - 1); }
 
+// The status row's context bar, one char per cell: '=' full, '>' half, '-'
+// empty track. Colors are the first fill and first track cell's foreground.
+constexpr u16 kBarCells = 8;
+
+struct ContextBarCells {
+  char Shape[kBarCells + 1];
+  u8 FillFg;
+  u8 TrackFg;
+};
+
+bool ReadContextBar(const Tui* t, u16 row, ContextBarCells* out) {
+  *out = {};
+  if (row >= t->Scr.Rows) return false;
+  const char* label = "ctx ";
+  for (u16 x = 0; x + 4 + kBarCells <= t->Scr.Cols; x++) {
+    bool match = true;
+    for (u16 i = 0; i < 4 && match; i++)
+      match = Screen_BackAt(&t->Scr, (u16)(x + i), row).Ch == (u8)label[i];
+    if (!match) continue;
+    for (u16 i = 0; i < kBarCells; i++) {
+      Cell cell = Screen_BackAt(&t->Scr, (u16)(x + 4 + i), row);
+      char shape = cell.Ch == 0x2501   ? '='
+                   : cell.Ch == 0x2578 ? '>'
+                   : cell.Ch == 0x2500 ? '-'
+                                       : '?';
+      out->Shape[i] = shape;
+      u8* fg = shape == '-' ? &out->TrackFg : &out->FillFg;
+      if (!*fg) *fg = cell.St.Fg;
+    }
+    return true;
+  }
+  return false;
+}
+
 bool ScreenContains(const Tui* t, const char* needle) {
   for (u16 y = 0; y < t->Scr.Rows; y++)
     if (ScreenRowContains(t, y, needle)) return true;
@@ -258,6 +292,7 @@ bool SessionUiCleared(const Tui* t, usize usedBefore) {
          t->Edit.History.Count == 0 && LineEdit_Empty(&t->ModalEdit) &&
          t->ModalEdit.History.Count == 0 && !Tui_HasPendingDisplay(t) &&
          t->DisplayHead == 0 && t->Use.Input == 0 && t->Use.Output == 0 &&
+         t->ContextTokens == 0 &&
          t->State == TuiState::Idle && t->Sess.StateTool.Length == 0 &&
          t->QueuedCount == 0 && t->Follow && t->Top == 0 && t->LastTop == 0 &&
          t->LastPaneH == 0 && t->HoveredEntryId == 0 && t->PressedEntryId == 0 &&
@@ -642,6 +677,7 @@ void TestTui() {
   SessionRecord assistantRecord = {};
   ev = AssistantRecordEvent(&assistantRecord, &m);
   TuiBridge_HarnessEvent(&t, &ev);
+  CHECK(t.ContextTokens == 19);
 
   ev = {};
   ev.Kind = AgentHarnessEventKind::TransientToolStart;
@@ -660,6 +696,23 @@ void TestTui() {
   ev.Tool.CallId = SVL("shell-1");
   ev.Tool.Result = tr;
   TuiBridge_HarnessEvent(&t, &ev);
+  // The tool result has not been billed yet: 16 bytes at 4/token plus 4.
+  CHECK(t.ContextTokens == 19 + 8);
+
+  // Only a compaction that landed invalidates the measurement.
+  ev = {};
+  ev.Kind = AgentHarnessEventKind::TransientTurnEnd;
+  ev.Turn.Kind = AgentTurnKind::Compaction;
+  ev.Turn.Outcome = AgentTurnOutcome::Failed;
+  TuiBridge_HarnessEvent(&t, &ev);
+  CHECK(t.ContextTokens == 27);
+  ev.Turn.Kind = AgentTurnKind::Run;
+  ev.Turn.Outcome = AgentTurnOutcome::Succeeded;
+  TuiBridge_HarnessEvent(&t, &ev);
+  CHECK(t.ContextTokens == 27);
+  ev.Turn.Kind = AgentTurnKind::Compaction;
+  TuiBridge_HarnessEvent(&t, &ev);
+  CHECK(t.ContextTokens == 0);
 
   ev = {};
   ev.Kind = AgentHarnessEventKind::TransientAgentEnd;
@@ -1258,6 +1311,9 @@ void TestTui() {
     ScriptStep step = {};
     step.Text = SVL("Here is the explanation");
     step.Stop = StopReason::Stop;
+    step.Use.Input = 300;
+    step.Use.CacheRead = 20;
+    step.Use.Output = 40;
     ScriptProvider script = {};
     script.Steps = &step;
     script.Count = 1;
@@ -1278,6 +1334,7 @@ void TestTui() {
         AgentHarness_SnapshotFull(&a3, &harness, &snapshot)));
     Tui_HydrateTranscript(&t3, snapshot.Transcript.Data,
                           snapshot.Transcript.Count);
+    Tui_SetContextTokens(&t3, snapshot.ContextTokens);
     u32 hydratedEntries = t3.Model.Entries.Count;
     Tui_ReplaceTranscript(&t3, snapshot.Transcript.Data,
                           snapshot.Transcript.Count);
@@ -1285,7 +1342,8 @@ void TestTui() {
     CHECK_ALL(!AnyRow(&a3, &t3, "assistant"),
               AnyRow(&a3, &t3, "Here is the explanation"),
               t3.Model.Entries.Count == hydratedEntries,
-              t3.State == TuiState::Idle);
+              t3.State == TuiState::Idle, snapshot.ContextTokens == 360,
+              t3.ContextTokens == 360);
 
     Tui_Stop(&t3);
     CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
@@ -2368,12 +2426,14 @@ void TestTui() {
               tc.Profile.Effort == ModelEffort::Medium,
               tc.Profile.ContextWindow == 1000000);
     Tui_ComposeFrame(&tc, 80, 12);
+    ContextBarCells statusBar = {};
+    CHECK(ReadContextBar(&tc, 11, &statusBar));
     CHECK_ALL(ScreenRowContains(&tc, 11, "after"),
               ScreenRowContains(&tc, 11, "e:medium"),
-              ScreenRowContains(&tc, 11, "ctx:1M"));
+              strcmp(statusBar.Shape, "--------") == 0);
     Tui_ComposeFrame(&tc, 20, 12);
     CHECK_ALL(ScreenRowContains(&tc, 11, "after"),
-              !ScreenRowContains(&tc, 11, "ctx:1M"));
+              !ReadContextBar(&tc, 11, &statusBar));
 
     Tui_BeginOperation(&tc, SVL("login"));
     Tui_SetOperationStatus(&tc, SVL("waiting for approval"));
@@ -2399,6 +2459,109 @@ void TestTui() {
 
     Tui_Stop(&tc);
     ArenaRelease(&ac);
+  }
+
+  // The context bar fills in half-cell steps, escalates its color past 70% and
+  // 90% of the window, and narrow rows shed effort and usage before it.
+  {
+    Arena ab = ArenaCreate();
+    TuiOpts ob;
+    ob.ModelName = SVL("m");
+    ob.Profile = ModelRequestProfile{ModelEffort::High, 1600};
+    ob.Color = true;
+    Tui tb;
+    Tui_InitModel(&tb, &ab, ob);
+    const u16 statusY = 11;
+    // Composes first: CHECK_ALL's arguments are evaluated in no fixed order.
+    auto barAt = [&](u16 cols) {
+      Tui_ComposeFrame(&tb, cols, 12);
+      ContextBarCells cells = {};
+      ReadContextBar(&tb, statusY, &cells);
+      return cells;
+    };
+
+    ContextBarCells bar = barAt(80);
+    CHECK_ALL(strcmp(bar.Shape, "--------") == 0, bar.TrackFg == 238);
+
+    // Any occupancy shows, so an empty bar only ever means unknown.
+    Tui_SetContextTokens(&tb, 1);
+    bar = barAt(80);
+    CHECK_ALL(strcmp(bar.Shape, ">-------") == 0, bar.FillFg == 250,
+              bar.TrackFg == 238);
+
+    Tui_SetContextTokens(&tb, 500);
+    bar = barAt(80);
+    CHECK_ALL(strcmp(bar.Shape, "==>-----") == 0, bar.FillFg == 250);
+
+    Tui_AddContextTokens(&tb, 700);
+    bar = barAt(80);
+    CHECK_ALL(tb.ContextTokens == 1200, strcmp(bar.Shape, "======--") == 0,
+              bar.FillFg == 214);
+
+    Tui_SetContextTokens(&tb, 1500);
+    bar = barAt(80);
+    CHECK_ALL(strcmp(bar.Shape, "=======>") == 0, bar.FillFg == 196);
+
+    Tui_SetContextTokens(&tb, 5000);
+    bar = barAt(80);
+    CHECK_ALL(strcmp(bar.Shape, "========") == 0, bar.FillFg == 196);
+
+    // "auto · m" is 8 cells, the bar segment 14, usage 17, and effort 8.
+    tb.Use.Input = 2048;
+    tb.Use.Output = 1024;
+    Tui_ComposeFrame(&tb, 80, 12);
+    CHECK_ALL(ScreenRowContains(&tb, statusY, "e:high"),
+              ReadContextBar(&tb, statusY, &bar),
+              ScreenRowContains(&tb, statusY, "1.0KiB"));
+    Tui_ComposeFrame(&tb, 41, 12);
+    CHECK_ALL(!ScreenRowContains(&tb, statusY, "e:high"),
+              ReadContextBar(&tb, statusY, &bar),
+              ScreenRowContains(&tb, statusY, "1.0KiB"));
+    Tui_ComposeFrame(&tb, 24, 12);
+    CHECK_ALL(!ScreenRowContains(&tb, statusY, "e:high"),
+              ReadContextBar(&tb, statusY, &bar),
+              !ScreenRowContains(&tb, statusY, "KiB"),
+              ScreenRowContains(&tb, statusY, "auto"));
+
+    // A model without a published window has nothing to measure against.
+    Tui_SetModelProfile(&tb, SVL("m"), ModelRequestProfile{ModelEffort::High, 0});
+    Tui_ComposeFrame(&tb, 80, 12);
+    CHECK(!ReadContextBar(&tb, statusY, &bar));
+
+    Tui_Stop(&tb);
+    ArenaRelease(&ab);
+  }
+
+  // Reported usage replaces the running total, since it measured the whole
+  // prompt; a response without usage is estimated on top of it instead.
+  {
+    Arena au = ArenaCreate();
+    TuiOpts ou;
+    ou.ModelName = SVL("m");
+    ou.Color = false;
+    Tui tu;
+    Tui_InitModel(&tu, &au, ou);
+    Tui_SetContextTokens(&tu, 1000);
+
+    Message unreported = Message_AssistantEmpty(&au);
+    Array_Push(&unreported.Content, Content_Text(SVL("abcdefgh")));
+    SessionRecord unreportedRecord = {};
+    AgentHarnessEvent recordEvent =
+        AssistantRecordEvent(&unreportedRecord, &unreported);
+    TuiBridge_HarnessEvent(&tu, &recordEvent);
+    CHECK(tu.ContextTokens == 1000 + 2 + 4);
+
+    Message reported = Message_AssistantEmpty(&au);
+    reported.Use.Input = 30;
+    reported.Use.CacheRead = 100;
+    reported.Use.Output = 5;
+    SessionRecord reportedRecord = {};
+    recordEvent = AssistantRecordEvent(&reportedRecord, &reported);
+    TuiBridge_HarnessEvent(&tu, &recordEvent);
+    CHECK(tu.ContextTokens == 135);
+
+    Tui_Stop(&tu);
+    ArenaRelease(&au);
   }
 
   // Session clear reclaims the resettable arena and returns all conversation/UI
@@ -2435,6 +2598,7 @@ void TestTui() {
     StreamReveal_Push(&resetTui.Reveal, SVL("pending reveal"));
     resetTui.Use.Input = 11;
     resetTui.Use.Output = 7;
+    resetTui.ContextTokens = 500;
     resetTui.State = TuiState::Streaming;
     resetTui.Sess.StateTool = SVL("old tool");
     resetTui.QueuedCount = 3;

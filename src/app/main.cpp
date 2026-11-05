@@ -259,6 +259,7 @@ static void RunTuiRepl(InteractiveRuntime* rt) {
   rt->EventSink = sink;
   Tui_HydrateTranscript(&tui, snapshot.Transcript.Data,
                         snapshot.Transcript.Count);
+  Tui_SetContextTokens(&tui, snapshot.ContextTokens);
   ArenaRelease(&hydrateMem);
 
   Http_GlobalInit();

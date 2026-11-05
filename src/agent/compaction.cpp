@@ -129,10 +129,7 @@ u32 AgentCompaction_ReportedContextTokens(const Message* messages, u32 count) {
   }
   if (anchor == count) return 0;
 
-  const Usage* use = &messages[anchor].Use;
-  u32 total = use->Input;
-  total = AddSaturated(total, use->CacheRead);
-  total = AddSaturated(total, use->Output);
+  u32 total = AgentCompaction_UsageTokens(&messages[anchor].Use);
   for (u32 i = anchor + 1; i < count; i++)
     total = AddSaturated(total, AgentCompaction_EstimateMessageTokens(&messages[i]));
   return total;
@@ -141,6 +138,24 @@ u32 AgentCompaction_ReportedContextTokens(const Message* messages, u32 count) {
 u32 AgentCompaction_ContextTokens(const Message* messages, u32 count) {
   u32 reported = AgentCompaction_ReportedContextTokens(messages, count);
   return reported ? reported : AgentCompaction_EstimateContextTokens(messages, count);
+}
+
+u32 AgentCompaction_BranchContextTokens(const SessionRecord* const* branch, u32 count) {
+  if (!branch) return 0;
+  u32 trailing = 0;
+  for (u32 i = count; i > 0; i--) {
+    const SessionRecord* record = branch[i - 1];
+    if (!record) continue;
+    if (record->Kind == SessionRecordKind::Compaction) return 0;
+    if (record->Kind != SessionRecordKind::Message) continue;
+    const Message* message = &record->MessageEntry.Value;
+    if (message->Kind == Role::Assistant) {
+      u32 reported = AgentCompaction_UsageTokens(&message->Use);
+      if (reported) return AddSaturated(reported, trailing);
+    }
+    trailing = AddSaturated(trailing, AgentCompaction_EstimateMessageTokens(message));
+  }
+  return trailing;
 }
 
 bool AgentCompaction_ShouldCompact(const AgentCompactionPolicy* policy,

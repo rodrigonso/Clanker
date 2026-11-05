@@ -242,6 +242,13 @@ SessionResult BuildSnapshotLocked(Arena* arena, AgentHarness* harness,
       Array_Make<Message>(arena, branch.Count ? branch.Count : 1);
   for (u32 i = 0; i < branch.Count; i++)
     Array_Push(&snapshot.Transcript, Message_Clone(arena, branch.Data[i]));
+  // The materialized context cannot say whether its newest usage predates a
+  // compaction, so the measurement walks the raw records instead.
+  Array<const SessionRecord*> records = {};
+  if (SessionResult_IsOk(SessionReducer_Ancestry(
+          &harness->Reduction, &scratch, harness->Reduction.HeadId, &records)))
+    snapshot.ContextTokens =
+        AgentCompaction_BranchContextTokens(records.Data, records.Count);
   ArenaRelease(&scratch);
   snapshot.Cursor =
       harness->Records.Count ? harness->Records.Data[harness->Records.Count - 1].Seq : 0;

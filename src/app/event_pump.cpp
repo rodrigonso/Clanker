@@ -153,6 +153,7 @@ static void PumpHarnessEvent(HarnessEventPump* pump,
   replay.Kind = AgentHarnessEventKind::TransientToolEnd;
   replay.Cursor = event->Cursor;
   replay.Tool.CallId = message->ToolCallId;
+  replay.Tool.Name = message->ToolName;
   replay.Tool.Result.Content = message->Content;
   replay.Tool.IsError = message->IsError;
   HarnessEventSink_Emit(pump->Sink, &replay);
@@ -186,9 +187,11 @@ static void RunHarnessEventPump(void* user) {
                              pump->TuiView ? &snapshot : nullptr,
                              &pump->Watch);
       ClearLiveToolEnds(pump);
-      if (SessionResult_IsOk(watched) && pump->TuiView)
+      if (SessionResult_IsOk(watched) && pump->TuiView) {
         Tui_ReplaceTranscript(pump->TuiView, snapshot.Transcript.Data,
                               snapshot.Transcript.Count);
+        Tui_SetContextTokens(pump->TuiView, snapshot.ContextTokens);
+      }
       Mutex_Unlock(&pump->WatchGuard);
       if (!SessionResult_IsOk(watched)) break;
       continue;

@@ -1822,6 +1822,7 @@ bool Tui_ClearSession(Tui* t) {
   // exhaustive way the rebuild does.
   ClearSessionScopedStringsLocked(t);
   t->Use = {};
+  t->ContextTokens = 0;
   t->Spinner = 0;
   t->SpinnerStartMs = 0;
   t->QueuedCount = 0;
@@ -2202,6 +2203,20 @@ void Tui_PermissionReviewEnded(Tui* t) {
 void Tui_SetQueuedCount(Tui* t, u32 count) {
   Mutex_Lock(&t->Lock);
   t->QueuedCount = count;
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+}
+
+void Tui_SetContextTokens(Tui* t, u32 tokens) {
+  Mutex_Lock(&t->Lock);
+  t->ContextTokens = tokens;
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+}
+
+void Tui_AddContextTokens(Tui* t, u32 tokens) {
+  Mutex_Lock(&t->Lock);
+  t->ContextTokens = AddSaturated(t->ContextTokens, tokens);
   Wake(t);
   Mutex_Unlock(&t->Lock);
 }

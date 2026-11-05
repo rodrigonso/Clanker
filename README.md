@@ -936,8 +936,11 @@ alternate-screen, double-buffered **differential renderer** (own cell grid +
 scrollback), markdown-rendered assistant output (headings, lists, tables,
 blockquotes, code blocks), a **sticky working-directory + git-branch line**
 just above the prompt, a minimal status line along the bottom
-(spinner and state on the left; model, supported effort/context, and token
-usage right-aligned), and a **multi-line input editor**. The first frame is
+(spinner and state on the left; model, supported effort, a small context-window
+usage bar, and token usage right-aligned), and a **multi-line input editor**.
+The bar appears only for models that publish a context window. It turns amber
+past 70% of the window and red past 90%, and reads empty right after a
+compaction until the next response reports usage. The first frame is
 painted synchronously before
 HTTP initialization, cwd/git context discovery, and credential warmup; key input
 starts before the remaining post-frame work. It runs three threads — the agent

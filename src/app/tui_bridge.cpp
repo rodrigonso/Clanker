@@ -81,6 +81,13 @@ void TuiBridge_HarnessEvent(void* user, const AgentHarnessEvent* ev) {
       if (ev->Record->Kind != SessionRecordKind::Message) break;
       const Message* message = &ev->Record->MessageEntry.Value;
       if (message->Kind != Role::Assistant) break;
+      // Reported usage covers the whole prompt this response saw, so it
+      // replaces the running total rather than adding to it.
+      u32 reported = AgentCompaction_UsageTokens(&message->Use);
+      if (reported)
+        Tui_SetContextTokens(t, reported);
+      else
+        Tui_AddContextTokens(t, AgentCompaction_EstimateMessageTokens(message));
       Tui_AssistantMessageEnded(t, message->Stop, message->Use,
                                 message->ErrorMessage);
       break;
@@ -91,9 +98,23 @@ void TuiBridge_HarnessEvent(void* user, const AgentHarnessEvent* ev) {
     case AgentHarnessEventKind::TransientToolUpdate:
       Tui_ToolProgress(t, ev->Tool.CallId, FirstText(ev->Tool.Result));
       break;
-    case AgentHarnessEventKind::TransientToolEnd:
+    case AgentHarnessEventKind::TransientToolEnd: {
+      // Estimated the same way the snapshot measures the durable result.
+      Message result = {};
+      result.Kind = Role::ToolResult;
+      result.Content = ev->Tool.Result.Content;
+      result.ToolName = ev->Tool.Name;
+      Tui_AddContextTokens(t, AgentCompaction_EstimateMessageTokens(&result));
       Tui_ToolEnded(t, ev->Tool.CallId, FirstText(ev->Tool.Result),
                     ev->Tool.IsError);
+      break;
+    }
+    // The summary replaced the measured context, and nothing measures the new
+    // one until the next response reports usage.
+    case AgentHarnessEventKind::TransientTurnEnd:
+      if (ev->Turn.Kind == AgentTurnKind::Compaction &&
+          ev->Turn.Outcome == AgentTurnOutcome::Succeeded)
+        Tui_SetContextTokens(t, 0);
       break;
     case AgentHarnessEventKind::TransientAgentEnd:
       Tui_TurnEnded(t);

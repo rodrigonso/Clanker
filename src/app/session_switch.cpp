@@ -24,9 +24,11 @@ bool RuntimeRestartWatch(InteractiveRuntime* rt,
     EmitCommandError(ux, watched.Message);
     return false;
   }
-  if (rt->TuiView)
+  if (rt->TuiView) {
     Tui_ReplaceTranscript(rt->TuiView, snapshot.Transcript.Data,
                           snapshot.Transcript.Count);
+    Tui_SetContextTokens(rt->TuiView, snapshot.ContextTokens);
+  }
   ArenaRelease(&scratch);
   return true;
 }
