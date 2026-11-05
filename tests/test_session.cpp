@@ -1210,6 +1210,27 @@ static void TestJsonlRepository(Arena* arena) {
   Array<SessionRecord> repaired = {};
   CHECK(SessionResult_IsOk(SessionLog_ReadAll(&writer, arena, &repaired)));
   CHECK(repaired.Count == 2);
+  // An open handle retains only record envelopes, so message bodies have to
+  // come back from the file -- both those loaded at open and those appended
+  // through this handle afterwards.
+  CHECK_ALL(repaired.Data[1].MessageEntry.Value.Content.Count == 1,
+            StrView_Eq(repaired.Data[1].MessageEntry.Value.Content.Data[0].Text,
+                       SVL("before crash")));
+  SessionRecord reply = {};
+  reply.EntryId = TestId(142);
+  reply.Kind = SessionRecordKind::Message;
+  reply.MessageEntry.ParentId = user.EntryId;
+  reply.MessageEntry.Value = UserMessage(arena, "after reopen");
+  CHECK(SessionResult_IsOk(SessionLog_Append(&writer, &reply)));
+  Array<SessionRecord> extended = {};
+  CHECK(SessionResult_IsOk(SessionLog_ReadAll(&writer, arena, &extended)));
+  CHECK_ALL(extended.Count == 3,
+            extended.Data[1].MessageEntry.Value.Content.Count == 1,
+            StrView_Eq(extended.Data[1].MessageEntry.Value.Content.Data[0].Text,
+                       SVL("before crash")),
+            extended.Data[2].MessageEntry.Value.Content.Count == 1,
+            StrView_Eq(extended.Data[2].MessageEntry.Value.Content.Data[0].Text,
+                       SVL("after reopen")));
   SessionLog_Close(&writer);
 
   StrView repairedBytes = {};
@@ -1346,6 +1367,30 @@ static void TestCompactionReplay(Arena* arena) {
                 StrView_EqCStr(context.Data[1].Content.Data[0].Text, "two"),
                 StrView_EqCStr(context.Data[2].Content.Data[0].Text, "reply"));
     }
+
+    // A prefix keeps the compaction applied even though the compaction entry
+    // itself lies past the limit: what the model sees of [root..userTwo] is
+    // the summary and "two", never the raw turns the summary replaced.
+    Array<Message> prefix = {};
+    CHECK(SessionResult_IsOk(SessionReducer_ContextThrough(
+        arena, &reduction, retained.EntryId, userTwo.EntryId, &prefix)));
+    CHECK(prefix.Count == 2);
+    if (prefix.Count == 2) {
+      CHECK_ALL(StrView_EqCStr(prefix.Data[0].Content.Data[0].Text, "summary one"),
+                StrView_EqCStr(prefix.Data[1].Content.Data[0].Text, "two"));
+    }
+    Array<Message> folded = {};
+    CHECK(SessionResult_IsOk(SessionReducer_ContextThrough(
+        arena, &reduction, retained.EntryId, assistantOne.EntryId, &folded)));
+    CHECK(folded.Count == 1);
+    Array<Message> whole = {};
+    CHECK(SessionResult_IsOk(SessionReducer_ContextThrough(
+        arena, &reduction, retained.EntryId, retained.EntryId, &whole)));
+    CHECK(whole.Count == 3);
+    Array<Message> offBranchLimit = {};
+    CHECK(SessionReducer_ContextThrough(arena, &reduction, retained.EntryId, sibling.EntryId,
+                                        &offBranchLimit)
+              .Status == SessionStatus::InvalidArgument);
   }
 
   // A legacy whole-branch span (root through the head) still collapses to the

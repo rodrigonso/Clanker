@@ -27,7 +27,12 @@ struct JsonValue {
   u32 MemberCount;
 };
 
-// Returns nullptr on parse error.
+// Deepest container nesting Json_Parse accepts. Anything a caller walks
+// recursively (clone, compare, write, schema validation) inherits this bound.
+constexpr u32 JSON_MAX_DEPTH = 256;
+
+// Returns nullptr on parse error, including input nested deeper than
+// JSON_MAX_DEPTH and containers left unterminated at the end of input.
 JsonValue* Json_Parse(Arena* arena, StrView text);
 
 // Json_Parse needs its input null-terminated; parse a view that may not be.

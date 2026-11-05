@@ -420,6 +420,24 @@ static FsCanonicalPermissionPath Fs_CanonicalizePermissionAbsolute(
   return result;
 }
 
+static bool Fs_IsProtectedComponent(StrView name) {
+#if defined(_WIN32)
+  // Win32 opens `.git.`, `.git ` and `.git::$INDEX_ALLOCATION` as `.git`.
+  for (u32 i = 0; i < name.Length; i++) {
+    if (name.Data[i] == ':') {
+      name.Length = i;
+      break;
+    }
+  }
+  while (name.Length && (name.Data[name.Length - 1] == '.' ||
+                         name.Data[name.Length - 1] == ' '))
+    name.Length--;
+#endif
+  return StrView_EqInsensitiveAscii(name, SVL(".git")) ||
+         StrView_EqInsensitiveAscii(name, SVL(".clanker")) ||
+         StrView_EqInsensitiveAscii(name, SVL(".agents"));
+}
+
 FsPermissionTarget Fs_ResolvePermissionTarget(Arena* arena,
                                               StrView workingDirectory,
                                               StrView target) {
@@ -451,6 +469,17 @@ FsPermissionTarget Fs_ResolvePermissionTarget(Arena* arena,
   result.Contained =
       safe && rootPath.Complete && Fs_IsDir(rootPath.Path) &&
       Fs_PathContained(rootPath.Path, targetPath.Path);
+  if (result.Contained) {
+    u32 tail = ClankerMin(rootPath.Path.Length, targetPath.Path.Length);
+    StrView path = targetPath.Path;
+    u32 start = tail;
+    for (u32 i = tail; i <= path.Length && !result.Protected; i++) {
+      if (i < path.Length && !Fs_IsSep(path.Data[i])) continue;
+      result.Protected =
+          Fs_IsProtectedComponent(StrView{path.Data + start, i - start});
+      start = i + 1;
+    }
+  }
   return result;
 }
 
@@ -468,12 +497,9 @@ bool Fs_DescribeMutationPermission(Arena* arena, const ToolArgs* args,
   FsPermissionTarget target =
       Fs_ResolvePermissionTarget(arena, workingDirectory, path);
   StrView display = target.Path.Length ? target.Path : path;
-  u32 room = actionPrefix.Length < 2048u ? 2048u - actionPrefix.Length : 0;
-  u32 displayLength = ClankerMin(display.Length, room);
-  if (actionPrefix.Length > 2048u) actionPrefix.Length = 2048u;
-  StrBuf action = StrBuf_Make(arena, actionPrefix.Length + displayLength + 1);
+  StrBuf action = StrBuf_Make(arena, actionPrefix.Length + display.Length + 1);
   StrBuf_Append(&action, actionPrefix);
-  StrBuf_Append(&action, StrView{display.Data, displayLength});
+  StrBuf_Append(&action, display);
   out->Action = StrBuf_View(&action);
   if (display.Length + grantPrefix.Length <= 8192u) {
     StrBuf key = StrBuf_Make(arena, grantPrefix.Length + display.Length + 1);
@@ -481,7 +507,7 @@ bool Fs_DescribeMutationPermission(Arena* arena, const ToolArgs* args,
     StrBuf_Append(&key, display);
     out->GrantKey = StrBuf_View(&key);
   }
-  out->AutoAllow = target.Contained;
+  out->AutoAllow = target.Contained && !target.Protected;
   return true;
 }
 

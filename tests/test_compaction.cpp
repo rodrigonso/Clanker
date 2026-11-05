@@ -84,6 +84,14 @@ void TestEstimator(Arena* arena) {
   Message messages[2] = {user, result};
   CHECK(AgentCompaction_EstimateContextTokens(messages, 2) == 10);
   CHECK(AgentCompaction_EstimateContextTokens(nullptr, 0) == 0);
+
+  // An image costs a flat 1200 tokens however large its encoding, so one
+  // screenshot cannot masquerade as a full context window.
+  StrBuf encoded = StrBuf_Make(arena, 1u << 20);
+  for (u32 i = 0; i < (1u << 20) - 1; i++) StrBuf_AppendChar(&encoded, 'A');
+  Message image = UserMessage(arena, SVL("aaaa"));
+  Array_Push(&image.Content, Content_Image(StrBuf_View(&encoded), SVL("image/png")));
+  CHECK(AgentCompaction_EstimateMessageTokens(&image) == 5 + 1200);
 }
 
 void TestReportedTokens(Arena* arena) {

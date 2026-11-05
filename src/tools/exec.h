@@ -22,6 +22,11 @@ typedef bool (*ExecChunkFn)(void* user, StrView chunk);
 // Run `command` through the platform shell (`cmd /c` on Windows, `/bin/sh -c`
 // on POSIX). Aborts the whole process tree if `abort` becomes non-zero or
 // `timeoutMs` elapses.
+//
+// On Windows the shell is the system cmd.exe, and a bare program name resolves
+// only through PATH, never from the working directory, matching POSIX shells:
+// a script in the workspace has to be named with a path (`.\build.bat`). The
+// same holds for Exec_RunShellInput below.
 ExecResult Exec_RunStreaming(Arena* arena, StrView command, u32 timeoutMs,
                              volatile i32* abort, ExecChunkFn onData,
                              void* user, StrBuf* output = nullptr);

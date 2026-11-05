@@ -4,11 +4,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "base/file_io.h"
+
 #if defined(_WIN32)
 #include <windows.h>
 // psapi.h must follow windows.h
 #include <psapi.h>
-#include <direct.h>
+#include "base/win32_utf8.h"
 #else
 #include <limits.h>
 #include <mach/mach.h>
@@ -124,7 +126,9 @@ enum class PathKind { Missing, Dir, File };
 
 PathKind StatKind(const char* path) {
 #if defined(_WIN32)
-  DWORD at = GetFileAttributesA(path);
+  wchar_t native[4096];
+  if (!Win32_Path(SV(path), native, 4096)) return PathKind::Missing;
+  DWORD at = GetFileAttributesW(native);
   if (at == INVALID_FILE_ATTRIBUTES) return PathKind::Missing;
   return (at & FILE_ATTRIBUTE_DIRECTORY) ? PathKind::Dir : PathKind::File;
 #else
@@ -134,17 +138,16 @@ PathKind StatKind(const char* path) {
 #endif
 }
 
-// Read an entire (small) file into `a`. Empty view on failure. The result is a
-// StrBuf so callers can also treat .Data as a C string.
+// .git files and HEAD are a line or two; anything bigger is not one.
+constexpr u64 GIT_SMALL_FILE_MAX_BYTES = 64 * 1024;
+
+// Read an entire (small) file into `a`. Empty view on failure.
 StrView ReadSmallFile(Arena* a, const char* path) {
-  FILE* f = fopen(path, "rb");
-  if (!f) return StrView{nullptr, 0};
-  StrBuf b = StrBuf_Make(a, 256);
-  char buf[512];
-  usize n;
-  while ((n = fread(buf, 1, sizeof(buf), f)) > 0) StrBuf_Append(&b, StrView{buf, (u32)n});
-  fclose(f);
-  return StrBuf_View(&b);
+  StrView content = {};
+  if (File_ReadAll(a, SV(path), &content, GIT_SMALL_FILE_MAX_BYTES) !=
+      FileIoResult::Success)
+    return StrView{nullptr, 0};
+  return content;
 }
 
 bool StartsWithAt(StrView s, u32 i, StrView pfx) {
@@ -169,13 +172,22 @@ bool HasHomePrefix(StrView path, StrView home) {
 }  // namespace
 
 StrView Sys_CurrentDir(Arena* a) {
-  char buf[4096];
 #if defined(_WIN32)
-  if (!_getcwd(buf, (int)sizeof(buf))) return StrView{nullptr, 0};
+  wchar_t buf[4096];
+  DWORD length = GetCurrentDirectoryW(4096, buf);
+  if (!length || length >= 4096) return StrView{nullptr, 0};
+  StrView utf8 = {};
+  if (!Win32_Utf8(a, buf, length, &utf8)) return StrView{nullptr, 0};
+  StrView trimmed = StripTrailingSep(utf8);
+  // Win32_Utf8 allocated the buffer, so terminating the trimmed view in place
+  // keeps .Data usable as a C string without a second copy.
+  ((char*)trimmed.Data)[trimmed.Length] = 0;
+  return trimmed;
 #else
+  char buf[4096];
   if (!getcwd(buf, sizeof(buf))) return StrView{nullptr, 0};
-#endif
   return DupCStr(a, StripTrailingSep(SV(buf)));
+#endif
 }
 
 StrView Sys_ExecutablePath(Arena* a) {
@@ -187,14 +199,7 @@ StrView Sys_ExecutablePath(Arena* a) {
     DWORD length = GetModuleFileNameW(nullptr, path, capacity);
     if (!length) break;
     if (length == capacity) continue;
-    int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, path,
-                                    (int)length, nullptr, 0, nullptr, nullptr);
-    if (bytes <= 0) break;
-    char* utf8 = ArenaPushArray(&scratch, char, (u32)bytes + 1);
-    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, path, (int)length,
-                            utf8, bytes, nullptr, nullptr) != bytes)
-      break;
-    result = DupCStr(a, StrView{utf8, (u32)bytes});
+    Win32_Utf8(a, path, length, &result);
     break;
   }
 #else
@@ -216,24 +221,31 @@ StrView Sys_ExecutablePath(Arena* a) {
 
 bool Sys_SetCurrentDir(StrView path) {
   if (!path.Data || !path.Length || path.Length >= 4096) return false;
+#if defined(_WIN32)
+  wchar_t native[4096];
+  return Win32_Path(path, native, 4096) && SetCurrentDirectoryW(native) != 0;
+#else
   char native[4096];
   memcpy(native, path.Data, path.Length);
   native[path.Length] = 0;
-#if defined(_WIN32)
-  return _chdir(native) == 0;
-#else
   return chdir(native) == 0;
 #endif
 }
 
 StrView Sys_HomeDir(Arena* a) {
 #if defined(_WIN32)
-  const char* h = getenv("USERPROFILE");
+  const wchar_t* h = _wgetenv(L"USERPROFILE");
+  if (!h || !*h) return StrView{nullptr, 0};
+  StrView utf8 = {};
+  if (!Win32_Utf8(a, h, (u32)wcslen(h), &utf8)) return StrView{nullptr, 0};
+  StrView trimmed = StripTrailingSep(utf8);
+  ((char*)trimmed.Data)[trimmed.Length] = 0;
+  return trimmed;
 #else
   const char* h = getenv("HOME");
-#endif
   if (!h || !*h) return StrView{nullptr, 0};
   return DupCStr(a, StripTrailingSep(SV(h)));
+#endif
 }
 
 StrView Sys_AbbreviatePath(Arena* a, StrView path, StrView home) {

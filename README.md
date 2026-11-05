@@ -153,8 +153,7 @@ selected model provider. Provider access and model usage are separate from the
 local executable. Ask mode is an approval policy, not an OS sandbox.
 
 **Preview limitations:** macOS native qualification is pending the native CI
-runs and interactive release checks. Some Windows filesystem/process operations
-still require ASCII installation, profile, and workspace paths. Archives are
+runs and interactive release checks. Archives are
 unsigned (and not notarized on macOS), so the OS may warn or block first launch.
 Do not disable OS-wide protections to run an untrusted download. SHA256
 checksums detect corruption, not publisher identity.
@@ -416,9 +415,7 @@ runtime dependencies. Windows Clanker binaries statically link the release CRT
 and require no VC runtime DLLs; packaging rejects a Clanker binary that imports
 them. Windows 10+ and its certificate store are still required. macOS uses
 system frameworks; the unsigned preview targets macOS 15+ in native CI.
-Native CI and interactive qualification must pass before publishing. Existing
-Windows ANSI filesystem/process operations still require ASCII installation
-and workspace paths.
+Native CI and interactive qualification must pass before publishing.
 
 Each archive contains `share/clanker/DISTRIBUTION.txt` and dependency notices;
 that file also marks a script install, which `clanker upgrade` requires. The
@@ -687,6 +684,10 @@ Each command runs through the platform shell and receives a JSON payload on
 }
 ```
 
+On Windows the platform shell is the system `cmd.exe`, which resolves a bare
+program name through `PATH` only, never the working directory; name a script in
+the project as `.\notify.bat`. The `shell` tool follows the same rule.
+
 `transcript_path` is reported directly so a consumer never has to re-derive the
 project key. `tool_name`, `tool_call_id`, and `tool_input` are present only for
 the tool events; `tool_input` is the canonical, already-validated arguments as a
@@ -765,10 +766,13 @@ interactive session:
 - **Ask** runs inspection tools directly and prompts before writes, edits,
   shell commands, and unknown tools.
 - **Auto** also admits workspace-local writes/edits and a narrow reversible
-  shell allowlist. Every other action goes to the configured reviewer model,
-  which is an extra billed request. A non-allow becomes a failed tool result
-  carrying an opaque request ID; the model must pass that exact ID to
-  `ask_user` to open the real approval prompt.
+  shell allowlist. Writes under a `.git`, `.clanker`, or `.agents` directory
+  do not count as workspace-local, since they steer later execution. Every
+  other action goes to the configured reviewer model, which is an extra billed
+  request; an action too long to show in full skips the reviewer and waits for
+  a person. A non-allow becomes a failed tool result carrying an opaque
+  request ID; the model must pass that exact ID to `ask_user` to open the real
+  approval prompt.
 - **Yolo** bypasses the built-in checks and reviewer, but not external
   `PreToolUse` hooks. An unacknowledged Yolo activation warns prominently.
 

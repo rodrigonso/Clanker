@@ -1,5 +1,6 @@
 #include "json/json.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,8 +13,48 @@ struct P {
   const char* p;
   const char* end;
   Arena* a;
+  u32 depth;
   bool ok;
 };
+
+// Fails a container that would nest deeper than JSON_MAX_DEPTH. The parser and
+// every consumer that walks the DOM recurse once per level, so the bound is
+// what keeps hostile input (a tool call's arguments, a session line) from
+// exhausting a worker thread's stack.
+bool EnterContainer(P* s) {
+  if (++s->depth > JSON_MAX_DEPTH) {
+    s->ok = false;
+    return false;
+  }
+  s->p++;
+  return true;
+}
+
+bool IsDigit(char c) { return c >= '0' && c <= '9'; }
+
+// Returns the end of the RFC 8259 number starting at p, or null when p does not
+// start one.
+const char* ScanNumber(const char* p, const char* end) {
+  if (p < end && *p == '-') p++;
+  if (p == end || !IsDigit(*p)) return nullptr;
+  if (*p == '0') {
+    p++;
+  } else {
+    while (p < end && IsDigit(*p)) p++;
+  }
+  if (p < end && *p == '.') {
+    p++;
+    if (p == end || !IsDigit(*p)) return nullptr;
+    while (p < end && IsDigit(*p)) p++;
+  }
+  if (p < end && (*p == 'e' || *p == 'E')) {
+    p++;
+    if (p < end && (*p == '+' || *p == '-')) p++;
+    if (p == end || !IsDigit(*p)) return nullptr;
+    while (p < end && IsDigit(*p)) p++;
+  }
+  return p;
+}
 
 void SkipWs(P* s) {
   while (s->p < s->end) {
@@ -89,18 +130,21 @@ StrView ParseString(P* s) {
 
 JsonValue* ParseValue(P* s);
 
+// Containers only succeed through their closing bracket; running out of input
+// first is a parse error, so a truncated document never reads as complete.
 JsonValue* ParseObject(P* s) {
-  s->p++;  // {
+  if (!EnterContainer(s)) return nullptr;
   Array<JsonMember> members = Array_Make<JsonMember>(s->a, 8);
   SkipWs(s);
   if (s->p < s->end && *s->p == '}') {
     s->p++;
+    s->depth--;
     JsonValue* v = NewVal(s, JsonKind::Object);
     v->Members = members.Data;
     v->MemberCount = 0;
     return v;
   }
-  while (s->p < s->end) {
+  for (;;) {
     SkipWs(s);
     if (s->p >= s->end || *s->p != '"') {
       s->ok = false;
@@ -136,6 +180,7 @@ JsonValue* ParseObject(P* s) {
     s->ok = false;
     return nullptr;
   }
+  s->depth--;
   JsonValue* v = NewVal(s, JsonKind::Object);
   v->Members = members.Data;
   v->MemberCount = members.Count;
@@ -143,17 +188,18 @@ JsonValue* ParseObject(P* s) {
 }
 
 JsonValue* ParseArray(P* s) {
-  s->p++;  // [
+  if (!EnterContainer(s)) return nullptr;
   Array<JsonValue*> items = Array_Make<JsonValue*>(s->a, 8);
   SkipWs(s);
   if (s->p < s->end && *s->p == ']') {
     s->p++;
+    s->depth--;
     JsonValue* v = NewVal(s, JsonKind::Array);
     v->Items = items.Data;
     v->Count = 0;
     return v;
   }
-  while (s->p < s->end) {
+  for (;;) {
     JsonValue* val = ParseValue(s);
     if (!s->ok) return nullptr;
     Array_Push(&items, val);
@@ -173,6 +219,7 @@ JsonValue* ParseArray(P* s) {
     s->ok = false;
     return nullptr;
   }
+  s->depth--;
   JsonValue* v = NewVal(s, JsonKind::Array);
   v->Items = items.Data;
   v->Count = items.Count;
@@ -221,14 +268,27 @@ JsonValue* ParseValue(P* s) {
     s->ok = false;
     return nullptr;
   }
-  // number
-  char* endptr = nullptr;
-  double d = strtod(s->p, &endptr);
-  if (endptr == s->p) {
+  // Only JSON's own number grammar is accepted, and strtod must consume exactly
+  // that span: alone it would also take "+1", "-inf", "0x10", "01" and "1.",
+  // none of which re-serialize as JSON. A finite check rejects "1e400".
+  const char* numberEnd = ScanNumber(s->p, s->end);
+  if (!numberEnd) {
     s->ok = false;
     return nullptr;
   }
-  s->p = endptr;
+  u32 length = (u32)(numberEnd - s->p);
+  // The input view is not NUL-terminated, so strtod reads from a copy.
+  char local[64];
+  char* text = length < sizeof(local) ? local : ArenaPushArray(s->a, char, length + 1u);
+  memcpy(text, s->p, length);
+  text[length] = '\0';
+  char* endptr = nullptr;
+  double d = strtod(text, &endptr);
+  if (endptr != text + length || !isfinite(d)) {
+    s->ok = false;
+    return nullptr;
+  }
+  s->p = numberEnd;
   JsonValue* v = NewVal(s, JsonKind::Number);
   v->Number = d;
   return v;
@@ -241,6 +301,7 @@ JsonValue* Json_Parse(Arena* arena, StrView text) {
   s.p = text.Data;
   s.end = text.Data + text.Length;
   s.a = arena;
+  s.depth = 0;
   s.ok = true;
   JsonValue* v = ParseValue(&s);
   SkipWs(&s);

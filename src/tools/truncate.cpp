@@ -84,7 +84,6 @@ static u32 Trunc_TailByteStart(StrView content, u32 start, u32 maxBytes) {
 static TruncResult Trunc_MakeResult(Arena* arena, StrView content, u32 start, u32 end, bool byBytes) {
   TruncResult result = {};
   result.TotalLines = Trunc_CountLines(content);
-  result.TotalBytes = content.Length;
 
   result.Truncated = start != 0 || end != content.Length;
   result.ByBytes = result.Truncated && byBytes;
@@ -96,7 +95,6 @@ static TruncResult Trunc_MakeResult(Arena* arena, StrView content, u32 start, u3
   }
 
   result.OutputLines = Trunc_CountLines(result.Content);
-  result.OutputBytes = result.Content.Length;
   return result;
 }
 

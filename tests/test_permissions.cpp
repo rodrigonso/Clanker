@@ -24,6 +24,8 @@ struct PermissionTestState {
   u32 Prompts;
   u32 PromptChoice;
   bool PromptAvailable;
+  u32 QuestionLength;
+  bool QuestionClipped;
 };
 
 bool Review(void* user, Arena* arena,
@@ -56,6 +58,11 @@ bool Ask(void* user, Arena* arena, const AgentAskRequest* request,
             StrView_Eq(request->Category, SVL("Permission")),
             StrView_Contains(request->Question, "shell"),
             !StrView_Contains(request->Question, "\n"));
+  state->QuestionLength = request->Question.Length;
+  state->QuestionClipped =
+      StrView_Contains(request->Question, "x ... [4023 more bytes not shown]") &&
+      !StrView_Contains(request->Question, "hidden-tail") &&
+      !StrView_Contains(request->Question, "\xE2");
   if (!state->PromptAvailable) return false;
   out->Status = AgentAskStatus::Answered;
   out->ChoiceIndex = state->PromptChoice;
@@ -107,6 +114,21 @@ bool OversizedGrantKey(void*, Arena* arena, const ToolArgs*, StrView,
   StrBuf key = StrBuf_Make(arena, 8194);
   for (u32 i = 0; i < 8193; i++) StrBuf_AppendChar(&key, 'k');
   out->GrantKey = StrBuf_View(&key);
+  return true;
+}
+
+// Byte 1983 starts a three-byte character that straddles the clip point, and
+// the dangerous part sits past it.
+bool LongAction(void*, Arena* arena, const ToolArgs*, StrView,
+                ToolPermissionInfo* out, StrBuf*) {
+  *out = {};
+  StrBuf action = StrBuf_Make(arena, 6016);
+  StrBuf_AppendCStr(&action, "Run shell ");
+  for (u32 i = 0; i < 1973; i++) StrBuf_AppendChar(&action, 'x');
+  StrBuf_AppendCStr(&action, "\xE2\x82\xAC");
+  for (u32 i = 0; i < 4000; i++) StrBuf_AppendChar(&action, 'y');
+  StrBuf_AppendCStr(&action, "; rm -rf hidden-tail");
+  out->Action = StrBuf_View(&action);
   return true;
 }
 
@@ -395,6 +417,53 @@ void TestGrantCapAndUnbindableKeys() {
       decision.Reason,
       "This action is too large to bind safely to a session grant."));
   CHECK(AgentPermissionEngine_GrantCount(&engine) == 0);
+
+  AgentPermissionEngine_EndRun(&engine);
+  AgentPermissionEngine_Close(&engine);
+  ArenaRelease(&arena);
+}
+
+// An action longer than the display bound reaches a person with a visible
+// clip marker, never the automatic reviewer, which would judge only a prefix.
+void TestClippedActionNeedsPerson() {
+  Arena arena = ArenaCreate();
+  PermissionTestState state = {};
+  state.PromptAvailable = true;
+  state.PromptChoice = 0;
+  state.ReviewDecision = AgentPermissionReviewDecision::Allow;
+  AgentAskUser ask = {&state, Ask};
+  AgentPermissionReviewer reviewer = {&state, Review};
+  AgentPermissionEngine engine = {};
+  AgentPermissionEngine_Init(&engine, AgentPermissionMode::Auto,
+                             SVL("C:\\work"), &ask, reviewer);
+  AgentPermissionEngine_BeginRun(&engine);
+  Tool tool = SensitiveTool();
+  tool.DescribePermission = LongAction;
+  AgentPermissionGate gate = Gate(&engine, &arena);
+  AgentPermissionDecision decision = {};
+
+  ToolArgs args = Args(&arena, SVL("{\"command\":\"long\"}"));
+  AgentPermission_Decide(&arena, &gate, &tool, &args, &decision);
+  StrView requestId = RequestId(&arena, decision.Reason);
+  CHECK_ALL(decision.Block, state.Reviews == 0,
+            requestId.Length == DURABLE_ID_CHAR_COUNT,
+            StrView_Contains(decision.Reason, "too long to review automatically"));
+
+  StrView resolved = {};
+  StrBuf error = StrBuf_Make(&arena, 128);
+  CHECK(AgentPermission_ResolveRequest(&engine, &arena, requestId, nullptr,
+                                       &resolved, &error));
+  CHECK_ALL(state.Prompts == 1, state.QuestionLength <= 2048,
+            state.QuestionClipped);
+  AgentPermission_Decide(&arena, &gate, &tool, &args, &decision);
+  CHECK_ALL(!decision.Block, state.Reviews == 0);
+
+  AgentPermissionEngine_SetMode(&engine, AgentPermissionMode::Ask);
+  state.QuestionClipped = false;
+  ToolArgs again = Args(&arena, SVL("{\"command\":\"long again\"}"));
+  AgentPermission_Decide(&arena, &gate, &tool, &again, &decision);
+  CHECK_ALL(!decision.Block, state.Prompts == 2, state.QuestionClipped,
+            state.Reviews == 0);
 
   AgentPermissionEngine_EndRun(&engine);
   AgentPermissionEngine_Close(&engine);
@@ -728,6 +797,7 @@ void TestPermissions() {
   TestModesAndRecovery();
   TestLiveModeChangeAndFastPaths();
   TestGrantCapAndUnbindableKeys();
+  TestClippedActionNeedsPerson();
   TestHeadlessFailClosed();
   TestReviewerAbort();
   TestConcurrentDecisions();

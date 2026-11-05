@@ -1,9 +1,8 @@
 #include "auth/store.h"
 
-#include <stdlib.h>
-
 #include "base/array.h"
 #include "base/config_file.h"
+#include "base/sysinfo.h"
 #include "json/json.h"
 
 namespace {
@@ -57,13 +56,9 @@ bool WriteEntries(Arena* a, StrView path, const Array<Entry>* entries) {
 }  // namespace
 
 StrView AuthStore_DefaultPath(Arena* a) {
-#if defined(_WIN32)
-  const char* home = getenv("USERPROFILE");
-#else
-  const char* home = getenv("HOME");
-#endif
-  StrBuf p = StrBuf_Make(a, 128);
-  StrBuf_AppendCStr(&p, (home && *home) ? home : ".");
+  StrView home = Sys_HomeDir(a);
+  StrBuf p = StrBuf_Make(a, home.Length + 24);
+  StrBuf_Append(&p, home.Length ? home : SVL("."));
   StrBuf_AppendCStr(&p, "/.clanker/auth.json");
   return StrBuf_View(&p);
 }

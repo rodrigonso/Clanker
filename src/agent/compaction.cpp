@@ -4,14 +4,22 @@
 
 namespace {
 
+// pi's flat per-image estimate. Providers bill an image by its pixels, not its
+// encoded size, so counting base64 bytes would make one screenshot look like
+// a whole context window.
+constexpr u32 IMAGE_ESTIMATE_BYTES = 4800;
+
 u32 MessageContentBytes(const Message* message) {
   u32 bytes = 0;
   for (u32 i = 0; i < message->Content.Count; i++) {
     const Content* content = &message->Content.Data[i];
+    if (content->Kind == ContentKind::Image) {
+      bytes = AddSaturated(bytes, IMAGE_ESTIMATE_BYTES);
+      continue;
+    }
     bytes = AddSaturated(bytes, content->Text.Length);
     bytes = AddSaturated(bytes, content->ToolName.Length);
     bytes = AddSaturated(bytes, content->ToolArgsJson.Length);
-    bytes = AddSaturated(bytes, content->ImageData.Length);
   }
   bytes = AddSaturated(bytes, message->ToolName.Length);
   bytes = AddSaturated(bytes, message->ErrorMessage.Length);

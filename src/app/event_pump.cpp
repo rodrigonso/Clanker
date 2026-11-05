@@ -158,11 +158,17 @@ static void PumpHarnessEvent(HarnessEventPump* pump,
   HarnessEventSink_Emit(pump->Sink, &replay);
 }
 
+// Committed pages the pump keeps between events. One event is normally a few
+// KB; a tool result or a post-lag snapshot can spike far higher, and those
+// pages should not stay resident for the rest of the session.
+constexpr usize PUMP_SCRATCH_KEEP_BYTES = (usize)1 << 20;
+
 static void RunHarnessEventPump(void* user) {
   HarnessEventPump* pump = (HarnessEventPump*)user;
-  Arena scratch = ArenaCreate((usize)16 << 20);
+  Arena scratch = ArenaCreate();
   for (;;) {
     ArenaReset(&scratch);
+    ArenaTrim(&scratch, PUMP_SCRATCH_KEEP_BYTES);
     AgentHarnessEvent event = {};
     SessionResult next =
         AgentHarness_WatchNext(&scratch, &pump->Watch, &event);
@@ -176,7 +182,8 @@ static void RunHarnessEventPump(void* user) {
       AgentHarnessSnapshot snapshot = {};
       SessionResult watched =
           AgentHarness_Watch(&scratch, pump->Harness,
-                             AGENT_HARNESS_MAX_WATCH_EVENTS, &snapshot,
+                             AGENT_HARNESS_MAX_WATCH_EVENTS,
+                             pump->TuiView ? &snapshot : nullptr,
                              &pump->Watch);
       ClearLiveToolEnds(pump);
       if (SessionResult_IsOk(watched) && pump->TuiView)
@@ -225,7 +232,6 @@ static void RunHarnessEventPump(void* user) {
       PumpHarnessEvent(pump, &event);
   }
   ArenaRelease(&scratch);
-  pump->Exited = 1;
 }
 
 }  // namespace

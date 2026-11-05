@@ -19,13 +19,15 @@ struct HarnessEventPump {
   Mutex WatchGuard;
   bool WatchGuardInitialized;
   bool StopRequested;
-  volatile i32 Exited;
   bool Started;
   // `--mode json`: write raw watch events as NDJSON instead of forwarding them
   // to the human-facing HarnessEventSink.
   bool JsonOutput;
 };
 
+// `snapshot` is optional. When given, it receives the transcript the watch
+// starts from, allocated in `arena`; callers that render nothing pass null for
+// both and skip the copy.
 SessionResult StartHarnessEventPump(Arena* arena, AgentHarness* harness,
                                     HarnessEventSink sink, Tui* tuiView,
                                     HarnessEventPump* pump,

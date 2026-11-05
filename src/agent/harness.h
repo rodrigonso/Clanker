@@ -111,10 +111,34 @@ SessionResult AgentHarness_Init(AgentHarness* harness, SessionLog log,
                                 const AgentHarnessConfig* config);
 SessionResult AgentHarness_Close(AgentHarness* harness);
 
+// Deep-copies the whole reduction, including every record. Costs the session's
+// full history; prefer Summarize/DescribeSession/SnapshotFull for anything that
+// needs less than the tree itself.
 SessionResult AgentHarness_Snapshot(Arena* arena, AgentHarness* harness,
                                     SessionReduction* out);
 SessionResult AgentHarness_SnapshotFull(Arena* arena, AgentHarness* harness,
                                         AgentHarnessSnapshot* out);
+
+// The handful of scalars callers usually want from a snapshot. Copies only the
+// provider and model strings.
+struct AgentHarnessSummary {
+  DurableId SessionId;
+  DurableId HeadId;
+  StrView Provider;  // active branch's provider; empty if never set
+  StrView Model;
+  u32 RecordCount;
+  u64 Cursor;
+  bool Running;
+  bool Faulted;
+};
+SessionResult AgentHarness_Summarize(Arena* arena, AgentHarness* harness,
+                                     AgentHarnessSummary* out);
+// Session metadata (title, usage, counts) built from the live records without
+// copying them.
+SessionResult AgentHarness_DescribeSession(Arena* arena, AgentHarness* harness,
+                                           SessionInfo* out);
+// `outSnapshot` is optional; when it is null, `arena` may be too and the watch
+// starts at the current cursor without copying the transcript.
 SessionResult AgentHarness_Watch(Arena* arena, AgentHarness* harness,
                                  u32 capacity,
                                  AgentHarnessSnapshot* outSnapshot,

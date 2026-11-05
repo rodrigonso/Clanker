@@ -1,4 +1,5 @@
 #include "json/json.h"
+#include "base/file_io.h"
 #include "base/thread.h"
 #include "crypto/random.h"
 #include "tools/exec.h"
@@ -11,6 +12,7 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#include "base/win32_utf8.h"
 #else
 #include <fcntl.h>
 #include <stdlib.h>
@@ -35,10 +37,12 @@ static StrView Shell_WriteTempOutput(Arena* arena, StrView output, StrView direc
     StrBuf_AppendCStr(&path, "shell-");
   } else {
 #if defined(_WIN32)
-    char temp[MAX_PATH];
-    DWORD n = GetTempPathA((DWORD)sizeof(temp), temp);
-    if (n == 0 || n >= (DWORD)sizeof(temp)) return StrView{};
-    StrBuf_Append(&path, StrView{temp, (u32)n});
+    wchar_t temp[MAX_PATH + 1];
+    DWORD n = GetTempPathW(MAX_PATH + 1, temp);
+    StrView tempDir = {};
+    if (n == 0 || n > MAX_PATH || !Win32_Utf8(arena, temp, n, &tempDir))
+      return StrView{};
+    StrBuf_Append(&path, tempDir);
     if (path.Length && path.Data[path.Length - 1] != '\\' &&
         path.Data[path.Length - 1] != '/')
       StrBuf_AppendChar(&path, '\\');
@@ -66,11 +70,12 @@ static StrView Shell_WriteTempOutput(Arena* arena, StrView output, StrView direc
     Shell_AppendHex16(&path, unique);
     StrBuf_AppendCStr(&path, ".log");
 
-    const char* target = StrBuf_CStr(&path);
 #if defined(_WIN32)
     FILE* f = nullptr;
-    if (fopen_s(&f, target, "wbx") != 0) f = nullptr;
+    if (File_Open(arena, StrBuf_View(&path), "wbx", &f) != FileIoResult::Success)
+      f = nullptr;
 #else
+    const char* target = StrBuf_CStr(&path);
     int fd = open(target, O_CREAT | O_EXCL | O_WRONLY, 0600);
     if (fd < 0) continue;
     FILE* f = fdopen(fd, "wb");
@@ -85,7 +90,7 @@ static StrView Shell_WriteTempOutput(Arena* arena, StrView output, StrView direc
     usize written = fwrite(output.Data, 1, output.Length, f);
     bool ok = fclose(f) == 0 && written == output.Length;
     if (!ok) {
-      remove(target);
+      File_Remove(arena, StrBuf_View(&path));
       return StrView{};
     }
     return StrBuf_View(&path);
@@ -325,11 +330,9 @@ static bool ShellDescribePermission(void* ctx, Arena* arena,
       Shell_CanonicalPermissionCommand(arena, command, &autoAllow,
                                        &stableCanonical);
   StrView identity = stableCanonical ? canonical : command;
-  StrView shown = identity.Length <= 2048 ? identity
-                                          : StrView{identity.Data, 2048};
-  StrBuf action = StrBuf_Make(arena, shown.Length + sizeof("Run "));
+  StrBuf action = StrBuf_Make(arena, identity.Length + sizeof("Run "));
   StrBuf_AppendCStr(&action, "Run ");
-  StrBuf_Append(&action, shown);
+  StrBuf_Append(&action, identity);
   out->Action = StrBuf_View(&action);
   if (identity.Length + sizeof("shell\n") - 1u <=
       SHELL_PERMISSION_MAX_COMMAND) {

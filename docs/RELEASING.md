@@ -70,8 +70,8 @@ do not label its output as a signed release.
    session resume, and HTTPS on each advertised platform.
 4. Qualify the minimum OS versions, not only the newest hosted runner.
    Windows previews target Windows 10+ x86_64; macOS previews target 15+ on
-   Intel and Apple Silicon. Keep the Windows ASCII-path limitation visible
-   until its remaining platform calls are migrated.
+   Intel and Apple Silicon. On Windows, exercise a non-ASCII profile and
+   workspace path.
 5. Decide whether an unsigned developer preview is acceptable. Otherwise
    complete Windows signing and macOS signing/notarization through an approved
    signing service before publishing. Do not ask users to disable OS-wide

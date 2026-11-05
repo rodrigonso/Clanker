@@ -1384,6 +1384,24 @@ static void TestHarnessWatchers() {
     CHECK_ALL(complete.Cursor == initial.Cursor + 2, complete.Transcript.Count == 2,
               ContextTextEq(&complete.Transcript, 0, Role::User, "watched prompt"),
               ContextTextEq(&complete.Transcript, 1, Role::Assistant, "watched response"));
+
+    // Cheap views over the same state: a summary, metadata, and a watch that
+    // skips the transcript copy entirely.
+    AgentHarnessSummary summary = {};
+    CHECK(SessionResult_IsOk(AgentHarness_Summarize(&arena, &harness, &summary)));
+    CHECK_ALL(summary.Cursor == complete.Cursor, summary.RecordCount == 3,
+              DurableId_IsSet(summary.SessionId), DurableId_IsSet(summary.HeadId),
+              !summary.Running, !summary.Faulted);
+    SessionInfo described = {};
+    CHECK(SessionResult_IsOk(AgentHarness_DescribeSession(&arena, &harness, &described)));
+    CHECK_ALL(DurableId_Eq(described.SessionId, summary.SessionId),
+              described.UserMessageCount == 1, described.AssistantMessageCount == 1,
+              !described.Busy);
+    AgentHarnessWatch* barePtr = ArenaPushStruct(&arena, AgentHarnessWatch);
+    *barePtr = AgentHarnessWatch{};
+    CHECK(SessionResult_IsOk(AgentHarness_Watch(nullptr, &harness, 16, nullptr, barePtr)));
+    CHECK(barePtr->Cursor == complete.Cursor);
+    CHECK(SessionResult_IsOk(AgentHarness_WatchClose(barePtr)));
     CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
     CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
     repository.Close(repository.Ctx);
@@ -3005,6 +3023,40 @@ static Usage PromptUsage(u32 input) {
   return use;
 }
 
+struct CompactionContextProbe {
+  u32 CompactionMessages;
+  bool CompactionSawTail;
+  bool CompactionSawFolded;
+  u32 LastRunMessages;
+  bool LastRunStartsWithSummary;
+};
+
+static bool MessagesMention(const Array<Message>* messages, const char* needle) {
+  for (u32 i = 0; i < messages->Count; i++) {
+    const Message* message = &messages->Data[i];
+    for (u32 j = 0; j < message->Content.Count; j++)
+      if (StrView_Contains(message->Content.Data[j].Text, needle)) return true;
+  }
+  return false;
+}
+
+static SessionResult ProbeCompactionContext(void* user, Arena*, AgentTurnKind turn, DurableId,
+                                            Array<Message>* messages) {
+  CompactionContextProbe* probe = (CompactionContextProbe*)user;
+  if (turn == AgentTurnKind::Compaction) {
+    probe->CompactionMessages = messages->Count;
+    probe->CompactionSawTail = MessagesMention(messages, "keep this turn");
+    probe->CompactionSawFolded = MessagesMention(messages, "fold this turn");
+  } else {
+    probe->LastRunMessages = messages->Count;
+    probe->LastRunStartsWithSummary =
+        messages->Count && messages->Data[0].Content.Count &&
+        StrView_Contains(messages->Data[0].Content.Data[0].Text,
+                         "Summary of previous conversation:");
+  }
+  return SessionResult_Ok();
+}
+
 static void TestHarnessAutoCompaction() {
   u32 executions = 0;
   Tool echo[1] = {};
@@ -3080,6 +3132,46 @@ static void TestHarnessAutoCompaction() {
               compactionAgentEvents == 0);
 
     CHECK(SessionResult_IsOk(AgentHarness_WatchClose(&watch)));
+    CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
+    repository.Close(repository.Ctx);
+    ArenaRelease(&arena);
+  }
+
+  // The summarizer sees only the folded span. The retained tail survives
+  // verbatim after the summary, so it must not also be summarized.
+  {
+    Arena arena = ArenaCreate((usize)32 << 20);
+    MemoryRepository memory = {};
+    MemoryRepository_Init(&memory);
+    SessionRepository repository = MemoryRepository_AsRepository(&memory);
+    SessionLog log = {};
+    CHECK(SessionResult_IsOk(CreateSession(&repository, &arena, &log)));
+
+    ScriptStep steps[3] = {};
+    steps[0].Text = SVL("folded answer");
+    steps[0].Stop = StopReason::Stop;
+    steps[0].Use = PromptUsage(700);
+    steps[1].Text = SVL("compact summary");
+    steps[1].Stop = StopReason::Stop;
+    steps[2].Text = SVL("done");
+    steps[2].Stop = StopReason::Stop;
+    ScriptProvider script = {steps, 3, 0};
+
+    CompactionContextProbe probe = {};
+    AgentHarness harness = {};
+    AgentHarnessConfig config = AutoCompactConfig(&script, echo, 1, true);
+    config.Hooks.User = &probe;
+    config.Hooks.BeforeContext = ProbeCompactionContext;
+    CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
+    CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("fold this turn"))));
+    CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("keep this turn"))));
+    CHECK(script.Index == 3);
+
+    // [fold this turn, folded answer, summarize prompt], then [summary, kept].
+    CHECK_ALL(probe.CompactionMessages == 3, probe.CompactionSawFolded,
+              !probe.CompactionSawTail, probe.LastRunMessages == 2,
+              probe.LastRunStartsWithSummary);
+
     CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
     repository.Close(repository.Ctx);
     ArenaRelease(&arena);

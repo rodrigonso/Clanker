@@ -30,6 +30,17 @@ static void Read_AppendNoticePrefix(StrBuf* b) {
   if (b->Length > 0) StrBuf_AppendCStr(b, "\n\n");
 }
 
+// Inline images are sent base64-encoded with every later request.
+constexpr u64 READ_MAX_IMAGE_BYTES = (u64)20 << 20;
+
+static void Read_AppendTooLarge(StrBuf* err, StrView path, u64 limit) {
+  StrBuf_AppendCStr(err, "file is larger than the ");
+  StrBuf_AppendU64(err, limit >> 20);
+  StrBuf_AppendCStr(err, " MB read limit: ");
+  StrBuf_Append(err, path);
+  StrBuf_AppendCStr(err, ". Use shell tools to inspect part of it.");
+}
+
 static bool ReadExec(void* ctx, Arena* arena, StrView id, const ToolArgs* args,
                      volatile i32* abort, const ToolUpdateSink* updates,
                      ToolResult* out, StrBuf* err) {
@@ -44,7 +55,11 @@ static bool ReadExec(void* ctx, Arena* arena, StrView id, const ToolArgs* args,
   }
 
   StrView bytes = {};
-  FileIoResult read = File_ReadAll(arena, path, &bytes);
+  FileIoResult read = File_ReadAll(arena, path, &bytes, FS_TOOL_MAX_FILE_BYTES);
+  if (read == FileIoResult::TooLarge) {
+    Read_AppendTooLarge(err, path, FS_TOOL_MAX_FILE_BYTES);
+    return false;
+  }
   if (read != FileIoResult::Success) {
     StrBuf_AppendCStr(err, read == FileIoResult::IoError
                              ? "failed to read file: " : "cannot open file: ");
@@ -56,6 +71,10 @@ static bool ReadExec(void* ctx, Arena* arena, StrView id, const ToolArgs* args,
   StrView mime = Img_SniffMime((const byte*)bytes.Data, sniffLen);
   if (mime.Length == 0) mime = Img_MimeForExt(Fs_Ext(path));
   if (mime.Length != 0) {
+    if (bytes.Length > READ_MAX_IMAGE_BYTES) {
+      Read_AppendTooLarge(err, path, READ_MAX_IMAGE_BYTES);
+      return false;
+    }
     StrBuf text = StrBuf_Make(arena, 32 + mime.Length);
     StrBuf_AppendCStr(&text, "Read image file [");
     StrBuf_Append(&text, mime);

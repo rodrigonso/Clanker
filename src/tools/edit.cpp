@@ -68,16 +68,12 @@ static u32 Edit_FindAllExact(StrView hay, StrView needle, u32* firstStart) {
 }
 
 struct EditChar {
-  u32 Cp;
   u32 Len;
   u32 Mapped;
 };
 
 static EditChar Edit_DecodeMapped(StrView s, u32 pos) {
   EditChar r = {};
-  r.Cp = 0;
-  r.Len = 0;
-  r.Mapped = 0;
   if (pos >= s.Length) return r;
 
   const u8* p = (const u8*)s.Data + pos;
@@ -123,7 +119,6 @@ static EditChar Edit_DecodeMapped(StrView s, u32 pos) {
     mapped = ' ';
   }
 
-  r.Cp = cp;
   r.Len = len;
   r.Mapped = mapped;
   return r;
@@ -370,7 +365,16 @@ bool EditExec(void* ctx, Arena* arena, StrView id, const ToolArgs* args,
   StrView body = {};
   bool crlf = false;
   StrView originalLF = {};
-  if (File_ReadAll(arena, path, &fileBytes) != FileIoResult::Success) {
+  FileIoResult readResult = File_ReadAll(arena, path, &fileBytes, FS_TOOL_MAX_FILE_BYTES);
+  if (readResult == FileIoResult::TooLarge) {
+    StrBuf_AppendCStr(err, "Could not edit file: ");
+    StrBuf_Append(err, path);
+    StrBuf_AppendCStr(err, ". It is larger than the ");
+    StrBuf_AppendU64(err, FS_TOOL_MAX_FILE_BYTES >> 20);
+    StrBuf_AppendCStr(err, " MB edit limit.");
+    goto done;
+  }
+  if (readResult != FileIoResult::Success) {
     Edit_AppendPathErr(err, "Could not edit file: ", path, ".");
     goto done;
   }

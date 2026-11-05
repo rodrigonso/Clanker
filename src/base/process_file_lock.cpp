@@ -5,6 +5,8 @@
 #if defined(_WIN32)
 #include <windows.h>
 
+#include "base/win32_utf8.h"
+
 static_assert(sizeof(HANDLE) <= sizeof(((ProcessFileLock*)nullptr)->Storage),
               "ProcessFileLock storage too small");
 
@@ -12,12 +14,13 @@ ProcessFileLockStatus ProcessFileLock_TryAcquire(Arena* scratch, StrView path,
                                                  ProcessFileLock* out) {
   if (!scratch || !out || path.Length == 0) return ProcessFileLockStatus::IoError;
   *out = ProcessFileLock{};
-  const char* native = StrView_DupCStr(scratch, path);
+  wchar_t native[4096];
+  if (!Win32_Path(path, native, 4096)) return ProcessFileLockStatus::IoError;
   // DELETE access plus FILE_FLAG_DELETE_ON_CLOSE ties the sentinel file's
   // lifetime to the handle, so the kernel removes it even if this process is
   // killed. A leftover file from an older build is opened and then cleaned up
   // the same way.
-  HANDLE handle = CreateFileA(native,
+  HANDLE handle = CreateFileW(native,
                               GENERIC_READ | GENERIC_WRITE | DELETE, 0, nullptr,
                               OPEN_ALWAYS,
                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE,
@@ -48,7 +51,8 @@ void ProcessFileLock_Release(ProcessFileLock* lock, StrView path) {
 
 bool ProcessFileLock_IsHeld(Arena* scratch, StrView path) {
   if (!scratch || path.Length == 0) return false;
-  const char* native = StrView_DupCStr(scratch, path);
+  wchar_t native[4096];
+  if (!Win32_Path(path, native, 4096)) return false;
   // GENERIC_READ is required: an access-free or FILE_READ_ATTRIBUTES open
   // bypasses the sharing check entirely and reports a held lock as free.
   // Requesting read access means this open is refused while a holder -- which
@@ -61,7 +65,7 @@ bool ProcessFileLock_IsHeld(Arena* scratch, StrView path) {
   // FILE_FLAG_DELETE_ON_CLOSE), where an acquirer racing this handful of
   // instructions can see a spurious Busy and retry.
   HANDLE handle =
-      CreateFileA(native, GENERIC_READ,
+      CreateFileW(native, GENERIC_READ,
                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                   nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (handle == INVALID_HANDLE_VALUE) {

@@ -1,6 +1,5 @@
 #include "session/jsonl_repository.h"
 
-#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -12,6 +11,7 @@
 #endif
 
 #include "base/config_file.h"
+#include "base/file_io.h"
 #include "json/json.h"
 #include "session/reducer.h"
 #include "tools/fs.h"
@@ -21,6 +21,10 @@ struct JsonlLogHandle {
   u32 ClaimIndex;
   ProcessFileLock WriterLock;
   Arena State;
+  // Every record, in order. Records retained after the file exists are
+  // envelopes (see RetainRecord): the file holds their content, and a
+  // conversation's text would otherwise be held twice -- here and in whatever
+  // the caller built from ReadAll.
   Array<SessionRecord> Records;
   // Persistent fold state, arena-backed by `State` so it lives as long as
   // the handle. Built once (index+fold over every loaded/created record)
@@ -32,8 +36,9 @@ struct JsonlLogHandle {
   FILE* AppendFile;
   Mutex AppendLock;
   bool Writable;
-  // False while a newly created session is still buffered in memory and its
-  // file does not exist yet. See RecordsWarrantPersist.
+  // True once the file holds every record, which is from the start for an
+  // opened session. A created session stays buffered in memory, with complete
+  // records and no file, until RecordsWarrantPersist.
   bool Flushed;
   bool Faulted;
   bool Closed;
@@ -52,6 +57,9 @@ void FoldAllValidated(JsonlLogHandle* handle) {
 }  // namespace
 
 namespace {
+
+SessionResult CopyHandleRecordsLocked(JsonlLogHandle* handle, Arena* arena,
+                                      Array<SessionRecord>* out);
 
 SessionResult IoError(const char* message) {
   return SessionResult_Error(SessionStatus::IoError, SV(message));
@@ -225,17 +233,7 @@ SessionResult CopyLiveRecords(JsonlRepository* repository, Arena* arena,
   if (source->Closed || source->Records.Count == 0)
     return SessionResult_Error(SessionStatus::NotFound,
                                SVL("session file was not found"));
-  Array<SessionRecord> records =
-      Array_Make<SessionRecord>(arena, source->Records.Count);
-  for (u32 i = 0; i < source->Records.Count; i++) {
-    SessionRecord clone = {};
-    SessionResult copied =
-        SessionRecord_Clone(arena, &source->Records.Data[i], &clone);
-    if (!SessionResult_IsOk(copied)) return copied;
-    Array_Push(&records, clone);
-  }
-  *out = records;
-  return SessionResult_Ok(records.Data[records.Count - 1].Seq);
+  return CopyHandleRecordsLocked(source, arena, out);
 }
 
 SessionResult AcquireWriter(JsonlRepository* repository, Arena* scratch,
@@ -296,12 +294,10 @@ bool RecordsWarrantPersist(const SessionRecord* records, u32 count) {
 }
 
 bool TruncateFile(Arena* arena, StrView path, u64 size) {
-  StrBuf native = StrBuf_Make(arena, path.Length + 1);
-  StrBuf_Append(&native, path);
-  FILE* file = fopen(StrBuf_CStr(&native), "r+b");
-  if (!file) return false;
+  FILE* file = nullptr;
+  if (File_Open(arena, path, "r+b", &file) != FileIoResult::Success) return false;
 #if defined(_WIN32)
-  bool ok = _chsize_s(_fileno(file), size) == 0;
+  bool ok = _chsize_s(_fileno(file), (__int64)size) == 0;
 #else
   bool ok = ftruncate(fileno(file), (off_t)size) == 0;
 #endif
@@ -310,32 +306,35 @@ bool TruncateFile(Arena* arena, StrView path, u64 size) {
 }
 
 bool AppendNewline(Arena* arena, StrView path) {
-  StrBuf native = StrBuf_Make(arena, path.Length + 1);
-  StrBuf_Append(&native, path);
-  FILE* file = fopen(StrBuf_CStr(&native), "ab");
-  if (!file) return false;
+  FILE* file = nullptr;
+  if (File_Open(arena, path, "ab", &file) != FileIoResult::Success) return false;
   bool ok = WriteAll(file, SVL("\n"));
   if (fclose(file) != 0) ok = false;
   return ok;
 }
 
-SessionResult LoadRecords(Arena* arena, StrView path, bool repair,
-                          Array<SessionRecord>* out) {
+// Every line is decoded in `scratch` and only its clone is kept in `arena`, so
+// neither the file's bytes nor any line's JSON tree outlives the call.
+SessionResult DecodeRecords(Arena* arena, Arena* scratch, StrView path,
+                            bool repair, Array<SessionRecord>* out) {
   StrView content = {};
-  ConfigFileReadResult read = ConfigFile_ReadAll(arena, path, &content);
+  ConfigFileReadResult read = ConfigFile_ReadAll(scratch, path, &content);
   if (read == ConfigFileReadResult::Missing)
     return SessionResult_Error(SessionStatus::NotFound, SVL("session file was not found"));
   if (read != ConfigFileReadResult::Success) return IoError("failed to read session file");
   if (content.Length == 0)
     return SessionResult_Error(SessionStatus::Corrupt, SVL("session file is empty"));
 
-  Array<SessionRecord> records = Array_Make<SessionRecord>(arena, 32);
+  u32 lineCount = 1;
+  for (u32 i = 0; i < content.Length; i++) lineCount += content.Data[i] == '\n';
+  Array<SessionRecord> records = Array_Make<SessionRecord>(arena, lineCount);
   u32 lineStart = 0;
   u32 lastGoodNewline = 0;
   while (lineStart < content.Length) {
-    u32 lineEnd = lineStart;
-    while (lineEnd < content.Length && content.Data[lineEnd] != '\n') lineEnd++;
-    bool terminated = lineEnd < content.Length;
+    const char* newline = (const char*)memchr(content.Data + lineStart, '\n',
+                                              content.Length - lineStart);
+    u32 lineEnd = newline ? (u32)(newline - content.Data) : content.Length;
+    bool terminated = newline != nullptr;
     StrView line = {content.Data + lineStart, lineEnd - lineStart};
     if (line.Length == 0) {
       if (terminated)
@@ -344,35 +343,40 @@ SessionResult LoadRecords(Arena* arena, StrView path, bool repair,
       break;
     }
 
-    SessionRecord record = {};
-    SessionResult decoded = SessionRecord_Decode(arena, line, &record);
-    if (!SessionResult_IsOk(decoded)) {
+    usize lineMark = scratch->Used;
+    SessionRecord decoded = {};
+    SessionResult result = SessionRecord_Decode(scratch, line, &decoded);
+    if (!SessionResult_IsOk(result)) {
       if (terminated)
         return SessionResult_Error(
-            decoded.Status == SessionStatus::UnsupportedVersion
+            result.Status == SessionStatus::UnsupportedVersion
                 ? SessionStatus::UnsupportedVersion
                 : SessionStatus::Corrupt,
             SVL("session file contains a malformed non-final record"));
-      if (Json_Parse(arena, line) != nullptr)
+      if (Json_Parse(scratch, line) != nullptr)
         return SessionResult_Error(
-            decoded.Status == SessionStatus::UnsupportedVersion
+            result.Status == SessionStatus::UnsupportedVersion
                 ? SessionStatus::UnsupportedVersion
                 : SessionStatus::Corrupt,
             SVL("final session record is structurally corrupt"));
       if (records.Count == 0)
         return SessionResult_Error(SessionStatus::Corrupt,
                                    SVL("session file has no valid prefix"));
-      if (repair && !TruncateFile(arena, path, lastGoodNewline))
+      if (repair && !TruncateFile(scratch, path, lastGoodNewline))
         return IoError("failed to repair torn session tail");
       break;
     }
-
+    SessionRecord record = {};
+    result = SessionRecord_Clone(arena, &decoded, &record);
+    ArenaRestore(scratch, lineMark);
+    if (!SessionResult_IsOk(result)) return result;
     Array_Push(&records, record);
+
     if (terminated) {
       lastGoodNewline = lineEnd + 1;
       lineStart = lineEnd + 1;
     } else {
-      if (repair && !AppendNewline(arena, path))
+      if (repair && !AppendNewline(scratch, path))
         return IoError("failed to terminate final session record");
       lineStart = content.Length;
     }
@@ -382,6 +386,75 @@ SessionResult LoadRecords(Arena* arena, StrView path, bool repair,
   if (!SessionResult_IsOk(valid)) return valid;
   *out = records;
   return SessionResult_Ok(records.Data[records.Count - 1].Seq);
+}
+
+SessionResult LoadRecords(Arena* arena, StrView path, bool repair,
+                          Array<SessionRecord>* out) {
+  Arena scratch = ArenaCreate();
+  usize mark = arena->Used;
+  SessionResult loaded = DecodeRecords(arena, &scratch, path, repair, out);
+  ArenaRelease(&scratch);
+  if (!SessionResult_IsOk(loaded)) ArenaRestore(arena, mark);
+  return loaded;
+}
+
+// What a handle keeps of a record once the file holds it: the envelope plus
+// every field folding and append validation read (kinds, ids, parents, and the
+// model/thinking/tools settings), but no message or compaction content.
+SessionResult RetainRecord(Arena* arena, const SessionRecord* source,
+                           bool envelope, SessionRecord* out) {
+  if (!envelope || (source->Kind != SessionRecordKind::Message &&
+                    source->Kind != SessionRecordKind::Compaction))
+    return SessionRecord_Clone(arena, source, out);
+  SessionRecord kept = *source;
+  if (source->Kind == SessionRecordKind::Message) {
+    kept.MessageEntry.Value = Message{};
+    kept.MessageEntry.Value.Kind = source->MessageEntry.Value.Kind;
+  } else {
+    kept.CompactionEntry.Summary = Message{};
+    kept.CompactionEntry.ReadFiles = Array<StrView>{};
+    kept.CompactionEntry.ModifiedFiles = Array<StrView>{};
+  }
+  *out = kept;
+  return SessionResult_Ok(source->Seq);
+}
+
+// Requires AppendLock. A buffered session's records are complete in memory; a
+// flushed one's content is read back from its file, which this handle is the
+// only writer of, so it holds at least the records the handle has accepted. A
+// read-only handle can see records a writer appended since it opened, which
+// are left out so every reader agrees with its own handle.
+SessionResult CopyHandleRecordsLocked(JsonlLogHandle* handle, Arena* arena,
+                                      Array<SessionRecord>* out) {
+  u32 count = handle->Records.Count;
+  if (!handle->Flushed) {
+    Array<SessionRecord> records = Array_Make<SessionRecord>(arena, count);
+    for (u32 i = 0; i < count; i++) {
+      SessionRecord clone = {};
+      SessionResult copied =
+          SessionRecord_Clone(arena, &handle->Records.Data[i], &clone);
+      if (!SessionResult_IsOk(copied)) return copied;
+      Array_Push(&records, clone);
+    }
+    *out = records;
+    return SessionResult_Ok(records.Data[count - 1].Seq);
+  }
+
+  usize mark = arena->Used;
+  Array<SessionRecord> records = {};
+  SessionResult loaded = LoadRecords(arena, handle->Path, false, &records);
+  if (!SessionResult_IsOk(loaded)) return loaded;
+  if (records.Count < count ||
+      !DurableId_Eq(records.Data[count - 1].EntryId,
+                    handle->Records.Data[count - 1].EntryId)) {
+    ArenaRestore(arena, mark);
+    return SessionResult_Error(
+        SessionStatus::Corrupt,
+        SVL("session file no longer matches its open log"));
+  }
+  records.Count = count;
+  *out = records;
+  return SessionResult_Ok(records.Data[count - 1].Seq);
 }
 
 SessionResult BuildInfo(Arena* arena, const SessionRecord* records, u32 count,
@@ -404,14 +477,13 @@ SessionResult OpenForFirstWrite(JsonlLogHandle* handle, Arena* scratch) {
   if (Fs_Exists(handle->Path))
     return SessionResult_Error(SessionStatus::Conflict,
                                SVL("session file already exists"));
-  StrBuf native = StrBuf_Make(scratch, handle->Path.Length + 1);
-  StrBuf_Append(&native, handle->Path);
-  FILE* file = fopen(StrBuf_CStr(&native), "wb");
-  if (!file) return IoError("failed to create session file");
+  FILE* file = nullptr;
+  if (File_Open(scratch, handle->Path, "wbx", &file) != FileIoResult::Success)
+    return IoError("failed to create session file");
 #if !defined(_WIN32)
-  if (chmod(StrBuf_CStr(&native), 0600) != 0) {
+  if (fchmod(fileno(file), 0600) != 0) {
     fclose(file);
-    remove(StrBuf_CStr(&native));
+    File_Remove(scratch, handle->Path);
     return IoError("failed to secure session file");
   }
 #endif
@@ -427,13 +499,9 @@ void DestroyHandle(JsonlLogHandle* handle, bool removeData) {
     fclose(handle->AppendFile);
     handle->AppendFile = nullptr;
   }
-  // A session still buffered in memory has no file to remove; `remove` on the
+  // A session still buffered in memory has no file to remove; removing the
   // absent path simply fails, which is the intended outcome either way.
-  if (removeData) {
-    StrBuf native = StrBuf_Make(&handle->State, handle->Path.Length + 1);
-    StrBuf_Append(&native, handle->Path);
-    remove(StrBuf_CStr(&native));
-  }
+  if (removeData) File_Remove(&handle->State, handle->Path);
   ProcessFileLock_Release(&handle->WriterLock, handle->LockPath);
   if (handle->Writable)
     ReleaseClaim(handle->Repository, handle->ClaimIndex);
@@ -449,17 +517,7 @@ SessionResult ReadAll(void* context, Arena* arena, Array<SessionRecord>* out) {
   ScopedLock lock(&handle->AppendLock);
   if (handle->Closed)
     return SessionResult_Error(SessionStatus::InvalidState, SVL("session log is closed"));
-  Array<SessionRecord> records =
-      Array_Make<SessionRecord>(arena, handle->Records.Count);
-  for (u32 i = 0; i < handle->Records.Count; i++) {
-    SessionRecord clone = {};
-    SessionResult copied =
-        SessionRecord_Clone(arena, &handle->Records.Data[i], &clone);
-    if (!SessionResult_IsOk(copied)) return copied;
-    Array_Push(&records, clone);
-  }
-  *out = records;
-  return SessionResult_Ok(records.Data[records.Count - 1].Seq);
+  return CopyHandleRecordsLocked(handle, arena, out);
 }
 
 SessionResult AppendBatch(void* context, SessionRecord* input, u32 count) {
@@ -541,9 +599,7 @@ SessionResult AppendBatch(void* context, SessionRecord* input, u32 count) {
         fclose(handle->AppendFile);
         handle->AppendFile = nullptr;
         handle->Flushed = false;
-        StrBuf native = StrBuf_Make(&scratch, handle->Path.Length + 1);
-        StrBuf_Append(&native, handle->Path);
-        remove(StrBuf_CStr(&native));
+        File_Remove(&scratch, handle->Path);
       } else {
         handle->Faulted = true;
       }
@@ -554,8 +610,8 @@ SessionResult AppendBatch(void* context, SessionRecord* input, u32 count) {
 
   for (u32 i = 0; i < prepared.Count; i++) {
     SessionRecord persistent = {};
-    SessionResult copied =
-        SessionRecord_Clone(&handle->State, &prepared.Data[i], &persistent);
+    SessionResult copied = RetainRecord(&handle->State, &prepared.Data[i],
+                                        handle->Flushed, &persistent);
     if (!SessionResult_IsOk(copied)) {
       handle->Faulted = true;
       ArenaRelease(&scratch);
@@ -603,39 +659,53 @@ SessionResult InitializeHandle(JsonlRepository* repository, Arena* callerArena,
   handle->Writable = writable;
   Mutex_Init(&handle->AppendLock);
 
-  SessionResult loaded =
-      LoadRecords(&handle->State, handle->Path, writable, &handle->Records);
-  if (!SessionResult_IsOk(loaded)) {
+  // The complete records are needed only to describe the session; the handle
+  // keeps envelopes, since the file already holds every record's content.
+  Arena scratch = ArenaCreate();
+  Array<SessionRecord> loaded = {};
+  SessionResult result = LoadRecords(&scratch, handle->Path, writable, &loaded);
+  if (!SessionResult_IsOk(result)) {
+    ArenaRelease(&scratch);
     DestroyHandle(handle, false);
-    return loaded;
+    return result;
   }
+  handle->Records = Array_Make<SessionRecord>(&handle->State, loaded.Count + 32);
+  for (u32 i = 0; i < loaded.Count; i++) {
+    SessionRecord kept = {};
+    SessionResult retained =
+        RetainRecord(&handle->State, &loaded.Data[i], true, &kept);
+    if (!SessionResult_IsOk(retained)) {
+      ArenaRelease(&scratch);
+      DestroyHandle(handle, false);
+      return retained;
+    }
+    Array_Push(&handle->Records, kept);
+  }
+  handle->Flushed = true;
   FoldAllValidated(handle);
   if (writable) {
-    StrBuf native = StrBuf_Make(&handle->State, handle->Path.Length + 1);
-    StrBuf_Append(&native, handle->Path);
-    handle->AppendFile = fopen(StrBuf_CStr(&native), "ab");
-    if (!handle->AppendFile) {
+    if (File_Open(&handle->State, handle->Path, "ab", &handle->AppendFile) !=
+        FileIoResult::Success) {
+      ArenaRelease(&scratch);
       DestroyHandle(handle, false);
       return IoError("failed to open session file for append");
     }
-    // An opened session already exists on disk, so appends go straight out.
-    handle->Flushed = true;
+    AttachClaimHandle(repository, claimIndex, handle);
   }
-  if (writable) AttachClaimHandle(repository, claimIndex, handle);
   const SessionRecord* root = &handle->Records.Data[0];
   bool busy =
       writable ||
       SessionBusy(repository, root->SessionStarted.ProjectKey,
                   root->SessionId);
   SessionResult built =
-      BuildInfo(callerArena, handle->Records.Data, handle->Records.Count,
-                busy, outInfo);
+      BuildInfo(callerArena, loaded.Data, loaded.Count, busy, outInfo);
+  ArenaRelease(&scratch);
   if (!SessionResult_IsOk(built)) {
     DestroyHandle(handle, false);
     return built;
   }
   *outHandle = handle;
-  return loaded;
+  return result;
 }
 
 SessionResult Create(void* context, Arena* arena, const SessionCreateOptions* options,
@@ -1022,10 +1092,15 @@ SessionResult Fork(void* context, Arena* arena, const SessionForkOptions* option
       return appended;
     }
   }
+  // Described from the complete records: once the copies reach the file, the
+  // handle keeps only their envelopes.
   JsonlLogHandle* handle = (JsonlLogHandle*)targetLog.Ctx;
+  Array<SessionRecord> forked =
+      Array_Make<SessionRecord>(&scratch, targetRoot.Count + copies.Count);
+  for (u32 i = 0; i < targetRoot.Count; i++) Array_Push(&forked, targetRoot.Data[i]);
+  for (u32 i = 0; i < copies.Count; i++) Array_Push(&forked, copies.Data[i]);
   SessionResult built =
-      BuildInfo(arena, handle->Records.Data, handle->Records.Count, true,
-                outInfo);
+      BuildInfo(arena, forked.Data, forked.Count, true, outInfo);
   if (!SessionResult_IsOk(built)) {
     DestroyHandle(handle, true);
     ArenaRelease(&scratch);

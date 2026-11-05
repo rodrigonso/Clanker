@@ -40,12 +40,26 @@ StrView BuildFallbackAction(Arena* arena, StrView toolName) {
   return StrBuf_View(&action);
 }
 
-StrView SanitizeAction(Arena* arena, StrView action) {
-  action = Bounded(action, AGENT_PERMISSION_MAX_ACTION_BYTES);
-  StrBuf safe = StrBuf_Make(arena, action.Length + 1);
-  for (u32 i = 0; i < action.Length; i++) {
+// A clipped action ends in a marker so neither a person nor the reviewer
+// mistakes a prefix for the whole call. The result, marker included, fits in
+// AGENT_PERMISSION_MAX_ACTION_BYTES.
+StrView SanitizeAction(Arena* arena, StrView action, bool* clipped) {
+  constexpr u32 MARKER_ROOM = 64;
+  *clipped = action.Length > AGENT_PERMISSION_MAX_ACTION_BYTES;
+  u32 keep = action.Length;
+  if (*clipped) {
+    keep = AGENT_PERMISSION_MAX_ACTION_BYTES - MARKER_ROOM;
+    while (keep && ((u8)action.Data[keep] & 0xC0) == 0x80) keep--;
+  }
+  StrBuf safe = StrBuf_Make(arena, keep + MARKER_ROOM);
+  for (u32 i = 0; i < keep; i++) {
     u8 c = (u8)action.Data[i];
     StrBuf_AppendChar(&safe, c < 0x20 || c == 0x7f ? ' ' : (char)c);
+  }
+  if (*clipped) {
+    StrBuf_AppendCStr(&safe, " ... [");
+    StrBuf_AppendU64(&safe, action.Length - keep);
+    StrBuf_AppendCStr(&safe, " more bytes not shown]");
   }
   return StrBuf_View(&safe);
 }
@@ -181,18 +195,14 @@ AgentPermissionRequest* AddRequestLocked(
     AgentPermissionEngine* engine, StrView toolName, StrView argumentsJson,
     StrView grantKey, StrView action, StrView rationale) {
   if (engine->Requests.Count >= AGENT_PERMISSION_MAX_REQUESTS) return nullptr;
+  // Decide has already bounded the arguments, grant key and action; only the
+  // reviewer's rationale arrives unbounded.
   AgentPermissionRequest request = {};
   request.Id = DurableId_Generate();
   request.ToolName = StrView_Dup(&engine->Run, toolName);
-  request.ArgumentsJson =
-      StrView_Dup(&engine->Run,
-                  Bounded(argumentsJson, AGENT_PERMISSION_MAX_KEY_BYTES));
-  request.GrantKey =
-      StrView_Dup(&engine->Run,
-                  Bounded(grantKey, AGENT_PERMISSION_MAX_KEY_BYTES));
-  request.Action =
-      StrView_Dup(&engine->Run,
-                  Bounded(action, AGENT_PERMISSION_MAX_ACTION_BYTES));
+  request.ArgumentsJson = StrView_Dup(&engine->Run, argumentsJson);
+  request.GrantKey = StrView_Dup(&engine->Run, grantKey);
+  request.Action = StrView_Dup(&engine->Run, action);
   request.Rationale =
       StrView_Dup(&engine->Run,
                   Bounded(rationale, AGENT_PERMISSION_MAX_RATIONALE_BYTES));
@@ -385,7 +395,8 @@ void AgentPermission_Decide(Arena* arena, const AgentPermissionGate* gate,
   }
   if (!info.Action.Length)
     info.Action = BuildFallbackAction(arena, tool->Name);
-  info.Action = SanitizeAction(arena, info.Action);
+  bool actionClipped = false;
+  info.Action = SanitizeAction(arena, info.Action, &actionClipped);
   if (!info.GrantKey.Length)
     info.GrantKey = BuildExactKey(arena, tool->Name, args->Json);
   if (info.GrantKey.Length > AGENT_PERMISSION_MAX_KEY_BYTES)
@@ -450,16 +461,21 @@ void AgentPermission_Decide(Arena* arena, const AgentPermissionGate* gate,
     }
 
     AgentPermissionReviewResult reviewed = {};
-    AgentPermissionReviewRequest request = {};
-    request.ToolName = tool->Name;
-    request.Action = info.Action;
-    // Only the bounded action projection reaches the reviewer; exact arguments
-    // remain in the run-scoped revalidation record.
-    request.TrustedUserText = TrustedUserText(arena, gate);
-    bool reviewOk =
-        engine->Reviewer.Review &&
-        engine->Reviewer.Review(engine->Reviewer.User, arena, &request,
-                                gate->Abort, &reviewed);
+    bool reviewOk = false;
+    // The reviewer would judge only the visible prefix of a clipped action,
+    // so such an action always goes to a person.
+    if (!actionClipped) {
+      AgentPermissionReviewRequest request = {};
+      request.ToolName = tool->Name;
+      request.Action = info.Action;
+      // Only the bounded action projection reaches the reviewer; exact
+      // arguments remain in the run-scoped revalidation record.
+      request.TrustedUserText = TrustedUserText(arena, gate);
+      reviewOk =
+          engine->Reviewer.Review &&
+          engine->Reviewer.Review(engine->Reviewer.User, arena, &request,
+                                  gate->Abort, &reviewed);
+    }
     if (!reviewOk) {
       reviewed.Rationale = {};
     }
@@ -481,9 +497,11 @@ void AgentPermission_Decide(Arena* arena, const AgentPermissionGate* gate,
     StrView rationale =
         reviewed.Rationale.Length
             ? reviewed.Rationale
-            : !reviewOk
-                  ? SVL("Automatic permission review was unavailable or invalid.")
-                  : SVL("Automatic review requires human approval.");
+        : actionClipped
+            ? SVL("The action is too long to review automatically.")
+        : !reviewOk
+            ? SVL("Automatic permission review was unavailable or invalid.")
+            : SVL("Automatic review requires human approval.");
     if (!exactKey.Length) {
       out->Block = true;
       out->Reason = PlainDenial(

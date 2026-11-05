@@ -3,7 +3,109 @@
 #include "base/thread.h"
 
 #if defined(_WIN32)
+#include <string.h>
+#include <wchar.h>
 #include <windows.h>
+
+// UTF-8 to a NUL-terminated UTF-16 copy in `arena`. Null when the text is not
+// valid UTF-8 or exceeds CreateProcess's 32767-character command-line limit.
+static wchar_t* Exec_Wide(Arena* arena, StrView text) {
+  int length = 0;
+  if (text.Length) {
+    if (text.Length > 0x7ffffffeu) return nullptr;
+    length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.Data,
+                                 (int)text.Length, nullptr, 0);
+    if (length <= 0 || length >= 32767) return nullptr;
+  }
+  wchar_t* wide = ArenaPushArray(arena, wchar_t, (u32)length + 1);
+  if (length &&
+      MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.Data,
+                          (int)text.Length, wide, length) != length)
+    return nullptr;
+  wide[length] = 0;
+  return wide;
+}
+
+// CreateProcess with no application name searches the current directory
+// before System32, so a workspace holding its own cmd.exe would run instead.
+static bool Exec_SystemCmdPath(wchar_t* out, u32 capacity) {
+  static const wchar_t kSuffix[] = L"\\cmd.exe";
+  const u32 suffixLength = (u32)(sizeof(kSuffix) / sizeof(kSuffix[0])) - 1;
+  UINT length = GetSystemDirectoryW(out, capacity);
+  if (!length || length + suffixLength + 1 > capacity) return false;
+  memcpy(out + length, kSuffix, (suffixLength + 1) * sizeof(wchar_t));
+  return true;
+}
+
+// The parent's environment plus NoDefaultCurrentDirectoryInExePath=1. cmd.exe
+// otherwise resolves a bare program name from the working directory before
+// PATH, so a file the agent wrote there (git.bat, say) would run in place of
+// the real program the next time a command names it. Entries stay sorted by
+// name, which is the order CreateProcess documents for environment blocks.
+static wchar_t* Exec_ShellEnvironment(Arena* arena) {
+  static const wchar_t kEntry[] = L"NoDefaultCurrentDirectoryInExePath=1";
+  const int nameLength = 34;
+  const u32 entryLength = (u32)(sizeof(kEntry) / sizeof(kEntry[0]));  // with NUL
+  wchar_t* parent = GetEnvironmentStringsW();
+  if (!parent) return nullptr;
+  usize parentLength = 0;
+  while (parent[parentLength]) parentLength += wcslen(parent + parentLength) + 1;
+  wchar_t* block = ArenaPushArray(arena, wchar_t, parentLength + entryLength + 1);
+  usize at = 0;
+  bool inserted = false;
+  for (const wchar_t* entry = parent; *entry;) {
+    usize length = wcslen(entry) + 1;
+    // Entries such as "=C:=C:\dir" begin with '=' and always sort first.
+    const wchar_t* equals = entry[0] == L'=' ? nullptr : wcschr(entry, L'=');
+    int order = CSTR_LESS_THAN;
+    if (equals)
+      order = CompareStringOrdinal(entry, (int)(equals - entry), kEntry,
+                                   nameLength, TRUE);
+    if (!inserted && order != CSTR_LESS_THAN) {
+      memcpy(block + at, kEntry, entryLength * sizeof(wchar_t));
+      at += entryLength;
+      inserted = true;
+    }
+    if (order != CSTR_EQUAL) {
+      memcpy(block + at, entry, length * sizeof(wchar_t));
+      at += length;
+    }
+    entry += length;
+  }
+  if (!inserted) {
+    memcpy(block + at, kEntry, entryLength * sizeof(wchar_t));
+    at += entryLength;
+  }
+  block[at] = 0;
+  FreeEnvironmentStringsW(parent);
+  return block;
+}
+
+// Starts `commandLine` suspended with inherited handles. A null `application`
+// runs `commandLine` through the system cmd.exe, with the working directory
+// removed from bare-name lookup. All conversion buffers are released before
+// returning; CreateProcess copies what it keeps.
+static bool Exec_StartProcess(StrView application, StrView commandLine,
+                              STARTUPINFOW* startup, PROCESS_INFORMATION* out) {
+  Arena scratch = ArenaCreate();
+  wchar_t* command = Exec_Wide(&scratch, commandLine);
+  wchar_t* program = nullptr;
+  wchar_t* environment = nullptr;
+  if (application.Length) {
+    program = Exec_Wide(&scratch, application);
+  } else {
+    program = ArenaPushArray(&scratch, wchar_t, MAX_PATH);
+    if (!Exec_SystemCmdPath(program, MAX_PATH)) program = nullptr;
+    environment = Exec_ShellEnvironment(&scratch);
+  }
+  bool ok = command && program && (application.Length || environment) &&
+            CreateProcessW(program, command, nullptr, nullptr, TRUE,
+                           CREATE_NO_WINDOW | CREATE_SUSPENDED |
+                               (environment ? CREATE_UNICODE_ENVIRONMENT : 0),
+                           environment, nullptr, startup, out);
+  ArenaRelease(&scratch);
+  return ok;
+}
 
 static bool Exec_WindowsArgNeedsQuotes(StrView arg) {
   if (arg.Length == 0) return true;
@@ -53,7 +155,7 @@ static void Exec_AppendWindowsArg(StrBuf* commandLine, StrView arg) {
 // Kill-on-close so a timeout or abort takes down the whole process tree, not
 // just the shell that was spawned.
 static HANDLE Exec_CreateKillOnCloseJob() {
-  HANDLE job = CreateJobObjectA(nullptr, nullptr);
+  HANDLE job = CreateJobObjectW(nullptr, nullptr);
   if (!job) return nullptr;
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {};
   limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -138,7 +240,7 @@ ExecArgvResult Exec_RunArgv(Arena* arena, StrView program, const StrView* args, 
     return res;
   }
 
-  STARTUPINFOA si = {};
+  STARTUPINFOW si = {};
   si.cb = sizeof(si);
   si.dwFlags = STARTF_USESTDHANDLES;
   si.hStdOutput = outWrite;
@@ -146,8 +248,7 @@ ExecArgvResult Exec_RunArgv(Arena* arena, StrView program, const StrView* args, 
   si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
 
   PROCESS_INFORMATION process = {};
-  BOOL ok = CreateProcessA(nullptr, commandLine.Data, nullptr, nullptr, TRUE,
-                           CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &process);
+  bool ok = Exec_StartProcess(program, StrBuf_View(&commandLine), &si, &process);
   CloseHandle(outWrite);
   CloseHandle(errWrite);
   if (!ok) {
@@ -235,7 +336,7 @@ ExecResult Exec_RunStreaming(Arena* arena, StrView command, u32 timeoutMs,
     return res;
   }
 
-  STARTUPINFOA si = {};
+  STARTUPINFOW si = {};
   si.cb = sizeof(si);
   si.dwFlags = STARTF_USESTDHANDLES;
   si.hStdOutput = wr;
@@ -243,8 +344,7 @@ ExecResult Exec_RunStreaming(Arena* arena, StrView command, u32 timeoutMs,
   si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
 
   PROCESS_INFORMATION pinfo = {};
-  BOOL ok = CreateProcessA(nullptr, (LPSTR)StrBuf_CStr(&cmd), nullptr, nullptr, TRUE,
-                           CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pinfo);
+  bool ok = Exec_StartProcess(StrView{}, StrBuf_View(&cmd), &si, &pinfo);
   CloseHandle(wr);
   if (!ok) {
     CloseHandle(job);
@@ -341,7 +441,7 @@ ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
   }
   SetHandleInformation(inWrite, HANDLE_FLAG_INHERIT, 0);
 
-  HANDLE nul = CreateFileA("NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+  HANDLE nul = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                            &sa, OPEN_EXISTING, 0, nullptr);
   if (nul == INVALID_HANDLE_VALUE) {
     CloseHandle(inRead);
@@ -383,7 +483,7 @@ ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
     return res;
   }
 
-  STARTUPINFOA si = {};
+  STARTUPINFOW si = {};
   si.cb = sizeof(si);
   si.dwFlags = STARTF_USESTDHANDLES;
   si.hStdInput = inRead;
@@ -391,8 +491,7 @@ ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
   si.hStdError = nul;
 
   PROCESS_INFORMATION pinfo = {};
-  BOOL ok = CreateProcessA(nullptr, (LPSTR)StrBuf_CStr(&cmd), nullptr, nullptr, TRUE,
-                           CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pinfo);
+  bool ok = Exec_StartProcess(StrView{}, StrBuf_View(&cmd), &si, &pinfo);
   CloseHandle(inRead);
   CloseHandle(nul);
   // Dropped as soon as the child owns it, so the read end sees EOF when the

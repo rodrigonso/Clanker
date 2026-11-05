@@ -66,9 +66,10 @@ bool RuntimeRollbackSessionSwitch(InteractiveRuntime* rt,
                                   DurableId previousSessionId,
                                   const AgentHarnessConfig* previousConfig,
                                   const AppCommandUx* ux);
+// The target's provider and model come from `targetInfo`; when it names none
+// (a fresh session), the current selection carries over.
 SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt, SessionLog target,
                                  const SessionInfo* targetInfo,
-                                 const SessionReduction* targetState,
                                  const AppCommandUx* ux);
 
 // ---- session listing / formatting ---------------------------------------

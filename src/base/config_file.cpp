@@ -1,12 +1,10 @@
 #include "base/config_file.h"
 
-#include <errno.h>
 #include <stdio.h>
 
 #include "base/file_io.h"
 
 #if defined(_WIN32)
-#include <direct.h>
 #include <windows.h>
 #else
 #include <sys/stat.h>
@@ -28,21 +26,12 @@ bool ConfigFile_EnsureParentDir(Arena* a, StrView path) {
     if (path.Data[i] == '/' || path.Data[i] == '\\') slash = (i32)i;
   }
   if (slash <= 0) return true;
-
-  const char* dir = StrView_DupCStr(a, StrView{path.Data, (u32)slash});
-  errno = 0;
-#if defined(_WIN32)
-  int result = _mkdir(dir);
-#else
-  int result = mkdir(dir, 0700);
-#endif
-  return result == 0 || errno == EEXIST;
+  return File_MakeDir(a, StrView{path.Data, (u32)slash});
 }
 
 bool ConfigFile_WriteAtomic(Arena* a, StrView path, StrView content) {
   if (!ConfigFile_EnsureParentDir(a, path)) return false;
 
-  const char* destination = StrView_DupCStr(a, path);
   StrBuf temporary = StrBuf_Make(a, path.Length + 48);
   StrBuf_Append(&temporary, path);
   StrBuf_AppendCStr(&temporary, ".tmp-");
@@ -53,14 +42,15 @@ bool ConfigFile_WriteAtomic(Arena* a, StrView path, StrView content) {
 #endif
   StrBuf_AppendChar(&temporary, '-');
   StrBuf_AppendU64(&temporary, ++g_configTempCounter);
+  StrView temporaryPath = StrBuf_View(&temporary);
 
-  FILE* f = fopen(StrBuf_CStr(&temporary), "wb");
-  if (!f) return false;
+  FILE* f = nullptr;
+  if (File_Open(a, temporaryPath, "wb", &f) != FileIoResult::Success) return false;
 
 #if !defined(_WIN32)
-  if (chmod(StrBuf_CStr(&temporary), 0600) != 0) {
+  if (fchmod(fileno(f), 0600) != 0) {
     fclose(f);
-    remove(StrBuf_CStr(&temporary));
+    File_Remove(a, temporaryPath);
     return false;
   }
 #endif
@@ -68,22 +58,9 @@ bool ConfigFile_WriteAtomic(Arena* a, StrView path, StrView content) {
   bool ok = content.Length == 0 || fwrite(content.Data, 1, content.Length, f) == content.Length;
   if (ok && fflush(f) != 0) ok = false;
   if (fclose(f) != 0) ok = false;
-  if (!ok) {
-    remove(StrBuf_CStr(&temporary));
+  if (!ok || !File_Replace(a, temporaryPath, path)) {
+    File_Remove(a, temporaryPath);
     return false;
   }
-
-#if defined(_WIN32)
-  if (!MoveFileExA(StrBuf_CStr(&temporary), destination,
-                   MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-    remove(StrBuf_CStr(&temporary));
-    return false;
-  }
-#else
-  if (rename(StrBuf_CStr(&temporary), destination) != 0) {
-    remove(StrBuf_CStr(&temporary));
-    return false;
-  }
-#endif
   return true;
 }

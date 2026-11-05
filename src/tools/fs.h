@@ -16,14 +16,24 @@ bool Fs_IsDir(StrView path);
 bool Fs_MkdirP(Arena* arena, StrView path);
 StrView Fs_RealPath(Arena* arena, StrView path);
 
+// The most a file tool (read, edit) buffers from one file. They hold the whole
+// file plus working copies, so larger files are left to tools that stream.
+constexpr u64 FS_TOOL_MAX_FILE_BYTES = (u64)64 << 20;
+
 struct FsPermissionTarget {
   StrView Path;
   bool Contained;
+  bool Protected;
 };
 
 // Canonicalizes existing path components, retaining missing trailing
 // components so callers can classify a future write without treating it as an
 // existing path. Ambiguous paths are never classified as contained.
+//
+// `Protected` marks a contained path with a `.git`, `.clanker` or `.agents`
+// component below the root (ASCII case-insensitive). Writes there change what
+// runs later -- git hooks and config, project hooks, skills -- so they are not
+// auto-allowed even inside the workspace.
 FsPermissionTarget Fs_ResolvePermissionTarget(Arena* arena,
                                               StrView workingDirectory,
                                               StrView target);

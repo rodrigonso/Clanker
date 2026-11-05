@@ -10,9 +10,7 @@ struct TruncResult {
   bool Truncated;
   bool ByBytes;        // when Truncated: true => byte limit hit; false => line limit hit
   u32 TotalLines;      // line count of the ORIGINAL content
-  u32 TotalBytes;      // byte count of the ORIGINAL content
   u32 OutputLines;     // line count of the returned content
-  u32 OutputBytes;     // byte count of the returned content
 };
 
 // Lines are separated by '\n'. A trailing '\n' terminates the last line but

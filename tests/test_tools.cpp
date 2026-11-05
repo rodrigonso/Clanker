@@ -151,6 +151,52 @@ static void TestToolPermissions(Arena* a) {
       workingDirectory, &outside, &outsideErr));
   CHECK(!outside.AutoAllow);
 
+  // Writes that steer later execution -- git hooks and config, project hooks,
+  // skills -- need review even inside the workspace.
+  const char* protectedPaths[] = {
+      ".git/config", ".GIT/hooks/pre-commit", "sub/.git/config",
+      ".clanker/hooks.json", ".Clanker/settings.json",
+      ".agents/skills/x/SKILL.md", ".git",
+  };
+  for (u32 i = 0; i < (u32)(sizeof(protectedPaths) / sizeof(protectedPaths[0])); i++) {
+    FsPermissionTarget target =
+        Fs_ResolvePermissionTarget(a, workingDirectory, SV(protectedPaths[i]));
+    CHECK_ALL(target.Contained, target.Protected);
+    StrBuf json = StrBuf_Make(a, 128);
+    StrBuf_AppendCStr(&json, "{\"path\":\"");
+    StrBuf_AppendCStr(&json, protectedPaths[i]);
+    StrBuf_AppendCStr(&json, "\",\"content\":\"x\"}");
+    ToolPermissionInfo info = {};
+    StrBuf infoErr = StrBuf_Make(a, 64);
+    CHECK(DescribeToolPermission(a, write, StrBuf_View(&json), workingDirectory,
+                                 &info, &infoErr));
+    CHECK(!info.AutoAllow);
+  }
+#if defined(_WIN32)
+  // Win32 opens each of these as `.git`.
+  const char* aliases[] = {".git./config", ".git /config",
+                           ".git::$INDEX_ALLOCATION/config"};
+  for (u32 i = 0; i < (u32)(sizeof(aliases) / sizeof(aliases[0])); i++) {
+    FsPermissionTarget target =
+        Fs_ResolvePermissionTarget(a, workingDirectory, SV(aliases[i]));
+    CHECK(!target.Contained || target.Protected);
+  }
+#endif
+  const char* ordinaryPaths[] = {".github/workflows/ci.yml", ".gitignore",
+                                 "my.git/x", "agents/x", ".clankerrc"};
+  for (u32 i = 0; i < (u32)(sizeof(ordinaryPaths) / sizeof(ordinaryPaths[0])); i++) {
+    FsPermissionTarget target =
+        Fs_ResolvePermissionTarget(a, workingDirectory, SV(ordinaryPaths[i]));
+    CHECK_ALL(target.Contained, !target.Protected);
+  }
+  // Only components below the workspace root count.
+  StrView gitRoot = Fs_Join(a, workingDirectory, SVL("sub/.git"));
+  Fs_MkdirP(a, gitRoot);
+  FsPermissionTarget insideGitRoot =
+      Fs_ResolvePermissionTarget(a, Fs_RealPath(a, gitRoot), SVL("file.txt"));
+  CHECK_ALL(insideGitRoot.Contained, !insideGitRoot.Protected);
+  CLANKER_RMDIR("clanker_tool_permission_root/sub/.git");
+
   CHECK(Fs_PathContained(workingDirectory, workingDirectory));
   CHECK(Fs_PathContained(workingDirectory,
                          Fs_Join(a, workingDirectory, SV("sub"))));
@@ -211,6 +257,18 @@ static void TestToolPermissions(Arena* a) {
       a, shell, SV("{\"command\":\"git branch --show-current\"}"),
       workingDirectory, &branch, &branchErr));
   CHECK(branch.AutoAllow);
+
+  // The tool hands over the whole command; bounding it for display is the
+  // permission engine's job, which can then tell a clipped action apart.
+  StrBuf longJson = StrBuf_Make(a, 3100);
+  StrBuf_AppendCStr(&longJson, "{\"command\":\"echo ");
+  for (u32 i = 0; i < 3000; i++) StrBuf_AppendChar(&longJson, 'a');
+  StrBuf_AppendCStr(&longJson, "\"}");
+  ToolPermissionInfo longCommand = {};
+  StrBuf longErr = StrBuf_Make(a, 64);
+  CHECK(DescribeToolPermission(a, shell, StrBuf_View(&longJson), workingDirectory,
+                               &longCommand, &longErr));
+  CHECK(longCommand.Action.Length == sizeof("Run echo ") - 1 + 3000);
 
   CLANKER_RMDIR("clanker_tool_permission_root/sub");
   CLANKER_RMDIR(root);

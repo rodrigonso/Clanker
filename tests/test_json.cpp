@@ -57,6 +57,52 @@ void TestJson() {
   CHECK(Json_Parse(&a, SV("{bad")) == nullptr);
   CHECK(Json_Parse(&a, SV("{} trailing")) == nullptr);
 
+  // A document cut off before its closing bracket is incomplete, not valid.
+  // Session repair depends on a torn final line failing to parse.
+  const char* truncated[] = {"{", "[", "{\"a\":1,", "{\"a\":1", "[1,", "[1",
+                             "{\"a\":[1,2", "[1,]", "{\"a\":1,}"};
+  for (const char* text : truncated) CHECK(Json_Parse(&a, SV(text)) == nullptr);
+  const char* nonJsonNumbers[] = {"+1",     "inf",   "nan",  "[ +1]", "{\"n\":.5}",
+                                  "-Infinity", "-inf", "-nan", "0x10",  "-0x1p4",
+                                  "01",     "-01",   "1.",   "1.e5",  "1e",
+                                  "1e+",    "-",     "1e400", "-1e400", "[1e999]"};
+  for (const char* text : nonJsonNumbers)
+    CHECK(Json_Parse(&a, SV(text)) == nullptr);
+  CHECK(Json_Parse(&a, SV("-0.5e3")) != nullptr);
+  {
+    JsonValue* zero = Json_Parse(&a, SV("-0"));
+    JsonValue* tiny = Json_Parse(&a, SV("1e-400"));
+    JsonValue* exponent = Json_Parse(&a, SV("[0E+2,10e-1]"));
+    // A view into a longer buffer parses only its own bytes.
+    JsonValue* prefix = Json_Parse(&a, StrView{"12345", 2});
+    CHECK_ALL(zero && zero->Number == 0.0, tiny && tiny->Number == 0.0,
+              exponent && exponent->Count == 2 && exponent->Items[1]->Number == 1.0,
+              prefix && prefix->Number == 12.0);
+    StrBuf longNumber = StrBuf_Make(&a, 128);
+    StrBuf_AppendCStr(&longNumber, "0.");
+    for (u32 i = 0; i < 99; i++) StrBuf_AppendChar(&longNumber, '0');
+    StrBuf_AppendCStr(&longNumber, "25e100");
+    JsonValue* scaled = Json_Parse(&a, StrBuf_View(&longNumber));
+    CHECK(scaled && scaled->Number == 2.5);
+  }
+
+  // Nesting is bounded so hostile input cannot exhaust the stack of whatever
+  // thread parses or later walks it.
+  {
+    StrBuf deep = StrBuf_Make(&a, 2 * (JSON_MAX_DEPTH + 1) + 1);
+    for (u32 i = 0; i < JSON_MAX_DEPTH; i++) StrBuf_AppendChar(&deep, '[');
+    for (u32 i = 0; i < JSON_MAX_DEPTH; i++) StrBuf_AppendChar(&deep, ']');
+    CHECK(Json_Parse(&a, StrBuf_View(&deep)) != nullptr);
+    StrBuf deeper = StrBuf_Make(&a, 2 * (JSON_MAX_DEPTH + 1) + 1);
+    for (u32 i = 0; i <= JSON_MAX_DEPTH; i++) StrBuf_AppendCStr(&deeper, "{\"k\":");
+    StrBuf_AppendChar(&deeper, '1');
+    for (u32 i = 0; i <= JSON_MAX_DEPTH; i++) StrBuf_AppendChar(&deeper, '}');
+    CHECK(Json_Parse(&a, StrBuf_View(&deeper)) == nullptr);
+    StrBuf hostile = StrBuf_Make(&a, 1 << 20);
+    for (u32 i = 0; i < (1u << 20) - 1; i++) StrBuf_AppendChar(&hostile, '[');
+    CHECK(Json_Parse(&a, StrBuf_View(&hostile)) == nullptr);
+  }
+
   // A lone surrogate escape has no UTF-8 form. Encoding it as CESU-8 is what
   // makes providers answer "surrogates not allowed", so it decodes to U+FFFD.
   JsonValue* lone = Json_Parse(&a, SV("{\"s\":\"x\\ud83dy\"}"));

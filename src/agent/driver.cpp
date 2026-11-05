@@ -448,12 +448,13 @@ SessionResult RunToolBatch(AgentHarness* harness, DurableId* ioHead, const Messa
              : committed;
 }
 
+// Only Text blocks form the summary, as in pi: reasoning is the model's
+// working, not part of the answer.
 StrView ExtractSummaryText(Arena* arena, const Message* assistant) {
   StrBuf text = StrBuf_Make(arena, 256);
   for (u32 i = 0; i < assistant->Content.Count; i++) {
     const Content* content = &assistant->Content.Data[i];
-    if ((content->Kind == ContentKind::Text || content->Kind == ContentKind::Thinking) &&
-        content->Text.Length) {
+    if (content->Kind == ContentKind::Text && content->Text.Length) {
       if (text.Length) StrBuf_AppendChar(&text, '\n');
       StrBuf_Append(&text, content->Text);
     }
@@ -491,9 +492,19 @@ SessionResult PerformCompaction(AgentHarness* harness, DurableId head,
     summarizeText = StrBuf_View(&directed);
   }
   Message summarizePrompt = Message_User(&harness->Work, summarizeText);
+
+  // The summarizer sees only the span being folded, as the model sees it now.
+  // The retained tail stays verbatim after the summary, so including it would
+  // duplicate it and spend the very headroom compaction exists to recover.
+  AgentRunState span = {};
+  span.HasContext = true;
+  SessionReduction reduction = AgentHarness_ReduceSnapshot(harness);
+  SessionResult result = SessionReducer_ContextThrough(&harness->Work, &reduction, head,
+                                                       throughEntryId, &span.Context);
   TurnRunResult turn = {};
-  SessionResult result =
-      RunAssistantTurn(harness, AgentTurnKind::Compaction, head, &summarizePrompt, nullptr, &turn);
+  if (SessionResult_IsOk(result))
+    result = RunAssistantTurn(harness, AgentTurnKind::Compaction, head, &summarizePrompt,
+                              &span, &turn);
 
   AgentTurnOutcome outcome = AgentTurnOutcome::Succeeded;
   StrView error = {};
@@ -515,7 +526,7 @@ SessionResult PerformCompaction(AgentHarness* harness, DurableId head,
       // they are collected before the summary is sealed and carried on the
       // record for the next compaction to reseed from.
       AgentFileLists files = {};
-      SessionReduction reduction = AgentHarness_ReduceSnapshot(harness);
+      reduction = AgentHarness_ReduceSnapshot(harness);
       Array<const SessionRecord*> branch = {};
       if (SessionResult_IsOk(
               SessionReducer_Ancestry(&reduction, &harness->Work, head, &branch))) {

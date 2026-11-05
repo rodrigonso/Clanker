@@ -18,21 +18,10 @@
 static AppCommandHandlerResult HandleSessionCommand(
     void* user, const AppCommandUx*, StrView) {
   InteractiveRuntime* rt = (InteractiveRuntime*)user;
-  Arena scratch = ArenaCreate((usize)32 << 20);
-  SessionReduction state = {};
-  SessionResult snapshot =
-      AgentHarness_Snapshot(&scratch, rt->Harness, &state);
-  if (!SessionResult_IsOk(snapshot)) {
-    ArenaRelease(&scratch);
-    return CommandResult(snapshot, {});
-  }
-  SessionMetadataBuildOptions build = {};
-  build.Busy = rt->Harness->Running;
-  build.NowMs = NowMillis();
+  Arena scratch = ArenaCreate();
   SessionInfo info = {};
   SessionResult metadata =
-      SessionMetadata_Build(&scratch, state.Records, state.RecordCount,
-                            &build, &info);
+      AgentHarness_DescribeSession(&scratch, rt->Harness, &info);
   if (!SessionResult_IsOk(metadata)) {
     ArenaRelease(&scratch);
     return CommandResult(metadata, {});
@@ -68,7 +57,7 @@ static AppCommandHandlerResult HandleSessionCommand(
 static AppCommandHandlerResult HandleNameCommand(
     void* user, const AppCommandUx*, StrView arguments) {
   InteractiveRuntime* rt = (InteractiveRuntime*)user;
-  Arena scratch = ArenaCreate((usize)16 << 20);
+  Arena scratch = ArenaCreate();
   StrView name = arguments;
   if (!arguments.Length) {
     if (!rt->TuiView) {
@@ -77,18 +66,9 @@ static AppCommandHandlerResult HandleNameCommand(
           AppCommandHandlerStatus::Failed,
           AppCommand_Usage(AppCommandKind::Name)};
     }
-    SessionReduction state = {};
-    SessionResult snapshot =
-        AgentHarness_Snapshot(&scratch, rt->Harness, &state);
-    if (!SessionResult_IsOk(snapshot)) {
-      ArenaRelease(&scratch);
-      return CommandResult(snapshot, {});
-    }
-    SessionMetadataBuildOptions build = {};
     SessionInfo info = {};
     SessionResult metadata =
-        SessionMetadata_Build(&scratch, state.Records, state.RecordCount,
-                              &build, &info);
+        AgentHarness_DescribeSession(&scratch, rt->Harness, &info);
     if (!SessionResult_IsOk(metadata)) {
       ArenaRelease(&scratch);
       return CommandResult(metadata, {});
@@ -325,18 +305,7 @@ resume_scope:
     ArenaRelease(&scratch);
     return CommandResult(opened, {});
   }
-  Array<SessionRecord> records = {};
-  SessionReduction state = {};
-  SessionResult read = SessionLog_ReadAll(&log, &scratch, &records);
-  if (SessionResult_IsOk(read))
-    read = SessionReducer_Reduce(&scratch, records.Data, records.Count, &state);
-  if (!SessionResult_IsOk(read)) {
-    SessionLog_Close(&log);
-    ArenaRelease(&scratch);
-    return CommandResult(read, {});
-  }
-  SessionResult switched =
-      RuntimeSwitchToLog(rt, log, &info, &state, ux);
+  SessionResult switched = RuntimeSwitchToLog(rt, log, &info, ux);
   ArenaRelease(&scratch);
   return CommandResult(switched, SVL("session resumed"));
 }
@@ -344,7 +313,7 @@ resume_scope:
 static AppCommandHandlerResult HandleTreeCommand(
     void* user, const AppCommandUx*, StrView) {
   InteractiveRuntime* rt = (InteractiveRuntime*)user;
-  Arena scratch = ArenaCreate((usize)32 << 20);
+  Arena scratch = ArenaCreate();
   SessionReduction state = {};
   SessionResult snapshot =
       AgentHarness_Snapshot(&scratch, rt->Harness, &state);
@@ -401,10 +370,10 @@ static AppCommandHandlerResult HandleCheckoutCommand(
 static AppCommandHandlerResult HandleForkCommand(
     void* user, const AppCommandUx* ux, StrView arguments) {
   InteractiveRuntime* rt = (InteractiveRuntime*)user;
-  Arena scratch = ArenaCreate((usize)64 << 20);
-  SessionReduction state = {};
+  Arena scratch = ArenaCreate();
+  AgentHarnessSummary state = {};
   SessionResult snapshot =
-      AgentHarness_Snapshot(&scratch, rt->Harness, &state);
+      AgentHarness_Summarize(&scratch, rt->Harness, &state);
   if (!SessionResult_IsOk(snapshot)) {
     ArenaRelease(&scratch);
     return CommandResult(snapshot, {});
@@ -420,20 +389,9 @@ static AppCommandHandlerResult HandleForkCommand(
   SessionResult forked =
       AgentHarness_Fork(&scratch, rt->Harness, rt->Sessions, head, {}, {},
                         &forkLog, &forkInfo);
-  if (SessionResult_IsOk(forked)) {
-    Array<SessionRecord> records = {};
-    SessionReduction forkState = {};
-    forked = SessionLog_ReadAll(&forkLog, &scratch, &records);
-    if (SessionResult_IsOk(forked))
-      forked = SessionReducer_Reduce(&scratch, records.Data, records.Count,
-                                     &forkState);
-    if (SessionResult_IsOk(forked)) {
-      forked =
-          RuntimeSwitchToLog(rt, forkLog, &forkInfo, &forkState, ux);
-    }
-    if (!SessionResult_IsOk(forked))
-      SessionLog_Close(&forkLog);
-  }
+  // RuntimeSwitchToLog takes ownership of the log, including on failure.
+  if (SessionResult_IsOk(forked))
+    forked = RuntimeSwitchToLog(rt, forkLog, &forkInfo, ux);
   ArenaRelease(&scratch);
   return CommandResult(forked, SVL("session forked"));
 }
@@ -763,8 +721,7 @@ bool RuntimeResetSession(InteractiveRuntime* rt, const AppCommandUx* ux) {
     return false;
   }
 
-  SessionResult switched =
-      RuntimeSwitchToLog(rt, log, &info, nullptr, ux);
+  SessionResult switched = RuntimeSwitchToLog(rt, log, &info, ux);
   if (!SessionResult_IsOk(switched)) {
     EmitCommandError(ux, switched.Message);
     return false;

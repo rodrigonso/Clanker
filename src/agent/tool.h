@@ -53,6 +53,9 @@ enum class ToolPermissionEffect : u8 {
   UserInteraction,
 };
 
+// `Action` is the complete human-readable projection of the call. The engine
+// bounds it for display; an action too long to show in full is never sent to
+// the automatic reviewer.
 struct ToolPermissionInfo {
   StrView Action;
   StrView GrantKey;

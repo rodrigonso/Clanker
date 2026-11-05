@@ -141,11 +141,10 @@ static void RunPlainRepl(InteractiveRuntime* rt) {
   EnableTerminal();
   rt->TuiView = nullptr;
   HarnessEventPump pump = {};
-  AgentHarnessSnapshot snapshot = {};
   HarnessEventSink sink = {nullptr, ReplSink};
   SessionResult watching =
-      StartHarnessEventPump(rt->Mem, rt->Harness, sink, nullptr, &pump,
-                            &snapshot);
+      StartHarnessEventPump(nullptr, rt->Harness, sink, nullptr, &pump,
+                            nullptr);
   if (!SessionResult_IsOk(watching)) {
     ReportHarnessResult(watching);
     return;
@@ -201,7 +200,7 @@ static void MaybeCompactTuiSession(InteractiveRuntime* rt, Tui* tui) {
   if (!Tui_SessionMemoryWantsCompaction(tui)) return;
   // The transcript is rebuilt from the harness, which is the authority, so the
   // copy is what the user was already looking at.
-  Arena scratch = ArenaCreate((usize)64 << 20);
+  Arena scratch = ArenaCreate();
   AgentHarnessSnapshot snapshot = {};
   SessionResult taken =
       AgentHarness_SnapshotFull(&scratch, rt->Harness, &snapshot);
@@ -243,12 +242,14 @@ static void RunTuiRepl(InteractiveRuntime* rt) {
   tui.Agent = TuiBridge_AgentHooks(rt->Harness);
 
   HarnessEventPump pump = {};
-  AgentHarnessSnapshot snapshot = {};
   HarnessEventSink sink = {&tui, TuiBridge_HarnessEvent};
+  Arena hydrateMem = ArenaCreate();
+  AgentHarnessSnapshot snapshot = {};
   SessionResult watching =
-      StartHarnessEventPump(rt->Mem, rt->Harness, sink, &tui, &pump,
+      StartHarnessEventPump(&hydrateMem, rt->Harness, sink, &tui, &pump,
                             &snapshot);
   if (!SessionResult_IsOk(watching)) {
+    ArenaRelease(&hydrateMem);
     ReportHarnessResult(watching);
     Tui_Stop(&tui);
     rt->TuiView = nullptr;
@@ -258,6 +259,7 @@ static void RunTuiRepl(InteractiveRuntime* rt) {
   rt->EventSink = sink;
   Tui_HydrateTranscript(&tui, snapshot.Transcript.Data,
                         snapshot.Transcript.Count);
+  ArenaRelease(&hydrateMem);
 
   Http_GlobalInit();
   Tui_LoadStartupContext(&tui);
@@ -845,10 +847,10 @@ int main(int argc, char** argv) {
   }
 
   if (openedExisting) {
-    Arena scratch = ArenaCreate((usize)16 << 20);
-    SessionReduction state = {};
+    Arena scratch = ArenaCreate();
+    AgentHarnessSummary state = {};
     SessionResult snapshot =
-        AgentHarness_Snapshot(&scratch, &harness, &state);
+        AgentHarness_Summarize(&scratch, &harness, &state);
     if (SessionResult_IsOk(snapshot) && state.Provider.Length &&
         state.Model.Length) {
       {
@@ -999,11 +1001,10 @@ int main(int argc, char** argv) {
     EnableTerminal();
     Http_GlobalInit();
     HarnessEventPump pump = {};
-    AgentHarnessSnapshot snapshot = {};
     HarnessEventSink sink = {nullptr, ReplSink};
     SessionResult watching =
-        StartHarnessEventPump(&arena, &harness, sink, nullptr, &pump,
-                              &snapshot, jsonMode);
+        StartHarnessEventPump(nullptr, &harness, sink, nullptr, &pump,
+                              nullptr, jsonMode);
     if (!SessionResult_IsOk(watching)) {
       ReportHarnessResult(watching);
       EndHookSession();

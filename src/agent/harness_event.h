@@ -115,8 +115,10 @@ struct AgentHarnessEvent {
   };
 };
 
+// The active branch's transcript as of `Cursor`. Messages are deep copies, so a
+// snapshot shares nothing with the harness and costs the branch, not the
+// session's whole history.
 struct AgentHarnessSnapshot {
-  SessionReduction State;
   Array<Message> Transcript;
   u64 Cursor;
   bool Running;

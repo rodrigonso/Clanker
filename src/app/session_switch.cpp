@@ -14,17 +14,20 @@
 bool RuntimeRestartWatch(InteractiveRuntime* rt,
                                 const AppCommandUx* ux) {
   if (!rt->EventPump) return true;
+  Arena scratch = ArenaCreate();
   AgentHarnessSnapshot snapshot = {};
-  SessionResult watched =
-      StartHarnessEventPump(rt->Mem, rt->Harness, rt->EventSink,
-                            rt->TuiView, rt->EventPump, &snapshot);
+  SessionResult watched = StartHarnessEventPump(
+      &scratch, rt->Harness, rt->EventSink, rt->TuiView, rt->EventPump,
+      rt->TuiView ? &snapshot : nullptr);
   if (!SessionResult_IsOk(watched)) {
+    ArenaRelease(&scratch);
     EmitCommandError(ux, watched.Message);
     return false;
   }
   if (rt->TuiView)
     Tui_ReplaceTranscript(rt->TuiView, snapshot.Transcript.Data,
                           snapshot.Transcript.Count);
+  ArenaRelease(&scratch);
   return true;
 }
 
@@ -192,7 +195,6 @@ void RuntimeUpdateShellDirectory(InteractiveRuntime* rt,
 SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
                                         SessionLog target,
                                         const SessionInfo* targetInfo,
-                                        const SessionReduction* targetState,
                                         const AppCommandUx* ux) {
   if (!targetInfo || !targetInfo->WorkingDirectory.Length ||
       !targetInfo->ProjectKey.Length) {
@@ -207,10 +209,10 @@ SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
         SVL("the session working directory no longer exists"));
   }
 
-  Arena scratch = ArenaCreate((usize)32 << 20);
-  SessionReduction previousState = {};
+  Arena scratch = ArenaCreate();
+  AgentHarnessSummary previousState = {};
   SessionResult previous =
-      AgentHarness_Snapshot(&scratch, rt->Harness, &previousState);
+      AgentHarness_Summarize(&scratch, rt->Harness, &previousState);
   if (!SessionResult_IsOk(previous) || previousState.RecordCount == 0) {
     SessionLog_Close(&target);
     ArenaRelease(&scratch);
@@ -219,7 +221,7 @@ SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
                                      SVL("current session has no durable root"))
                : previous;
   }
-  DurableId previousSessionId = previousState.Records[0].SessionId;
+  DurableId previousSessionId = previousState.SessionId;
   AgentHarnessConfig previousConfig = rt->Harness->Config;
   AgentHarnessConfig config = previousConfig;
   StrView previousWorkingDirectory = rt->WorkingDirectory;
@@ -253,10 +255,11 @@ SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
   const ProviderSpec* targetSpec = rt->Spec;
   Model targetModel = rt->CurrentModel;
   ModelRequestProfile targetProfile = config.Stream.Profile;
-  if (targetState && targetState->Provider.Length &&
-      targetState->Model.Length) {
+  // SessionInfo carries the target branch's provider/model (falling back to its
+  // last assistant message), which is exactly what a full reduction would give.
+  if (targetInfo->CurrentProvider.Length && targetInfo->CurrentModel.Length) {
     {
-      targetSpec = ProviderRegistry_Find(targetState->Provider);
+      targetSpec = ProviderRegistry_Find(targetInfo->CurrentProvider);
       if (!targetSpec || !targetSpec->CreateModel ||
           !targetSpec->CreateProvider) {
         SessionLog_Close(&target);
@@ -266,8 +269,8 @@ SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
             SessionStatus::InvalidState,
             SVL("the target session uses an unavailable provider"));
       }
-      targetModel =
-          targetSpec->CreateModel(rt->Mem, targetSpec, targetState->Model);
+      targetModel = targetSpec->CreateModel(rt->Mem, targetSpec,
+                                            targetInfo->CurrentModel);
       targetProfile = Model_ResolveRequestPreference(
           &targetModel, rt->PreferredProfile);
       config.ModelInfo = targetModel;
@@ -633,15 +636,15 @@ SessionOptionList BuildSessionOptions(
 
 SessionResult CurrentSessionId(Arena* arena, InteractiveRuntime* rt,
                                       DurableId* out) {
-  SessionReduction state = {};
-  SessionResult snapshot =
-      AgentHarness_Snapshot(arena, rt->Harness, &state);
-  if (!SessionResult_IsOk(snapshot)) return snapshot;
-  if (!state.RecordCount)
+  AgentHarnessSummary summary = {};
+  SessionResult described =
+      AgentHarness_Summarize(arena, rt->Harness, &summary);
+  if (!SessionResult_IsOk(described)) return described;
+  if (!summary.RecordCount)
     return SessionResult_Error(SessionStatus::InvalidState,
                                SVL("current session has no durable root"));
-  *out = state.Records[0].SessionId;
-  return snapshot;
+  *out = summary.SessionId;
+  return described;
 }
 bool ResolveStartupProjectTrust(
     Arena* arena, StrView trustPath, StrView workingDirectory,

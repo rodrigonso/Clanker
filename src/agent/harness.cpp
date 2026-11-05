@@ -224,21 +224,25 @@ SessionResult CloneReduction(Arena* arena, const SessionReduction* source,
   return SessionResult_Ok(copy.RecordCount);
 }
 
-// Shared by AgentHarness_SnapshotFull and AgentHarness_Watch, both of which
-// already hold StateLock. The caller owns the cloned durable state; transcript
-// projection then visits only the active branch.
+// Builds the snapshot under StateLock, which AgentHarness_SnapshotFull and
+// AgentHarness_Watch already hold. The branch is resolved against the live
+// reduction in a private arena; only the messages it selects are copied out.
 SessionResult BuildSnapshotLocked(Arena* arena, AgentHarness* harness,
                                   AgentHarnessSnapshot* out) {
+  Arena scratch = ArenaCreate();
+  Array<Message> branch = {};
+  SessionResult context = SessionReducer_Context(
+      &scratch, &harness->Reduction, harness->Reduction.HeadId, &branch);
+  if (!SessionResult_IsOk(context)) {
+    ArenaRelease(&scratch);
+    return context;
+  }
   AgentHarnessSnapshot snapshot = {};
-  SessionResult cloned =
-      CloneReduction(arena, &harness->Reduction, &snapshot.State);
-  if (!SessionResult_IsOk(cloned)) return cloned;
-  Array<Message> transcript = {};
-  SessionResult context =
-      SessionReducer_Context(arena, &snapshot.State, snapshot.State.HeadId,
-                             &transcript);
-  if (!SessionResult_IsOk(context)) return context;
-  snapshot.Transcript = transcript;
+  snapshot.Transcript =
+      Array_Make<Message>(arena, branch.Count ? branch.Count : 1);
+  for (u32 i = 0; i < branch.Count; i++)
+    Array_Push(&snapshot.Transcript, Message_Clone(arena, branch.Data[i]));
+  ArenaRelease(&scratch);
   snapshot.Cursor =
       harness->Records.Count ? harness->Records.Data[harness->Records.Count - 1].Seq : 0;
   snapshot.Running = harness->Running;
@@ -676,10 +680,42 @@ SessionResult AgentHarness_SnapshotFull(Arena* arena, AgentHarness* harness,
   return BuildSnapshotLocked(arena, harness, out);
 }
 
+SessionResult AgentHarness_Summarize(Arena* arena, AgentHarness* harness,
+                                     AgentHarnessSummary* out) {
+  if (!arena || !harness || !harness->Initialized || !out)
+    return SessionResult_Invalid("summary arguments are invalid");
+  ScopedLock lock(&harness->StateLock);
+  AgentHarnessSummary summary = {};
+  if (harness->Records.Count) {
+    summary.SessionId = harness->Records.Data[0].SessionId;
+    summary.Cursor = harness->Records.Data[harness->Records.Count - 1].Seq;
+  }
+  summary.HeadId = harness->Reduction.HeadId;
+  summary.Provider = StrView_Dup(arena, harness->Reduction.Provider);
+  summary.Model = StrView_Dup(arena, harness->Reduction.Model);
+  summary.RecordCount = harness->Records.Count;
+  summary.Running = harness->Running;
+  summary.Faulted = harness->Faulted;
+  *out = summary;
+  return SessionResult_Ok(summary.Cursor);
+}
+
+SessionResult AgentHarness_DescribeSession(Arena* arena, AgentHarness* harness,
+                                           SessionInfo* out) {
+  if (!arena || !harness || !harness->Initialized || !out)
+    return SessionResult_Invalid("describe arguments are invalid");
+  ScopedLock lock(&harness->StateLock);
+  SessionMetadataBuildOptions options = {};
+  options.Busy = harness->Running;
+  options.NowMs = NowMillis();
+  return SessionMetadata_Build(arena, harness->Records.Data,
+                               harness->Records.Count, &options, out);
+}
+
 SessionResult AgentHarness_Watch(Arena* arena, AgentHarness* harness, u32 capacity,
                                  AgentHarnessSnapshot* outSnapshot,
                                  AgentHarnessWatch* outWatch) {
-  if (!arena || !harness || !harness->Initialized || !outSnapshot || !outWatch ||
+  if (!harness || !harness->Initialized || (outSnapshot && !arena) || !outWatch ||
       outWatch->Initialized)
     return SessionResult_Invalid("watch arguments are invalid");
   if (capacity == 0) capacity = 16;
@@ -697,17 +733,23 @@ SessionResult AgentHarness_Watch(Arena* arena, AgentHarness* harness, u32 capaci
 
   SessionResult result = {};
   {
+    // The snapshot and the registration have to be atomic with respect to
+    // appends: a record landing between them would reach neither the snapshot
+    // nor the watcher. Appends publish durable records under StateLock, so
+    // holding it across both is enough; WatcherLock is taken only to register,
+    // which keeps streamed tokens from waiting on the snapshot copy.
     ScopedLock lock(&harness->StateLock);
-    ScopedLock registry(&harness->WatcherLock);
-    if (harness->WatcherCount == AGENT_HARNESS_MAX_WATCHERS) {
-      result = SessionResult_Error(SessionStatus::Busy, SVL("watcher limit reached"));
-    } else {
-      // The snapshot and the registration have to be atomic with respect to
-      // appends: a record landing between them would reach neither the
-      // snapshot nor the watcher.
-      result = BuildSnapshotLocked(arena, harness, outSnapshot);
-      if (SessionResult_IsOk(result)) {
-        outWatch->Cursor = outSnapshot->Cursor;
+    u64 cursor = harness->Records.Count
+                     ? harness->Records.Data[harness->Records.Count - 1].Seq
+                     : 0;
+    result = outSnapshot ? BuildSnapshotLocked(arena, harness, outSnapshot)
+                         : SessionResult_Ok(cursor);
+    if (SessionResult_IsOk(result)) {
+      ScopedLock registry(&harness->WatcherLock);
+      if (harness->WatcherCount == AGENT_HARNESS_MAX_WATCHERS) {
+        result = SessionResult_Error(SessionStatus::Busy, SVL("watcher limit reached"));
+      } else {
+        outWatch->Cursor = cursor;
         outWatch->Registered = true;
         harness->Watchers[harness->WatcherCount++] = outWatch;
       }

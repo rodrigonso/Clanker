@@ -44,6 +44,17 @@ void TestFileIo() {
   CHECK(ConfigFile_ReadAll(&arena, path, &bytes) == ConfigFileReadResult::Success);
   CHECK(StrView_Eq(bytes, content));
 
+  // A regular file is read into exactly one block of its size plus the NUL.
+  mark = arena.Used;
+  CHECK(File_ReadAll(&arena, path, &bytes) == FileIoResult::Success);
+  CHECK_ALL(StrView_Eq(bytes, content), arena.Used - mark == content.Length + 1u);
+  CHECK(File_ReadAll(&arena, path, &bytes, content.Length) == FileIoResult::Success);
+  CHECK(StrView_Eq(bytes, content));
+  mark = arena.Used;
+  bytes = SVL("stale");
+  CHECK(File_ReadAll(&arena, path, &bytes, content.Length - 1u) == FileIoResult::TooLarge);
+  CHECK_ALL(bytes.Data == nullptr, bytes.Length == 0, arena.Used == mark);
+
   CHECK(File_WriteAll(&arena, path, SVL("short")) == FileIoResult::Success);
   CHECK(File_ReadAll(&arena, path, &bytes) == FileIoResult::Success);
   CHECK(StrView_Eq(bytes, SVL("short")));
@@ -62,12 +73,28 @@ void TestFileIo() {
   CHECK(File_WriteAll(&arena, unicodePath, SVL("unicode path")) == FileIoResult::Success);
   CHECK(File_ReadAll(&arena, unicodePath, &bytes) == FileIoResult::Success);
   CHECK(StrView_EqCStr(bytes, "unicode path"));
+
+  // Directory, replace, remove, and atomic config writes take UTF-8 paths too.
+  StrView unicodeDir = Fs_Join(&arena, StrBuf_View(&root), SVL("d\xc3\xa9j\xc3\xa0"));
+  CHECK(File_MakeDir(&arena, unicodeDir));
+  CHECK(File_MakeDir(&arena, unicodeDir));
+  StrView unicodeConfig = Fs_Join(&arena, unicodeDir, SVL("r\xc3\xa9glages.json"));
+  CHECK(ConfigFile_WriteAtomic(&arena, unicodeConfig, SVL("{\"a\":1}")));
+  CHECK(ConfigFile_WriteAtomic(&arena, unicodeConfig, SVL("{\"a\":2}")));
+  CHECK(ConfigFile_ReadAll(&arena, unicodeConfig, &bytes) == ConfigFileReadResult::Success);
+  CHECK(StrView_EqCStr(bytes, "{\"a\":2}"));
+  CHECK(File_Replace(&arena, unicodePath, unicodeConfig));
+  CHECK(File_ReadAll(&arena, unicodeConfig, &bytes) == FileIoResult::Success);
+  CHECK(StrView_EqCStr(bytes, "unicode path"));
+  CHECK(File_ReadAll(&arena, unicodePath, &bytes) == FileIoResult::Missing);
+  CHECK(File_Remove(&arena, unicodeConfig));
+  CHECK(!File_Remove(&arena, unicodeConfig));
 #if defined(_WIN32)
   wchar_t native[4096];
-  CHECK(Win32_Path(unicodePath, native, 4096));
-  CHECK(_wremove(native) == 0);
+  CHECK(Win32_Path(unicodeDir, native, 4096));
+  CHECK(_wrmdir(native) == 0);
 #else
-  CHECK(remove(StrView_DupCStr(&arena, unicodePath)) == 0);
+  CHECK(rmdir(StrView_DupCStr(&arena, unicodeDir)) == 0);
 #endif
 
   CHECK(remove(StrView_DupCStr(&arena, path)) == 0);

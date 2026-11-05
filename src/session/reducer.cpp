@@ -198,19 +198,33 @@ enum class ContextSlot : u8 {
 
 SessionResult SessionReducer_Context(Arena* arena, const SessionReduction* reduction,
                                      DurableId headId, Array<Message>* outMessages) {
+  return SessionReducer_ContextThrough(arena, reduction, headId, DurableId{}, outMessages);
+}
+
+SessionResult SessionReducer_ContextThrough(Arena* arena, const SessionReduction* reduction,
+                                            DurableId headId, DurableId throughId,
+                                            Array<Message>* outMessages) {
   if (!arena || !reduction || !outMessages) return SessionResult_Invalid("context arguments are invalid");
   Array<const SessionRecord*> branch = {};
   SessionResult ancestry = SessionReducer_Ancestry(reduction, arena, headId, &branch);
   if (!SessionResult_IsOk(ancestry)) return ancestry;
 
+  u32 limit = branch.Count;
+  if (DurableId_IsSet(throughId)) {
+    limit = 0;
+    for (u32 i = 0; i < branch.Count && !limit; i++)
+      if (DurableId_Eq(branch.Data[i]->EntryId, throughId)) limit = i + 1;
+    if (!limit) return SessionResult_Invalid("context limit is not on the branch");
+  }
+
   u32 compactionCount = 0;
   for (u32 i = 0; i < branch.Count; i++)
     if (branch.Data[i]->Kind == SessionRecordKind::Compaction) compactionCount++;
 
-  Array<Message> messages = Array_Make<Message>(arena, branch.Count ? branch.Count : 1);
+  Array<Message> messages = Array_Make<Message>(arena, limit ? limit : 1);
 
   if (compactionCount == 0) {
-    for (u32 i = 0; i < branch.Count; i++) {
+    for (u32 i = 0; i < limit; i++) {
       if (branch.Data[i]->Kind == SessionRecordKind::Message)
         Array_Push(&messages, branch.Data[i]->MessageEntry.Value);
     }
@@ -251,7 +265,7 @@ SessionResult SessionReducer_Context(Arena* arena, const SessionReduction* reduc
     anchor[base] = &record->CompactionEntry.Summary;
   }
 
-  for (u32 i = 0; i < branch.Count; i++) {
+  for (u32 i = 0; i < limit; i++) {
     if (slot[i] == ContextSlot::Summary) {
       Array_Push(&messages, *anchor[i]);
       continue;

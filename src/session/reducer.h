@@ -59,6 +59,15 @@ SessionResult SessionReducer_Ancestry(const SessionReduction* reduction, Arena* 
 SessionResult SessionReducer_Context(Arena* arena, const SessionReduction* reduction,
                                      DurableId headId, Array<Message>* outMessages);
 
+// The prefix of `headId`'s context contributed by branch entries up to and
+// including `throughId`. Every compaction on the branch still applies, so a
+// summary anchored at or before `throughId` stands in for the span it folded,
+// even when the compaction entry itself comes later. This is what the model
+// currently sees of that span. An unset `throughId` means the whole branch.
+SessionResult SessionReducer_ContextThrough(Arena* arena, const SessionReduction* reduction,
+                                            DurableId headId, DurableId throughId,
+                                            Array<Message>* outMessages);
+
 // Full O(n) bulk validation used only at session open (and other one-shot
 // contexts like fork copy verification): schema-version, envelope,
 // contiguous seq, duplicate-EntryId, and parent/reference-existence checks
