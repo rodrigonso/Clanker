@@ -72,7 +72,7 @@ bool Ask(void* user, Arena* arena, const AgentAskRequest* request,
   return true;
 }
 
-bool DescribeSensitive(void*, Arena* arena, const ToolArgs* args, StrView,
+bool DescribeSensitive(void*, Arena* arena, const ToolArgs* args, const ToolPermissionScope*,
                        ToolPermissionInfo* out, StrBuf*) {
   StrBuf action = StrBuf_Make(arena, 128);
   StrBuf_AppendCStr(&action, "Run shell ");
@@ -119,7 +119,7 @@ StrView RequestId(Arena* arena, StrView denial) {
   return Json_GetStr(root, "permission_request_id");
 }
 
-bool OversizedGrantKey(void*, Arena* arena, const ToolArgs*, StrView,
+bool OversizedGrantKey(void*, Arena* arena, const ToolArgs*, const ToolPermissionScope*,
                        ToolPermissionInfo* out, StrBuf*) {
   *out = {};
   out->Action = SVL("Run shell with an oversized grant key");
@@ -131,7 +131,7 @@ bool OversizedGrantKey(void*, Arena* arena, const ToolArgs*, StrView,
 
 // Byte 1983 starts a three-byte character that straddles the clip point, and
 // the dangerous part sits past it.
-bool LongAction(void*, Arena* arena, const ToolArgs*, StrView,
+bool LongAction(void*, Arena* arena, const ToolArgs*, const ToolPermissionScope*,
                 ToolPermissionInfo* out, StrBuf*) {
   *out = {};
   StrBuf action = StrBuf_Make(arena, 6016);
@@ -863,7 +863,7 @@ void TestHarnessReviewerIsolation() {
   executions = 0;
   config.ProviderImpl = ScriptProvider_Make(&yoloScript);
   config.PermissionMode = AgentPermissionMode::Yolo;
-  config.ToolHooks.BeforeTool = AdministrativeBlock;
+  config.Hooks.BeforeTool = AdministrativeBlock;
   CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, yoloLog, &config)));
   CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("try it"))));
   CHECK_ALL(executions == 0, yoloScript.Index == 2);
@@ -881,7 +881,7 @@ void TestHarnessReviewerIsolation() {
   executions = 0;
   config.ProviderImpl = ScriptProvider_Make(&malformedScript);
   config.PermissionMode = AgentPermissionMode::Auto;
-  config.ToolHooks = {};
+  config.Hooks = {};
   config.PermissionReviewer = {};
   CHECK(
       SessionResult_IsOk(AgentHarness_Init(&harness, malformedLog, &config)));

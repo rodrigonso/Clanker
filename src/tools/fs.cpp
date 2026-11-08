@@ -109,6 +109,7 @@ FsStat Fs_Stat(StrView path) {
     r.IsDir = (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
     r.Size = sz.QuadPart;
     r.IsRegular = !r.IsDir && !(data.dwFileAttributes & FILE_ATTRIBUTE_DEVICE);
+    FILETIME lastWrite = data.ftLastWriteTime;
     if (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
       HANDLE h = CreateFileW(buf, FILE_READ_ATTRIBUTES,
                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -120,10 +121,18 @@ FsStat Fs_Stat(StrView path) {
         r.IsDir = (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
         r.IsRegular = !r.IsDir && GetFileType(h) == FILE_TYPE_DISK;
         r.Size = ((u64)info.nFileSizeHigh << 32) | info.nFileSizeLow;
+        lastWrite = info.ftLastWriteTime;
       }
       CloseHandle(h);
       if (!valid) return FsStat{};
     }
+    ULARGE_INTEGER written;
+    written.LowPart = lastWrite.dwLowDateTime;
+    written.HighPart = lastWrite.dwHighDateTime;
+    // FILETIME counts 100ns ticks from 1601.
+    const u64 kUnixEpochTicks = 116444736000000000ull;
+    if (written.QuadPart > kUnixEpochTicks)
+      r.ModifiedMs = (written.QuadPart - kUnixEpochTicks) / 10000ull;
   }
 #else
   char buf[4096];
@@ -134,6 +143,7 @@ FsStat Fs_Stat(StrView path) {
     r.IsDir = S_ISDIR(st.st_mode) != 0;
     r.Size = st.st_size > 0 ? (u64)st.st_size : 0;
     r.IsRegular = S_ISREG(st.st_mode) != 0;
+    r.ModifiedMs = st.st_mtime > 0 ? (u64)st.st_mtime * 1000ull : 0;
   }
 #endif
   return r;
@@ -144,6 +154,64 @@ bool Fs_Exists(StrView path) { return Fs_Stat(path).Exists; }
 bool Fs_IsDir(StrView path) {
   FsStat st = Fs_Stat(path);
   return st.Exists && st.IsDir;
+}
+
+bool Fs_Remove(Arena* arena, StrView path) {
+  if (!path.Length) return false;
+  usize mark = arena->Used;
+  const char* native = StrView_DupCStr(arena, path);
+  bool removed;
+#if defined(_WIN32)
+  DWORD attributes = GetFileAttributesA(native);
+  removed = attributes != INVALID_FILE_ATTRIBUTES &&
+            ((attributes & FILE_ATTRIBUTE_DIRECTORY) ? RemoveDirectoryA(native)
+                                                     : DeleteFileA(native));
+#else
+  struct stat st;
+  removed = lstat(native, &st) == 0 &&
+            (S_ISDIR(st.st_mode) ? rmdir(native) == 0 : unlink(native) == 0);
+#endif
+  ArenaRestore(arena, mark);
+  return removed;
+}
+
+// Whether `path` is a real directory to descend into, as opposed to a file or
+// a link (symlink, junction) that must be removed without being followed.
+static bool Fs_IsPlainDir(Arena* arena, StrView path) {
+  usize mark = arena->Used;
+  const char* native = StrView_DupCStr(arena, path);
+  bool plain;
+#if defined(_WIN32)
+  DWORD attributes = GetFileAttributesA(native);
+  plain = attributes != INVALID_FILE_ATTRIBUTES &&
+          (attributes & FILE_ATTRIBUTE_DIRECTORY) &&
+          !(attributes & FILE_ATTRIBUTE_REPARSE_POINT);
+#else
+  struct stat st;
+  plain = lstat(native, &st) == 0 && S_ISDIR(st.st_mode);
+#endif
+  ArenaRestore(arena, mark);
+  return plain;
+}
+
+bool Fs_RemoveTree(Arena* arena, StrView path) {
+  if (!path.Length) return false;
+  if (!Fs_Exists(path)) {
+#if !defined(_WIN32)
+    // A dangling symlink reports missing through stat but still has to go.
+    Fs_Remove(arena, path);
+#endif
+    return !Fs_Exists(path);
+  }
+  if (!Fs_IsPlainDir(arena, path)) return Fs_Remove(arena, path);
+  usize mark = arena->Used;
+  bool listed = false;
+  Array<FsEntry> entries = Fs_ListDir(arena, path, &listed);
+  bool ok = listed;
+  for (u32 i = 0; ok && i < entries.Count; i++)
+    ok = Fs_RemoveTree(arena, Fs_Join(arena, path, entries.Data[i].Name));
+  ArenaRestore(arena, mark);
+  return ok && Fs_Remove(arena, path);
 }
 
 static bool Fs_MkdirOne(const char* path) {
@@ -438,16 +506,50 @@ static bool Fs_IsProtectedComponent(StrView name) {
          StrView_EqInsensitiveAscii(name, SVL(".agents"));
 }
 
+// Whether any component of `path` after its first `rootLength` bytes is
+// protected.
+static bool Fs_HasProtectedComponent(StrView path, u32 rootLength) {
+  u32 start = ClankerMin(rootLength, path.Length);
+  for (u32 i = start; i <= path.Length; i++) {
+    if (i < path.Length && !Fs_IsSep(path.Data[i])) continue;
+    if (Fs_IsProtectedComponent(StrView{path.Data + start, i - start})) return true;
+    start = i + 1;
+  }
+  return false;
+}
+
+// Whether canonical `target` lies inside `root` once the root is
+// canonicalized the same way. A root that does not fully exist contains
+// nothing, so a missing directory can never widen what is allowed.
+// `rootLength` receives the canonical root's length.
+static bool Fs_RootContains(Arena* arena, StrView root,
+                            const FsCanonicalPermissionPath& target,
+                            u32* rootLength) {
+  if (!target.Safe || root.Length == 0 || root.Length > 16384) return false;
+  bool rootSafe = true;
+  StrView absolute = Fs_AbsoluteForPermission(arena, root, &rootSafe);
+  if (!absolute.Length) return false;
+  FsCanonicalPermissionPath canonical =
+      Fs_CanonicalizePermissionAbsolute(arena, absolute, rootSafe);
+  if (!canonical.Safe || !canonical.Complete || !Fs_IsDir(canonical.Path) ||
+      !Fs_PathContained(canonical.Path, target.Path))
+    return false;
+  *rootLength = canonical.Path.Length;
+  return true;
+}
+
 FsPermissionTarget Fs_ResolvePermissionTarget(Arena* arena,
-                                              StrView workingDirectory,
+                                              const ToolPermissionScope* scope,
                                               StrView target) {
   FsPermissionTarget result = {};
-  if (!arena || workingDirectory.Length == 0 || target.Length == 0) return result;
-  if (workingDirectory.Length > 16384 || target.Length > 16384) return result;
+  if (!arena || !scope || scope->WorkingDirectory.Length == 0 ||
+      target.Length == 0)
+    return result;
+  if (scope->WorkingDirectory.Length > 16384 || target.Length > 16384) return result;
 
   bool rootSafe = true;
   StrView rootAbsolute =
-      Fs_AbsoluteForPermission(arena, workingDirectory, &rootSafe);
+      Fs_AbsoluteForPermission(arena, scope->WorkingDirectory, &rootSafe);
   if (!rootAbsolute.Length) return result;
 
   bool targetSafe = true;
@@ -460,31 +562,28 @@ FsPermissionTarget Fs_ResolvePermissionTarget(Arena* arena,
       Fs_AbsoluteForPermission(arena, targetAbsolute, &targetSafe);
   if (!targetAbsolute.Length) return result;
 
-  FsCanonicalPermissionPath rootPath =
-      Fs_CanonicalizePermissionAbsolute(arena, rootAbsolute, rootSafe);
   FsCanonicalPermissionPath targetPath =
       Fs_CanonicalizePermissionAbsolute(arena, targetAbsolute, targetSafe);
   result.Path = targetPath.Path;
-  bool safe = rootPath.Safe && targetPath.Safe;
+  // A target is protected only when every root containing it sees a protected
+  // component below that root; a writable root granted inside one is explicit.
+  u32 rootLength = 0;
   result.Contained =
-      safe && rootPath.Complete && Fs_IsDir(rootPath.Path) &&
-      Fs_PathContained(rootPath.Path, targetPath.Path);
-  if (result.Contained) {
-    u32 tail = ClankerMin(rootPath.Path.Length, targetPath.Path.Length);
-    StrView path = targetPath.Path;
-    u32 start = tail;
-    for (u32 i = tail; i <= path.Length && !result.Protected; i++) {
-      if (i < path.Length && !Fs_IsSep(path.Data[i])) continue;
-      result.Protected =
-          Fs_IsProtectedComponent(StrView{path.Data + start, i - start});
-      start = i + 1;
-    }
+      rootSafe && Fs_RootContains(arena, rootAbsolute, targetPath, &rootLength);
+  result.Protected =
+      result.Contained && Fs_HasProtectedComponent(targetPath.Path, rootLength);
+  for (u32 i = 0; (!result.Contained || result.Protected) &&
+                  i < scope->WritableRootCount; i++) {
+    if (!Fs_RootContains(arena, scope->WritableRoots[i], targetPath, &rootLength))
+      continue;
+    result.Contained = true;
+    result.Protected = Fs_HasProtectedComponent(targetPath.Path, rootLength);
   }
   return result;
 }
 
 bool Fs_DescribeMutationPermission(Arena* arena, const ToolArgs* args,
-                                   StrView workingDirectory,
+                                   const ToolPermissionScope* scope,
                                    StrView actionPrefix,
                                    StrView grantPrefix,
                                    ToolPermissionInfo* out, StrBuf* err) {
@@ -495,7 +594,7 @@ bool Fs_DescribeMutationPermission(Arena* arena, const ToolArgs* args,
   }
 
   FsPermissionTarget target =
-      Fs_ResolvePermissionTarget(arena, workingDirectory, path);
+      Fs_ResolvePermissionTarget(arena, scope, path);
   StrView display = target.Path.Length ? target.Path : path;
   StrBuf action = StrBuf_Make(arena, actionPrefix.Length + display.Length + 1);
   StrBuf_Append(&action, actionPrefix);
@@ -511,6 +610,20 @@ bool Fs_DescribeMutationPermission(Arena* arena, const ToolArgs* args,
   }
   out->AutoAllow = target.Contained && !target.Protected;
   return true;
+}
+
+StrView Fs_PermissionPath(Arena* arena, StrView workingDirectory, StrView path) {
+  ToolPermissionScope scope = {};
+  scope.WorkingDirectory = workingDirectory;
+  return Fs_ResolvePermissionTarget(arena, &scope, path).Path;
+}
+
+StrView Fs_MutationTarget(Arena* arena, StrView toolName, const ToolArgs* args,
+                          StrView workingDirectory) {
+  if (!StrView_Eq(toolName, SVL("write")) && !StrView_Eq(toolName, SVL("edit")))
+    return {};
+  StrView path = ToolArgs_GetStr(args, "path");
+  return path.Length ? Fs_PermissionPath(arena, workingDirectory, path) : StrView{};
 }
 
 StrView Fs_Parent(StrView path) {

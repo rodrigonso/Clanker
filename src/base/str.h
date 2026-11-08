@@ -78,6 +78,29 @@ inline bool StrView_StartsWith(StrView value, StrView prefix) {
          (prefix.Length == 0 || memcmp(value.Data, prefix.Data, prefix.Length) == 0);
 }
 
+inline bool StrView_EndsWith(StrView value, StrView suffix) {
+  return suffix.Length <= value.Length &&
+         (suffix.Length == 0 ||
+          memcmp(value.Data + value.Length - suffix.Length, suffix.Data, suffix.Length) == 0);
+}
+
+// Bytewise order, a prefix first.
+inline i32 StrView_Compare(StrView a, StrView b) {
+  u32 shared = a.Length < b.Length ? a.Length : b.Length;
+  int c = shared ? memcmp(a.Data, b.Data, shared) : 0;
+  if (c) return c < 0 ? -1 : 1;
+  return a.Length < b.Length ? -1 : a.Length > b.Length ? 1 : 0;
+}
+
+// The longest prefix of at most `maxBytes` that does not split a UTF-8
+// sequence.
+inline StrView StrView_ClampUtf8(StrView value, u32 maxBytes) {
+  if (value.Length <= maxBytes) return value;
+  u32 length = maxBytes;
+  while (length && ((u8)value.Data[length] & 0xC0) == 0x80) length--;
+  return StrView{value.Data, length};
+}
+
 inline bool StrView_EndsWithInsensitiveAscii(StrView value, StrView suffix) {
   if (suffix.Length > value.Length) return false;
   u32 offset = value.Length - suffix.Length;
@@ -185,6 +208,20 @@ inline void StrBuf_AppendUtf8(StrBuf* b, u32 cp) {
 
 inline StrView StrBuf_View(const StrBuf* b) { return StrView{b->Data, b->Length}; }
 inline const char* StrBuf_CStr(StrBuf* b) { return b->Data; }
+
+// Escapes & < > " ' so `value` is safe as XML text or a quoted attribute.
+inline void StrBuf_AppendXmlEscaped(StrBuf* out, StrView value) {
+  for (u32 i = 0; i < value.Length; i++) {
+    switch (value.Data[i]) {
+      case '&': StrBuf_AppendCStr(out, "&amp;"); break;
+      case '<': StrBuf_AppendCStr(out, "&lt;"); break;
+      case '>': StrBuf_AppendCStr(out, "&gt;"); break;
+      case '"': StrBuf_AppendCStr(out, "&quot;"); break;
+      case '\'': StrBuf_AppendCStr(out, "&apos;"); break;
+      default: StrBuf_AppendChar(out, value.Data[i]); break;
+    }
+  }
+}
 
 inline void StrBuf_Clear(StrBuf* b) {
   b->Length = 0;

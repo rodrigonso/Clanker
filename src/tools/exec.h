@@ -69,3 +69,9 @@ ExecArgvResult Exec_RunArgv(Arena* arena, StrView program, const StrView* args, 
 ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
                               u32 timeoutMs, volatile i32* abort,
                               StrBuf* output = nullptr, u32 outputLimit = 0);
+
+// Starts `program` with `args` in `workingDirectory` and does not wait for it.
+// The child is detached from this process's console, session, and job, its
+// stdio is the null device, and it outlives the caller. True once it started.
+bool Exec_SpawnDetached(Arena* arena, StrView program, const StrView* args,
+                        u32 argCount, StrView workingDirectory);

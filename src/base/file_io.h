@@ -48,3 +48,7 @@ bool File_Remove(Arena* arena, StrView path);
 bool File_Replace(Arena* arena, StrView from, StrView to);
 // True when the directory was created or already exists. POSIX mode is 0700.
 bool File_MakeDir(Arena* arena, StrView path);
+// Appends `content` with one write, creating the file when missing. Records
+// from concurrent appenders, including other processes, never overwrite or
+// interleave with each other.
+FileIoResult File_Append(Arena* arena, StrView path, StrView content);

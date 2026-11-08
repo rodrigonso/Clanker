@@ -7,6 +7,7 @@
 
 #include "agent/driver.h"
 #include "agent/harness.h"
+#include "agent/hook_chain.h"
 #include "base/arena.h"
 #include "base/thread.h"
 #include "check.h"
@@ -110,7 +111,7 @@ struct HarnessHookState {
   u32 BeforeContextCount;
   u32 BeforeProviderCount;
   u32 AfterProviderCount;
-  u32 BeforeToolCount;
+  u32 RewriteCount;
   u32 AfterTurnCount;
   u32 FirstContextCount;
   u32 LastContextCount;
@@ -163,10 +164,10 @@ SessionResult HookAfterProvider(void* context, Arena* arena, AgentTurnKind turn,
   return SessionResult_Ok();
 }
 
-SessionResult HookBeforeTool(void* context, Arena* arena, StrView toolName, StrView* argumentsJson) {
+SessionResult HookRewriteArguments(void* context, Arena* arena, StrView toolName, StrView* argumentsJson) {
   (void)toolName;
   HarnessHookState* state = (HarnessHookState*)context;
-  state->BeforeToolCount++;
+  state->RewriteCount++;
   *argumentsJson = StrView_Dup(arena, SVL("{\"hooked\":true}"));
   return SessionResult_Ok();
 }
@@ -181,7 +182,7 @@ SessionResult HookAfterTurn(void* context, Arena* arena, AgentTurnKind turn, Age
   return SessionResult_Ok();
 }
 
-SessionResult FailBeforeTool(void* context, Arena* arena, StrView toolName, StrView* argumentsJson) {
+SessionResult FailRewriteArguments(void* context, Arena* arena, StrView toolName, StrView* argumentsJson) {
   (void)arena;
   (void)toolName;
   (void)argumentsJson;
@@ -228,17 +229,17 @@ void ScriptedToolGate(void* user, Arena* arena, StrView toolName, StrView toolCa
                     StrView_Eq(toolName, script->TerminateOnlyTool));
 }
 
-struct BlockingBeforeToolState {
+struct BlockingRewriteState {
   volatile i32 Entered;
   volatile i32 Release;
 };
 
-SessionResult BlockingBeforeTool(void* context, Arena* arena, StrView toolName,
+SessionResult BlockingRewriteArguments(void* context, Arena* arena, StrView toolName,
                                  StrView* argumentsJson) {
   (void)arena;
   (void)toolName;
   (void)argumentsJson;
-  BlockingBeforeToolState* state = (BlockingBeforeToolState*)context;
+  BlockingRewriteState* state = (BlockingRewriteState*)context;
   state->Entered = 1;
   while (!state->Release) Sleep_Ms(1);
   return SessionResult_Ok();
@@ -251,7 +252,7 @@ SessionResult BlockingAfterTurn(void* context, Arena* arena,
   (void)turn;
   (void)outcome;
   (void)error;
-  BlockingBeforeToolState* state = (BlockingBeforeToolState*)context;
+  BlockingRewriteState* state = (BlockingRewriteState*)context;
   state->Entered = 1;
   while (!state->Release) Sleep_Ms(1);
   return SessionResult_Ok();
@@ -2342,7 +2343,7 @@ static void TestHarnessToolsAndHooks() {
     config.Hooks.BeforeContext = HookBeforeContext;
     config.Hooks.BeforeProvider = HookBeforeProvider;
     config.Hooks.AfterProvider = HookAfterProvider;
-    config.Hooks.BeforeTool = HookBeforeTool;
+    config.Hooks.RewriteToolArguments = HookRewriteArguments;
     config.Hooks.AfterTurn = HookAfterTurn;
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
     CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("original prompt"))));
@@ -2357,7 +2358,7 @@ static void TestHarnessToolsAndHooks() {
               ContextTextEq(&context, 3, Role::Assistant, "hooked run complete"),
               hookState.BeforeRunCount == 1, hookState.BeforeContextCount == 2,
               hookState.BeforeProviderCount == 2, hookState.AfterProviderCount == 2,
-              hookState.BeforeToolCount == 1, hookState.AfterTurnCount == 1,
+              hookState.RewriteCount == 1, hookState.AfterTurnCount == 1,
               hookState.FirstContextCount == 2, hookState.LastContextCount == 4);
 
     Array<SessionRecord> records = {};
@@ -2429,7 +2430,7 @@ static void TestHarnessToolsAndHooks() {
     AgentHarness harness = {};
     AgentHarnessConfig config = ScriptConfig(&script, &tool, 1);
     config.Hooks.User = &hookCalls;
-    config.Hooks.BeforeTool = FailBeforeTool;
+    config.Hooks.RewriteToolArguments = FailRewriteArguments;
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
     CHECK(AgentHarness_Run(&harness, SVL("block tool")).Status == SessionStatus::HookError);
     SessionReduction snapshot = {};
@@ -2476,8 +2477,8 @@ static void TestHarnessToolsAndHooks() {
     gate.BlockTool = SVL("gated");
     AgentHarness harness = {};
     AgentHarnessConfig config = ScriptConfig(&script, &tool, 1);
-    config.ToolHooks.User = &gate;
-    config.ToolHooks.BeforeTool = ScriptedToolGate;
+    config.Hooks.User = &gate;
+    config.Hooks.BeforeTool = ScriptedToolGate;
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
     // A block is a tool result, not a harness failure: the run continues.
     CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("gate me"))));
@@ -2534,8 +2535,8 @@ static void TestHarnessToolsAndHooks() {
     gate.Reason = SVL("policy says no");
     AgentHarness harness = {};
     AgentHarnessConfig config = ScriptConfig(&script, tools, 2);
-    config.ToolHooks.User = &gate;
-    config.ToolHooks.BeforeTool = ScriptedToolGate;
+    config.Hooks.User = &gate;
+    config.Hooks.BeforeTool = ScriptedToolGate;
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
     CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("mixed batch"))));
     SessionReduction snapshot = {};
@@ -2589,8 +2590,8 @@ static void TestHarnessToolsAndHooks() {
     gate.TerminateOnlyTool = SVL("gated");
     AgentHarness harness = {};
     AgentHarnessConfig config = ScriptConfig(&script, tools, 2);
-    config.ToolHooks.User = &gate;
-    config.ToolHooks.BeforeTool = ScriptedToolGate;
+    config.Hooks.User = &gate;
+    config.Hooks.BeforeTool = ScriptedToolGate;
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
     CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("partial terminate"))));
     SessionReduction snapshot = {};
@@ -2633,8 +2634,8 @@ static void TestHarnessToolsAndHooks() {
     gate.Terminate = true;
     AgentHarness harness = {};
     AgentHarnessConfig config = ScriptConfig(&script, &tool, 1);
-    config.ToolHooks.User = &gate;
-    config.ToolHooks.BeforeTool = ScriptedToolGate;
+    config.Hooks.User = &gate;
+    config.Hooks.BeforeTool = ScriptedToolGate;
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
     CHECK(SessionResult_IsOk(AgentHarness_Run(&harness, SVL("full terminate"))));
     SessionReduction snapshot = {};
@@ -3118,11 +3119,11 @@ static void TestHarnessCancellationAndBranches() {
     step.Tools = cancelCall;
     step.ToolCount = 1;
     ScriptProvider script = {&step, 1, 0};
-    BlockingBeforeToolState hook = {};
+    BlockingRewriteState hook = {};
     AgentHarness harness = {};
     AgentHarnessConfig config = ScriptConfig(&script, &echo, 1);
     config.Hooks.User = &hook;
-    config.Hooks.BeforeTool = BlockingBeforeTool;
+    config.Hooks.RewriteToolArguments = BlockingRewriteArguments;
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
 
     HarnessRunThread run = {};
@@ -3237,7 +3238,7 @@ static void TestHarnessCancellationAndBranches() {
     step.Text = SVL("completed response");
     step.Stop = StopReason::Stop;
     ScriptProvider script = {&step, 1, 0};
-    BlockingBeforeToolState hook = {};
+    BlockingRewriteState hook = {};
     AgentHarnessConfig config = ScriptConfig(&script, nullptr, 0);
     config.Hooks.User = &hook;
     config.Hooks.AfterTurn = BlockingAfterTurn;
@@ -5319,7 +5320,7 @@ bool ToolMutationProvider(void* user, Arena* arena, const Model*, const LlmConte
   return true;
 }
 
-SessionResult MutableBeforeToolArguments(void* user, Arena* arena, StrView toolName,
+SessionResult MutableRewriteArguments(void* user, Arena* arena, StrView toolName,
                                            StrView* arguments) {
   ToolMutationProbe* probe = (ToolMutationProbe*)user;
   CHECK_ALL(StrView_EqCStr(toolName, "echo"), StrView_EqCStr(*arguments, "{\"x\":1}"));
@@ -5349,7 +5350,7 @@ void TestHarnessMutableToolArguments() {
     probe.Fail = failure != 0;
     config.ProviderImpl = {&probe, ToolMutationProvider};
     config.Hooks.User = &probe;
-    config.Hooks.BeforeTool = MutableBeforeToolArguments;
+    config.Hooks.RewriteToolArguments = MutableRewriteArguments;
     AgentHarness harness = {};
     CHECK(SessionResult_IsOk(AgentHarness_Init(&harness, log, &config)));
     Message assistant = Message_AssistantEmpty(&arena);
@@ -5611,7 +5612,155 @@ void TestHarnessMutationAdmission() {
   ArenaRelease(&arena);
 }
 
+struct ChainProbe {
+  char Tag;
+  bool Block;
+  bool Fail;
+  bool Stop;
+  StrBuf* Trace;
+};
+
+static void ChainGate(void* user, Arena*, StrView, StrView, const ToolArgs*,
+                      AgentToolGateDecision* out) {
+  ChainProbe* probe = (ChainProbe*)user;
+  StrBuf_AppendChar(probe->Trace, probe->Tag);
+  if (!probe->Block) return;
+  out->Block = true;
+  out->Reason = SVL("blocked");
+}
+
+static void ChainAfterTool(void* user, Arena* arena, StrView, StrView,
+                           const ToolArgs*, ToolOutcome* io) {
+  ChainProbe* probe = (ChainProbe*)user;
+  Array<Content> next = Array_Make<Content>(arena, io->Content.Count + 1);
+  for (u32 i = 0; i < io->Content.Count; i++) Array_Push(&next, io->Content.Data[i]);
+  Array_Push(&next, Content_Text(StrView{&probe->Tag, 1}));
+  io->Content = next;
+}
+
+static SessionResult ChainAfterTurn(void* user, Arena*, AgentTurnKind,
+                                    AgentTurnOutcome, StrView) {
+  ChainProbe* probe = (ChainProbe*)user;
+  StrBuf_AppendChar(probe->Trace, probe->Tag);
+  return probe->Fail ? SessionResult_Error(SessionStatus::HookError, SVL("link failed"))
+                     : SessionResult_Ok();
+}
+
+static SessionResult ChainShouldStop(void* user, Arena*, const AgentTurnContext*,
+                                     bool* outStop) {
+  ChainProbe* probe = (ChainProbe*)user;
+  StrBuf_AppendChar(probe->Trace, probe->Tag);
+  *outStop = probe->Stop;
+  return SessionResult_Ok();
+}
+
+static SessionResult ChainPrepare(void* user, Arena*, const AgentTurnContext*,
+                                  AgentNextTurnUpdate* out) {
+  ChainProbe* probe = (ChainProbe*)user;
+  out->HasModel = true;
+  out->ModelInfo.Id = StrView{&probe->Tag, 1};
+  if (probe->Tag == 'a') {
+    out->HasProfile = true;
+    out->Profile.ContextWindow = 1234;
+  }
+  return SessionResult_Ok();
+}
+
+static SessionResult ChainSteering(void* user, Arena* arena, Array<Message>* out) {
+  ChainProbe* probe = (ChainProbe*)user;
+  Message message = {};
+  message.Kind = Role::User;
+  message.Content = Array_Make<Content>(arena, 1);
+  Array_Push(&message.Content, Content_Text(StrView{&probe->Tag, 1}));
+  Array_Push(out, message);
+  return SessionResult_Ok();
+}
+
+static void TestHookChain() {
+  Arena arena = ArenaCreate();
+  StrBuf trace = StrBuf_Make(&arena, 16);
+  ChainProbe a = {'a', false, false, false, &trace};
+  ChainProbe b = {'b', false, false, false, &trace};
+
+  AgentHookChain empty = {};
+  AgentHarnessHooks none = AgentHookChain_Compose(&empty);
+  CHECK_ALL(!none.User, !none.BeforeTool, !none.AfterTurn);
+
+  AgentHookChain single = {};
+  AgentHarnessHooks onlyA = {};
+  onlyA.User = &a;
+  onlyA.BeforeTool = ChainGate;
+  CHECK(AgentHookChain_Add(&single, &onlyA));
+  AgentHarnessHooks direct = AgentHookChain_Compose(&single);
+  CHECK_ALL(direct.User == &a, direct.BeforeTool == ChainGate);
+
+  AgentHookChain chain = {};
+  AgentHarnessHooks hooksA = {};
+  hooksA.User = &a;
+  hooksA.BeforeTool = ChainGate;
+  hooksA.AfterTool = ChainAfterTool;
+  hooksA.AfterTurn = ChainAfterTurn;
+  hooksA.ShouldStopAfterTurn = ChainShouldStop;
+  hooksA.PrepareNextTurn = ChainPrepare;
+  hooksA.GetSteeringMessages = ChainSteering;
+  AgentHarnessHooks hooksB = hooksA;
+  hooksB.User = &b;
+  CHECK(AgentHookChain_Add(&chain, &hooksA));
+  CHECK(AgentHookChain_Add(&chain, &hooksB));
+  AgentHarnessHooks composed = AgentHookChain_Compose(&chain);
+  CHECK_ALL(composed.User == &chain, composed.BeforeTool, composed.AfterTool,
+            !composed.BeforeRun, !composed.ConvertToLlm, !composed.GetFollowUpMessages);
+
+  // The first blocking link decides and later links never see the call.
+  a.Block = true;
+  b.Block = true;
+  AgentToolGateDecision decision = {};
+  composed.BeforeTool(composed.User, &arena, SVL("write"), SVL("call"), nullptr, &decision);
+  CHECK_ALL(decision.Block, StrView_EqCStr(StrBuf_View(&trace), "a"));
+  a.Block = false;
+  StrBuf_Clear(&trace);
+  decision = {};
+  composed.BeforeTool(composed.User, &arena, SVL("write"), SVL("call"), nullptr, &decision);
+  CHECK_ALL(decision.Block, StrView_EqCStr(StrBuf_View(&trace), "ab"));
+
+  // After-tool hooks see each other's rewrites, in registration order.
+  ToolOutcome outcome = {};
+  outcome.Content = Array_Make<Content>(&arena, 1);
+  composed.AfterTool(composed.User, &arena, SVL("write"), SVL("call"), nullptr, &outcome);
+  CHECK(outcome.Content.Count == 2);
+  CHECK_ALL(StrView_EqCStr(outcome.Content.Data[0].Text, "a"),
+            StrView_EqCStr(outcome.Content.Data[1].Text, "b"));
+
+  // AfterTurn is a notification: every link runs, the first failure wins.
+  StrBuf_Clear(&trace);
+  a.Fail = true;
+  SessionResult turned = composed.AfterTurn(composed.User, &arena, AgentTurnKind::Run,
+                                            AgentTurnOutcome::Succeeded, StrView{});
+  CHECK_ALL(!SessionResult_IsOk(turned), StrView_EqCStr(StrBuf_View(&trace), "ab"));
+
+  StrBuf_Clear(&trace);
+  a.Stop = true;
+  bool stop = false;
+  CHECK(SessionResult_IsOk(composed.ShouldStopAfterTurn(composed.User, &arena,
+                                                         nullptr, &stop)));
+  CHECK_ALL(stop, StrView_EqCStr(StrBuf_View(&trace), "a"));
+
+  AgentNextTurnUpdate update = {};
+  CHECK(SessionResult_IsOk(composed.PrepareNextTurn(composed.User, &arena, nullptr,
+                                                     &update)));
+  CHECK_ALL(update.HasModel, StrView_EqCStr(update.ModelInfo.Id, "b"),
+            update.HasProfile, update.Profile.ContextWindow == 1234, !update.HasContext);
+
+  Array<Message> steering = Array_Make<Message>(&arena, 4);
+  CHECK(SessionResult_IsOk(composed.GetSteeringMessages(composed.User, &arena,
+                                                         &steering)));
+  CHECK(steering.Count == 2);
+
+  ArenaRelease(&arena);
+}
+
 void TestHarness() {
+  TestHookChain();
   TestHarnessReplayAndIncremental();
   TestHarnessLifecycle();
   TestHarnessTranscriptProjection();

@@ -5,10 +5,10 @@
 // Switching the live harness onto a different session log, and the project-trust
 // decisions that gate it.
 //
-// A switch is not a fresh start: the event pump, shell tool, prompt context and
-// trust state all point at the old session and have to be moved together, and
-// any step can fail with the harness already half-moved. RuntimeSwitchToLog owns
-// that sequencing and rolls back rather than leaving a mixed state.
+// A switch is not a fresh start: the event pump, prompt context, trust state,
+// and every extension point at the old session and have to be moved together,
+// and any step can fail with the harness already half-moved. RuntimeSwitchToLog
+// owns that sequencing and rolls back rather than leaving a mixed state.
 
 // One project-trust menu, shared by startup, `/trust`, and cross-project
 // resume. The session-only choices apply to the running process instead of
@@ -56,8 +56,6 @@ bool ResolveStartupProjectTrust(Arena* arena, StrView trustPath,
 
 // Restarts the watch/event pump against the harness's current session.
 bool RuntimeRestartWatch(InteractiveRuntime* rt, const AppCommandUx* ux);
-void RuntimeUpdateShellDirectory(InteractiveRuntime* rt, StrView projectKey,
-                                 DurableId sessionId);
 bool RuntimeRestorePreviousSession(InteractiveRuntime* rt, DurableId previousSessionId,
                                    const AgentHarnessConfig* config,
                                    const AppCommandUx* ux);
@@ -74,6 +72,9 @@ SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt, SessionLog target,
 
 // ---- session listing / formatting ---------------------------------------
 
+// "YYYY-MM-DD HH:MM:SS" in local time, or "(unknown)" for zero or an
+// unconvertible time.
+StrView FormatLocalTime(Arena* arena, u64 timestampMs);
 StrView SessionTitle(const SessionInfo* info);
 StrView SessionStatusText(const SessionInfo* info);
 Array<StrView> SessionDetailLines(Arena* arena, const SessionInfo* info,
@@ -86,8 +87,3 @@ SessionOptionList BuildSessionOptions(Arena* arena, Array<SessionInfo>* items,
                                       bool includeFullId, bool availableOnly,
                                       u64 nowMs, StrView home);
 SessionResult CurrentSessionId(Arena* arena, InteractiveRuntime* rt, DurableId* out);
-
-// ---- session storage paths ----------------------------------------------
-
-StrView SessionDataRoot(Arena* arena);
-StrView SessionProjectKey(Arena* arena, StrView workingDirectory);

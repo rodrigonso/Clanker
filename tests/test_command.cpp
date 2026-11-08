@@ -167,7 +167,7 @@ bool PromptTemplate(void* user, const AppCommandUx* ux, StrView name,
 }
 
 void TestParse() {
-  CHECK_ALL(AppCommandSpec_Count() == 18,
+  CHECK_ALL(AppCommandSpec_Count() == 20,
             AppCommandSpec_At(AppCommandSpec_Count()) == nullptr,
             AppCommandSpec_At(0)->Kind == AppCommandKind::Auth,
             StrView_EqCStr(AppCommandSpec_At(0)->Name, "auth"),
@@ -178,20 +178,23 @@ void TestParse() {
             StrView_EqCStr(AppCommandSpec_At(12)->Name, "permissions"),
             AppCommandSpec_At(12)->Arguments ==
                 AppCommandArgumentPolicy::Optional,
-            AppCommandSpec_At(14)->Kind == AppCommandKind::Debug,
-            AppCommandSpec_At(14)->Arguments ==
-                AppCommandArgumentPolicy::Optional,
-            AppCommandSpec_At(15)->Kind == AppCommandKind::Rounded,
-            StrView_EqCStr(AppCommandSpec_At(15)->Name, "rounded"),
-            AppCommandSpec_At(15)->Arguments ==
-                AppCommandArgumentPolicy::Optional,
-            AppCommandSpec_At(16)->Kind == AppCommandKind::Skill,
-            StrView_EqCStr(AppCommandSpec_At(16)->Name, "skill"),
+            AppCommandSpec_At(14)->Kind == AppCommandKind::Memory,
+            AppCommandSpec_At(15)->Kind == AppCommandKind::Dream,
+            AppCommandSpec_At(15)->Arguments == AppCommandArgumentPolicy::Optional,
+            AppCommandSpec_At(16)->Kind == AppCommandKind::Debug,
             AppCommandSpec_At(16)->Arguments ==
                 AppCommandArgumentPolicy::Optional,
-            AppCommandSpec_At(17)->Kind == AppCommandKind::Exit,
-            StrView_EqCStr(AppCommandSpec_At(17)->Alias, "quit"),
-            AppCommandSpec_At(17)->Description.Length != 0,
+            AppCommandSpec_At(17)->Kind == AppCommandKind::Rounded,
+            StrView_EqCStr(AppCommandSpec_At(17)->Name, "rounded"),
+            AppCommandSpec_At(17)->Arguments ==
+                AppCommandArgumentPolicy::Optional,
+            AppCommandSpec_At(18)->Kind == AppCommandKind::Skill,
+            StrView_EqCStr(AppCommandSpec_At(18)->Name, "skill"),
+            AppCommandSpec_At(18)->Arguments ==
+                AppCommandArgumentPolicy::Optional,
+            AppCommandSpec_At(19)->Kind == AppCommandKind::Exit,
+            StrView_EqCStr(AppCommandSpec_At(19)->Alias, "quit"),
+            AppCommandSpec_At(19)->Description.Length != 0,
             StrView_EqCStr(AppCommand_Usage(AppCommandKind::Resume),
                            "Usage: /resume [session-id]"),
             StrView_EqCStr(AppCommand_Usage(AppCommandKind::Debug),
@@ -203,6 +206,10 @@ void TestParse() {
                            "Usage: /rounded [on|off]"),
             StrView_EqCStr(AppCommand_Usage(AppCommandKind::Skill),
                            "Usage: /skill:<name> [instructions]"),
+            StrView_EqCStr(AppCommand_Usage(AppCommandKind::Memory),
+                           "Usage: /memory [lint|on|off|restore]"),
+            StrView_EqCStr(AppCommand_Usage(AppCommandKind::Dream),
+                           "Usage: /dream [watch]"),
             AppCommand_Usage(AppCommandKind::Unknown).Length == 0);
 
   u32 permissionsIndex = AppCommandSpec_Count();

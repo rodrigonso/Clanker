@@ -10,6 +10,10 @@
 #include <direct.h>
 #endif
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 namespace {
 
 // The length of a regular file. Anything else (a pipe, a device) has no size
@@ -191,4 +195,37 @@ bool File_MakeDir(Arena* arena, StrView path) {
   ArenaRestore(arena, mark);
 #endif
   return result == 0 || errno == EEXIST;
+}
+
+FileIoResult File_Append(Arena* arena, StrView path, StrView content) {
+#if defined(_WIN32)
+  (void)arena;
+  wchar_t native[4096];
+  if (!Win32_Path(path, native, 4096)) return FileIoResult::OpenFailed;
+  // Append-only access makes the kernel place every write at the current end
+  // of file, atomically across processes. The C runtime's append mode seeks
+  // and then writes, so two appenders can land on one offset and lose a record.
+  HANDLE file = CreateFileW(native, FILE_APPEND_DATA,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE)
+    return GetLastError() == ERROR_PATH_NOT_FOUND ? FileIoResult::Missing
+                                                  : FileIoResult::OpenFailed;
+  DWORD written = 0;
+  bool ok = !content.Length ||
+            (WriteFile(file, content.Data, content.Length, &written, nullptr) &&
+             written == content.Length);
+  if (!CloseHandle(file)) ok = false;
+  return ok ? FileIoResult::Success : FileIoResult::IoError;
+#else
+  FILE* file = nullptr;
+  FileIoResult opened = File_Open(arena, path, "ab", &file);
+  if (opened != FileIoResult::Success) return opened;
+  // Unbuffered, so the record reaches O_APPEND as a single write.
+  setvbuf(file, nullptr, _IONBF, 0);
+  bool ok = !content.Length ||
+            fwrite(content.Data, 1, content.Length, file) == content.Length;
+  if (fclose(file) != 0) ok = false;
+  return ok ? FileIoResult::Success : FileIoResult::IoError;
+#endif
 }

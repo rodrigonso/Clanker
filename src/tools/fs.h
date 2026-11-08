@@ -8,6 +8,8 @@ struct FsStat {
   bool IsDir;
   u64 Size;
   bool IsRegular;
+  // Last write time in Unix milliseconds; 0 when unknown.
+  u64 ModifiedMs;
 };
 
 FsStat Fs_Stat(StrView path);
@@ -15,6 +17,12 @@ bool Fs_Exists(StrView path);
 bool Fs_IsDir(StrView path);
 bool Fs_MkdirP(Arena* arena, StrView path);
 StrView Fs_RealPath(Arena* arena, StrView path);
+// Deletes a file or an empty directory.
+bool Fs_Remove(Arena* arena, StrView path);
+// Deletes `path` and everything below it. A symlink or junction inside it is
+// removed itself, never followed, so the tree cannot reach outside `path`.
+// A missing path succeeds.
+bool Fs_RemoveTree(Arena* arena, StrView path);
 
 // The most a file tool (read, edit) buffers from one file. They hold the whole
 // file plus working copies, so larger files are left to tools that stream.
@@ -26,24 +34,38 @@ struct FsPermissionTarget {
   bool Protected;
 };
 
-// Canonicalizes existing path components, retaining missing trailing
-// components so callers can classify a future write without treating it as an
-// existing path. Ambiguous paths are never classified as contained.
-//
-// `Protected` marks a contained path with a `.git`, `.clanker` or `.agents`
-// component below the root (ASCII case-insensitive). Writes there change what
-// runs later -- git hooks and config, project hooks, skills -- so they are not
-// auto-allowed even inside the workspace.
-FsPermissionTarget Fs_ResolvePermissionTarget(Arena* arena,
-                                              StrView workingDirectory,
-                                              StrView target);
 struct ToolArgs;
 struct ToolPermissionInfo;
+struct ToolPermissionScope;
+
+// Canonicalizes existing path components, retaining missing trailing
+// components so callers can classify a future write without treating it as an
+// existing path. A relative target resolves against the scope's working
+// directory; it is contained when it lies inside that directory or one of the
+// scope's writable roots. Ambiguous paths, and roots that do not exist, are
+// never classified as contained.
+//
+// `Protected` marks a contained path with a `.git`, `.clanker` or `.agents`
+// component below every root that contains it (ASCII case-insensitive). Writes
+// there change what runs later -- git hooks and config, project hooks, skills
+// -- so they are not auto-allowed even inside the workspace.
+FsPermissionTarget Fs_ResolvePermissionTarget(Arena* arena,
+                                              const ToolPermissionScope* scope,
+                                              StrView target);
 bool Fs_DescribeMutationPermission(Arena* arena, const ToolArgs* args,
-                                   StrView workingDirectory,
+                                   const ToolPermissionScope* scope,
                                    StrView actionPrefix,
                                    StrView grantPrefix,
                                    ToolPermissionInfo* out, StrBuf* err);
+
+// `path` canonicalized exactly as permission checks see a tool target, so a
+// containment test between the two agrees with what the engine allowed.
+StrView Fs_PermissionPath(Arena* arena, StrView workingDirectory, StrView path);
+
+// The canonical target of a `write` or `edit` call; empty for any other tool
+// or a call without a path.
+StrView Fs_MutationTarget(Arena* arena, StrView toolName, const ToolArgs* args,
+                          StrView workingDirectory);
 
 // Inclusive, separator-aware containment check for already canonicalized
 // paths. On Windows this comparison is case-insensitive.

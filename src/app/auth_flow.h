@@ -1,28 +1,21 @@
 #pragma once
 
 #include "app/runtime.h"
+#include "app/settings.h"
 
 // Credential resolution and the interactive provider/model pickers built on it.
 // Everything here is renderer-neutral and drives the TUI or the plain REPL
 // through the Runtime* seams.
 
+// Startup configuration: the settings file, or its defaults when the file is
+// missing or unusable, plus the provider and model they resolve to.
 struct RuntimeSelection {
   const ProviderSpec* Spec;
+  // The configured model, or the command-line override.
   StrView ModelId;
-  ModelRequestProfile RequestedProfile;
-  DefaultProjectTrust DefaultTrust;
-  AgentCompactionPolicy Compaction;
-  AgentRetryPolicy Retry;
-  AgentTurnLimitPolicy TurnLimit;
-  AgentPermissionMode PermissionMode = AgentPermissionMode::Auto;
-  StrView PermissionReviewerModel = AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL;
-  f64 PermissionReviewerThreshold = AGENT_PERMISSION_DEFAULT_REVIEWER_THRESHOLD;
-  bool PermissionReviewerInvalid = false;
-  bool PermissionReviewerThresholdInvalid = false;
-  bool YoloAcknowledged = false;
-  bool Rounded = true;
-  Array<StrView> Skills;
-  Array<StrView> PromptTemplates;
+  // Profile is cleared when the configured provider is unknown; on a
+  // malformed file only the reviewer diagnostics are kept.
+  AppSettings Settings;
 };
 
 void AppAuth_Invalidate(AppAuth* auth);

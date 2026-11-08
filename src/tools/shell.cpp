@@ -417,10 +417,10 @@ static StrView Shell_CanonicalPermissionCommand(Arena* arena, StrView command,
 
 static bool ShellDescribePermission(void* ctx, Arena* arena,
                                     const ToolArgs* args,
-                                    StrView workingDirectory,
+                                    const ToolPermissionScope* scope,
                                     ToolPermissionInfo* out, StrBuf* err) {
   (void)ctx;
-  (void)workingDirectory;
+  (void)scope;
   StrView command = ToolArgs_GetStr(args, "command");
   if (command.Length == 0) {
     StrBuf_AppendCStr(err, "missing 'command' argument");

@@ -63,6 +63,15 @@ struct ToolPermissionInfo {
   bool ReviewIncomplete;
 };
 
+// Where a tool's mutations count as in scope. Relative paths resolve against
+// WorkingDirectory; a target inside it, or inside any WritableRoots entry, is
+// contained, which Auto mode allows without review.
+struct ToolPermissionScope {
+  StrView WorkingDirectory;
+  const StrView* WritableRoots;
+  u32 WritableRootCount;
+};
+
 // A tool the agent can execute. The harness prepares and validates `ToolArgs`
 // before `Execute`; failures become isError tool results.
 struct Tool {
@@ -84,7 +93,7 @@ struct Tool {
   bool (*PrepareArguments)(void* ctx, Arena* arena, JsonValue* input,
                            JsonValue** out, StrBuf* err);
   bool (*DescribePermission)(void* ctx, Arena* arena, const ToolArgs* args,
-                             StrView workingDirectory,
+                             const ToolPermissionScope* scope,
                              ToolPermissionInfo* out, StrBuf* err);
   bool (*Execute)(void* ctx, Arena* arena, StrView toolCallId,
                   const ToolArgs* args, volatile i32* abort,

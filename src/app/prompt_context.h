@@ -40,6 +40,10 @@ struct PromptContextOptions {
   u32 PromptTemplatePathCount;
   const StrView* SettingsPromptTemplatePaths;
   u32 SettingsPromptTemplatePathCount;
+  // Folder holding every repository's memory wiki (normally
+  // `~/.clanker/memory`). Empty disables memory, leaving the prompt exactly as
+  // it is without the feature.
+  StrView MemoryStore;
 };
 
 struct PromptContext {
@@ -55,6 +59,11 @@ struct PromptContext {
   // them atomically with everything else the project can contribute.
   PromptTemplateSet Templates;
   Array<StrView> SettingsPromptTemplatePaths;
+  // The working directory's wiki pages folder when memory is enabled, and the
+  // `<memory_wiki>` block built from it. The block is absent without `read`.
+  StrView MemoryPages;
+  StrView MemoryBlock;
+  u32 MemoryPageCount;
   Array<PromptDiagnostic> Diagnostics;
 };
 

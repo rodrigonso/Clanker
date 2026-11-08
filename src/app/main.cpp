@@ -7,8 +7,11 @@
 #include "app/auth_flow.h"
 #include "app/command.h"
 #include "app/commands.h"
+#include "app/config_paths.h"
+#include "app/dream.h"
 #include "app/event_pump.h"
-#include "app/hook_runner.h"
+#include "app/hook_extension.h"
+#include "app/memory.h"
 #include "app/permission_reviewer.h"
 #include "app/plain_select.h"
 #include "app/project_trust.h"
@@ -126,14 +129,17 @@ static void PrintHelp() {
       "  --max-turns N     Model turns to run before asking to continue (0: unlimited)\n"
       "  -a, --approve     Trust project prompt resources for this run\n"
       "  -na, --no-approve Do not trust project prompt resources for this run\n"
+      "  --no-memory       Turn the memory wiki off for this run (also\n"
+      "                    CLANKER_NO_MEMORY=1)\n"
+      "  --dream           Consolidate this repository's memory wiki and exit\n"
       "  --logout PROV     Remove stored credentials for a provider\n"
       "  --version         Print the version and exit\n"
       "  --help            Show this help\n\n"
       "Auth: run `/auth` inside the TUI to sign in to OpenRouter, or set the\n"
      "OPENROUTER_API_KEY environment variable.\n"
       "Interactive commands: /session, /name, /sessions, /resume, /tree,\n"
-      "/checkout, /fork, /compact, /trust, /reload, /debug, /auth, /model,\n"
-      "/permissions, /skill:<name>, /clear, /exit.\n");
+      "/checkout, /fork, /compact, /trust, /reload, /memory, /dream, /debug,\n"
+      "/auth, /model, /permissions, /skill:<name>, /clear, /exit.\n");
 }
 
 // Plain line REPL (non-TTY / fallback): the original fgets loop.
@@ -143,7 +149,7 @@ static void RunPlainRepl(InteractiveRuntime* rt) {
   HarnessEventPump pump = {};
   HarnessEventSink sink = {nullptr, ReplSink};
   SessionResult watching =
-      StartHarnessEventPump(rt->Harness, sink, nullptr, &pump);
+      StartHarnessEventPump(rt->Harness, sink, nullptr, &pump, rt->Extensions);
   if (!SessionResult_IsOk(watching)) {
     ReportHarnessResult(watching);
     return;
@@ -248,7 +254,7 @@ static void RunTuiRepl(InteractiveRuntime* rt) {
   HarnessEventPump pump = {};
   HarnessEventSink sink = {&tui, TuiBridge_HarnessEvent};
   SessionResult watching =
-      StartHarnessEventPump(rt->Harness, sink, &tui, &pump);
+      StartHarnessEventPump(rt->Harness, sink, &tui, &pump, rt->Extensions);
   if (!SessionResult_IsOk(watching)) {
     ReportHarnessResult(watching);
     Tui_Stop(&tui);
@@ -344,6 +350,8 @@ int main(int argc, char** argv) {
   bool continueSession = false;
   bool hasMaxTurnsOverride = false;
   u32 maxTurnsOverride = 0;
+  bool noMemory = false;
+  bool dream = false;
 
   if (argc > 1 && strcmp(argv[1], "upgrade") == 0) {
     const char* version = nullptr;
@@ -503,6 +511,10 @@ int main(int argc, char** argv) {
       trustOverride = ProjectTrustOverride::Untrusted;
     } else if (strcmp(argv[i], "--no-session") == 0) {
       noSession = true;
+    } else if (strcmp(argv[i], "--no-memory") == 0) {
+      noMemory = true;
+    } else if (strcmp(argv[i], "--dream") == 0) {
+      dream = true;
     } else if (strcmp(argv[i], "-c") == 0 ||
                strcmp(argv[i], "--continue") == 0) {
       continueSession = true;
@@ -563,19 +575,46 @@ int main(int argc, char** argv) {
     return rc;
   }
 
+  const char* noMemoryEnv = getenv("CLANKER_NO_MEMORY");
+  bool memoryAvailable =
+      !noMemory && !(noMemoryEnv && *noMemoryEnv && strcmp(noMemoryEnv, "0") != 0);
+  StrView memoryStore = Wiki_DefaultStore(&arena);
+  if (dream) {
+    if (!memoryAvailable || onePrompt || noSession || continueSession || resumeSession) {
+      fprintf(stderr,
+              "error: --dream runs on its own and needs memory; drop --no-memory, "
+              "CLANKER_NO_MEMORY, -p, --no-session, --continue, and --resume\n");
+      ArenaRelease(&arena);
+      return 1;
+    }
+    EnableTerminal();
+    DreamCommandLine dreamOptions = {};
+    dreamOptions.WorkingDirectory = Sys_CurrentDir(&arena);
+    dreamOptions.Store = memoryStore;
+    dreamOptions.DataRoot = ClankerDataRoot(&arena);
+    dreamOptions.AgentDirectory = Fs_Parent(settingsPath);
+    dreamOptions.SettingsPath = settingsPath;
+    dreamOptions.AuthPath = authPath;
+    dreamOptions.TrustPath = ProjectTrust_DefaultPath(&arena);
+    dreamOptions.ModelOverride = modelOverride;
+    int rc = Dream_RunCommandLine(&arena, &dreamOptions);
+    ArenaRelease(&arena);
+    return rc;
+  }
+
   AppAuth appAuth = {};
   appAuth.Mem = &arena;
   appAuth.Path = authPath;
   RuntimeSelection selected =
       LoadRuntimeSelection(&arena, settingsPath, modelOverride);
-  if (selected.PermissionReviewerInvalid) {
+  if (selected.Settings.PermissionReviewerInvalid) {
     fprintf(stderr,
             "error: permissionReviewerModel in settings must be a non-empty, "
             "supported Jev model name or alias\n");
     ArenaRelease(&arena);
     return 1;
   }
-  if (selected.PermissionReviewerThresholdInvalid) {
+  if (selected.Settings.PermissionReviewerThresholdInvalid) {
     fprintf(stderr,
             "error: permissionReviewerThreshold in settings must be a number from 0 to 1\n");
     ArenaRelease(&arena);
@@ -587,12 +626,12 @@ int main(int argc, char** argv) {
     ArenaRelease(&arena);
     return 1;
   }
-  AgentPermissionMode persistedPermissionMode = selected.PermissionMode;
+  AgentPermissionMode persistedPermissionMode = selected.Settings.PermissionMode;
   if (hasPermissionModeOverride)
-    selected.PermissionMode = permissionModeOverride;
+    selected.Settings.PermissionMode = permissionModeOverride;
   if ((onePrompt || !Term_IsInteractive()) &&
-      selected.PermissionMode == AgentPermissionMode::Yolo &&
-      !selected.YoloAcknowledged) {
+      selected.Settings.PermissionMode == AgentPermissionMode::Yolo &&
+      !selected.Settings.YoloAcknowledged) {
     fprintf(stderr, "YOLO enabled: Clanker permission checks disabled\n");
   }
 
@@ -610,7 +649,7 @@ int main(int argc, char** argv) {
     MemoryRepository_Init(&memoryRepository);
     sessions = MemoryRepository_AsRepository(&memoryRepository);
   } else {
-    StrView dataRoot = SessionDataRoot(&arena);
+    StrView dataRoot = ClankerDataRoot(&arena);
     JsonlRepository_Init(&jsonlRepository, dataRoot);
     sessions = JsonlRepository_AsRepository(&jsonlRepository);
   }
@@ -660,7 +699,7 @@ int main(int argc, char** argv) {
   bool hasProjectResources = false;
   bool trustInteractive = !onePrompt && Term_IsInteractive();
   if (!ResolveStartupProjectTrust(
-          &arena, trustPath, workingDirectory, selected.DefaultTrust,
+          &arena, trustPath, workingDirectory, selected.Settings.DefaultTrust,
           trustOverride, trustInteractive, &projectTrusted,
           &hasProjectResources)) {
     sessions.Close(sessions.Ctx);
@@ -671,7 +710,7 @@ int main(int argc, char** argv) {
   Model model = selected.Spec->CreateModel(&arena, selected.Spec, selected.ModelId);
   bool unsupportedProfilePreference = false;
   ModelRequestProfile preference = Model_NormalizeRequestPreference(
-      &model, selected.RequestedProfile, &unsupportedProfilePreference);
+      &model, selected.Settings.Profile, &unsupportedProfilePreference);
   ModelRequestProfile profile = Model_ResolveRequestProfile(&model, preference);
   if (unsupportedProfilePreference) {
     fprintf(stderr,
@@ -679,8 +718,8 @@ int main(int argc, char** argv) {
             "'%.*s'; using model defaults where needed\n",
             (int)model.Id.Length, model.Id.Data);
   }
-  StrView reviewerId = selected.PermissionReviewerModel.Length
-                           ? selected.PermissionReviewerModel
+  StrView reviewerId = selected.Settings.PermissionReviewerModel.Length
+                           ? selected.Settings.PermissionReviewerModel
                            : AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL;
   FileLock_Init();
   // Repointed whenever the durable session changes, so shell overflow logs
@@ -735,12 +774,14 @@ int main(int argc, char** argv) {
   promptOptions.ExplicitAppendPromptCount = explicitAppendPrompts.Count;
   promptOptions.SkillPaths = explicitSkills.Data;
   promptOptions.SkillPathCount = explicitSkills.Count;
-  promptOptions.SettingsSkillPaths = selected.Skills.Data;
-  promptOptions.SettingsSkillPathCount = selected.Skills.Count;
+  promptOptions.SettingsSkillPaths = selected.Settings.Skills.Data;
+  promptOptions.SettingsSkillPathCount = selected.Settings.Skills.Count;
   promptOptions.PromptTemplatePaths = explicitPromptTemplates.Data;
   promptOptions.PromptTemplatePathCount = explicitPromptTemplates.Count;
-  promptOptions.SettingsPromptTemplatePaths = selected.PromptTemplates.Data;
-  promptOptions.SettingsPromptTemplatePathCount = selected.PromptTemplates.Count;
+  promptOptions.SettingsPromptTemplatePaths = selected.Settings.PromptTemplates.Data;
+  promptOptions.SettingsPromptTemplatePathCount = selected.Settings.PromptTemplates.Count;
+  promptOptions.MemoryStore =
+      memoryAvailable && selected.Settings.Memory ? memoryStore : StrView{};
   PromptContext promptContext = {};
   StrBuf promptError = StrBuf_Make(&arena, 160);
   if (!PromptContext_Build(&promptOptions, &promptContext, &promptError)) {
@@ -766,15 +807,15 @@ int main(int argc, char** argv) {
   harnessConfig.ProviderImpl = selected.Spec->CreateProvider(&arena, selected.Spec);
   harnessConfig.Stream.Profile = profile;
   harnessConfig.ToolExec = ToolExecution::Parallel;
-  harnessConfig.Compaction = selected.Compaction;
-  harnessConfig.Retry = selected.Retry;
-  harnessConfig.TurnLimit = selected.TurnLimit;
-  harnessConfig.PermissionMode = selected.PermissionMode;
+  harnessConfig.Compaction = selected.Settings.Compaction;
+  harnessConfig.Retry = selected.Settings.Retry;
+  harnessConfig.TurnLimit = selected.Settings.TurnLimit;
+  harnessConfig.PermissionMode = selected.Settings.PermissionMode;
   harnessConfig.PermissionReviewerModel = reviewerId;
-  harnessConfig.PermissionReviewerThreshold = selected.PermissionReviewerThreshold;
+  harnessConfig.PermissionReviewerThreshold = selected.Settings.PermissionReviewerThreshold;
   harnessConfig.PermissionReviewer =
       TypeSafePermissionReviewer_Make(&arena, reviewerId,
-                                      selected.PermissionReviewerThreshold, authPath);
+                                      selected.Settings.PermissionReviewerThreshold, authPath);
   harnessConfig.WorkingDirectory = workingDirectory;
   // Overrides whatever settings.json configured. 0 means "never stop to ask".
   if (hasMaxTurnsOverride) {
@@ -833,10 +874,6 @@ int main(int argc, char** argv) {
     Http_GlobalShutdown();
     ArenaRelease(&arena);
     return 1;
-  }
-  if (!noSession) {
-    shellContext.Directory = JsonlRepository_SessionDir(
-        &arena, &jsonlRepository, sessionInfo.ProjectKey, sessionInfo.SessionId);
   }
 
   AgentHarness harness = {};
@@ -927,16 +964,15 @@ int main(int argc, char** argv) {
   runtime.Spec = selected.Spec;
   runtime.CurrentModel = model;
   runtime.PreferredProfile = preference;
-  runtime.PermissionMode = selected.PermissionMode;
+  runtime.PermissionMode = selected.Settings.PermissionMode;
   runtime.PersistedPermissionMode = persistedPermissionMode;
   runtime.PermissionReviewerModel = reviewerId;
-  runtime.PermissionReviewerThreshold = selected.PermissionReviewerThreshold;
-  runtime.YoloAcknowledged = selected.YoloAcknowledged;
+  runtime.PermissionReviewerThreshold = selected.Settings.PermissionReviewerThreshold;
+  runtime.YoloAcknowledged = selected.Settings.YoloAcknowledged;
   runtime.PermissionModeOverridden = hasPermissionModeOverride;
   runtime.Harness = &harness;
   runtime.Sessions = &sessions;
   runtime.JsonlSessions = noSession ? nullptr : &jsonlRepository;
-  runtime.Shell = &shellContext;
   runtime.ProjectKey = projectKey;
   runtime.WorkingDirectory = workingDirectory;
   runtime.AgentDirectory = agentDirectory;
@@ -948,8 +984,8 @@ int main(int argc, char** argv) {
       hasProjectResources ||
       trustOverride != ProjectTrustOverride::Unspecified;
   runtime.TrustOverride = trustOverride;
-  runtime.DefaultTrust = selected.DefaultTrust;
-  runtime.Rounded = selected.Rounded;
+  runtime.DefaultTrust = selected.Settings.DefaultTrust;
+  runtime.Rounded = selected.Settings.Rounded;
   runtime.Prompt = &promptContext;
   RuntimeSetPromptOptions(&runtime, &promptOptions);
   runtime.Auth = &appAuth;
@@ -961,45 +997,32 @@ int main(int argc, char** argv) {
   askContext.Ask = RuntimeAskUser(&runtime);
   askContext.Permissions = &harness.Permissions;
   harness.Config.AskUser = askContext.Ask;
-  // External lifecycle hooks. The config is read regardless of `--no-session`
-  // because it also carries the PreToolUse gate, and a policy deciding whether
-  // a tool may run must not switch itself off just because the transcript is
-  // not durable.
-  HookConfig hookConfig = {};
-  StrView hooksPath = HookConfig_DefaultPath(&arena);
-  HookConfigLoadResult hooksLoad = HookConfig_Load(&arena, hooksPath, &hookConfig);
-  // Surfaced the way a malformed settings.json is: a typo must not disable
-  // every hook in silence. Missing is the normal case and stays quiet.
-  if (hooksLoad == HookConfigLoadResult::Malformed ||
-      hooksLoad == HookConfigLoadResult::ReadFailure) {
-    fprintf(stderr, "warning: %s %.*s; hooks are disabled\n",
-            hooksLoad == HookConfigLoadResult::Malformed
-                ? "hooks file is malformed:"
-                : "could not read hooks file:",
-            (int)hooksPath.Length, hooksPath.Data);
-  }
 
-  HookSessionInfo hookSession = {};
-  hookSession.WorkingDirectory = workingDirectory;
-  hookSession.Interactive = trustInteractive;
-  // Reported only once the session is durable, so the very first payload can
-  // already name the transcript a consumer should read.
-  if (!noSession) {
-    hookSession.SessionId = DurableId_View(&sessionInfo.SessionId);
-    hookSession.TranscriptPath = JsonlRepository_SessionPath(
-        &arena, &jsonlRepository, sessionInfo.ProjectKey, sessionInfo.SessionId);
+  // Features that attach to the agent. The hooks.json config is read regardless
+  // of `--no-session` because it also carries the PreToolUse gate, and a policy
+  // deciding whether a tool may run must not switch itself off just because the
+  // transcript is not durable.
+  AppExtensions extensions = {};
+  ShellDirectoryExtension shellDirectory = {};
+  HookExtension hookExtension = {};
+  HookExtension_Init(&hookExtension, &arena, HookConfig_DefaultPath(&arena),
+                     !noSession, trustInteractive, &harness.AbortFlag);
+  AppExtension extension = ShellDirectoryExtension_Make(&shellDirectory, &shellContext);
+  AppExtensions_Add(&extensions, &extension);
+  extension = HookExtension_Make(&hookExtension);
+  AppExtensions_Add(&extensions, &extension);
+  MemoryExtension memory = {};
+  if (memoryAvailable) {
+    MemoryExtension_Init(&memory, &harness, memoryStore, selected.Settings.Memory);
+    extension = MemoryExtension_Make(&memory);
+    AppExtensions_Add(&extensions, &extension);
+    runtime.Memory = &memory;
   }
-
-  g_gate = HookGate_Create(&arena, &hookConfig, &hookSession, &harness.AbortFlag);
-  if (g_gate) {
-    harness.Config.ToolHooks.User = g_gate;
-    harness.Config.ToolHooks.BeforeTool = HookGate_BeforeTool;
-  }
-
-  if (!noSession) {
-    g_hooks = HookRunner_Create(&arena, &hookConfig, &hookSession);
-    HookRunner_Dispatch(g_hooks, HookEvent::SessionStart, StrView{});
-  }
+  runtime.MemoryEnabled = selected.Settings.Memory;
+  runtime.DreamModel = selected.Settings.DreamModel;
+  harness.Config.Hooks = AppExtensions_Hooks(&extensions);
+  runtime.Extensions = &extensions;
+  RuntimeAnnounceSession(&runtime, sessionInfo.ProjectKey, sessionInfo.SessionId);
 
   if (onePrompt) {
     EnableTerminal();
@@ -1007,7 +1030,7 @@ int main(int argc, char** argv) {
     Atomic_StoreI32(&g_abort, 0);
     if (!ResolvePromptAuth(&harness, &g_abort)) {
       if (Atomic_LoadI32(&g_abort)) {
-        EndHookSession();
+        AppExtensions_Shutdown(&extensions);
         AgentHarness_Close(&harness);
         sessions.Close(sessions.Ctx);
         Http_GlobalShutdown();
@@ -1016,7 +1039,7 @@ int main(int argc, char** argv) {
       }
       StrView authGuidance = AuthGuidance(&arena, runtime.Spec, false);
       fprintf(stderr, "error: %.*s\n", (int)authGuidance.Length, authGuidance.Data);
-      EndHookSession();
+      AppExtensions_Shutdown(&extensions);
       AgentHarness_Close(&harness);
       sessions.Close(sessions.Ctx);
       Http_GlobalShutdown();
@@ -1027,11 +1050,11 @@ int main(int argc, char** argv) {
     HarnessJsonOutput json = {};
     HarnessEventSink sink = {nullptr, ReplSink};
     SessionResult watching = jsonMode
-        ? StartHarnessJsonOutput(&harness, &json)
-        : StartHarnessEventPump(&harness, sink, nullptr, &pump);
+        ? StartHarnessJsonOutput(&harness, &json, {}, &extensions)
+        : StartHarnessEventPump(&harness, sink, nullptr, &pump, &extensions);
     if (!SessionResult_IsOk(watching)) {
       ReportHarnessResult(watching);
-      EndHookSession();
+      AppExtensions_Shutdown(&extensions);
       AgentHarness_Close(&harness);
       sessions.Close(sessions.Ctx);
       Http_GlobalShutdown();
@@ -1046,7 +1069,7 @@ int main(int argc, char** argv) {
       StopHarnessEventPump(&pump);
     if (!jsonMode || !SessionResult_IsOk(run)) ReportHarnessResult(run);
     MaybeReportMem();
-    EndHookSession();
+    AppExtensions_Shutdown(&extensions);
     AgentHarness_Close(&harness);
     sessions.Close(sessions.Ctx);
     Http_GlobalShutdown();
@@ -1063,7 +1086,7 @@ int main(int argc, char** argv) {
 
   MaybeReportMem();
   UpdateCheck_Stop(&g_updateCheck);
-  EndHookSession();
+  AppExtensions_Shutdown(&extensions);
   AgentHarness_Close(&harness);
   sessions.Close(sessions.Ctx);
   Http_GlobalShutdown();

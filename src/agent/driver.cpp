@@ -493,19 +493,20 @@ SessionResult RunToolBatch(AgentHarness* harness, DurableId* ioHead, const Messa
   for (u32 i = 0; i < assistant->Content.Count; i++) {
     Content content = assistant->Content.Data[i];
     if (content.Kind == ContentKind::ToolCall && !Atomic_LoadI32(&harness->AbortFlag) &&
-        harness->Config.Hooks.BeforeTool &&
+        harness->Config.Hooks.RewriteToolArguments &&
         SessionResult_IsOk(beforeToolFailure)) {
       StrView arguments = MutableText(arena, content.ToolArgsJson);
       StrView toolName = MutableText(arena, content.ToolName);
       SessionResult hooked = AgentHook_Failure(
-          harness->Config.Hooks.BeforeTool(harness->Config.Hooks.User, arena, toolName,
-                                           &arguments),
-          "before-tool hook failed");
+          harness->Config.Hooks.RewriteToolArguments(harness->Config.Hooks.User,
+                                                     arena, toolName, &arguments),
+          "rewrite-tool-arguments hook failed");
       if (!SessionResult_IsOk(hooked)) {
         beforeToolFailure = hooked;
       } else if (arguments.Length == 0) {
         beforeToolFailure = SessionResult_Error(
-            SessionStatus::HookError, SVL("before-tool hook produced empty arguments"));
+            SessionStatus::HookError,
+            SVL("rewrite-tool-arguments hook produced empty arguments"));
       } else {
         content.ToolArgsJson = StrView_Dup(arena, arguments);
       }
@@ -523,7 +524,7 @@ SessionResult RunToolBatch(AgentHarness* harness, DurableId* ioHead, const Messa
   permissionGate.Abort = &harness->AbortFlag;
   AgentToolBatch_Prepare(arena, harness->RuntimeTools, harness->Config.ToolCount,
                         &effectiveAssistant, harness->Config.ToolExec, &harness->AbortFlag,
-                        &harness->Config.ToolHooks, &permissionGate, &plan);
+                        &harness->Config.Hooks, &permissionGate, &plan);
   if (!SessionResult_IsOk(beforeToolFailure)) {
     for (u32 i = 0; i < plan.Calls.Count; i++) {
       plan.Calls.Data[i].Runnable = false;
@@ -552,7 +553,7 @@ SessionResult RunToolBatch(AgentHarness* harness, DurableId* ioHead, const Messa
   dispatch.TryStart = TryStartTool;
   AgentToolEventSink events = ToolEvents(harness);
   AgentToolBatch_Run(arena, &plan, harness->Config.MaxParallelTools,
-                     &harness->Config.ToolHooks, &dispatch, &events, &results);
+                     &harness->Config.Hooks, &dispatch, &events, &results);
 
   Array<SessionRecord> messages =
       Array_Make<SessionRecord>(arena, results.Calls.Count ? results.Calls.Count : 1);

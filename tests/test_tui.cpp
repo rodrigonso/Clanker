@@ -755,6 +755,43 @@ void TestHydrationPayloadOwnership(Arena* outer) {
   ArenaRelease(&input);
 }
 
+// A transcript shown in pieces, with a tool call and its result in different
+// pieces, matches the same transcript shown at once.
+void TestTranscriptAppend(Arena* outer) {
+  Arena input = ArenaCreate();
+  Array<Message> messages = Array_Make<Message>(&input, 4);
+  Array_Push(&messages, Message_User(&input, SVL("look at the wiki")));
+  Message call = Message_AssistantEmpty(&input);
+  Array_Push(&call.Content, Content_Text(SVL("Reading it.")));
+  Array_Push(&call.Content,
+             Content_ToolCall(SVL("call-1"), SVL("read"), SVL("{\"path\":\"a.md\"}")));
+  Array_Push(&messages, call);
+  Array_Push(&messages, Message_ToolResult(&input, SVL("call-1"), SVL("read"),
+                                           SVL("page body"), false));
+  Message done = Message_AssistantEmpty(&input);
+  Array_Push(&done.Content, Content_Text(SVL("Done.")));
+  Array_Push(&messages, done);
+
+  u64 hashes[2] = {};
+  for (u32 split = 0; split < 2; split++) {
+    Tui t;
+    InitHeadlessTui(&t, outer, true);
+    if (split) {
+      Tui_ReplaceTranscript(&t, messages.Data, 2);
+      Tui_AppendTranscript(&t, messages.Data + 2, messages.Count - 2);
+    } else {
+      Tui_ReplaceTranscript(&t, messages.Data, messages.Count);
+    }
+    CHECK_ALL(t.Model.Entries.Count == 4, t.Model.Entries.Data[2].Kind == EntryKind::Tool,
+              t.Model.Entries.Data[2].Tool.Done);
+    Tui_ComposeFrame(&t, 40, 20);
+    hashes[split] = FrameHash(&t);
+    Tui_Stop(&t);
+  }
+  CHECK(hashes[0] == hashes[1]);
+  ArenaRelease(&input);
+}
+
 }  // namespace
 
 // SessionMem is a bump allocator, so an entry dropped by the scrollback cap is
@@ -1062,6 +1099,7 @@ void TestTui() {
   TestToolUpdateOwnership(&a);
   TestTransientStatusOwnership(&a);
   TestHydrationPayloadOwnership(&a);
+  TestTranscriptAppend(&a);
   TuiOpts o;
   o.ModelName = SVL("test-model");
   o.Color = true;

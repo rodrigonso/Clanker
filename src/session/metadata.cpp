@@ -1,5 +1,6 @@
 #include "session/metadata.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "session/reducer.h"
@@ -236,22 +237,53 @@ SessionResult SessionMetadata_Build(
 
 void SessionInfo_SortByActivity(Array<SessionInfo>* items) {
   if (!items) return;
-  for (u32 i = 1; i < items->Count; i++) {
-    SessionInfo value = items->Data[i];
-    u32 j = i;
-    while (j > 0) {
-      const SessionInfo* previous = &items->Data[j - 1];
-      bool before = previous->LastActivityAt < value.LastActivityAt ||
-                    (previous->LastActivityAt == value.LastActivityAt &&
-                     previous->CreatedAt < value.CreatedAt) ||
-                    (previous->LastActivityAt == value.LastActivityAt &&
-                     previous->CreatedAt == value.CreatedAt &&
-                     memcmp(previous->SessionId.Value, value.SessionId.Value,
-                            DURABLE_ID_CHAR_COUNT) > 0);
-      if (!before) break;
-      items->Data[j] = items->Data[j - 1];
-      j--;
-    }
-    items->Data[j] = value;
+  // Most recent first; creation time and then ID break ties deterministically.
+  Array_Sort(items, [](const SessionInfo& value, const SessionInfo& previous) {
+    if (previous.LastActivityAt != value.LastActivityAt)
+      return previous.LastActivityAt < value.LastActivityAt;
+    if (previous.CreatedAt != value.CreatedAt)
+      return previous.CreatedAt < value.CreatedAt;
+    return memcmp(previous.SessionId.Value, value.SessionId.Value,
+                  DURABLE_ID_CHAR_COUNT) > 0;
+  });
+}
+
+StrView SessionProjectKey(Arena* arena, StrView directory) {
+  u64 hash = 1469598103934665603ull;
+  for (u32 i = 0; i < directory.Length; i++) {
+    char c = directory.Data[i];
+#if defined(_WIN32)
+    if (c == '\\') c = '/';
+    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+#endif
+    hash ^= (u8)c;
+    hash *= 1099511628211ull;
   }
+
+  u32 baseStart = directory.Length;
+  while (baseStart > 0 && directory.Data[baseStart - 1] != '/' &&
+         directory.Data[baseStart - 1] != '\\')
+    baseStart--;
+  StrView base = {directory.Data + baseStart,
+                  directory.Length - baseStart};
+  StrBuf key = StrBuf_Make(arena, base.Length + 18);
+  for (u32 i = 0; i < base.Length; i++) {
+    char c = base.Data[i];
+#if defined(_WIN32)
+    // The hash half of the key already folds case, so the readable half has to
+    // fold it too. Otherwise one directory reached as C:\Work\Clanker and as
+    // c:/work/clanker hashes identically but yields two different keys, and the
+    // same project gets two session directories.
+    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+#endif
+    bool valid = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                 (c >= '0' && c <= '9') || c == '-' || c == '_' ||
+                 c == '.';
+    StrBuf_AppendChar(&key, valid ? c : '-');
+  }
+  if (key.Length == 0) StrBuf_AppendCStr(&key, "project");
+  char suffix[24];
+  snprintf(suffix, sizeof(suffix), "-%016llx", (unsigned long long)hash);
+  StrBuf_AppendCStr(&key, suffix);
+  return StrBuf_View(&key);
 }

@@ -329,7 +329,12 @@ void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts);
 // Clear conversation/UI state at an idle boundary without emitting a notice.
 // Returns false while the agent is active or shutdown is in progress.
 bool Tui_ClearSession(Tui* t);
-void Tui_ReplaceTranscript(Tui* t, const Message* messages, u32 count);
+// `follow` scrolls to the end; otherwise the viewport stays where it was.
+void Tui_ReplaceTranscript(Tui* t, const Message* messages, u32 count,
+                           bool follow = false);
+// Adds messages after the transcript already shown, as if they had been part
+// of the last Tui_ReplaceTranscript. Idle only: nothing may be streaming.
+void Tui_AppendTranscript(Tui* t, const Message* messages, u32 count);
 
 // SessionMem is a bump allocator, so transcript entries dropped by the
 // scrollback cap stay resident until the survivors are copied elsewhere.
@@ -347,6 +352,11 @@ void Tui_FeedInput(Tui* t, const char* data, u32 n);
 // Block until the user submits a prompt/command (returns true) or asks to quit
 // (false). Slash-prefixed submissions are commands, including unknown commands.
 bool Tui_WaitForSubmit(Tui* t, TuiSubmission* out);
+
+// Waits up to `waitMs` for a submission without taking it. True once one is
+// queued or shutdown has begun, so a command holding the main loop can step
+// aside for whatever the user asked for next.
+bool Tui_SubmissionPending(Tui* t, u32 waitMs);
 
 // Add an idle prompt to the visible transcript after application-level preflight
 // (such as credential resolution) has accepted it. Atomically commits the turn

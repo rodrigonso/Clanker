@@ -578,6 +578,49 @@ ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
   return res;
 }
 
+bool Exec_SpawnDetached(Arena* arena, StrView program, const StrView* args,
+                        u32 argCount, StrView workingDirectory) {
+  if (!program.Length || (argCount && !args)) return false;
+  StrBuf cmd = StrBuf_Make(arena, program.Length + 64);
+  Exec_AppendWindowsArg(&cmd, program);
+  for (u32 i = 0; i < argCount; i++) {
+    StrBuf_AppendChar(&cmd, ' ');
+    Exec_AppendWindowsArg(&cmd, args[i]);
+  }
+  SECURITY_ATTRIBUTES sa = {};
+  sa.nLength = sizeof(sa);
+  sa.bInheritHandle = TRUE;
+  HANDLE nul = CreateFileA("NUL", GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING,
+                           0, nullptr);
+  if (nul == INVALID_HANDLE_VALUE) return false;
+  STARTUPINFOA si = {};
+  si.cb = sizeof(si);
+  si.dwFlags = STARTF_USESTDHANDLES;
+  si.hStdInput = nul;
+  si.hStdOutput = nul;
+  si.hStdError = nul;
+  const char* cwd = workingDirectory.Length
+                        ? StrView_DupCStr(arena, workingDirectory)
+                        : nullptr;
+  PROCESS_INFORMATION pinfo = {};
+  DWORD flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+  // Breaking away keeps the child alive when the caller runs inside a
+  // kill-on-close job (a terminal or IDE). A job that forbids it refuses the
+  // flag, and the child then simply shares the caller's job.
+  BOOL ok = CreateProcessA(nullptr, (LPSTR)StrBuf_CStr(&cmd), nullptr, nullptr,
+                           TRUE, flags | CREATE_BREAKAWAY_FROM_JOB, nullptr, cwd,
+                           &si, &pinfo);
+  if (!ok)
+    ok = CreateProcessA(nullptr, (LPSTR)StrBuf_CStr(&cmd), nullptr, nullptr, TRUE,
+                        flags, nullptr, cwd, &si, &pinfo);
+  CloseHandle(nul);
+  if (!ok) return false;
+  CloseHandle(pinfo.hProcess);
+  CloseHandle(pinfo.hThread);
+  return true;
+}
+
 #else  // POSIX
 #include <poll.h>
 #include <errno.h>
@@ -1018,6 +1061,40 @@ ExecResult Exec_RunShellInput(Arena* arena, StrView command, StrView input,
   }
   res.ExitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
   return res;
+}
+
+bool Exec_SpawnDetached(Arena* arena, StrView program, const StrView* args,
+                        u32 argCount, StrView workingDirectory) {
+  if (!program.Length || (argCount && !args)) return false;
+  char** argv = ArenaPushArray(arena, char*, argCount + 2);
+  argv[0] = Exec_DupPosixArg(arena, program);
+  for (u32 i = 0; i < argCount; i++) argv[i + 1] = Exec_DupPosixArg(arena, args[i]);
+  argv[argCount + 1] = nullptr;
+  const char* cwd = workingDirectory.Length
+                        ? StrView_DupCStr(arena, workingDirectory)
+                        : nullptr;
+  pid_t pid = fork();
+  if (pid < 0) return false;
+  if (pid == 0) {
+    // Double fork: the grandchild is reparented to init, so nothing has to
+    // reap it and it survives this process exiting.
+    setsid();
+    pid_t grandchild = fork();
+    if (grandchild != 0) _exit(grandchild < 0 ? 1 : 0);
+    int nul = open("/dev/null", O_RDWR);
+    if (nul >= 0) {
+      dup2(nul, STDIN_FILENO);
+      dup2(nul, STDOUT_FILENO);
+      dup2(nul, STDERR_FILENO);
+      if (nul > STDERR_FILENO) close(nul);
+    }
+    if (cwd && chdir(cwd) != 0) _exit(127);
+    execv(argv[0], argv);
+    _exit(127);
+  }
+  int status = 0;
+  if (waitpid(pid, &status, 0) < 0) return false;
+  return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
 #endif

@@ -65,3 +65,18 @@ template <typename T>
 inline void Array_Clear(Array<T>* a) {
   a->Count = 0;
 }
+
+// Stable insertion sort; `before(x, y)` is true when `x` must precede `y`.
+// Meant for the short arrays Clanker orders (paths, pages, matches, sessions).
+template <typename T, typename Before>
+inline void Array_Sort(Array<T>* a, Before before) {
+  for (u32 i = 1; i < a->Count; i++) {
+    T value = a->Data[i];
+    u32 slot = i;
+    while (slot > 0 && before(value, a->Data[slot - 1])) {
+      a->Data[slot] = a->Data[slot - 1];
+      slot--;
+    }
+    a->Data[slot] = value;
+  }
+}

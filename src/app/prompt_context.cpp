@@ -1,6 +1,7 @@
 #include "app/prompt_context.h"
 
 #include "app/skills.h"
+#include "app/wiki.h"
 #include "base/config_file.h"
 #include "tools/fs.h"
 
@@ -313,6 +314,42 @@ bool HasTool(const PromptContextOptions* options, StrView name) {
   return false;
 }
 
+// The wiki is read only at build time, so pages written during a session reach
+// the prompt on the next build (a new session, `/reload`, or a project switch)
+// and the system prompt stays stable within one.
+void DiscoverMemory(PromptContext* context, const PromptContextOptions* options) {
+  if (!options->MemoryStore.Length) return;
+  WikiLocation location = {};
+  if (!Wiki_Locate(&context->Mem, options->MemoryStore,
+                   options->WorkingDirectory, &location))
+    return;
+  context->MemoryPages = location.Pages;
+  Wiki wiki = {};
+  Wiki_Scan(&context->Mem, location.Pages, &wiki);
+  context->MemoryPageCount = wiki.Pages.Count;
+  // pi exposes skills only when the model can read their files; the wiki's
+  // pages are reached the same way.
+  if (!HasTool(options, SVL("read"))) return;
+
+  bool writable = HasTool(options, SVL("write")) || HasTool(options, SVL("edit"));
+  StrBuf block = StrBuf_Make(&context->Mem, 4096);
+  WikiCatalogStats stats = {};
+  Wiki_AppendPromptBlock(&context->Mem, &block, &wiki,
+                         Fs_ToPosix(&context->Mem, location.Pages), writable,
+                         &stats);
+  context->MemoryBlock = StrBuf_View(&block);
+  if (stats.Omitted) {
+    StrBuf message = StrBuf_Make(&context->Mem, 128);
+    StrBuf_AppendCStr(&message, "the memory catalog lists ");
+    StrBuf_AppendU64(&message, stats.Listed);
+    StrBuf_AppendCStr(&message, " of ");
+    StrBuf_AppendU64(&message, wiki.Pages.Count);
+    StrBuf_AppendCStr(&message, " pages; run /dream to consolidate the wiki");
+    AddDiagnostic(context, PromptDiagnosticSeverity::Warning, location.Pages,
+                  StrBuf_View(&message));
+  }
+}
+
 void AddGuideline(Array<StrView>* guidelines, StrView value) {
   if (!value.Length) return;
   for (u32 i = 0; i < guidelines->Count; i++)
@@ -418,6 +455,10 @@ bool BuildFinalPrompt(PromptContext* context,
     if (!AppendCStrLimited(&prompt, "</project_context>\n")) goto too_large;
   }
 
+  if (context->MemoryBlock.Length &&
+      !AppendLimited(&prompt, context->MemoryBlock))
+    goto too_large;
+
   // pi exposes skills only when the model can read their files.
   if (HasTool(options, SVL("read"))) {
     if (!Skills_AppendPromptBlock(&prompt, &context->Skills,
@@ -479,6 +520,7 @@ bool PromptContext_Build(const PromptContextOptions* options, PromptContext* out
   DiscoverContextFiles(out, options);
   DiscoverSkills(out, options);
   DiscoverPromptTemplates(out, options);
+  DiscoverMemory(out, options);
   StrView basePrompt = {};
   StrView appendPrompt = {};
   if (!ResolveSystemPrompt(out, options, &basePrompt, error) ||

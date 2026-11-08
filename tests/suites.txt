@@ -22,6 +22,7 @@ cli|command|TestCommand|test_command|TagDefault|slash command parsing
 cli|app|TestApp|test_app|TagDefault|app runtime, session keys, trust menu
 cli|hooks|TestHooks|test_hooks|TagDefault|external lifecycle hooks
 cli|prompt_context|TestPromptContext|test_prompt_context|TagDefault|system prompt and project context
+cli|memory|TestMemory|test_memory|TagDefault|memory wiki, its session extension, and dreaming
 cli|prompt_templates|TestPromptTemplates|test_prompt_templates|TagDefault|user-defined slash command templates
 cli|project_trust|TestProjectTrust|test_project_trust|TagDefault|hierarchical project trust
 cli|provider_registry|TestProviderRegistry|test_provider_registry|TagDefault|provider registry

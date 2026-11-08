@@ -1,6 +1,29 @@
 #pragma once
 
+#include "agent/tool.h"
 #include "session/reducer.h"
+
+// A finished tool call as the after-tool hook sees and may rewrite it.
+struct ToolOutcome {
+  ContentArray Content;
+  bool IsError;
+  bool Terminate;
+};
+
+// Verdict of the before-tool gate, mirroring pi's `BeforeToolCallResult`.
+// Zero-initialized means "allow". `Reason` becomes the blocked call's tool
+// result verbatim; an empty one falls back to AGENT_TOOL_BLOCKED_FALLBACK.
+// `Terminate` only ends the run when every call in the batch sets it, which is
+// what AgentToolBatchResult::AllTerminate already computes.
+struct AgentToolGateDecision {
+  bool Block;
+  StrView Reason;
+  bool Terminate;
+};
+
+// pi's wording for a block that supplied no reason, byte for byte. Both are
+// model-visible, so neither may be reworded casually.
+constexpr StrView AGENT_TOOL_BLOCKED_FALLBACK = SVL("Tool execution was blocked");
 
 // Distinguishes the two provider-driving turn kinds the harness can run.
 // Navigation (checkout) never calls the provider, so it only needs
@@ -92,9 +115,22 @@ struct AgentHarnessHooks {
                                  AgentTurnKind turn,
                                  u32 attemptIndex,
                                  Message* ioAssistant);
-  SessionResult (*BeforeTool)(void* user, Arena* arena,
-                              StrView toolName,
-                              StrView* ioArgumentsJson);
+  // Rewrites one tool call's raw argument JSON before it is parsed and
+  // validated. The rewrite is what the session records as the call.
+  SessionResult (*RewriteToolArguments)(void* user, Arena* arena,
+                                        StrView toolName,
+                                        StrView* ioArgumentsJson);
+  // pi's `beforeToolCall`. Runs during preparation, after argument
+  // normalization and schema validation, on the coordinator thread and
+  // serially across the batch -- pi's clearance phase. A gate may block on
+  // external work; nothing in the batch has started yet.
+  void (*BeforeTool)(void* user, Arena* arena, StrView toolName,
+                     StrView toolCallId, const ToolArgs* args,
+                     AgentToolGateDecision* out);
+  // pi's `afterToolCall`. Runs on the coordinator thread once a call finishes,
+  // before its result is durable; rewriting `io` changes what is recorded.
+  void (*AfterTool)(void* user, Arena* arena, StrView toolName,
+                    StrView toolCallId, const ToolArgs* args, ToolOutcome* io);
   // Runs after a run turn's `turn_end`, before the loop decides whether
   // another provider request should start. Writes replacement model / effort /
   // context for the rest of this run. The arena is turn-scoped scratch; the

@@ -4,7 +4,6 @@
 #include <string.h>
 
 #include "app/auth_flow.h"
-#include "app/config_paths.h"
 #include "app/event_pump.h"
 #include "app/permission_reviewer.h"
 #include "app/plain_select.h"
@@ -17,7 +16,7 @@ bool RuntimeRestartWatch(InteractiveRuntime* rt,
   if (!rt->EventPump) return true;
   SessionResult watched =
       StartHarnessEventPump(rt->Harness, rt->EventSink,
-                            rt->TuiView, rt->EventPump);
+                            rt->TuiView, rt->EventPump, rt->Extensions);
   if (!SessionResult_IsOk(watched)) {
     EmitCommandError(ux, watched.Message);
     return false;
@@ -144,7 +143,8 @@ bool RuntimeRestorePreviousSession(
   // it earlier in the switch discarded it for good. It held nothing durable by
   // definition, so a fresh session restores a usable runtime instead of
   // leaving the caller with no log at all.
-  if (restored.Status == SessionStatus::NotFound) {
+  bool created = restored.Status == SessionStatus::NotFound;
+  if (created) {
     SessionCreateOptions create = {};
     create.ProjectKey = rt->ProjectKey;
     create.WorkingDirectory = rt->WorkingDirectory;
@@ -155,6 +155,8 @@ bool RuntimeRestorePreviousSession(
     restored = AgentHarness_Init(rt->Harness, log, config);
   }
   bool ok = SessionResult_IsOk(restored) && RuntimeRestartWatch(rt, ux);
+  // Extensions still name the discarded session; the replacement has a new ID.
+  if (ok && created) RuntimeAnnounceSession(rt, info.ProjectKey, info.SessionId);
   ArenaRelease(&scratch);
   return ok;
 }
@@ -170,20 +172,6 @@ bool RuntimeRollbackSessionSwitch(
   if (restored && rt->TuiView)
     Tui_LoadStartupContext(rt->TuiView);
   return restored;
-}
-
-// Points the shell tool at the session's artifact directory, so output that
-// overflows the truncation limit is written beside the log it belongs to.
-// Leaves the view empty when there is no durable backend (`--no-session`),
-// which falls the tool back to the OS temp directory.
-void RuntimeUpdateShellDirectory(InteractiveRuntime* rt,
-                                        StrView projectKey,
-                                        DurableId sessionId) {
-  if (!rt->Shell) return;
-  rt->Shell->Directory =
-      rt->JsonlSessions ? JsonlRepository_SessionDir(rt->Mem, rt->JsonlSessions,
-                                                     projectKey, sessionId)
-                        : StrView{};
 }
 
 SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
@@ -399,26 +387,9 @@ SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
     Tui_LoadStartupContext(rt->TuiView);
   }
 
-  // The switch replaced the durable session, so later payloads would otherwise
-  // keep naming a transcript that is no longer written.
-  RuntimeUpdateShellDirectory(rt, targetInfo->ProjectKey, targetInfo->SessionId);
-  if (g_hooks || g_gate) {
-    Arena hookScratch = ArenaCreate((usize)1 << 20);
-    HookSessionInfo hookSession = {};
-    hookSession.SessionId = DurableId_View(&targetInfo->SessionId);
-    hookSession.WorkingDirectory = rt->WorkingDirectory;
-    hookSession.Interactive = rt->Interactive;
-    if (rt->JsonlSessions)
-      hookSession.TranscriptPath =
-          JsonlRepository_SessionPath(&hookScratch, rt->JsonlSessions,
-                                      targetInfo->ProjectKey, targetInfo->SessionId);
-    HookRunner_SetSession(g_hooks, &hookSession);
-    HookGate_SetSession(g_gate, &hookSession);
-    ArenaRelease(&hookScratch);
-    // Announced as a fresh start so a consumer tracks the new session rather
-    // than silently reattributing it to the old one.
-    HookRunner_Dispatch(g_hooks, HookEvent::SessionStart, StrView{});
-  }
+  // The switch replaced the durable session, so everything that reports or
+  // writes beside it moves with it.
+  RuntimeAnnounceSession(rt, targetInfo->ProjectKey, targetInfo->SessionId);
 
   ArenaRelease(&scratch);
   return initialized;
@@ -478,7 +449,7 @@ static StrView FormatRelativeAge(Arena* arena, u64 timestamp, u64 now) {
   return StrBuf_View(&text);
 }
 
-static StrView FormatTimestamp(Arena* arena, u64 timestamp) {
+StrView FormatLocalTime(Arena* arena, u64 timestamp) {
   if (!timestamp) return SVL("(unknown)");
   struct tm local = {};
   if (!Sys_LocalTime(timestamp, &local)) return SVL("(unknown)");
@@ -511,11 +482,11 @@ Array<StrView> SessionDetailLines(Arena* arena,
   AddDetail(&lines, arena, "Storage    ", storage);
   AddDetail(&lines, arena, "Status     ", status);
   AddDetail(&lines, arena, "Created    ",
-            FormatTimestamp(arena, info->CreatedAt));
+            FormatLocalTime(arena, info->CreatedAt));
   AddDetail(&lines, arena, "Activity   ",
-            FormatTimestamp(arena, info->LastActivityAt));
+            FormatLocalTime(arena, info->LastActivityAt));
   AddDetail(&lines, arena, "Updated    ",
-            FormatTimestamp(arena, info->StorageUpdatedAt));
+            FormatLocalTime(arena, info->StorageUpdatedAt));
   AddDetail(&lines, arena, "Wall span  ",
             FormatDuration(arena, info->WallSpanMs));
 
@@ -710,46 +681,4 @@ bool ResolveStartupProjectTrust(
     return false;
   }
   return true;
-}
-
-StrView SessionDataRoot(Arena* arena) { return ClankerDataRoot(arena); }
-
-StrView SessionProjectKey(Arena* arena, StrView workingDirectory) {
-  u64 hash = 1469598103934665603ull;
-  for (u32 i = 0; i < workingDirectory.Length; i++) {
-    char c = workingDirectory.Data[i];
-#if defined(_WIN32)
-    if (c == '\\') c = '/';
-    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-#endif
-    hash ^= (u8)c;
-    hash *= 1099511628211ull;
-  }
-
-  u32 baseStart = workingDirectory.Length;
-  while (baseStart > 0 && workingDirectory.Data[baseStart - 1] != '/' &&
-         workingDirectory.Data[baseStart - 1] != '\\')
-    baseStart--;
-  StrView base = {workingDirectory.Data + baseStart,
-                  workingDirectory.Length - baseStart};
-  StrBuf key = StrBuf_Make(arena, base.Length + 18);
-  for (u32 i = 0; i < base.Length; i++) {
-    char c = base.Data[i];
-#if defined(_WIN32)
-    // The hash half of the key already folds case, so the readable half has to
-    // fold it too. Otherwise one directory reached as C:\Work\Clanker and as
-    // c:/work/clanker hashes identically but yields two different keys, and the
-    // same project gets two session directories.
-    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-#endif
-    bool valid = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-                 (c >= '0' && c <= '9') || c == '-' || c == '_' ||
-                 c == '.';
-    StrBuf_AppendChar(&key, valid ? c : '-');
-  }
-  if (key.Length == 0) StrBuf_AppendCStr(&key, "project");
-  char suffix[24];
-  snprintf(suffix, sizeof(suffix), "-%016llx", (unsigned long long)hash);
-  StrBuf_AppendCStr(&key, suffix);
-  return StrBuf_View(&key);
 }

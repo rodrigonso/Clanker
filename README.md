@@ -219,17 +219,24 @@ tests/     single CLI test harness (suite selection via args; offline by default
   Mirrors pi's event sequence (`agent_start → turn_start → message_* → tool_* →
   turn_end → agent_end`) plus its agent-owned steer / follow-up / next-turn
   message queues (`queue_update` events).
-- **Full hook parity with pi's `AgentLoopConfig`.** Thirteen typed C callbacks
-  bracket the loop: `BeforeRun`, `BeforeContext`, `ConvertToLlm`,
-  `BeforeProvider`, `AfterProvider`, `BeforeTool`, `PrepareNextTurn`,
-  `ShouldStopAfterTurn`, `GetSteeringMessages`, `GetFollowUpMessages`,
-  `BeforeCompaction`, `BeforeNavigation`, `AfterTurn`. `PrepareNextTurn` swaps
+- **Full hook parity with pi's `AgentLoopConfig`, in one struct.**
+  `AgentHarnessHooks` brackets the loop with typed C callbacks: `BeforeRun`,
+  `BeforeContext`, `ConvertToLlm`, `BeforeProvider`, `AfterProvider`,
+  `RewriteToolArguments`, `BeforeTool` (pi's `beforeToolCall` gate),
+  `AfterTool` (pi's `afterToolCall`), `PrepareNextTurn`, `ShouldStopAfterTurn`,
+  `GetSteeringMessages`, `GetFollowUpMessages`, `BeforeCompaction`,
+  `BeforeNavigation`, `AfterTurn`. `PrepareNextTurn` swaps
   the model, effort, or context for the rest of a run and `ShouldStopAfterTurn`
   ends it gracefully; both fire after `turn_end` and before either steering
   source is polled. `GetSteeringMessages` / `GetFollowUpMessages` are polled at
   the same checkpoints as the in-memory queues. Overrides are run-scoped and
   never touch the config or the session tree; a failing hook surfaces as a
-  typed `HookError`.
+  typed `HookError`. `AgentHookChain` composes independent hook sets into one
+  (the first blocking gate wins, rewrites pipe through in order, `AfterTurn`
+  reaches everyone), so features never compete for a slot. The CLI builds on it
+  with app extensions: the hooks.json policy, the memory wiki, and the shell
+  tool's artifact directory each own their hooks and hear session changes,
+  ordered events, and exit through one registry.
 - **One reimplemented chat wire protocol**, not vendor SDKs. Chat uses
   `POST /v1/responses`; every chat provider is a row of
   endpoint data rather than a protocol implementation. The request builder and
@@ -523,6 +530,8 @@ or build with `build.bat -Config Debug` and launch or attach the debugger to
 ./build/clanker --no-tools               # read-only conversation
 ./build/clanker --max-turns 25           # ask to continue every 25 turns (0: unlimited)
 ./build/clanker --approve                # trust project prompt files for this run
+./build/clanker --no-memory              # no memory wiki for this run
+./build/clanker --dream                  # consolidate this repository's memory wiki
 ```
 
 ## Project context and system prompts
@@ -561,6 +570,98 @@ explicit CLI trust override covers the run.
 `~/.clanker/settings.json` also stores the active provider/model and explicit
 effort or selectable context-window preferences. Unsupported saved values fall
 back to the selected model's defaults. Current fixed provider context windows are displayed without an extra chooser.
+
+## Memory wiki
+
+Each repository gets a wiki of linked markdown pages that persists across
+sessions: what the agent learned about the user, the project, and the codebase
+that a future session would otherwise rediscover or get wrong. Every worktree
+and subdirectory of one repository shares it -- the location follows the git
+common directory, so linked worktrees resolve to the main checkout -- and a
+folder outside git gets its own.
+
+```text
+~/.clanker/memory/<repo-key>/
+  pages/<slug>.md   the wiki
+  journal.jsonl     sessions and page writes, recorded by Clanker
+  .dream/           dreaming state, progress, inbox, snapshots, and lock
+```
+
+A page is `<slug>.md` (lowercase-kebab-case) with a scalar header, and links
+others with `[[slug]]`, so the folder also opens as an Obsidian vault:
+
+```markdown
+---
+title: Build and test
+type: feedback        # user | feedback | project | reference | topic
+summary: Always build with build.bat; it is the page's catalog entry
+pinned: false
+---
+The user asked for build.bat over raw CMake.
+```
+
+When `read` is available, the system prompt gains a `<memory_wiki>` block after
+the project context: what the wiki is for, the full text of pinned pages (4 KB
+in total), and a catalog of every page's summary (200 lines / 25 KB, pinned
+first, then most recently changed). The catalog is generated from the page
+headers, never stored, so it cannot drift from the pages or be clobbered by two
+sessions at once. The agent reads pages with `read` and searches them with
+`grep`; with `write` or `edit` it is also told when and how to write pages. The
+wiki is read when the prompt is built (startup, `/reload`, a project switch),
+so pages written mid-session reach the next session and the prompt stays
+stable within one.
+
+The pages folder is a writable root: a write or edit there is allowed exactly
+like one in the working directory (Auto skips the reviewer; Ask still asks).
+`write` and `edit` are refused for the journal and `.dream/`. Every page the agent writes
+is checked as it is saved -- header fields, slug, size, and links to pages that
+do not exist -- and problems come back in the tool result. With memory off the
+system prompt is byte-for-byte what it is without the feature, which is the
+only place it diverges from pi.
+
+`memory` in `settings.json` (default `true`) turns the wiki on; `--no-memory` or
+`CLANKER_NO_MEMORY=1` turns it off for one run. `/memory` shows the wiki's
+location, size, lint summary, and dreaming status; `/memory lint` lists
+findings, `/memory on|off` switches it, and `/memory restore` puts back the
+snapshot taken before the last dream.
+
+### Dreaming
+
+Dreaming is an offline pass in which an agent replays what recent sessions did
+and corrects, extends, merges, and prunes the wiki. `/dream` starts it in the
+background and `/dream watch` follows it live; `clanker --dream` runs it in the
+foreground for the working directory's repository. A pass:
+
+1. Takes `.dream/lock`, so only one pass runs per repository.
+2. Reads the journal for sessions that worked in the repository -- from any
+   worktree -- and renders the new part of each transcript into
+   `.dream/inbox/` as a markdown digest (at most a third of the dream model's
+   context window and 2 MB in total, so a backlog drains over several passes;
+   user and assistant text, compact tool calls, failed tool results in full,
+   other results clipped, compaction summaries, never reasoning).
+3. Snapshots `pages/` (the newest three are kept).
+4. Runs a headless agent with the wiki as its working directory, `read`,
+   `write`, `edit`, `ls`, `find`, and `grep`, and writes confined to `pages/`.
+   It may read the repository to check claims against the code.
+5. Lints the result and spends up to two follow-up turns on remaining errors.
+6. Advances `.dream/state.json` and journals the outcome. A failed pass
+   advances nothing and is retried from the same point.
+
+A pass with no new session activity, no page writes, and a clean wiki does not
+start the agent. The dream's system prompt can be replaced by `~/.clanker/DREAM.md`,
+or by `<repo>/.clanker/DREAM.md` in a trusted repository, using `{{inbox}}`,
+`{{pages}}`, `{{repo}}`, `{{page_limit}}`, and `{{pinned_limit}}`.
+`dreamModel` in `settings.json` picks a different (cheaper) model for dreaming;
+`-m` overrides it. The dream's own session is durable and can be inspected with
+`--resume` like any other.
+
+`/dream watch` follows a dream as it happens, starting one first if none is
+running. The transcript is replaced, read-only, by the dream's session -- its
+first prompt, every tool call and result, and its closing report -- which grows
+as the pass writes to its log; the status bar shows the phase. Ctrl+C, or
+submitting anything, returns to the session as it was; leaving does not stop
+the dream. The pass reports its phase, session, and outcome in
+`.dream/progress.json`, which is what lets any process follow it.
 
 ## Skills
 
@@ -1407,6 +1508,8 @@ Deliberately out of scope for now (the structure leaves seams for them):
   retained-tail budget. One-shot `/compact <instructions>` is done.
 - Fuzzy/regex session search, generated names, pricing, deletion UX, and a
   derived session metadata sidecar.
+- Automatic dreaming. A pass runs when asked (`/dream`, `--dream`); nothing
+  schedules one when a session ends.
 
 ## License
 

@@ -3,8 +3,7 @@
 #include "agent/ask.h"
 #include "agent/harness.h"
 #include "app/command.h"
-#include "app/hook_gate.h"
-#include "app/hook_runner.h"
+#include "app/extensions.h"
 #include "app/project_trust.h"
 #include "app/prompt_context.h"
 #include "app/provider_registry.h"
@@ -21,6 +20,7 @@
 // lets the handlers live outside main.cpp and be driven by tests.
 
 struct HarnessEventPump;
+struct MemoryExtension;
 
 struct AppAuth {
   Arena* Mem;
@@ -55,8 +55,8 @@ struct InteractiveRuntime {
   ModelRequestProfile PreferredProfile;
   AgentHarness* Harness;
   SessionRepository* Sessions;
-  // Concrete backend, when there is one, purely so a session switch can report
-  // the new durable log path to hooks. Null under `--no-session`.
+  // Concrete backend, when there is one, so a session announcement can name
+  // the durable log and artifact directory. Null under `--no-session`.
   JsonlRepository* JsonlSessions;
   StrView ProjectKey;
   StrView WorkingDirectory;
@@ -89,29 +89,49 @@ struct InteractiveRuntime {
   HarnessEventSink EventSink;
   Tui* TuiView;
   AppAuth* Auth;
-  // Where the shell tool writes overflow logs; repointed on session switch.
-  ShellToolContext* Shell;
+  // Told about every session change and fed the ordered event stream.
+  AppExtensions* Extensions;
+  // The memory wiki extension; null when `--no-memory` or CLANKER_NO_MEMORY
+  // turned memory off for this run.
+  MemoryExtension* Memory;
+  // The persisted settings, which a run-level override leaves untouched.
+  bool MemoryEnabled = true;
+  StrView DreamModel;
 };
 
+// The wiki store the prompt should read with memory `enabled`, or empty when
+// memory is off for this run.
+StrView RuntimeMemoryStore(const InteractiveRuntime* rt, bool enabled);
+
+// Rebuilds the prompt context from the current options, as `/reload` does
+// without rereading settings. False leaves the old context in place.
+bool RuntimeRebuildPrompt(InteractiveRuntime* rt, StrBuf* error);
+
+// Keeps the shell tool's overflow logs beside the live session's log. Under
+// `--no-session` the directory stays empty, which falls the tool back to the
+// OS temp directory.
+struct ShellDirectoryExtension {
+  ShellToolContext* Shell;
+  Arena Mem;
+};
+
+AppExtension ShellDirectoryExtension_Make(ShellDirectoryExtension* state,
+                                          ShellToolContext* shell);
+
+// Tells every extension which durable session is now live. Called once at
+// startup and after every session switch.
+void RuntimeAnnounceSession(InteractiveRuntime* rt, StrView projectKey,
+                            DurableId sessionId);
+
 // ---- process-wide session state -----------------------------------------
-// Exactly one session runs per process, and every reporting site -- startup,
-// the prompt choke point, and the event pump thread -- would otherwise have to
-// thread the same pointers through unrelated structs.
+// Exactly one session runs per process, and the signal handler has no other
+// way to reach the run it must cancel.
 
 extern volatile i32 g_abort;
 extern AgentHarness* g_activeHarness;
-extern HookRunner* g_hooks;
-// The PreToolUse gate, or null when no PreToolUse command is configured. Unlike
-// g_hooks it survives `--no-session`: a policy that decides whether a tool may
-// run has nothing to do with whether the transcript is durable.
-extern HookGate* g_gate;
 
 // Runs a prompt with the harness published for the signal handler to cancel.
 SessionResult RunHarnessPrompt(AgentHarness* harness, StrView prompt);
-
-// Idempotent, so every exit path can call it without tracking who got there
-// first.
-void EndHookSession();
 
 // ---- command UX ----------------------------------------------------------
 

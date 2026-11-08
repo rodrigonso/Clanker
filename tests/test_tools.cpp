@@ -91,7 +91,8 @@ static StrView Args1(Arena* a, const char* k, const char* v) {
 
 static bool DescribeToolPermission(Arena* a, const Tool& tool,
                                    StrView argsJson, StrView workingDirectory,
-                                   ToolPermissionInfo* out, StrBuf* err) {
+                                   ToolPermissionInfo* out, StrBuf* err,
+                                   StrView writableRoot = {}) {
   JsonValue* root = Json_ParseCopy(a, argsJson);
   if (!root) {
     StrBuf_AppendCStr(err, "invalid JSON");
@@ -101,7 +102,67 @@ static bool DescribeToolPermission(Arena* a, const Tool& tool,
   Json_WriteValue(&canonical, root);
   ToolArgs args = {root, StrBuf_View(&canonical)};
   if (!tool.DescribePermission) return false;
-  return tool.DescribePermission(tool.Ctx, a, &args, workingDirectory, out, err);
+  ToolPermissionScope scope = {};
+  scope.WorkingDirectory = workingDirectory;
+  scope.WritableRoots = writableRoot.Length ? &writableRoot : nullptr;
+  scope.WritableRootCount = writableRoot.Length ? 1 : 0;
+  return tool.DescribePermission(tool.Ctx, a, &args, &scope, out, err);
+}
+
+static FsPermissionTarget ResolveTarget(Arena* a, StrView workingDirectory,
+                                        StrView target, StrView writableRoot = {}) {
+  ToolPermissionScope scope = {};
+  scope.WorkingDirectory = workingDirectory;
+  scope.WritableRoots = writableRoot.Length ? &writableRoot : nullptr;
+  scope.WritableRootCount = writableRoot.Length ? 1 : 0;
+  return Fs_ResolvePermissionTarget(a, &scope, target);
+}
+
+static StrView WriteArgs(Arena* a, StrView path) {
+  StrBuf json = StrBuf_Make(a, path.Length + 48);
+  StrBuf_AppendCStr(&json, "{\"path\":");
+  Json_WriteString(&json, path);
+  StrBuf_AppendCStr(&json, ",\"content\":\"x\"}");
+  return StrBuf_View(&json);
+}
+
+// A writable root widens Auto's allowance to one directory outside the working
+// directory, and to nothing beside or above it.
+static void TestWritableRootPermissions(Arena* a, const Tool& write,
+                                        StrView workingDirectory) {
+  Fs_MkdirP(a, SV("clanker_tool_permission_memory/pages"));
+  StrView memory = Fs_RealPath(a, SV("clanker_tool_permission_memory"));
+  StrView inside = Fs_Join(a, memory, SV("pages/note.md"));
+  StrView escape = Fs_Join(a, memory, SV("../escape.txt"));
+  StrView sibling = Fs_Join(a, Fs_Parent(memory),
+                            SV("clanker_tool_permission_memory-evil/x.md"));
+
+  ToolPermissionInfo info = {};
+  StrBuf err = StrBuf_Make(a, 64);
+  CHECK(DescribeToolPermission(a, write, WriteArgs(a, inside), workingDirectory,
+                               &info, &err));
+  CHECK(!info.AutoAllow);
+  info = {};
+  CHECK(DescribeToolPermission(a, write, WriteArgs(a, inside), workingDirectory,
+                               &info, &err, memory));
+  CHECK(info.AutoAllow);
+  info = {};
+  CHECK(DescribeToolPermission(a, write, WriteArgs(a, escape), workingDirectory,
+                               &info, &err, memory));
+  CHECK(!info.AutoAllow);
+  info = {};
+  CHECK(DescribeToolPermission(a, write, WriteArgs(a, sibling), workingDirectory,
+                               &info, &err, memory));
+  CHECK(!info.AutoAllow);
+  info = {};
+  StrView missing = Fs_Join(a, memory, SV("not-created"));
+  CHECK(DescribeToolPermission(a, write,
+                               WriteArgs(a, Fs_Join(a, missing, SV("x.md"))),
+                               workingDirectory, &info, &err, missing));
+  CHECK(!info.AutoAllow);
+
+  CLANKER_RMDIR("clanker_tool_permission_memory/pages");
+  CLANKER_RMDIR("clanker_tool_permission_memory");
 }
 
 static void TestToolPermissions(Arena* a) {
@@ -156,6 +217,7 @@ static void TestToolPermissions(Arena* a) {
       a, write, SV("{\"path\":\"../outside.txt\",\"content\":\"x\"}"),
       workingDirectory, &outside, &outsideErr));
   CHECK_ALL(!outside.AutoAllow, outside.ReviewIncomplete);
+  TestWritableRootPermissions(a, write, workingDirectory);
 
   // Writes that steer later execution -- git hooks and config, project hooks,
   // skills -- need review even inside the workspace.
@@ -166,7 +228,7 @@ static void TestToolPermissions(Arena* a) {
   };
   for (u32 i = 0; i < (u32)(sizeof(protectedPaths) / sizeof(protectedPaths[0])); i++) {
     FsPermissionTarget target =
-        Fs_ResolvePermissionTarget(a, workingDirectory, SV(protectedPaths[i]));
+        ResolveTarget(a, workingDirectory, SV(protectedPaths[i]));
     CHECK_ALL(target.Contained, target.Protected);
     StrBuf json = StrBuf_Make(a, 128);
     StrBuf_AppendCStr(&json, "{\"path\":\"");
@@ -184,7 +246,7 @@ static void TestToolPermissions(Arena* a) {
                            ".git::$INDEX_ALLOCATION/config"};
   for (u32 i = 0; i < (u32)(sizeof(aliases) / sizeof(aliases[0])); i++) {
     FsPermissionTarget target =
-        Fs_ResolvePermissionTarget(a, workingDirectory, SV(aliases[i]));
+        ResolveTarget(a, workingDirectory, SV(aliases[i]));
     CHECK(!target.Contained || target.Protected);
   }
 #endif
@@ -192,16 +254,29 @@ static void TestToolPermissions(Arena* a) {
                                  "my.git/x", "agents/x", ".clankerrc"};
   for (u32 i = 0; i < (u32)(sizeof(ordinaryPaths) / sizeof(ordinaryPaths[0])); i++) {
     FsPermissionTarget target =
-        Fs_ResolvePermissionTarget(a, workingDirectory, SV(ordinaryPaths[i]));
+        ResolveTarget(a, workingDirectory, SV(ordinaryPaths[i]));
     CHECK_ALL(target.Contained, !target.Protected);
   }
   // Only components below the workspace root count.
   StrView gitRoot = Fs_Join(a, workingDirectory, SVL("sub/.git"));
   Fs_MkdirP(a, gitRoot);
   FsPermissionTarget insideGitRoot =
-      Fs_ResolvePermissionTarget(a, Fs_RealPath(a, gitRoot), SVL("file.txt"));
+      ResolveTarget(a, Fs_RealPath(a, gitRoot), SVL("file.txt"));
   CHECK_ALL(insideGitRoot.Contained, !insideGitRoot.Protected);
   CLANKER_RMDIR("clanker_tool_permission_root/sub/.git");
+  // A writable root inside a protected directory is an explicit grant; only
+  // protected components below that root still need review.
+  Fs_MkdirP(a, SV("clanker_tool_permission_root/.clanker/memory"));
+  StrView grantedRoot =
+      Fs_RealPath(a, SV("clanker_tool_permission_root/.clanker/memory"));
+  FsPermissionTarget granted = ResolveTarget(
+      a, workingDirectory, SVL(".clanker/memory/pages/a.md"), grantedRoot);
+  CHECK_ALL(granted.Contained, !granted.Protected);
+  FsPermissionTarget grantedGit = ResolveTarget(
+      a, workingDirectory, SVL(".clanker/memory/.git/config"), grantedRoot);
+  CHECK_ALL(grantedGit.Contained, grantedGit.Protected);
+  CLANKER_RMDIR("clanker_tool_permission_root/.clanker/memory");
+  CLANKER_RMDIR("clanker_tool_permission_root/.clanker");
 
   CHECK(Fs_PathContained(workingDirectory, workingDirectory));
   CHECK(Fs_PathContained(workingDirectory,
@@ -1459,8 +1534,8 @@ static void TestUnicodeGrep(Arena* a) {
   StrView bytes = {};
   CHECK(File_ReadAll(a, file, &bytes) == FileIoResult::Success);
   CHECK(StrView_EqCStr(bytes, "needle\n"));
-  CHECK(Fs_ResolvePermissionTarget(a, Fs_RealPath(a, root), Fs_RealPath(a, file)).Contained);
-  CHECK(Fs_ResolvePermissionTarget(a, Fs_RealPath(a, root), Fs_RealPath(a, longFile)).Contained);
+  CHECK(ResolveTarget(a, Fs_RealPath(a, root), Fs_RealPath(a, file)).Contained);
+  CHECK(ResolveTarget(a, Fs_RealPath(a, root), Fs_RealPath(a, longFile)).Contained);
 
   StrView result = RunGrep(a, "{\"pattern\":\"needle\",\"path\":\"clanker_unicode_grep_it\"}");
   CHECK_ALL(StrView_Contains(result, "\xe4\xb8\xad\xf0\x9f\x98\x80.txt:1: needle"),

@@ -49,15 +49,9 @@ void AddPath(Arena* arena, Array<StrView>* paths, StrView path) {
 }
 
 void SortPaths(Array<StrView>* paths) {
-  for (u32 i = 1; i < paths->Count; i++) {
-    StrView value = paths->Data[i];
-    u32 slot = i;
-    while (slot > 0 && ComparePaths(paths->Data[slot - 1], value) > 0) {
-      paths->Data[slot] = paths->Data[slot - 1];
-      slot--;
-    }
-    paths->Data[slot] = value;
-  }
+  Array_Sort(paths, [](StrView value, StrView previous) {
+    return ComparePaths(previous, value) > 0;
+  });
 }
 
 // Which bucket a tool call contributes to, or null when the tool is not one of

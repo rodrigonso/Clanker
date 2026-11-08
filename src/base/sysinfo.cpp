@@ -295,37 +295,65 @@ StrView Git_BranchFromHead(StrView c) {
   return StrView{c.Data + start, end - start};
 }
 
-StrView Sys_GitBranch(Arena* a, StrView dir) {
+StrView Git_CommonDirFromFile(StrView c) {
+  u32 end = 0;
+  while (end < c.Length && c.Data[end] != '\n' && c.Data[end] != '\r') end++;
+  u32 start = 0;
+  while (start < end && (c.Data[start] == ' ' || c.Data[start] == '\t')) start++;
+  while (end > start && (c.Data[end - 1] == ' ' || c.Data[end - 1] == '\t')) end--;
+  while (end > start && IsSep(c.Data[end - 1])) end--;
+  return StrView{c.Data + start, end - start};
+}
+
+namespace {
+
+// The git directory of the work tree containing `dir`: `.git` itself, or the
+// target of a `.git` file (linked worktree, submodule). The walk stops at the
+// first `.git` found, so an unreadable `.git` file yields empty rather than
+// an outer repository. `*workTree` receives the directory holding that `.git`.
+StrView FindGitDir(Arena* a, StrView dir, StrView* workTree = nullptr) {
   StrView cur = StripTrailingSep(dir);
   for (u32 guard = 0; guard < 260 && cur.Length > 0; guard++) {
     StrBuf dot = JoinPath(a, cur, SVL(".git"));
     PathKind kind = StatKind(StrBuf_CStr(&dot));
-
+    if (kind != PathKind::Missing && workTree) *workTree = DupCStr(a, cur);
+    if (kind == PathKind::Dir) return StrBuf_View(&dot);
     if (kind != PathKind::Missing) {
-      StrView gitdirView;
-      StrBuf relJoin;  // backing storage for the relative-gitdir case
-      if (kind == PathKind::Dir) {
-        gitdirView = StrBuf_View(&dot);
-      } else {
-        StrView gp = Git_GitdirFromFile(ReadSmallFile(a, StrBuf_CStr(&dot)));
-        if (gp.Length == 0) return StrView{nullptr, 0};
-        if (IsAbsPath(gp)) {
-          gitdirView = gp;
-        } else {
-          relJoin = JoinPath(a, cur, gp);
-          gitdirView = StrBuf_View(&relJoin);
-        }
-      }
-      StrBuf head = JoinPath(a, gitdirView, SVL("HEAD"));
-      StrView br = Git_BranchFromHead(ReadSmallFile(a, StrBuf_CStr(&head)));
-      return br.Length ? DupCStr(a, br) : StrView{nullptr, 0};
+      StrView gp = Git_GitdirFromFile(ReadSmallFile(a, StrBuf_CStr(&dot)));
+      if (gp.Length == 0) return StrView{nullptr, 0};
+      if (IsAbsPath(gp)) return DupCStr(a, gp);
+      StrBuf joined = JoinPath(a, cur, gp);
+      return StrBuf_View(&joined);
     }
-
     StrView parent = ParentDir(cur);
     if (parent.Length >= cur.Length) break;  // no progress -> at the root
     cur = parent;
   }
   return StrView{nullptr, 0};
+}
+
+}  // namespace
+
+StrView Sys_GitBranch(Arena* a, StrView dir) {
+  StrView gitdir = FindGitDir(a, dir);
+  if (!gitdir.Length) return StrView{nullptr, 0};
+  StrBuf head = JoinPath(a, gitdir, SVL("HEAD"));
+  StrView br = Git_BranchFromHead(ReadSmallFile(a, StrBuf_CStr(&head)));
+  return br.Length ? DupCStr(a, br) : StrView{nullptr, 0};
+}
+
+StrView Sys_GitCommonDir(Arena* a, StrView dir, StrView* workTree) {
+  if (workTree) *workTree = StrView{nullptr, 0};
+  StrView found = StrView{nullptr, 0};
+  StrView gitdir = FindGitDir(a, dir, &found);
+  if (!gitdir.Length) return StrView{nullptr, 0};
+  if (workTree) *workTree = found;
+  StrBuf commondir = JoinPath(a, gitdir, SVL("commondir"));
+  StrView common = Git_CommonDirFromFile(ReadSmallFile(a, StrBuf_CStr(&commondir)));
+  if (!common.Length) return gitdir;
+  if (IsAbsPath(common)) return DupCStr(a, common);
+  StrBuf joined = JoinPath(a, gitdir, common);
+  return StrBuf_View(&joined);
 }
 
 bool Sys_LocalTime(u64 timestampMs, struct tm* out) {

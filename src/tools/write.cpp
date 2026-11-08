@@ -61,11 +61,11 @@ static bool WriteExec(void* ctx, Arena* arena, StrView id,
 
 static bool WriteDescribePermission(void* ctx, Arena* arena,
                                     const ToolArgs* args,
-                                    StrView workingDirectory,
+                                    const ToolPermissionScope* scope,
                                     ToolPermissionInfo* out, StrBuf* err) {
   (void)ctx;
   return Fs_DescribeMutationPermission(
-      arena, args, workingDirectory, SVL("Write file "), SVL("write\n"), out,
+      arena, args, scope, SVL("Write file "), SVL("write\n"), out,
       err);
 }
 

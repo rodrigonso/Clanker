@@ -3,14 +3,13 @@
 #include <stdio.h>
 
 #include "app/plain_select.h"
+#include "app/memory.h"
 #include "app/permission_reviewer.h"
 #include "app/settings.h"
 #include "base/thread.h"
 
 volatile i32 g_abort = 0;
 AgentHarness* g_activeHarness = nullptr;
-HookRunner* g_hooks = nullptr;
-HookGate* g_gate = nullptr;
 
 SessionResult RunHarnessPrompt(AgentHarness* harness, StrView prompt) {
   g_activeHarness = harness;
@@ -19,10 +18,46 @@ SessionResult RunHarnessPrompt(AgentHarness* harness, StrView prompt) {
   return result;
 }
 
-void EndHookSession() {
-  if (!g_hooks) return;
-  HookRunner_Shutdown(g_hooks, HookEvent::SessionEnd);
-  g_hooks = nullptr;
+static void ShellDirectoryChanged(void* user, const AppSessionContext* session) {
+  ShellDirectoryExtension* state = (ShellDirectoryExtension*)user;
+  ArenaReset(&state->Mem);
+  state->Shell->Directory = StrView_Dup(&state->Mem, session->ArtifactDirectory);
+}
+
+static void ShellDirectoryShutdown(void* user) {
+  ShellDirectoryExtension* state = (ShellDirectoryExtension*)user;
+  state->Shell->Directory = {};
+  ArenaRelease(&state->Mem);
+}
+
+AppExtension ShellDirectoryExtension_Make(ShellDirectoryExtension* state,
+                                          ShellToolContext* shell) {
+  state->Shell = shell;
+  state->Mem = ArenaCreate((usize)1 << 20);
+  AppExtension extension = {};
+  extension.User = state;
+  extension.SessionChanged = ShellDirectoryChanged;
+  extension.Shutdown = ShellDirectoryShutdown;
+  return extension;
+}
+
+void RuntimeAnnounceSession(InteractiveRuntime* rt, StrView projectKey,
+                            DurableId sessionId) {
+  if (!rt || !rt->Extensions) return;
+  Arena scratch = ArenaCreate((usize)1 << 20);
+  AppSessionContext session = {};
+  session.ProjectKey = projectKey;
+  session.WorkingDirectory = rt->WorkingDirectory;
+  session.Interactive = rt->Interactive;
+  if (rt->JsonlSessions) {
+    session.SessionId = DurableId_View(&sessionId);
+    session.TranscriptPath = JsonlRepository_SessionPath(
+        &scratch, rt->JsonlSessions, projectKey, sessionId);
+    session.ArtifactDirectory = JsonlRepository_SessionDir(
+        &scratch, rt->JsonlSessions, projectKey, sessionId);
+  }
+  AppExtensions_SessionChanged(rt->Extensions, &session);
+  ArenaRelease(&scratch);
 }
 
 void PlainCommandNotice(void*, StrView message) {
@@ -207,6 +242,24 @@ void RuntimeSetPromptOptions(InteractiveRuntime* rt,
       rt->Prompt->SettingsPromptTemplatePaths.Count;
 }
 
+StrView RuntimeMemoryStore(const InteractiveRuntime* rt, bool enabled) {
+  return enabled && rt && rt->Memory ? rt->Memory->Store : StrView{};
+}
+
+bool RuntimeRebuildPrompt(InteractiveRuntime* rt, StrBuf* error) {
+  if (!rt || !rt->Prompt || !rt->Harness) return false;
+  PromptContextOptions options = rt->PromptOptions;
+  options.MemoryStore = RuntimeMemoryStore(rt, rt->MemoryEnabled);
+  PromptContext next = {};
+  if (!PromptContext_Build(&options, &next, error)) return false;
+  PromptContext previous = *rt->Prompt;
+  *rt->Prompt = next;
+  RuntimeSetPromptOptions(rt, &options);
+  rt->Harness->Config.SystemPrompt = rt->Prompt->SystemPrompt;
+  PromptContext_Release(&previous);
+  return true;
+}
+
 bool RuntimePersistSettings(InteractiveRuntime* rt) {
   if (!rt || !rt->Harness || !rt->Spec || !rt->CurrentModel.Id.Length)
     return false;
@@ -230,6 +283,8 @@ bool RuntimePersistSettings(InteractiveRuntime* rt) {
   settings.YoloAcknowledged = rt->YoloAcknowledged;
   settings.PermissionReviewerThreshold = rt->PermissionReviewerThreshold;
   settings.Rounded = rt->Rounded;
+  settings.Memory = rt->MemoryEnabled;
+  settings.DreamModel = rt->DreamModel;
   if (rt->Prompt) {
     settings.Skills = rt->Prompt->SettingsSkillPaths;
     settings.PromptTemplates = rt->Prompt->SettingsPromptTemplatePaths;
@@ -298,6 +353,15 @@ StrView PromptContextReport(Arena* arena, const PromptContext* context,
     }
   } else {
     StrBuf_AppendCStr(&message, "\nProject instructions: none");
+  }
+  StrBuf_AppendCStr(&message, "\nMemory wiki: ");
+  if (context->MemoryPages.Length) {
+    StrBuf_Append(&message, context->MemoryPages);
+    StrBuf_AppendCStr(&message, " (");
+    StrBuf_AppendU64(&message, context->MemoryPageCount);
+    StrBuf_AppendCStr(&message, context->MemoryPageCount == 1 ? " page)" : " pages)");
+  } else {
+    StrBuf_AppendCStr(&message, "off");
   }
   return StrBuf_View(&message);
 }

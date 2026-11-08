@@ -14,7 +14,7 @@ struct AppSettings {
   StrView Model;
   DefaultProjectTrust DefaultTrust;
   ModelRequestProfile Profile;
-  AgentCompactionPolicy Compaction;
+  AgentCompactionPolicy Compaction = AgentCompactionPolicy_Default();
   AgentRetryPolicy Retry = AgentRetryPolicy_Default();
   AgentTurnLimitPolicy TurnLimit = AgentTurnLimitPolicy_Default();
   AgentPermissionMode PermissionMode = AgentPermissionMode::Auto;
@@ -25,6 +25,11 @@ struct AppSettings {
   bool PermissionReviewerThresholdInvalid = false;
   bool YoloAcknowledged = false;
   bool Rounded = true;
+  // The memory wiki; `--no-memory` and CLANKER_NO_MEMORY turn it off for one
+  // run without changing this.
+  bool Memory = true;
+  // Model dreaming uses instead of the active one. Empty means the same model.
+  StrView DreamModel;
   Array<StrView> Skills;
   Array<StrView> PromptTemplates;
 };

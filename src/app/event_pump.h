@@ -1,14 +1,16 @@
 #pragma once
 
+#include "app/extensions.h"
 #include "app/runtime.h"
 
-// Presentation delivery, including ordered run-hook dispatch. Machine output
-// uses the synchronous observer below, not this deliberately lossy watch.
+// Presentation delivery, including ordered extension event delivery. Machine
+// output uses the synchronous observer below, not this deliberately lossy watch.
 struct HarnessEventPump {
   AgentHarnessWatch Watch;
   AgentHarness* Harness;
   Tui* TuiView;
   HarnessEventSink Sink;
+  AppExtensions* Extensions;
   Arena CompletionMem;
   Array<StrView> LiveToolEnds;
   Thread Worker;
@@ -19,10 +21,12 @@ struct HarnessEventPump {
 };
 
 // Replaces the TUI transcript synchronously before starting event delivery;
-// other consumers subscribe without copying history.
+// other consumers subscribe without copying history. Every event also reaches
+// `extensions`, before the sink sees it.
 SessionResult StartHarnessEventPump(AgentHarness* harness,
                                     HarnessEventSink sink, Tui* tuiView,
-                                    HarnessEventPump* pump);
+                                    HarnessEventPump* pump,
+                                    AppExtensions* extensions = nullptr);
 void StopHarnessEventPump(HarnessEventPump* pump);
 
 struct HarnessJsonWriter {
@@ -34,6 +38,7 @@ struct HarnessJsonWriter {
 
 struct HarnessJsonOutput {
   AgentHarness* Harness;
+  AppExtensions* Extensions;
   Arena Scratch;
   HarnessJsonWriter Writer;
   SessionResult Failure;
@@ -44,7 +49,8 @@ struct HarnessJsonOutput {
 // worker is allocated; stdout backpressure reaches the producer directly.
 SessionResult StartHarnessJsonOutput(AgentHarness* harness,
                                      HarnessJsonOutput* output,
-                                     HarnessJsonWriter writer = {});
+                                     HarnessJsonWriter writer = {},
+                                     AppExtensions* extensions = nullptr);
 // Detaches, writes the final result, and releases scratch. The returned verdict
 // includes encoding/write/flush failures and determines the process exit code.
 SessionResult FinishHarnessJsonOutput(HarnessJsonOutput* output,

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "agent/hooks.h"
 #include "agent/tool.h"
 #include "base/thread.h"
 #include "llm/types.h"
@@ -8,12 +9,6 @@
 struct AgentPermissionGate;
 
 enum class ToolExecution : u8 { Parallel, Sequential };
-
-struct ToolOutcome {
-  ContentArray Content;
-  bool IsError;
-  bool Terminate;
-};
 
 struct AgentProviderRequest {
   LlmContext Context;
@@ -108,34 +103,6 @@ AgentRetryDecision AgentProvider_RetryDecision(const AgentRetryPolicy* policy,
                                                const Message* assistant);
 bool AgentProvider_SleepBackoff(u32 delayMs, volatile i32* abort);
 
-// Verdict of the before-tool gate, mirroring pi's `BeforeToolCallResult`.
-// Zero-initialized means "allow". `Reason` becomes the blocked call's tool
-// result verbatim; an empty one falls back to AGENT_TOOL_BLOCKED_FALLBACK.
-// `Terminate` only ends the run when every call in the batch sets it, which is
-// what AgentToolBatchResult::AllTerminate already computes.
-struct AgentToolGateDecision {
-  bool Block;
-  StrView Reason;
-  bool Terminate;
-};
-
-// pi's wording for a block that supplied no reason, byte for byte. Both are
-// model-visible, so neither may be reworded casually.
-constexpr StrView AGENT_TOOL_BLOCKED_FALLBACK = SVL("Tool execution was blocked");
-
-struct AgentToolHooks {
-  void* User;
-  // Runs during preparation, after argument normalization and schema
-  // validation, on the coordinator thread and serially across the batch --
-  // pi's clearance phase. A gate may block on external work; nothing in the
-  // batch has started yet.
-  void (*BeforeTool)(void* user, Arena* arena, StrView toolName,
-                     StrView toolCallId, const ToolArgs* args,
-                     AgentToolGateDecision* out);
-  void (*AfterTool)(void* user, Arena* arena, StrView toolName,
-                    const ToolArgs* args, ToolOutcome* io);
-};
-
 struct AgentToolEventSink {
   void* User;
   void (*OnUpdate)(void* user, StrView toolCallId, StrView toolName,
@@ -186,15 +153,16 @@ struct AgentToolBatchResult {
 };
 
 // Preparation resolves tools, normalizes and validates arguments, and runs the
-// before-tool gate. Run is the external-effect boundary; it finalizes each call
-// on the coordinator thread as soon as that call completes.
+// hooks' before-tool gate. Run is the external-effect boundary; it finalizes
+// each call, including the after-tool hook, on the coordinator thread as soon
+// as that call completes.
 void AgentToolBatch_Prepare(Arena* arena, const ToolRuntime* tools, u32 toolCount,
                             const Message* assistant, ToolExecution execution,
-                            volatile i32* abort, const AgentToolHooks* hooks,
+                            volatile i32* abort, const AgentHarnessHooks* hooks,
                             const AgentPermissionGate* permissions,
                             AgentToolBatchPlan* out);
 void AgentToolBatch_Run(Arena* arena, AgentToolBatchPlan* plan,
-                        u32 maxParallelTools, const AgentToolHooks* hooks,
+                        u32 maxParallelTools, const AgentHarnessHooks* hooks,
                         const AgentToolDispatchGate* dispatch,
                         const AgentToolEventSink* events,
                         AgentToolBatchResult* out);

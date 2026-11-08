@@ -7,7 +7,7 @@
 
 #include "app/auth_flow.h"
 #include "app/event_pump.h"
-#include "app/hook_runner.h"
+#include "app/memory.h"
 #include "app/plain_select.h"
 #include "app/permission_reviewer.h"
 #include "app/session_switch.h"
@@ -778,6 +778,8 @@ static AppCommandHandlerResult HandleReloadCommand(
   f64 permissionReviewerThreshold = AGENT_PERMISSION_DEFAULT_REVIEWER_THRESHOLD;
   bool yoloAcknowledged = false;
   bool rounded = rt->Rounded;
+  bool memory = rt->MemoryEnabled;
+  StrView dreamModel = rt->DreamModel;
   AppSettings settings = {};
   AppSettingsLoadResult settingsResult =
       AppSettings_Load(&scratch, rt->SettingsPath, &settings);
@@ -791,6 +793,8 @@ static AppCommandHandlerResult HandleReloadCommand(
     permissionReviewerThreshold = settings.PermissionReviewerThreshold;
     yoloAcknowledged = settings.YoloAcknowledged;
     rounded = settings.Rounded;
+    memory = settings.Memory;
+    dreamModel = settings.DreamModel;
   } else if (settingsResult == AppSettingsLoadResult::Malformed ||
              settingsResult == AppSettingsLoadResult::ReadFailure) {
     StrView message =
@@ -822,6 +826,7 @@ static AppCommandHandlerResult HandleReloadCommand(
   options.SettingsSkillPathCount = settings.Skills.Count;
   options.SettingsPromptTemplatePaths = settings.PromptTemplates.Data;
   options.SettingsPromptTemplatePathCount = settings.PromptTemplates.Count;
+  options.MemoryStore = RuntimeMemoryStore(rt, memory);
   StrBuf error = StrBuf_Make(&scratch, 160);
   if (!PromptContext_Build(&options, &next, &error)) {
     AppCommandHandlerResult result =
@@ -859,6 +864,9 @@ static AppCommandHandlerResult HandleReloadCommand(
   rt->ProjectTrusted = trust.Trusted;
   rt->HasProjectResources = hasProjectResources;
   rt->Rounded = rounded;
+  rt->MemoryEnabled = memory;
+  rt->DreamModel = dreamModel.Length ? StrView_Dup(rt->Mem, dreamModel) : StrView{};
+  MemoryExtension_SetEnabled(rt->Memory, memory);
   if (rt->TuiView) {
     Tui_SetPermissionMode(rt->TuiView,
                           TuiBridge_ToTuiPermissionMode(permissionMode),
@@ -1095,6 +1103,8 @@ AppCommandHandlers RuntimeCommandHandlers(InteractiveRuntime* rt) {
   handlers.Compact = HandleCompactCommand;
   handlers.Permissions = HandlePermissionsCommand;
   handlers.Reload = HandleReloadCommand;
+  handlers.Memory = HandleMemoryCommand;
+  handlers.Dream = HandleDreamCommand;
   if (rt->TuiView) handlers.Debug = HandleDebugCommand;
   if (rt->TuiView) handlers.Rounded = HandleRoundedCommand;
   bool selectorsAvailable = rt->TuiView || Term_IsInteractive();

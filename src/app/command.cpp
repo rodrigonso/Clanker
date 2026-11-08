@@ -45,6 +45,14 @@ const AppCommandSpec kCommands[] = {
     {AppCommandKind::Reload, SVL("reload"), {},
      SVL("Reload settings and prompt context"), SVL("Usage: /reload"),
      AppCommandArgumentPolicy::None},
+    {AppCommandKind::Memory, SVL("memory"), {},
+     SVL("Show, lint, restore, or turn the memory wiki on and off"),
+     SVL("Usage: /memory [lint|on|off|restore]"),
+     AppCommandArgumentPolicy::Optional},
+    {AppCommandKind::Dream, SVL("dream"), {},
+     SVL("Consolidate the memory wiki in the background, or watch it happen"),
+     SVL("Usage: /dream [watch]"),
+     AppCommandArgumentPolicy::Optional},
     {AppCommandKind::Debug, SVL("debug"), {},
      SVL("Toggle the performance overlay"), SVL("Usage: /debug [on|off]"),
      AppCommandArgumentPolicy::Optional},
@@ -232,6 +240,8 @@ AppCommandDispatchResult AppCommand_Dispatch(StrView input, const AppCommandHand
         case AppCommandKind::Trust: fn = handlers->Trust; break;
         case AppCommandKind::Permissions: fn = handlers->Permissions; break;
         case AppCommandKind::Reload: fn = handlers->Reload; break;
+        case AppCommandKind::Memory: fn = handlers->Memory; break;
+        case AppCommandKind::Dream: fn = handlers->Dream; break;
         case AppCommandKind::Debug: fn = handlers->Debug; break;
         case AppCommandKind::Rounded: fn = handlers->Rounded; break;
         default: break;

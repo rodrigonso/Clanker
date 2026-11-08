@@ -27,7 +27,7 @@ HookGate* HookGate_Create(Arena* arena, const HookConfig* config,
 // is switched or reset. Safe to call while a gate evaluation is in flight.
 void HookGate_SetSession(HookGate* gate, const HookSessionInfo* session);
 
-// Binds to AgentToolHooks::BeforeTool with the HookGate as `user`. A null
+// Binds to AgentHarnessHooks::BeforeTool with the HookGate as `user`. A null
 // `user` allows, so the seam can be installed unconditionally.
 void HookGate_BeforeTool(void* user, Arena* arena, StrView toolName, StrView toolCallId,
                          const ToolArgs* args, AgentToolGateDecision* out);

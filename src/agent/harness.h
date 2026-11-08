@@ -26,7 +26,6 @@ struct AgentHarnessConfig {
   // Automatic compaction. Zero-initialized means disabled, so a harness only
   // compacts on its own when a caller opts in; the CLI enables it by default.
   AgentCompactionPolicy Compaction;
-  AgentToolHooks ToolHooks;
   AgentHarnessHooks Hooks;
   AgentHarnessEventObserver Events;
   // How the harness reaches the user mid-run. Null means nobody is there to
@@ -40,6 +39,10 @@ struct AgentHarnessConfig {
   f64 PermissionReviewerThreshold = AGENT_PERMISSION_DEFAULT_REVIEWER_THRESHOLD;
   AgentPermissionReviewer PermissionReviewer;
   StrView WorkingDirectory;
+  // Directories outside WorkingDirectory that file mutations may target as
+  // freely as the working directory itself. Copied at Init.
+  const StrView* WritableRoots;
+  u32 WritableRootCount;
   void* AuthUser;
   AgentResolveAuthFn ResolveAuth;
 };
@@ -182,6 +185,11 @@ AgentPermissionMode AgentHarness_SetPermissionMode(AgentHarness* harness,
 AgentPermissionMode AgentHarness_CyclePermissionMode(AgentHarness* harness);
 AgentPermissionMode AgentHarness_ResetPermissions(AgentHarness* harness);
 u32 AgentHarness_PermissionGrantCount(AgentHarness* harness);
+// Replaces the configured writable roots for later tool calls. `roots` is
+// copied for the permission engine but also kept as the config's view, so it
+// must stay valid while this harness or a copy of its config is in use.
+void AgentHarness_SetWritableRoots(AgentHarness* harness, const StrView* roots,
+                                   u32 count);
 bool AgentHarness_ResolvePermissionRequest(AgentHarness* harness, Arena* arena,
                                            StrView requestId,
                                            volatile i32* abort,

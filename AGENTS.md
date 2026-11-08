@@ -46,6 +46,14 @@ already ignored.
 
 Never commit anything under `~/.clanker` or a session log; those are user data.
 
+## Extending the agent
+
+Features that attach to the agent are app extensions (`src/app/extensions.h`):
+their harness hooks are composed by `AgentHookChain`, and the registry tells
+them about session changes, the ordered event stream, and exit. Add a feature
+as an extension rather than a new global or a hand-written re-point in the
+session switch.
+
 ## Code conventions
 
 - **No C++ standard library**, no exceptions, no RTTI. Only the C runtime and
@@ -66,7 +74,9 @@ Never commit anything under `~/.clanker` or a session log; those are user data.
 Prompt-visible strings (the default system prompt preamble, tool prompt
 snippets, guideline bullets, and the `<project_context>` framing) are aligned
 byte-for-byte with pi's `buildSystemPrompt`. Do not reword them casually; a
-reword is a parity change.
+reword is a parity change. The `<memory_wiki>` block is a deliberate
+divergence: it is appended only when memory is on, and with memory off the
+prompt must stay byte-identical.
 
 The provider layer is a deliberate divergence: Clanker speaks only OpenAI's
 Responses API (`src/llm/responses*`), not pi's per-vendor protocols. A provider
@@ -85,6 +95,10 @@ full fidelity rather than clamped.
   `.clanker/hooks.json` per project. All config writes go through
   `ConfigFile_WriteAtomic`, which writes a sibling temp file and removes it on
   every failure path -- use it instead of writing config in place.
+- Memory wikis: `~/.clanker/memory/<repo-key>/` with `pages/`, `journal.jsonl`,
+  and `.dream/`, keyed by the git common directory so every worktree of a
+  repository shares one. The journal is append-only and written by Clanker;
+  the agent's `write` and `edit` are refused there.
 - The `shell` tool spills output over the truncation limit to a randomly named
   file in the session's artifact directory (`shell-<hex>.log`) and reports the
   path in the tool result. That file is intentionally left for the user to

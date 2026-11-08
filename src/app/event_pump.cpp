@@ -88,30 +88,6 @@ void ReportHarnessResult(SessionResult result) {
 
 namespace {
 
-static void DispatchHarnessHooks(const AgentHarnessEvent* event) {
-  // Dispatch from ordered event delivery, never around Run on the caller:
-  // Stop must follow the run's last PostToolUse. PreToolUse belongs to the gate.
-  switch (event->Kind) {
-    case AgentHarnessEventKind::TransientToolEnd:
-      HookRunner_Dispatch(g_hooks, HookEvent::PostToolUse, event->Tool.Name);
-      break;
-    case AgentHarnessEventKind::TransientAgentStart:
-      if (event->Turn.Kind == AgentTurnKind::Run)
-        HookRunner_Dispatch(g_hooks, HookEvent::UserPromptSubmit, StrView{});
-      break;
-    case AgentHarnessEventKind::TransientAgentEnd:
-      if (event->Turn.Kind == AgentTurnKind::Run)
-        HookRunner_Dispatch(g_hooks,
-                            event->Turn.Outcome == AgentTurnOutcome::Failed
-                                ? HookEvent::StopFailure
-                                : HookEvent::Stop,
-                            StrView{});
-      break;
-    default:
-      break;
-  }
-}
-
 static bool WriteJsonFile(void* user, StrView line) {
   FILE* file = (FILE*)user;
   return fwrite(line.Data, 1, line.Length, file) == line.Length &&
@@ -133,7 +109,7 @@ static void WriteJsonLine(HarnessJsonOutput* output, StrBuf* line) {
 
 static void ObserveJsonEvent(void* user, const AgentHarnessEvent* event) {
   HarnessJsonOutput* output = (HarnessJsonOutput*)user;
-  DispatchHarnessHooks(event);
+  AppExtensions_OnEvent(output->Extensions, event);
   if (!SessionResult_IsOk(output->Failure)) return;
   ArenaReset(&output->Scratch);
   ArenaTrim(&output->Scratch, 64 * 1024);
@@ -261,7 +237,7 @@ static void RunHarnessEventPump(void* user) {
       continue;
     }
     if (!SessionResult_IsOk(next)) break;
-    DispatchHarnessHooks(&event);
+    AppExtensions_OnEvent(pump->Extensions, &event);
     PumpHarnessEvent(pump, &event);
   }
   ArenaRelease(&scratch);
@@ -271,11 +247,13 @@ static void RunHarnessEventPump(void* user) {
 
 SessionResult StartHarnessEventPump(AgentHarness* harness,
                                     HarnessEventSink sink, Tui* tuiView,
-                                    HarnessEventPump* pump) {
+                                    HarnessEventPump* pump,
+                                    AppExtensions* extensions) {
   memset(pump, 0, sizeof(*pump));
   pump->Harness = harness;
   pump->TuiView = tuiView;
   pump->Sink = sink;
+  pump->Extensions = extensions;
   pump->CompletionMem = ArenaCreate((usize)4 << 20);
   ClearLiveToolEnds(pump);
   Mutex_Init(&pump->WatchGuard);
@@ -319,7 +297,8 @@ void StopHarnessEventPump(HarnessEventPump* pump) {
 
 SessionResult StartHarnessJsonOutput(AgentHarness* harness,
                                      HarnessJsonOutput* output,
-                                     HarnessJsonWriter writer) {
+                                     HarnessJsonWriter writer,
+                                     AppExtensions* extensions) {
   if (!harness || !harness->Initialized || !output)
     return SessionResult_Invalid("JSON output arguments are invalid");
   ScopedLock state(&harness->StateLock);
@@ -336,6 +315,7 @@ SessionResult StartHarnessJsonOutput(AgentHarness* harness,
 #endif
   *output = {};
   output->Harness = harness;
+  output->Extensions = extensions;
   output->Scratch = ArenaCreate();
   output->Writer = writer.Write ? writer : HarnessJsonWriter{stdout, WriteJsonFile};
   output->Failure = SessionResult_Ok();

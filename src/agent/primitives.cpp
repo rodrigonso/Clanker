@@ -26,7 +26,7 @@ void SetPreparedError(Arena* arena, AgentPreparedTool* prepared,
 }
 
 void PrepareOne(Arena* arena, const ToolRuntime* tools, u32 toolCount,
-                const AgentToolHooks* hooks,
+                const AgentHarnessHooks* hooks,
                 const AgentPermissionGate* permissions,
                 AgentPreparedTool* prepared) {
   const Content* call = prepared->Call;
@@ -208,7 +208,7 @@ void ToolWorker(void* argument) {
 }
 
 void FinalizeOne(Arena* arena, AgentPreparedTool* prepared,
-                 const AgentToolHooks* hooks,
+                 const AgentHarnessHooks* hooks,
                  const AgentToolEventSink* events,
                  AgentToolCallResult* out) {
   Array<Content> content =
@@ -220,7 +220,7 @@ void FinalizeOne(Arena* arena, AgentPreparedTool* prepared,
   outcome.Terminate = prepared->Terminate;
   if (hooks && hooks->AfterTool)
     hooks->AfterTool(hooks->User, arena, prepared->Call->ToolName,
-                     &prepared->Args, &outcome);
+                     prepared->Call->ToolId, &prepared->Args, &outcome);
 
   AgentToolCallResult call = {};
   call.ToolCallId = prepared->Call->ToolId;
@@ -323,7 +323,7 @@ bool AgentProvider_SleepBackoff(u32 delayMs, volatile i32* abort) {
 
 void AgentToolBatch_Prepare(Arena* arena, const ToolRuntime* tools, u32 toolCount,
                             const Message* assistant, ToolExecution execution,
-                            volatile i32* abort, const AgentToolHooks* hooks,
+                            volatile i32* abort, const AgentHarnessHooks* hooks,
                             const AgentPermissionGate* permissions,
                             AgentToolBatchPlan* out) {
   u32 count = 0;
@@ -351,7 +351,7 @@ void AgentToolBatch_Prepare(Arena* arena, const ToolRuntime* tools, u32 toolCoun
 }
 
 void AgentToolBatch_Run(Arena* arena, AgentToolBatchPlan* plan,
-                        u32 maxParallelTools, const AgentToolHooks* hooks,
+                        u32 maxParallelTools, const AgentHarnessHooks* hooks,
                         const AgentToolDispatchGate* dispatch,
                         const AgentToolEventSink* events,
                         AgentToolBatchResult* out) {

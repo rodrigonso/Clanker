@@ -599,6 +599,9 @@ SessionResult AgentHarness_Init(AgentHarness* harness, SessionLog log,
   AgentPermissionEngine_Init(&harness->Permissions, config->PermissionMode,
                              config->WorkingDirectory,
                              &harness->Config.AskUser, reviewer);
+  AgentPermissionEngine_SetWritableRoots(&harness->Permissions,
+                                         config->WritableRoots,
+                                         config->WritableRootCount);
 
   if (config->ToolCount) {
     harness->RuntimeTools = ArenaPushArray(&harness->Runtime, ToolRuntime, config->ToolCount);
@@ -934,6 +937,14 @@ AgentPermissionMode AgentHarness_ResetPermissions(AgentHarness* harness) {
 
 u32 AgentHarness_PermissionGrantCount(AgentHarness* harness) {
   return harness ? AgentPermissionEngine_GrantCount(&harness->Permissions) : 0;
+}
+
+void AgentHarness_SetWritableRoots(AgentHarness* harness, const StrView* roots,
+                                   u32 count) {
+  if (!harness) return;
+  harness->Config.WritableRoots = roots;
+  harness->Config.WritableRootCount = count;
+  AgentPermissionEngine_SetWritableRoots(&harness->Permissions, roots, count);
 }
 
 bool AgentHarness_ResolvePermissionRequest(AgentHarness* harness, Arena* arena,

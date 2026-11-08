@@ -17,6 +17,8 @@ enum class AppCommandKind : u8 {
   Trust,
   Permissions,
   Reload,
+  Memory,
+  Dream,
   Debug,
   Rounded,
   Skill,
@@ -106,6 +108,8 @@ struct AppCommandHandlers {
   AppCommandArgHandlerFn Trust;
   AppCommandArgHandlerFn Permissions;
   AppCommandArgHandlerFn Reload;
+  AppCommandArgHandlerFn Memory;
+  AppCommandArgHandlerFn Dream;
   AppCommandArgHandlerFn Debug;
   AppCommandArgHandlerFn Rounded;
   AppCommandSkillHandlerFn Skill;

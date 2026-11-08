@@ -163,10 +163,19 @@ void RebuildTranscriptLocked(Tui* t, const Message* messages, u32 count,
 
 using namespace TuiInternal;
 
-void Tui_ReplaceTranscript(Tui* t, const Message* messages, u32 count) {
+void Tui_ReplaceTranscript(Tui* t, const Message* messages, u32 count, bool follow) {
   if (!t || (!messages && count)) return;
   Mutex_Lock(&t->Lock);
   RebuildTranscriptLocked(t, messages, count, false);
+  if (follow) t->Follow = true;
+  Wake(t);
+  Mutex_Unlock(&t->Lock);
+}
+
+void Tui_AppendTranscript(Tui* t, const Message* messages, u32 count) {
+  if (!t || !messages || !count) return;
+  Mutex_Lock(&t->Lock);
+  HydrateTranscriptLocked(t, messages, count);
   Wake(t);
   Mutex_Unlock(&t->Lock);
 }

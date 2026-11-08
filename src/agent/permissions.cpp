@@ -13,15 +13,6 @@ constexpr u32 AGENT_PERMISSION_MAX_ACTION_BYTES = 2048;
 constexpr u32 AGENT_PERMISSION_MAX_RATIONALE_BYTES = 512;
 constexpr u32 AGENT_PERMISSION_MAX_TRUSTED_TEXT_BYTES = 8192;
 
-StrView Bounded(StrView value, u32 limit) {
-  if (value.Length > limit) {
-    value.Length = limit;
-    while (value.Length && ((u8)value.Data[value.Length] & 0xc0) == 0x80)
-      value.Length--;
-  }
-  return value;
-}
-
 StrView BuildExactKey(Arena* arena, StrView toolName, StrView argumentsJson) {
   if ((u64)toolName.Length + argumentsJson.Length + 1 >
       AGENT_PERMISSION_MAX_KEY_BYTES)
@@ -50,11 +41,10 @@ StrView BuildFallbackAction(Arena* arena, StrView toolName) {
 StrView SanitizeAction(Arena* arena, StrView action, bool* clipped) {
   constexpr u32 MARKER_ROOM = 64;
   *clipped = action.Length > AGENT_PERMISSION_MAX_ACTION_BYTES;
-  u32 keep = action.Length;
-  if (*clipped) {
-    keep = AGENT_PERMISSION_MAX_ACTION_BYTES - MARKER_ROOM;
-    while (keep && ((u8)action.Data[keep] & 0xC0) == 0x80) keep--;
-  }
+  StrView shown = action;
+  if (*clipped)
+    shown = StrView_ClampUtf8(action, AGENT_PERMISSION_MAX_ACTION_BYTES - MARKER_ROOM);
+  u32 keep = shown.Length;
   StrBuf safe = StrBuf_Make(arena, keep + MARKER_ROOM);
   for (u32 i = 0; i < keep; i++) {
     u8 c = (u8)action.Data[i];
@@ -85,7 +75,7 @@ StrView TrustedUserText(Arena* arena, const AgentPermissionGate* gate,
       if (text.Length && text.Length < AGENT_PERMISSION_MAX_TRUSTED_TEXT_BYTES)
         StrBuf_AppendChar(&text, '\n');
       u32 room = AGENT_PERMISSION_MAX_TRUSTED_TEXT_BYTES - text.Length;
-      StrBuf_Append(&text, Bounded(content->Text, room));
+      StrBuf_Append(&text, StrView_ClampUtf8(content->Text, room));
       if (content->Text.Length > room) {
         *incomplete = true;
         return StrBuf_View(&text);
@@ -108,7 +98,7 @@ bool AddGrantLocked(AgentPermissionEngine* engine, StrView key) {
   if (engine->Grants.Count >= AGENT_PERMISSION_MAX_GRANTS) return false;
   AgentPermissionGrant grant = {};
   grant.Key = StrView_Dup(&engine->GrantMem,
-                          Bounded(key, AGENT_PERMISSION_MAX_KEY_BYTES));
+                          StrView_ClampUtf8(key, AGENT_PERMISSION_MAX_KEY_BYTES));
   Array_Push(&engine->Grants, grant);
   return true;
 }
@@ -229,7 +219,7 @@ AgentPermissionRequest* AddRequestLocked(
   request.Action = StrView_Dup(&engine->Run, action);
   request.Rationale =
       StrView_Dup(&engine->Run,
-                  Bounded(rationale, AGENT_PERMISSION_MAX_RATIONALE_BYTES));
+                  StrView_ClampUtf8(rationale, AGENT_PERMISSION_MAX_RATIONALE_BYTES));
   request.Approval = AgentPermissionApproval::Pending;
   return Array_Push(&engine->Requests, request);
 }
@@ -293,6 +283,7 @@ void AgentPermissionEngine_Init(AgentPermissionEngine* engine,
   engine->Session = ArenaCreate((usize)1 << 20);
   engine->GrantMem = ArenaCreate((usize)1 << 20);
   engine->Run = ArenaCreate((usize)4 << 20);
+  engine->RootMem = ArenaCreate((usize)1 << 20);
   Mutex_Init(&engine->Lock);
   engine->AskUser = askUser;
   engine->Reviewer = reviewer;
@@ -309,10 +300,24 @@ void AgentPermissionEngine_Init(AgentPermissionEngine* engine,
 void AgentPermissionEngine_Close(AgentPermissionEngine* engine) {
   if (!engine || !engine->Initialized) return;
   Mutex_Destroy(&engine->Lock);
+  ArenaRelease(&engine->RootMem);
   ArenaRelease(&engine->Run);
   ArenaRelease(&engine->GrantMem);
   ArenaRelease(&engine->Session);
   *engine = AgentPermissionEngine{};
+}
+
+void AgentPermissionEngine_SetWritableRoots(AgentPermissionEngine* engine,
+                                            const StrView* roots, u32 count) {
+  if (!engine || !engine->Initialized || (count && !roots)) return;
+  ScopedLock lock(&engine->Lock);
+  ArenaReset(&engine->RootMem);
+  engine->WritableRoots = Array_Make<StrView>(&engine->RootMem, count ? count : 1);
+  for (u32 i = 0; i < count; i++)
+    if (roots[i].Length)
+      Array_Push(&engine->WritableRoots, StrView_Dup(&engine->RootMem, roots[i]));
+  // A cached review was decided against the old scope.
+  Atomic_StoreI32(&engine->Revision, Atomic_LoadI32(&engine->Revision) + 1);
 }
 
 void AgentPermissionEngine_BeginRun(AgentPermissionEngine* engine) {
@@ -423,9 +428,21 @@ void AgentPermission_Decide(Arena* arena, const AgentPermissionGate* gate,
 
   ToolPermissionInfo info = {};
   if (tool->DescribePermission) {
+    // Snapshotted so a concurrent root change cannot be observed half-made.
+    ToolPermissionScope scope = {};
+    scope.WorkingDirectory = engine->WorkingDirectory;
+    {
+      ScopedLock lock(&engine->Lock);
+      u32 count = engine->WritableRoots.Count;
+      StrView* roots = count ? ArenaPushArray(arena, StrView, count) : nullptr;
+      for (u32 i = 0; i < count; i++)
+        roots[i] = StrView_Dup(arena, engine->WritableRoots.Data[i]);
+      scope.WritableRoots = roots;
+      scope.WritableRootCount = count;
+    }
     StrBuf error = StrBuf_Make(arena, 128);
-    if (!tool->DescribePermission(tool->Ctx, arena, args,
-                                  engine->WorkingDirectory, &info, &error)) {
+    if (!tool->DescribePermission(tool->Ctx, arena, args, &scope, &info,
+                                  &error)) {
       out->Block = true;
       out->Reason = PlainDenial(
           arena, error.Length ? StrBuf_View(&error)
@@ -444,7 +461,7 @@ void AgentPermission_Decide(Arena* arena, const AgentPermissionGate* gate,
   // The reviewer would judge only the visible prefix of a clipped action, so
   // such an action always goes to a person.
   request.ActionIncomplete = info.ReviewIncomplete || actionClipped;
-  request.Action = Bounded(info.Action, AGENT_PERMISSION_MAX_ACTION_BYTES);
+  request.Action = StrView_ClampUtf8(info.Action, AGENT_PERMISSION_MAX_ACTION_BYTES);
   if (!info.GrantKey.Length)
     info.GrantKey = BuildExactKey(arena, tool->Name, args->Json);
   if (info.GrantKey.Length > AGENT_PERMISSION_MAX_KEY_BYTES)

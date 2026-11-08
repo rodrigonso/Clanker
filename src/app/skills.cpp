@@ -252,19 +252,6 @@ u64 EscapedLength(StrView value) {
   return length;
 }
 
-void AppendEscaped(StrBuf* out, StrView value) {
-  for (u32 i = 0; i < value.Length; i++) {
-    switch (value.Data[i]) {
-      case '&': StrBuf_AppendCStr(out, "&amp;"); break;
-      case '<': StrBuf_AppendCStr(out, "&lt;"); break;
-      case '>': StrBuf_AppendCStr(out, "&gt;"); break;
-      case '"': StrBuf_AppendCStr(out, "&quot;"); break;
-      case '\'': StrBuf_AppendCStr(out, "&apos;"); break;
-      default: StrBuf_AppendChar(out, value.Data[i]); break;
-    }
-  }
-}
-
 }  // namespace
 
 bool Skills_ParseFile(Arena* arena, StrView filePath, StrView content,
@@ -375,11 +362,11 @@ bool Skills_AppendPromptBlock(StrBuf* out, const SkillSet* skills,
     const Skill& skill = skills->Skills.Data[i];
     if (skill.DisableModelInvocation) continue;
     StrBuf_AppendCStr(out, "  <skill>\n    <name>");
-    AppendEscaped(out, skill.Name);
+    StrBuf_AppendXmlEscaped(out, skill.Name);
     StrBuf_AppendCStr(out, "</name>\n    <description>");
-    AppendEscaped(out, skill.Description);
+    StrBuf_AppendXmlEscaped(out, skill.Description);
     StrBuf_AppendCStr(out, "</description>\n    <location>");
-    AppendEscaped(out, skill.FilePath);
+    StrBuf_AppendXmlEscaped(out, skill.FilePath);
     StrBuf_AppendCStr(out, "</location>\n  </skill>\n");
   }
   StrBuf_Append(out, kPromptSuffix);

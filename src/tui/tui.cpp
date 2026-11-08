@@ -2079,6 +2079,17 @@ bool Tui_WaitForSubmit(Tui* t, TuiSubmission* out) {
   }
 }
 
+bool Tui_SubmissionPending(Tui* t, u32 waitMs) {
+  Mutex_Lock(&t->Lock);
+  bool pending = t->QCount || t->Quit || t->Stop;
+  if (!pending && waitMs) {
+    Cond_WaitTimeout(&t->SubmitCv, &t->Lock, waitMs);
+    pending = t->QCount || t->Quit || t->Stop;
+  }
+  Mutex_Unlock(&t->Lock);
+  return pending;
+}
+
 bool Tui_AcceptPrompt(Tui* t, StrView text) {
   Mutex_Lock(&t->Lock);
   if (t->Stop || t->Quit) {

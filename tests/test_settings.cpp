@@ -137,6 +137,7 @@ void TestSettings() {
           "\"permissionMode\":\"ask\",\"yoloAcknowledged\":true,"
           "\"defaultProjectTrust\":\"never\",\"effort\":\"high\","
           "\"contextWindow\":1000000,\"rounded\":false,"
+          "\"memory\":false,\"dreamModel\":\"cheap-model\","
           "\"compaction\":{\"enabled\":false,\"reserveTokens\":4096,"
           "\"keepRecentTokens\":8192},\"retry\":{\"enabled\":false,"
           "\"maxRetries\":5,\"baseDelayMs\":250,\"maxDelayMs\":3000},"
@@ -151,7 +152,8 @@ void TestSettings() {
             StrView_EqCStr(loaded.Provider, "openrouter"),
             StrView_EqCStr(loaded.Model, "chat"),
             loaded.PermissionMode == AgentPermissionMode::Ask,
-            loaded.YoloAcknowledged, !loaded.Rounded,
+            loaded.YoloAcknowledged, !loaded.Rounded, !loaded.Memory,
+            StrView_EqCStr(loaded.DreamModel, "cheap-model"),
             loaded.DefaultTrust == DefaultProjectTrust::Never,
             loaded.Profile.Effort == ModelEffort::High,
             loaded.Profile.ContextWindow == 1000000);

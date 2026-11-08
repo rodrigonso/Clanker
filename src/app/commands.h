@@ -13,3 +13,9 @@ bool RuntimeResetSession(InteractiveRuntime* rt, const AppCommandUx* ux);
 
 TuiCommandSpec* RuntimeCommandCatalog(InteractiveRuntime* rt, Arena* arena,
                                       u32* count);
+
+// `/memory [lint|on|off|restore]` and `/dream [watch]`, in memory_commands.cpp.
+AppCommandHandlerResult HandleMemoryCommand(void* user, const AppCommandUx* ux,
+                                            StrView arguments);
+AppCommandHandlerResult HandleDreamCommand(void* user, const AppCommandUx* ux,
+                                           StrView arguments);

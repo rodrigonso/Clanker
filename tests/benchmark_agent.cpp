@@ -111,7 +111,7 @@ bool BenchToolExecute(void* context, Arena* arena, StrView, const ToolArgs*,
   return true;
 }
 
-void BenchAfterTool(void* user, Arena*, StrView, const ToolArgs*,
+void BenchAfterTool(void* user, Arena*, StrView, StrView, const ToolArgs*,
                     ToolOutcome*) {
   RecordToolEnd((BenchTiming*)user);
 }
@@ -214,8 +214,8 @@ bool RunOnce(u32 size, bool parallel, BenchRun* out) {
   config.ProviderImpl.Stream = BenchProviderStream;
   config.ToolExec = parallel ? ToolExecution::Parallel : ToolExecution::Sequential;
   config.MaxParallelTools = parallel ? size : 0;
-  config.ToolHooks.User = &timing;
-  config.ToolHooks.AfterTool = BenchAfterTool;
+  config.Hooks.User = &timing;
+  config.Hooks.AfterTool = BenchAfterTool;
 
   AgentHarness harness = {};
   SessionResult initialized = AgentHarness_Init(&harness, log, &config);

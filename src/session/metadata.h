@@ -25,6 +25,12 @@ inline bool SessionProjectKey_Eq(StrView a, StrView b) {
 #endif
 }
 
+// A readable, filesystem-safe key for `directory`: its base name plus a hash
+// of the whole path, folded on Windows so every spelling of one directory
+// yields one key. Names the session storage directory of a working directory
+// and the memory wiki of a repository.
+StrView SessionProjectKey(Arena* arena, StrView directory);
+
 // Derived, read-only view of a session for listing/display purposes. Every
 // field here is recomputed from the record log (or supplied by the caller
 // for the transient Busy/NowMs signal); v2 has no durable operation/recovery

@@ -1020,13 +1020,13 @@ void TestRuntimeSelectionPrecedence() {
   RuntimeSelection defaults = LoadRuntimeSelection(&arena, SV(path), nullptr);
   CHECK_ALL(defaults.Spec == ProviderRegistry_At(0),
             StrView_Eq(defaults.ModelId, defaults.Spec->DefaultModel),
-            defaults.PermissionMode == AgentPermissionMode::Auto,
-            StrView_Eq(defaults.PermissionReviewerModel,
+            defaults.Settings.PermissionMode == AgentPermissionMode::Auto,
+            StrView_Eq(defaults.Settings.PermissionReviewerModel,
                        AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL),
-            !defaults.PermissionReviewerInvalid,
-            defaults.PermissionReviewerThreshold == 0.95,
-            !defaults.PermissionReviewerThresholdInvalid,
-            !defaults.YoloAcknowledged);
+            !defaults.Settings.PermissionReviewerInvalid,
+            defaults.Settings.PermissionReviewerThreshold == 0.95,
+            !defaults.Settings.PermissionReviewerThresholdInvalid,
+            !defaults.Settings.YoloAcknowledged);
 
   CHECK(ConfigFile_WriteAtomic(
       &arena, SV(path),
@@ -1037,12 +1037,12 @@ void TestRuntimeSelectionPrecedence() {
           "\"yoloAcknowledged\":true}")));
   RuntimeSelection configured = LoadRuntimeSelection(&arena, SV(path), "override");
   CHECK_ALL(StrView_EqCStr(configured.ModelId, "override"),
-            configured.PermissionReviewerThreshold == 0.85,
-            configured.PermissionMode == AgentPermissionMode::Yolo,
-            StrView_EqCStr(configured.PermissionReviewerModel,
+            configured.Settings.PermissionReviewerThreshold == 0.85,
+            configured.Settings.PermissionMode == AgentPermissionMode::Yolo,
+            StrView_EqCStr(configured.Settings.PermissionReviewerModel,
                            "jev-1.12.0"),
-            !configured.PermissionReviewerInvalid,
-            configured.YoloAcknowledged);
+            !configured.Settings.PermissionReviewerInvalid,
+            configured.Settings.YoloAcknowledged);
 
   CHECK(ConfigFile_WriteAtomic(
       &arena, SV(path),
@@ -1050,7 +1050,7 @@ void TestRuntimeSelectionPrecedence() {
           "\"permissionMode\":\"ask\","
           "\"permissionReviewerModel\":\"z-ai/glm-5.2\"}")));
   RuntimeSelection unsupported = LoadRuntimeSelection(&arena, SV(path), "override");
-  CHECK_ALL(unsupported.PermissionReviewerInvalid,
+  CHECK_ALL(unsupported.Settings.PermissionReviewerInvalid,
             StrView_EqCStr(unsupported.ModelId, "override"));
 
   CHECK(ConfigFile_WriteAtomic(
@@ -1058,22 +1058,22 @@ void TestRuntimeSelectionPrecedence() {
       SVL("{\"provider\":\"openrouter\",\"model\":\"configured\","
           "\"permissionReviewerModel\":\"jev-\"}")));
   RuntimeSelection invalid = LoadRuntimeSelection(&arena, SV(path), nullptr);
-  CHECK(invalid.PermissionReviewerInvalid);
+  CHECK(invalid.Settings.PermissionReviewerInvalid);
 
   CHECK(ConfigFile_WriteAtomic(
       &arena, SV(path),
       SVL("{\"provider\":\"openrouter\",\"model\":\"configured\","
           "\"permissionReviewerThreshold\":-1}")));
   RuntimeSelection invalidThreshold = LoadRuntimeSelection(&arena, SV(path), nullptr);
-  CHECK_ALL(invalidThreshold.PermissionReviewerThresholdInvalid,
-            !invalidThreshold.PermissionReviewerInvalid);
+  CHECK_ALL(invalidThreshold.Settings.PermissionReviewerThresholdInvalid,
+            !invalidThreshold.Settings.PermissionReviewerInvalid);
 
   CHECK(ConfigFile_WriteAtomic(&arena, SV(path), SVL("{bad")));
   RuntimeSelection malformed = LoadRuntimeSelection(&arena, SV(path), nullptr);
   CHECK_ALL(malformed.Spec == ProviderRegistry_At(0),
             StrView_Eq(malformed.ModelId, malformed.Spec->DefaultModel),
-            malformed.PermissionMode == AgentPermissionMode::Auto,
-            StrView_Eq(malformed.PermissionReviewerModel,
+            malformed.Settings.PermissionMode == AgentPermissionMode::Auto,
+            StrView_Eq(malformed.Settings.PermissionReviewerModel,
                        AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL));
 
   remove(path);

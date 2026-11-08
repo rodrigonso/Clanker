@@ -64,6 +64,7 @@ add_library(clanker_core STATIC
   src/llm/retry.cpp
   src/agent/harness.cpp
   src/agent/driver.cpp
+  src/agent/hook_chain.cpp
   src/agent/primitives.cpp
   src/agent/permissions.cpp
   src/agent/compaction.cpp
@@ -134,11 +135,16 @@ if(CLANKER_BUILD_CLI)
     src/app/command.cpp
     src/app/commands.cpp
     src/app/config_paths.cpp
+    src/app/dream.cpp
     src/app/event_pump.cpp
+    src/app/extensions.cpp
     src/app/frontmatter.cpp
     src/app/hook_config.cpp
+    src/app/hook_extension.cpp
     src/app/hook_gate.cpp
     src/app/hook_runner.cpp
+    src/app/memory.cpp
+    src/app/memory_commands.cpp
     src/app/plain_select.cpp
     src/app/permission_reviewer.cpp
     src/app/project_trust.cpp
@@ -149,7 +155,8 @@ if(CLANKER_BUILD_CLI)
     src/app/session_switch.cpp
     src/app/settings.cpp
     src/app/skills.cpp
-    src/app/tui_bridge.cpp)
+    src/app/tui_bridge.cpp
+    src/app/wiki.cpp)
   clanker_target(clanker_cli)
   target_compile_definitions(clanker_cli PUBLIC CLANKER_VERSION="${PROJECT_VERSION}")
   target_link_libraries(clanker_cli PUBLIC clanker_core CURL::libcurl ${CLANKER_PCRE2_TARGET})

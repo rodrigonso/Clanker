@@ -246,15 +246,9 @@ static void Edit_AppendDuplicate(StrBuf* err, StrView path, u32 index, bool mult
 }
 
 static void Edit_SortMatches(Array<EditMatch>* matches) {
-  for (u32 i = 1; i < matches->Count; i++) {
-    EditMatch v = matches->Data[i];
-    u32 j = i;
-    while (j > 0 && matches->Data[j - 1].Start > v.Start) {
-      matches->Data[j] = matches->Data[j - 1];
-      j--;
-    }
-    matches->Data[j] = v;
-  }
+  Array_Sort(matches, [](const EditMatch& value, const EditMatch& previous) {
+    return value.Start < previous.Start;
+  });
 }
 
 static StrView Edit_Apply(Arena* arena, StrView original, Array<EditSpec>* edits, Array<EditMatch>* matches) {
@@ -475,11 +469,11 @@ done:
 
 static bool EditDescribePermission(void* ctx, Arena* arena,
                                    const ToolArgs* args,
-                                   StrView workingDirectory,
+                                   const ToolPermissionScope* scope,
                                    ToolPermissionInfo* out, StrBuf* err) {
   (void)ctx;
   return Fs_DescribeMutationPermission(
-      arena, args, workingDirectory, SVL("Edit file "), SVL("edit\n"), out,
+      arena, args, scope, SVL("Edit file "), SVL("edit\n"), out,
       err);
 }
 

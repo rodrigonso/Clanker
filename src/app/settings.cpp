@@ -164,6 +164,21 @@ AppSettingsLoadResult AppSettings_Load(Arena* a, StrView path, AppSettings* out)
     rounded = roundedValue->Bool;
   }
 
+  bool memory = true;
+  JsonValue* memoryValue = Json_Get(root, "memory");
+  if (memoryValue) {
+    if (memoryValue->Kind != JsonKind::Bool) return AppSettingsLoadResult::Malformed;
+    memory = memoryValue->Bool;
+  }
+
+  StrView dreamModel = {};
+  JsonValue* dreamModelValue = Json_Get(root, "dreamModel");
+  if (dreamModelValue) {
+    if (!Json_IsString(dreamModelValue) || !dreamModelValue->Str.Length)
+      return AppSettingsLoadResult::Malformed;
+    dreamModel = dreamModelValue->Str;
+  }
+
   Array<StrView> skills = {};
   Array<StrView> promptTemplates = {};
   if (!ReadStringArray(a, root, "skills", &skills) ||
@@ -221,6 +236,8 @@ AppSettingsLoadResult AppSettings_Load(Arena* a, StrView path, AppSettings* out)
   out->PermissionReviewerThreshold = permissionReviewerThreshold;
   out->YoloAcknowledged = yoloAcknowledged;
   out->Rounded = rounded;
+  out->Memory = memory;
+  out->DreamModel = dreamModel;
   out->Skills = skills;
   out->PromptTemplates = promptTemplates;
   return AppSettingsLoadResult::Success;
@@ -305,6 +322,12 @@ bool AppSettings_Save(Arena* a, StrView path, const AppSettings* settings) {
   StrBuf_AppendCStr(&content, settings->YoloAcknowledged ? "true" : "false");
   StrBuf_AppendCStr(&content, ",\"rounded\":");
   StrBuf_AppendCStr(&content, settings->Rounded ? "true" : "false");
+  StrBuf_AppendCStr(&content, ",\"memory\":");
+  StrBuf_AppendCStr(&content, settings->Memory ? "true" : "false");
+  if (settings->DreamModel.Length) {
+    StrBuf_AppendCStr(&content, ",\"dreamModel\":");
+    Json_WriteString(&content, settings->DreamModel);
+  }
   WriteStringArray(&content, "skills", &settings->Skills);
   WriteStringArray(&content, "promptTemplates", &settings->PromptTemplates);
   StrBuf_AppendChar(&content, '}');

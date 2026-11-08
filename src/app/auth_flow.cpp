@@ -91,49 +91,27 @@ RuntimeSelection LoadRuntimeSelection(Arena* arena, StrView settingsPath,
   RuntimeSelection selected = {};
   const ProviderSpec* defaults = ProviderRegistry_At(0);
   if (!defaults) return selected;
-
   selected.Spec = defaults;
   selected.ModelId = defaults->DefaultModel;
-  selected.DefaultTrust = DefaultProjectTrust::Ask;
-  selected.Compaction = AgentCompactionPolicy_Default();
-  selected.Retry = AgentRetryPolicy_Default();
-  selected.TurnLimit = AgentTurnLimitPolicy_Default();
-  selected.PermissionMode = AgentPermissionMode::Auto;
-  selected.PermissionReviewerModel = AGENT_PERMISSION_DEFAULT_REVIEWER_MODEL;
-  selected.YoloAcknowledged = false;
 
-  AppSettings settings = {};
-  AppSettingsLoadResult load = AppSettings_Load(arena, settingsPath, &settings);
+  AppSettings* settings = &selected.Settings;
+  AppSettingsLoadResult load = AppSettings_Load(arena, settingsPath, settings);
   if (load == AppSettingsLoadResult::Success) {
-    selected.DefaultTrust = settings.DefaultTrust;
-    selected.Compaction = settings.Compaction;
-    selected.Retry = settings.Retry;
-    selected.TurnLimit = settings.TurnLimit;
-    selected.PermissionMode = settings.PermissionMode;
-    selected.PermissionReviewerModel = settings.PermissionReviewerModel;
-    selected.PermissionReviewerThreshold = settings.PermissionReviewerThreshold;
-    selected.YoloAcknowledged = settings.YoloAcknowledged;
-    selected.Rounded = settings.Rounded;
-    selected.Skills = settings.Skills;
-    selected.PromptTemplates = settings.PromptTemplates;
-    const ProviderSpec* configured = ProviderRegistry_Find(settings.Provider);
+    const ProviderSpec* configured = ProviderRegistry_Find(settings->Provider);
     if (configured) {
       selected.Spec = configured;
-      selected.ModelId = settings.Model;
-      selected.RequestedProfile = settings.Profile;
+      selected.ModelId = settings->Model;
     } else {
+      settings->Profile = {};
       fprintf(stderr,
               "warning: settings %.*s names unknown provider '%.*s'; using built-in defaults "
               "provider '%.*s', model '%.*s'\n",
-              (int)settingsPath.Length, settingsPath.Data, (int)settings.Provider.Length,
-              settings.Provider.Data, (int)defaults->Id.Length, defaults->Id.Data,
+              (int)settingsPath.Length, settingsPath.Data, (int)settings->Provider.Length,
+              settings->Provider.Data, (int)defaults->Id.Length, defaults->Id.Data,
               (int)defaults->DefaultModel.Length, defaults->DefaultModel.Data);
     }
   } else if (load == AppSettingsLoadResult::Malformed) {
-    selected.PermissionReviewerInvalid = settings.PermissionReviewerInvalid;
-    selected.PermissionReviewerThresholdInvalid =
-        settings.PermissionReviewerThresholdInvalid;
-    if (!selected.PermissionReviewerInvalid && !selected.PermissionReviewerThresholdInvalid)
+    if (!settings->PermissionReviewerInvalid && !settings->PermissionReviewerThresholdInvalid)
       WarnUsingDefaults(settingsPath, defaults, "settings file is malformed:");
   } else if (load == AppSettingsLoadResult::ReadFailure) {
     WarnUsingDefaults(settingsPath, defaults, "could not read settings file:");

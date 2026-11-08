@@ -38,6 +38,14 @@ StrView Sys_AbbreviatePath(Arena* a, StrView path, StrView home);
 // directory chain and follows the `.git` file (worktree/submodule) indirection.
 StrView Sys_GitBranch(Arena* a, StrView dir);
 
+// The git directory shared by every worktree of the repository containing
+// `dir`: the `.git` directory of a normal checkout, the main repository's
+// `.git` for a linked worktree (via its `commondir`), or the module directory
+// for a submodule. May contain `..` segments; canonicalize before comparing.
+// Empty if `dir` is not inside a git work tree. `*workTree`, when given,
+// receives the work tree `dir` is in. Owned by `a`.
+StrView Sys_GitCommonDir(Arena* a, StrView dir, StrView* workTree = nullptr);
+
 // Local calendar time for a millisecond timestamp. Wraps the platform's
 // reentrant localtime; returns false when the timestamp cannot be converted.
 bool Sys_LocalTime(u64 timestampMs, struct tm* out);
@@ -45,3 +53,4 @@ bool Sys_LocalTime(u64 timestampMs, struct tm* out);
 // Pure parsers (exposed for testing).
 StrView Git_GitdirFromFile(StrView contents);  // "gitdir: <path>"      -> <path>
 StrView Git_BranchFromHead(StrView contents);  // "ref: refs/heads/<b>" -> <b>
+StrView Git_CommonDirFromFile(StrView contents);  // "../..\n"           -> "../.."
