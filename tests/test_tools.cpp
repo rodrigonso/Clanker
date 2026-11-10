@@ -277,6 +277,54 @@ static void TestToolPermissions(Arena* a) {
   CHECK_ALL(grantedGit.Contained, grantedGit.Protected);
   CLANKER_RMDIR("clanker_tool_permission_root/.clanker/memory");
   CLANKER_RMDIR("clanker_tool_permission_root/.clanker");
+#if defined(_WIN32)
+  // A missing leaf still has every existing component above it resolved: a
+  // short (8.3) alias of a writable root is that root, and a junction out of
+  // the workspace leads outside it.
+  Fs_MkdirP(a, SV("clanker_tool_permission_root/longdirectoryname"));
+  StrView longRoot =
+      Fs_RealPath(a, SV("clanker_tool_permission_root/longdirectoryname"));
+  wchar_t longNative[4096];
+  wchar_t shortNative[4096];
+  DWORD shortLength = Win32_Path(longRoot, longNative, 4096)
+                          ? GetShortPathNameW(longNative, shortNative, 4096)
+                          : 0;
+  StrView shortRoot = {};
+  if (shortLength && shortLength < 4096)
+    Win32_Utf8(a, shortNative, shortLength, &shortRoot);
+  // Volumes without short names return the long path unchanged.
+  if (shortRoot.Length && !Fs_PathEquals(shortRoot, longRoot)) {
+    FsPermissionTarget viaShort =
+        ResolveTarget(a, Fs_Join(a, workingDirectory, SVL("sub")),
+                      Fs_Join(a, shortRoot, SVL("new.md")), longRoot);
+    CHECK_ALL(viaShort.Contained,
+              StrView_Contains(viaShort.Path, "longdirectoryname"));
+  }
+  CLANKER_RMDIR("clanker_tool_permission_root/longdirectoryname");
+
+  Fs_MkdirP(a, SV("clanker_tool_permission_outside"));
+  StrView outsideRoot = Fs_RealPath(a, SV("clanker_tool_permission_outside"));
+  StrView junction = Fs_Join(a, workingDirectory, SVL("escape"));
+  StrBuf mklink = StrBuf_Make(a, junction.Length + outsideRoot.Length + 32);
+  StrBuf_AppendCStr(&mklink, "mklink /J \"");
+  StrBuf_Append(&mklink, junction);
+  StrBuf_AppendCStr(&mklink, "\" \"");
+  StrBuf_Append(&mklink, outsideRoot);
+  StrBuf_AppendCStr(&mklink, "\" >nul");
+  CHECK(system(StrBuf_CStr(&mklink)) == 0);
+  // Windows can refuse to follow a junction a non-administrator created
+  // (ERROR_UNTRUSTED_MOUNT_POINT); every write through it then fails anyway.
+  if (Fs_Stat(junction).Exists) {
+    CHECK(!ResolveTarget(a, workingDirectory, SVL("escape/new.txt")).Contained);
+    ToolPermissionInfo throughJunction = {};
+    StrBuf junctionErr = StrBuf_Make(a, 64);
+    CHECK(DescribeToolPermission(a, write, WriteArgs(a, SVL("escape/new.txt")),
+                                 workingDirectory, &throughJunction, &junctionErr));
+    CHECK(!throughJunction.AutoAllow);
+  }
+  CLANKER_RMDIR("clanker_tool_permission_root/escape");
+  CLANKER_RMDIR("clanker_tool_permission_outside");
+#endif
 
   CHECK(Fs_PathContained(workingDirectory, workingDirectory));
   CHECK(Fs_PathContained(workingDirectory,

@@ -854,16 +854,27 @@ static bool Fs_HasSlash(StrView s) {
   return false;
 }
 
+// GetFullPathNameW returns backslashes, so Windows splits on both separators.
+// Kept whole, a path whose leaf is missing would leave short (8.3) names and
+// junctions above that leaf unresolved.
+static bool Fs_IsSegmentSep(char c) {
+#if defined(_WIN32)
+  return Fs_IsSep(c);
+#else
+  return c == '/';
+#endif
+}
+
 static bool Fs_NextSegment(StrView s, u32* pos, StrView* seg) {
   if (*pos > s.Length) return false;
   u32 start = *pos;
-  while (start < s.Length && s.Data[start] == '/') start++;
+  while (start < s.Length && Fs_IsSegmentSep(s.Data[start])) start++;
   if (start >= s.Length) {
     *pos = s.Length + 1;
     return false;
   }
   u32 end = start;
-  while (end < s.Length && s.Data[end] != '/') end++;
+  while (end < s.Length && !Fs_IsSegmentSep(s.Data[end])) end++;
   *seg = StrView{s.Data + start, end - start};
   *pos = end + 1;
   return true;
