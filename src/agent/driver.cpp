@@ -76,6 +76,7 @@ void OwnMutableProviderInput(Arena* arena, AgentHarnessProviderInput* input) {
   }
   context->Tools = tools.Data;
   input->Options.Auth.Token = MutableText(arena, input->Options.Auth.Token);
+  input->Options.Auth.AccountId = MutableText(arena, input->Options.Auth.AccountId);
   input->Options.Request.ToolName = MutableText(arena, input->Options.Request.ToolName);
 }
 

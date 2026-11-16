@@ -20,13 +20,18 @@ typedef ProviderModelList (*ProviderListModelsFn)(Arena* arena,
                                                   ProviderAuth auth,
                                                   volatile i32* abort);
 
+// How `/auth` signs in to a provider. OpenRouter's OAuth mints a long-lived API
+// key; ChatGPT sign-in issues refreshable tokens for a ChatGPT subscription.
+enum class ProviderSignIn : u8 { OpenRouterKey, ChatGpt };
+
 struct ProviderSpec {
   StrView Id;
   StrView Name;
   StrView DefaultModel;
-  const char* ApiKeyEnvVar;
-  // The OpenRouter Responses endpoint. It is the only provider transport this
-  // build supports.
+  const char* ApiKeyEnvVar;  // null when the provider takes no API key
+  ProviderSignIn SignIn;
+  // Every provider speaks the Responses protocol; the endpoint carries its root
+  // and dialect.
   const ResponsesEndpoint* Endpoint;
   ProviderFactoryFn CreateProvider;
   ProviderModelFactoryFn CreateModel;

@@ -12,6 +12,8 @@ struct ModelsFetchFixture {
   StrView Urls[2];
   StrView Authorizations[2];
   StrView Accepts[2];
+  StrView AccountIds[2];
+  StrView Originators[2];
   volatile i32* AbortSeen;
   bool RequestsValid = true;
 };
@@ -37,6 +39,8 @@ static HttpResponse FetchModelsFixture(void* user, Arena*, const HttpRequest* re
   fixture->Urls[call] = request->Url;
   fixture->Authorizations[call] = FindHeader(request, "authorization");
   fixture->Accepts[call] = FindHeader(request, "accept");
+  fixture->AccountIds[call] = FindHeader(request, "chatgpt-account-id");
+  fixture->Originators[call] = FindHeader(request, "originator");
   fixture->AbortSeen = abort;
   return fixture->Responses[call];
 }
@@ -45,7 +49,7 @@ static void TestModelDiscoveryFailures() {
   Arena arena = ArenaCreate();
   const ResponsesEndpoint* endpoint =
       ProviderRegistry_Find(SVL("openrouter"))->Endpoint;
-  ProviderAuth key = {SVL("test-key")};
+  ProviderAuth key = {SVL("test-key"), {}};
 
   ProviderModelList noEndpoint = Responses_ListModelsWithFetch(
       &arena, nullptr, key, nullptr, FetchModelsFixture, nullptr);
@@ -113,7 +117,7 @@ static void TestModelDiscovery() {
       "{\"id\":\"mistralai/mistral-medium\",\"name\":\"Mistral Medium\","
       "\"context_length\":131072,\"supported_parameters\":[\"tools\"]}"
       "]}");
-  ProviderAuth auth = {SVL("test-key")};
+  ProviderAuth auth = {SVL("test-key"), {}};
 
   ProviderModelList live = Responses_ListModelsWithFetch(
       &arena, spec->Endpoint, auth, nullptr, FetchModelsFixture, &fixture);
@@ -150,8 +154,69 @@ static void TestModelDiscovery() {
   ArenaRelease(&arena);
 }
 
+static void TestCodexModelDiscovery() {
+  Arena arena = ArenaCreate();
+  const ProviderSpec* spec = ProviderRegistry_Find(SVL("openai-codex"));
+
+  // The backend scopes every request to a ChatGPT account, so a token without
+  // one never reaches the network.
+  ModelsFetchFixture unused = {};
+  ProviderAuth noAccount = {SVL("access"), {}};
+  ProviderModelList refused = Responses_ListModelsWithFetch(
+      &arena, spec->Endpoint, noAccount, nullptr, FetchModelsFixture, &unused);
+  CHECK_ALL(refused.Status == ProviderModelListStatus::Failed, unused.Calls == 0);
+
+  ModelsFetchFixture fixture = {};
+  fixture.ResponseCount = 1;
+  fixture.Responses[0].Status = 200;
+  fixture.Responses[0].Body = SVL(
+      "{\"models\":["
+      "{\"slug\":\"gpt-mini\",\"display_name\":\"GPT Mini\",\"visibility\":\"list\","
+      "\"priority\":5,\"context_window\":200000,"
+      "\"supported_reasoning_levels\":[{\"effort\":\"minimal\"},{\"effort\":\"low\"}],"
+      "\"default_reasoning_level\":\"minimal\"},"
+      "{\"slug\":\"internal\",\"visibility\":\"hide\",\"priority\":0},"
+      "{\"slug\":\"gpt-6.1-sol\",\"display_name\":\"GPT-6.1 Sol\",\"visibility\":\"list\","
+      "\"priority\":1,\"context_window\":400000,"
+      "\"supported_reasoning_levels\":[{\"effort\":\"low\"},{\"effort\":\"medium\"},"
+      "{\"effort\":\"high\"},{\"effort\":\"xhigh\"}],"
+      "\"default_reasoning_level\":\"medium\"},"
+      "{\"slug\":\"gpt-plain\",\"visibility\":\"list\",\"priority\":5}"
+      "]}");
+  ProviderAuth auth = {SVL("access"), SVL("acct-1")};
+  ProviderModelList live = Responses_ListModelsWithFetch(
+      &arena, spec->Endpoint, auth, nullptr, FetchModelsFixture, &fixture);
+  CHECK_ALL(live.Status == ProviderModelListStatus::Success, live.Count == 3,
+            fixture.RequestsValid,
+            StrView_EqCStr(fixture.Urls[0],
+                           "https://chatgpt.com/backend-api/codex/models?client_version="
+                           RESPONSES_CODEX_CLIENT_VERSION),
+            StrView_EqCStr(fixture.Authorizations[0], "Bearer access"),
+            StrView_EqCStr(fixture.AccountIds[0], "acct-1"),
+            StrView_EqCStr(fixture.Originators[0], "clanker"));
+
+  // Hidden models are dropped and the rest follow the backend's priority,
+  // keeping its order among ties.
+  CHECK_ALL(StrView_EqCStr(live.Models[0].Id, "gpt-6.1-sol"),
+            StrView_EqCStr(live.Models[0].Name, "GPT-6.1 Sol"),
+            StrView_EqCStr(live.Models[0].Provider, "openai-codex"),
+            live.Models[0].ContextWindow == 400000, live.Models[0].Reasoning,
+            Model_SupportsEffort(&live.Models[0], ModelEffort::XHigh),
+            !Model_SupportsEffort(&live.Models[0], ModelEffort::Max),
+            live.Models[0].DefaultEffort == ModelEffort::Medium,
+            Model_MetadataIsValid(&live.Models[0]));
+  // Levels Clanker has no tier for are not offered, nor defaulted to.
+  CHECK_ALL(StrView_EqCStr(live.Models[1].Id, "gpt-mini"),
+            live.Models[1].EffortMask == ModelEffort_Bit(ModelEffort::Low),
+            live.Models[1].DefaultEffort == ModelEffort::None);
+  CHECK_ALL(StrView_EqCStr(live.Models[2].Id, "gpt-plain"),
+            StrView_EqCStr(live.Models[2].Name, "gpt-plain"),
+            !live.Models[2].Reasoning);
+  ArenaRelease(&arena);
+}
+
 void TestProviderRegistry() {
-  CHECK_ALL(ProviderRegistry_Count() == 1,
+  CHECK_ALL(ProviderRegistry_Count() == 2,
             ProviderRegistry_At(ProviderRegistry_Count()) == nullptr,
             ProviderRegistry_Find(SVL("nonexistent")) == nullptr,
             ProviderRegistry_Find(SVL("missing")) == nullptr);
@@ -213,7 +278,22 @@ void TestProviderRegistry() {
   CHECK_ALL(provider.Stream != nullptr,
             provider.Ctx == (void*)openrouter->Endpoint);
 
+  // ChatGPT sign-in replaces an API key, so there is no variable to name.
+  const ProviderSpec* codex = ProviderRegistry_Find(SVL("openai-codex"));
+  CHECK(codex == ProviderRegistry_At(1));
+  CHECK_ALL(StrView_EqCStr(codex->Name, "ChatGPT"),
+            StrView_EqCStr(codex->DefaultModel, "gpt-6.1-sol"),
+            codex->ApiKeyEnvVar == nullptr,
+            codex->SignIn == ProviderSignIn::ChatGpt,
+            openrouter->SignIn == ProviderSignIn::OpenRouterKey,
+            codex->Endpoint->Dialect == ResponsesDialect::ChatGptCodex,
+            openrouter->Endpoint->Dialect == ResponsesDialect::OpenRouter);
+  Model codexModel = codex->CreateModel(&arena, codex, codex->DefaultModel);
+  CHECK_ALL(StrView_EqCStr(codexModel.Provider, "openai-codex"),
+            StrView_EqCStr(codexModel.BaseUrl, "https://chatgpt.com/backend-api"));
+
   ArenaRelease(&arena);
   TestModelDiscovery();
+  TestCodexModelDiscovery();
   TestModelDiscoveryFailures();
 }

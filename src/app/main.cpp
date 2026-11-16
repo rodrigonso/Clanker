@@ -135,8 +135,8 @@ static void PrintHelp() {
       "  --logout PROV     Remove stored credentials for a provider\n"
       "  --version         Print the version and exit\n"
       "  --help            Show this help\n\n"
-      "Auth: run `/auth` inside the TUI to sign in to OpenRouter, or set the\n"
-     "OPENROUTER_API_KEY environment variable.\n"
+      "Auth: run `/auth` inside the TUI to sign in to OpenRouter or ChatGPT, or\n"
+     "set the OPENROUTER_API_KEY environment variable.\n"
       "Interactive commands: /session, /name, /sessions, /resume, /tree,\n"
       "/checkout, /fork, /compact, /trust, /reload, /memory, /dream, /debug,\n"
       "/auth, /model, /permissions, /skill:<name>, /clear, /exit.\n");

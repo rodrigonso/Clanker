@@ -438,7 +438,8 @@ inline void StreamSink_Emit(const StreamSink& sink, const StreamEvent& ev) {
 struct HttpRetryPolicy;  // llm/retry.h
 
 struct ProviderAuth {
-  StrView Token;  // empty only when the endpoint allows anonymous access
+  StrView Token;      // empty only when the endpoint allows anonymous access
+  StrView AccountId;  // account the token is scoped to, for backends that ask
 };
 
 enum class LlmToolChoice : u8 { Auto, NamedFunction };

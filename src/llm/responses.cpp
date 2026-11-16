@@ -4,19 +4,30 @@
 
 namespace {
 
-constexpr u32 RESPONSES_HEADER_CAPACITY = 3;
+constexpr u32 RESPONSES_HEADER_CAPACITY = 6;
 
 bool OnResponsesData(void* user, StrView chunk) {
   ResponsesParse_Feed((ResponsesParse*)user, chunk);
   return true;
 }
 
-bool BuildResponsesHeaders(Arena* arena, ProviderAuth auth, bool streaming,
+ResponsesDialect EndpointDialect(const ResponsesEndpoint* endpoint) {
+  return endpoint ? endpoint->Dialect : ResponsesDialect::OpenRouter;
+}
+
+bool BuildResponsesHeaders(Arena* arena, ProviderAuth auth,
+                           ResponsesDialect dialect, bool streaming,
                            HttpHeader* headers, u32* count, StrView* error) {
   *count = 0;
   *error = {};
   if (!auth.Token.Length) {
     *error = SVL("credentials are unavailable for this provider");
+    return false;
+  }
+  bool codex = dialect == ResponsesDialect::ChatGptCodex;
+  if (codex && !auth.AccountId.Length) {
+    *error = SVL("the ChatGPT account id is unavailable; run /auth to sign in "
+                 "again");
     return false;
   }
 
@@ -26,6 +37,13 @@ bool BuildResponsesHeaders(Arena* arena, ProviderAuth auth, bool streaming,
       SVL("accept"),
       streaming ? SVL("text/event-stream") : SVL("application/json")};
   headers[(*count)++] = Http_BearerHeader(arena, auth.Token);
+  if (codex) {
+    headers[(*count)++] = HttpHeader{SVL("chatgpt-account-id"), auth.AccountId};
+    headers[(*count)++] =
+        HttpHeader{SVL("OpenAI-Beta"), SVL("responses=experimental")};
+    // The backend expects every request to name its client.
+    headers[(*count)++] = HttpHeader{SVL("originator"), SVL("clanker")};
+  }
   return true;
 }
 
@@ -52,7 +70,7 @@ bool FailResponses(Arena* arena, const Model* model, StreamSink sink,
 bool Responses_Stream(void* ctx, Arena* arena, const Model* model,
                       const LlmContext* context, const StreamOptions* options,
                       StreamSink sink, Message* out) {
-  (void)ctx;
+  ResponsesDialect dialect = EndpointDialect((const ResponsesEndpoint*)ctx);
   StreamOptions resolved = options ? *options : StreamOptions{};
   if (!Model_RequestProfileIsValid(model, resolved.Profile)) {
     return FailResponses(
@@ -72,13 +90,14 @@ bool Responses_Stream(void* ctx, Arena* arena, const Model* model,
   HttpHeader headers[RESPONSES_HEADER_CAPACITY];
   u32 headerCount = 0;
   StrView headerError = {};
-  if (!BuildResponsesHeaders(arena, resolved.Auth, true, headers, &headerCount,
-                             &headerError)) {
+  if (!BuildResponsesHeaders(arena, resolved.Auth, dialect, true, headers,
+                             &headerCount, &headerError)) {
     return FailResponses(arena, model, sink, headerError, StopReason::Error,
                          out);
   }
 
-  StrBuf body = Responses_BuildRequest(arena, model, context, &resolved);
+  StrBuf body =
+      Responses_BuildRequest(arena, model, context, &resolved, dialect);
   Message message = Message_AssistantEmpty(arena);
   message.Model = model->Id;
   message.Provider = model->Provider;
@@ -88,7 +107,9 @@ bool Responses_Stream(void* ctx, Arena* arena, const Model* model,
 
   HttpRequest request = {};
   request.Method = SVL("POST");
-  request.Url = Responses_Url(arena, model->BaseUrl, "responses");
+  request.Url = dialect == ResponsesDialect::ChatGptCodex
+                    ? Responses_CodexUrl(arena, model->BaseUrl, "responses")
+                    : Responses_Url(arena, model->BaseUrl, "responses");
   request.Headers = headers;
   request.HeaderCount = headerCount;
   request.Body = StrBuf_View(&body);
@@ -167,10 +188,11 @@ ProviderModelList Responses_ListModelsWithFetch(
     return ProviderModelList_Error(arena, ProviderModelListStatus::Unavailable,
                                    SVL("model discovery was aborted"));
 
+  ResponsesDialect dialect = EndpointDialect(endpoint);
   HttpHeader headers[RESPONSES_HEADER_CAPACITY];
   u32 headerCount = 0;
   StrView headerError = {};
-  if (!BuildResponsesHeaders(arena, auth, false, headers, &headerCount,
+  if (!BuildResponsesHeaders(arena, auth, dialect, false, headers, &headerCount,
                              &headerError)) {
     return ProviderModelList_Error(arena, ProviderModelListStatus::Failed,
                                    headerError);
@@ -181,9 +203,14 @@ ProviderModelList Responses_ListModelsWithFetch(
     return ProviderModelList_Error(arena, ProviderModelListStatus::Unavailable,
                                    SVL("no endpoint is configured"));
 
+  bool codex = dialect == ResponsesDialect::ChatGptCodex;
   HttpRequest request = {};
   request.Method = SVL("GET");
-  request.Url = Responses_Url(arena, baseUrl, "models");
+  request.Url =
+      codex ? Responses_CodexUrl(
+                  arena, baseUrl,
+                  "models?client_version=" RESPONSES_CODEX_CLIENT_VERSION)
+            : Responses_Url(arena, baseUrl, "models");
   request.Headers = headers;
   request.HeaderCount = headerCount;
 
@@ -203,8 +230,10 @@ ProviderModelList Responses_ListModelsWithFetch(
   }
 
   ProviderModelList parsed = {};
-  if (!Responses_ParseModelsResponse(arena, endpoint, response.Body, &parsed))
-    return parsed;
+  if (codex)
+    Responses_ParseCodexModelsResponse(arena, endpoint, response.Body, &parsed);
+  else
+    Responses_ParseModelsResponse(arena, endpoint, response.Body, &parsed);
   return parsed;
 }
 

@@ -11,13 +11,16 @@ void AuthTokenCache_Invalidate(AuthTokenCache* cache) {
 }
 
 bool AuthTokenCache_Store(Arena* arena, AuthTokenCache* cache, StrView provider,
-                          StrView token) {
+                          StrView token, StrView accountId, u64 expiresAtMs) {
   if (!arena || !cache || !provider.Length || !token.Length) return false;
   StrView nextProvider = StrView_Dup(arena, provider);
   StrView nextValue = StrView_Dup(arena, token);
+  StrView nextAccount = accountId.Length ? StrView_Dup(arena, accountId) : StrView{};
   AuthTokenCache_Invalidate(cache);
   cache->Provider = nextProvider;
   cache->Value = nextValue;
+  cache->AccountId = nextAccount;
+  cache->ExpiresAtMs = expiresAtMs;
   return true;
 }
 
@@ -35,7 +38,8 @@ StrView Auth_ResolveToken(Arena* a, StrView authPath, StrView providerId,
                           const char* envVar) {
   if (!a) return StrView{};
   Credential c;
-  if (AuthStore_Read(a, authPath, providerId, &c) && c.ApiKey.Length)
+  if (AuthStore_Read(a, authPath, providerId, &c) &&
+      c.Kind == CredentialKind::ApiKey && c.ApiKey.Length)
     return c.ApiKey;
   if (envVar) {
     const char* e = getenv(envVar);

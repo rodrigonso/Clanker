@@ -4,7 +4,11 @@
 #include "base/str.h"
 
 // Credential storage in a JSON file keyed by provider id, one credential each.
-// Writes are atomic (temp + rename) with restrictive perms on POSIX.
+// Writes are atomic (temp + rename) with restrictive perms on POSIX. Entries
+// are `{"type":"api_key","key":...}` or, as pi writes them,
+// `{"type":"oauth","access":...,"refresh":...,"expires":<ms>,"accountId":...}`
+// with `accountId` optional. A store holding any other shape is never
+// rewritten, so an unknown entry is preserved rather than dropped.
 
 // Default path: <home>/.clanker/auth.json.
 StrView AuthStore_DefaultPath(Arena* arena);

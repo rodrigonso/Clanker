@@ -41,20 +41,74 @@ bool CompleteStoreDocument(StrView content) {
   return !quoted && depth == 0;
 }
 
+// JSON numbers are doubles; an expiry must be a whole millisecond count that
+// survives the round trip exactly.
+constexpr f64 MAX_EXACT_TIMESTAMP_MS = 9007199254740992.0;
+
+bool IsTimestamp(JsonValue* v) {
+  return v && v->Kind == JsonKind::Number && v->Number >= 0 &&
+         v->Number <= MAX_EXACT_TIMESTAMP_MS && (f64)(u64)v->Number == v->Number;
+}
+
 bool ParseCred(JsonValue* v, Credential* out) {
   *out = {};
   if (!Json_IsObject(v)) return false;
   for (u32 i = 0; i < v->MemberCount; i++)
     for (u32 j = 0; j < i; j++)
       if (StrView_Eq(v->Members[i].Key, v->Members[j].Key)) return false;
-  if (!StrView_EqCStr(Json_GetStr(v, "type"), "api_key")) return false;
-  JsonValue* key = Json_Get(v, "key");
-  if (!key || key->Kind != JsonKind::String) return false;
-  out->ApiKey = Json_GetStr(v, "key");
+  StrView type = Json_GetStr(v, "type");
+  if (StrView_EqCStr(type, "api_key")) {
+    JsonValue* key = Json_Get(v, "key");
+    if (!key || key->Kind != JsonKind::String) return false;
+    out->Kind = CredentialKind::ApiKey;
+    out->ApiKey = key->Str;
+    return true;
+  }
+  if (!StrView_EqCStr(type, "oauth")) return false;
+  JsonValue* access = Json_Get(v, "access");
+  JsonValue* refresh = Json_Get(v, "refresh");
+  JsonValue* expires = Json_Get(v, "expires");
+  JsonValue* account = Json_Get(v, "accountId");
+  if (!Json_IsString(access) || !access->Str.Length || !Json_IsString(refresh) ||
+      !refresh->Str.Length || !IsTimestamp(expires) ||
+      (account && !Json_IsString(account)))
+    return false;
+  out->Kind = CredentialKind::OAuth;
+  out->AccessToken = access->Str;
+  out->RefreshToken = refresh->Str;
+  out->ExpiresAtMs = (u64)expires->Number;
+  if (account) out->AccountId = account->Str;
   return true;
 }
 
+// Rewriting the store must reproduce every member it read, so an entry with
+// members this build does not write is refused rather than silently dropped.
+u32 SchemaMemberCount(JsonValue* v, const Credential* c) {
+  if (c->Kind == CredentialKind::ApiKey) return 2;
+  return Json_Get(v, "accountId") ? 5 : 4;
+}
+
+bool CredIsWritable(const Credential* c) {
+  if (c->Kind == CredentialKind::ApiKey) return true;
+  return c->Kind == CredentialKind::OAuth && c->AccessToken.Length &&
+         c->RefreshToken.Length && c->ExpiresAtMs <= (u64)MAX_EXACT_TIMESTAMP_MS;
+}
+
 void WriteCred(StrBuf* b, const Credential* c) {
+  if (c->Kind == CredentialKind::OAuth) {
+    StrBuf_AppendCStr(b, "{\"type\":\"oauth\",\"access\":");
+    Json_WriteString(b, c->AccessToken);
+    StrBuf_AppendCStr(b, ",\"refresh\":");
+    Json_WriteString(b, c->RefreshToken);
+    StrBuf_AppendCStr(b, ",\"expires\":");
+    StrBuf_AppendU64(b, c->ExpiresAtMs);
+    if (c->AccountId.Length) {
+      StrBuf_AppendCStr(b, ",\"accountId\":");
+      Json_WriteString(b, c->AccountId);
+    }
+    StrBuf_AppendChar(b, '}');
+    return;
+  }
   StrBuf_AppendCStr(b, "{\"type\":\"api_key\",\"key\":");
   Json_WriteString(b, c->ApiKey);
   StrBuf_AppendChar(b, '}');
@@ -73,7 +127,9 @@ bool LoadEntries(Arena* a, StrView path, Array<Entry>* entries) {
     Entry e = {};
     e.Id = root->Members[i].Key;
     JsonValue* value = root->Members[i].Value;
-    if (!ParseCred(value, &e.Cred) || value->MemberCount != 2) return false;
+    if (!ParseCred(value, &e.Cred) ||
+        value->MemberCount != SchemaMemberCount(value, &e.Cred))
+      return false;
     for (u32 j = 0; j < entries->Count; j++)
       if (StrView_Eq(entries->Data[j].Id, e.Id)) return false;
     Array_Push(entries, e);
@@ -123,6 +179,7 @@ bool AuthStore_Read(Arena* a, StrView path, StrView providerId, Credential* out)
 }
 
 bool AuthStore_Write(Arena* a, StrView path, StrView providerId, const Credential* cred) {
+  if (!cred || !CredIsWritable(cred)) return false;
   Array<Entry> entries = {};
   if (!LoadEntries(a, path, &entries)) return false;
   bool replaced = false;

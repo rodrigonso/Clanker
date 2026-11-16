@@ -502,6 +502,29 @@ void ApplyAdvertisedCapabilities(Model* model, JsonValue* value) {
     model->DefaultEffort = defaultEffort;
 }
 
+// The ChatGPT backend names each model's reasoning levels itself; levels
+// Clanker has no tier for (such as "minimal") are not offered.
+void ApplyCodexCapabilities(Model* model, JsonValue* value) {
+  model->EffortMask = 0;
+  model->DefaultEffort = ModelEffort::None;
+  JsonValue* levels = Json_Get(value, "supported_reasoning_levels");
+  if (Json_IsArray(levels)) {
+    for (u32 i = 0; i < levels->Count; i++) {
+      JsonValue* entry = levels->Items[i];
+      StrView name = Json_IsString(entry) ? entry->Str : Json_GetStr(entry, "effort");
+      ModelEffort effort = ModelEffort::None;
+      if (ModelEffort_Parse(name, &effort))
+        model->EffortMask |= ModelEffort_Bit(effort);
+    }
+  }
+  model->Reasoning = model->EffortMask != 0;
+  ModelEffort defaultEffort = ModelEffort::None;
+  if (ModelEffort_Parse(Json_GetStr(value, "default_reasoning_level"),
+                        &defaultEffort) &&
+      Model_SupportsEffort(model, defaultEffort))
+    model->DefaultEffort = defaultEffort;
+}
+
 }  // namespace
 
 StrView ResponsesEndpoint_ResolveBaseUrl(Arena* arena,
@@ -527,6 +550,15 @@ StrView Responses_Url(Arena* arena, StrView baseUrl, const char* path) {
   return StrBuf_View(&url);
 }
 
+StrView Responses_CodexUrl(Arena* arena, StrView baseUrl, const char* path) {
+  StrView suffix = SV(path);
+  StrBuf url = StrBuf_Make(arena, baseUrl.Length + suffix.Length + 8);
+  StrBuf_Append(&url, baseUrl);
+  StrBuf_AppendCStr(&url, StrView_EndsWith(baseUrl, SVL("/codex")) ? "/" : "/codex/");
+  StrBuf_Append(&url, suffix);
+  return StrBuf_View(&url);
+}
+
 Model Responses_Model(Arena* arena, const ResponsesEndpoint* endpoint,
                       StrView modelId) {
   Model model = {};
@@ -539,7 +571,9 @@ Model Responses_Model(Arena* arena, const ResponsesEndpoint* endpoint,
 
 StrBuf Responses_BuildRequest(Arena* arena, const Model* model,
                               const LlmContext* context,
-                              const StreamOptions* options) {
+                              const StreamOptions* options,
+                              ResponsesDialect dialect) {
+  bool codex = dialect == ResponsesDialect::ChatGptCodex;
   ModelRequestProfile profile = Model_ResolveRequestProfile(
       model, options ? options->Profile : ModelRequestProfile{});
   StrBuf out = StrBuf_Make(arena, 4096);
@@ -552,20 +586,27 @@ StrBuf Responses_BuildRequest(Arena* arena, const Model* model,
   if (context->SystemPrompt.Length) {
     StrBuf_AppendCStr(&out, ",\"instructions\":");
     Json_WriteString(&out, context->SystemPrompt);
+  } else if (codex) {
+    // The ChatGPT backend refuses a request without instructions.
+    StrBuf_AppendCStr(&out, ",\"instructions\":\"You are a helpful assistant.\"");
   }
 
   i32 maxTokens = options && options->MaxTokens > 0
                       ? options->MaxTokens
                       : (model->MaxTokens ? (i32)model->MaxTokens : 0);
-  if (maxTokens > 0) {
+  // The ChatGPT backend rejects an output budget outright.
+  if (maxTokens > 0 && !codex) {
     StrBuf_AppendCStr(&out, ",\"max_output_tokens\":");
     StrBuf_AppendU64(&out, (u64)maxTokens);
   }
 
   if (profile.Effort != ModelEffort::None) {
-    // "ultra" is Clanker's name for the tier the wire calls "max".
+    // On OpenRouter "ultra" is Clanker's name for the tier the wire calls
+    // "max". The ChatGPT backend listed its levels by name, so they go back
+    // verbatim.
     ModelEffort wireEffort =
-        profile.Effort == ModelEffort::Ultra ? ModelEffort::Max : profile.Effort;
+        profile.Effort == ModelEffort::Ultra && !codex ? ModelEffort::Max
+                                                       : profile.Effort;
     StrBuf_AppendCStr(&out, ",\"reasoning\":{\"effort\":");
     Json_WriteString(&out, ModelEffort_Name(wireEffort));
     StrBuf_AppendCStr(&out, ",\"summary\":\"auto\"}");
@@ -699,6 +740,64 @@ bool Responses_ParseModelsResponse(Arena* arena,
     StrView name = Json_GetStr(value, "name");
     if (name.Length) model.Name = StrView_Dup(arena, name);
     out->Models[out->Count++] = model;
+  }
+  out->Status = ProviderModelListStatus::Success;
+  return true;
+}
+
+bool Responses_ParseCodexModelsResponse(Arena* arena,
+                                        const ResponsesEndpoint* endpoint,
+                                        StrView response,
+                                        ProviderModelList* out) {
+  *out = {};
+  out->Status = ProviderModelListStatus::Failed;
+  JsonValue* root = Json_ParseCopy(arena, response);
+  if (!Json_IsObject(root)) {
+    out->Error = SVL("the models response is not a JSON object");
+    return false;
+  }
+  JsonValue* values = Json_Get(root, "models");
+  if (!Json_IsArray(values)) {
+    out->Error = SVL("the models response has no models array");
+    return false;
+  }
+
+  u32 capacity = values->Count;
+  out->Models = capacity ? ArenaPushArray(arena, Model, capacity) : nullptr;
+  f64* priorities = capacity ? ArenaPushArray(arena, f64, capacity) : nullptr;
+  for (u32 i = 0; i < values->Count; i++) {
+    JsonValue* value = values->Items[i];
+    if (!Json_IsObject(value)) {
+      out->Error = SVL("the models response contains a non-object model");
+      return false;
+    }
+    StrView slug = Json_GetStr(value, "slug");
+    if (!slug.Length) {
+      out->Error = SVL("the models response contains a model without a slug");
+      return false;
+    }
+    // Hidden entries are internal or retired models the picker must not offer.
+    if (!Eq(Json_GetStr(value, "visibility"), "list")) continue;
+
+    Model model = Responses_Model(arena, endpoint, StrView_Dup(arena, slug));
+    i64 contextWindow = Json_GetInt(value, "context_window", 0);
+    if (contextWindow > 0 && contextWindow <= 0xFFFFFFFFll)
+      model.ContextWindow = (u32)contextWindow;
+    ApplyCodexCapabilities(&model, value);
+    StrView name = Json_GetStr(value, "display_name");
+    if (name.Length) model.Name = StrView_Dup(arena, name);
+
+    // Stable insertion keeps the backend's order among equal priorities.
+    f64 priority = Json_GetNum(value, "priority", 0);
+    u32 at = out->Count;
+    while (at && priorities[at - 1] > priority) {
+      out->Models[at] = out->Models[at - 1];
+      priorities[at] = priorities[at - 1];
+      at--;
+    }
+    out->Models[at] = model;
+    priorities[at] = priority;
+    out->Count++;
   }
   out->Status = ProviderModelListStatus::Success;
   return true;

@@ -5,8 +5,10 @@
 
 #include "app/browser.h"
 #include "app/settings.h"
+#include "auth/openai_codex_oauth.h"
 #include "auth/openrouter_oauth.h"
 #include "auth/store.h"
+#include "base/process_file_lock.h"
 #include "base/thread.h"
 #include "net/loopback.h"
 
@@ -14,9 +16,107 @@ void AppAuth_Invalidate(AppAuth* auth) {
   if (auth) AuthTokenCache_Invalidate(&auth->Cache);
 }
 
-static bool AppAuth_CacheToken(AppAuth* auth, StrView provider, StrView token) {
-  return auth &&
-         AuthTokenCache_Store(auth->Mem, &auth->Cache, provider, token);
+static bool AppAuth_CacheToken(AppAuth* auth, StrView provider, StrView token,
+                               StrView accountId = {}, u64 expiresAtMs = 0) {
+  return auth && AuthTokenCache_Store(auth->Mem, &auth->Cache, provider, token,
+                                      accountId, expiresAtMs);
+}
+
+// Returned views are copied into the caller's arena: a refresh replaces the
+// cached token and wipes the old one, which must not corrupt a request that is
+// still holding it.
+static bool ReturnAuth(Arena* arena, StrView token, StrView accountId,
+                       ProviderAuth* out) {
+  out->Token = StrView_Dup(arena, token);
+  out->AccountId = accountId.Length ? StrView_Dup(arena, accountId) : StrView{};
+  return true;
+}
+
+static bool UseChatGptCredential(AppAuth* aa, Arena* arena, Arena* scratch,
+                                 StrView provider, const Credential* cred,
+                                 ProviderAuth* out) {
+  StrView accountId = cred->AccountId.Length
+                          ? cred->AccountId
+                          : OpenAICodexOAuth_AccountId(scratch, cred->AccessToken);
+  if (!accountId.Length) return false;
+  AppAuth_CacheToken(aa, provider, cred->AccessToken, accountId,
+                     cred->ExpiresAtMs);
+  return ReturnAuth(arena, cred->AccessToken, accountId, out);
+}
+
+// Covers the token request's own timeout, so a waiter outlasts a holder that
+// is still refreshing rather than giving up while it works.
+static const u64 CHATGPT_REFRESH_LOCK_WAIT_MS = 65 * 1000;
+
+// Refresh tokens are single-use: two processes refreshing the same one would
+// race, and the loser's refusal can sign the account out. A refresh therefore
+// holds the store's lock and re-reads the store first, so a process that
+// waited reuses whatever the holder wrote.
+static bool RefreshChatGptCredential(AppAuth* aa, Arena* arena, Arena* scratch,
+                                     StrView provider, const Credential* stale,
+                                     volatile i32* abort, ProviderAuth* out) {
+  StrBuf lockPath = StrBuf_Make(scratch, aa->Path.Length + 8);
+  StrBuf_Append(&lockPath, aa->Path);
+  StrBuf_AppendCStr(&lockPath, ".lock");
+  ProcessFileLock lock = {};
+  ProcessFileLockStatus status = ProcessFileLockStatus::Busy;
+  u64 deadline = MonotonicMillis() + CHATGPT_REFRESH_LOCK_WAIT_MS;
+  for (;;) {
+    status = ProcessFileLock_TryAcquire(scratch, StrBuf_View(&lockPath), &lock);
+    if (status != ProcessFileLockStatus::Busy ||
+        (abort && Atomic_LoadI32(abort)) || MonotonicMillis() >= deadline)
+      break;
+    Sleep_Ms(50);
+  }
+  if (status != ProcessFileLockStatus::Acquired) {
+    // Inside the refresh margin the old token still works for a while.
+    return NowMillis() < stale->ExpiresAtMs &&
+           UseChatGptCredential(aa, arena, scratch, provider, stale, out);
+  }
+
+  bool ok = false;
+  Credential current = {};
+  if (AuthStore_Read(scratch, aa->Path, provider, &current) &&
+      current.Kind == CredentialKind::OAuth) {
+    if (!Credential_NeedsRefresh(current.ExpiresAtMs, NowMillis())) {
+      ok = UseChatGptCredential(aa, arena, scratch, provider, &current, out);
+    } else {
+      OpenAICodexTokens tokens =
+          OpenAICodexOAuth_Refresh(scratch, current.RefreshToken, abort);
+      if (tokens.Ok) {
+        Credential next = {};
+        next.Kind = CredentialKind::OAuth;
+        next.AccessToken = tokens.Access;
+        next.RefreshToken = tokens.Refresh;
+        next.AccountId = tokens.AccountId;
+        next.ExpiresAtMs = tokens.ExpiresAtMs;
+        // A failed save still leaves this process a working token; the next
+        // process will find the old refresh token refused and ask for /auth.
+        AuthStore_Write(scratch, aa->Path, provider, &next);
+        ok = UseChatGptCredential(aa, arena, scratch, provider, &next, out);
+      } else if (NowMillis() < current.ExpiresAtMs) {
+        ok = UseChatGptCredential(aa, arena, scratch, provider, &current, out);
+      }
+    }
+  }
+  ProcessFileLock_Release(&lock, StrBuf_View(&lockPath));
+  return ok;
+}
+
+static bool ResolveChatGptAuth(AppAuth* aa, Arena* arena, StrView provider,
+                               volatile i32* abort, ProviderAuth* out) {
+  Arena scratch = ArenaCreate((usize)4 << 20);
+  bool ok = false;
+  Credential cred = {};
+  if (AuthStore_Read(&scratch, aa->Path, provider, &cred) &&
+      cred.Kind == CredentialKind::OAuth) {
+    ok = Credential_NeedsRefresh(cred.ExpiresAtMs, NowMillis())
+             ? RefreshChatGptCredential(aa, arena, &scratch, provider, &cred,
+                                        abort, out)
+             : UseChatGptCredential(aa, arena, &scratch, provider, &cred, out);
+  }
+  ArenaReleaseSecure(&scratch);
+  return ok;
 }
 
 bool AppResolveAuth(void* user, Arena* arena, StrView provider, volatile i32* abort,
@@ -26,11 +126,13 @@ bool AppResolveAuth(void* user, Arena* arena, StrView provider, volatile i32* ab
   AppAuth* aa = (AppAuth*)user;
   if (abort && Atomic_LoadI32(abort)) return false;
   StrView cached = {};
-  if (AuthTokenCache_Get(&aa->Cache, provider, &cached)) {
-    out->Token = cached;
-    return true;
-  }
+  if (AuthTokenCache_Get(&aa->Cache, provider, &cached) &&
+      (!aa->Cache.ExpiresAtMs ||
+       !Credential_NeedsRefresh(aa->Cache.ExpiresAtMs, NowMillis())))
+    return ReturnAuth(arena, cached, aa->Cache.AccountId, out);
   const ProviderSpec* spec = ProviderRegistry_Find(provider);
+  if (spec && spec->SignIn == ProviderSignIn::ChatGpt)
+    return ResolveChatGptAuth(aa, arena, provider, abort, out);
   StrView token = Auth_ResolveToken(arena, aa->Path, provider,
                                     spec ? spec->ApiKeyEnvVar : nullptr);
   if (!token.Length) return false;
@@ -57,6 +159,20 @@ bool ResolvePromptAuth(AgentHarness* harness, volatile i32* abort) {
 StrView AuthGuidance(Arena* arena, const ProviderSpec* spec, bool interactive) {
   if (!spec) return SVL("No provider is selected.");
   StrBuf b = StrBuf_Make(arena, 192);
+  if (spec->SignIn == ProviderSignIn::ChatGpt) {
+    // An expired sign-in whose refresh failed lands here too, so this does not
+    // claim nothing was ever configured.
+    StrBuf_AppendCStr(&b, "No usable ");
+    StrBuf_Append(&b, spec->Name);
+    StrBuf_AppendCStr(&b, " sign-in is available for '");
+    StrBuf_Append(&b, spec->Id);
+    StrBuf_AppendCStr(&b, interactive
+                              ? "'. Run `/auth` to sign in with your ChatGPT "
+                                "account before sending a prompt."
+                              : "'. Sign in with `/auth` in an interactive "
+                                "session before sending a prompt.");
+    return StrBuf_View(&b);
+  }
   StrBuf_AppendCStr(&b, "No credentials are configured for ");
   StrBuf_Append(&b, spec->Name);
   StrBuf_AppendCStr(&b, " ('");
@@ -162,37 +278,40 @@ struct OAuthCodeResult {
   StrView Message;
 };
 
-// OpenRouter's code expires after ten minutes, so waiting longer is pointless.
+// Authorization codes expire after about ten minutes, so waiting longer is
+// pointless.
 static const u32 OAUTH_CALLBACK_WAIT_MS = 10 * 60 * 1000;
 
+// What a browser sign-in shows and expects. The caller owns the listener.
+struct OAuthBrowserFlow {
+  StrView ProviderName;
+  StrView Url;
+  StrView CallbackPath;
+  StrView State;
+  StrView BrowserHint;  // operation status while waiting
+};
+
 // Browser + loopback redirect. Unavailable means fall back to pasting a code.
-static OAuthCodeResult ReceiveOAuthCallback(InteractiveRuntime* rt, Arena* scratch,
-                                            const OAuthPkce* pkce,
-                                            const AppCommandUx* ux) {
-  LoopbackServer server;
-  if (!LoopbackServer_Open(&server))
+static OAuthCodeResult AwaitOAuthCallback(InteractiveRuntime* rt, Arena* scratch,
+                                          LoopbackServer* server,
+                                          const OAuthBrowserFlow* flow,
+                                          const AppCommandUx* ux) {
+  if (!Browser_Open(flow->Url))
     return OAuthCodeResult{OAuthCodeStatus::Unavailable, StrView{}, StrView{}};
 
-  StrBuf callback = StrBuf_Make(scratch, 48);
-  StrBuf_AppendCStr(&callback, "http://localhost:");
-  StrBuf_AppendU64(&callback, server.Port);
-  StrBuf_AppendCStr(&callback, OPENROUTER_OAUTH_CALLBACK_PATH);
-  StrView url = OpenRouterOAuth_AuthorizeUrl(scratch, pkce, StrBuf_View(&callback));
-  if (!Browser_Open(url)) {
-    LoopbackServer_Close(&server);
-    return OAuthCodeResult{OAuthCodeStatus::Unavailable, StrView{}, StrView{}};
-  }
-
-  StrBuf notice = StrBuf_Make(scratch, url.Length + 96);
-  StrBuf_AppendCStr(&notice,
-                    "Opened your browser to sign in to OpenRouter. If it did not "
-                    "open, visit:\n");
-  StrBuf_Append(&notice, url);
+  StrBuf notice = StrBuf_Make(scratch, flow->Url.Length + 96);
+  StrBuf_AppendCStr(&notice, "Opened your browser to sign in to ");
+  StrBuf_Append(&notice, flow->ProviderName);
+  StrBuf_AppendCStr(&notice, ". If it did not open, visit:\n");
+  StrBuf_Append(&notice, flow->Url);
   EmitCommandNotice(ux, StrBuf_View(&notice));
 
-  volatile i32* abort =
-      RuntimeBeginOperation(rt, ux, SVL("Waiting for OpenRouter sign-in"));
-  RuntimeSetOperationStatus(rt, ux, SVL("Approve Clanker in your browser."));
+  StrBuf waiting = StrBuf_Make(scratch, flow->ProviderName.Length + 24);
+  StrBuf_AppendCStr(&waiting, "Waiting for ");
+  StrBuf_Append(&waiting, flow->ProviderName);
+  StrBuf_AppendCStr(&waiting, " sign-in");
+  volatile i32* abort = RuntimeBeginOperation(rt, ux, StrBuf_View(&waiting));
+  RuntimeSetOperationStatus(rt, ux, flow->BrowserHint);
   OAuthCodeResult result = {OAuthCodeStatus::Failed, StrView{}, StrView{}};
   u64 deadline = MonotonicMillis() + OAUTH_CALLBACK_WAIT_MS;
   for (;;) {
@@ -201,13 +320,17 @@ static OAuthCodeResult ReceiveOAuthCallback(InteractiveRuntime* rt, Arena* scrat
     u64 now = MonotonicMillis();
     LoopbackRequest request;
     LoopbackWait wait = LoopbackServer_Accept(
-        &server, scratch, abort, now < deadline ? (u32)(deadline - now) : 0, &request);
+        server, scratch, abort, now < deadline ? (u32)(deadline - now) : 0, &request);
     if (wait == LoopbackWait::Aborted) {
       result.Status = OAuthCodeStatus::Cancelled;
       break;
     }
     if (wait == LoopbackWait::TimedOut) {
-      result.Message = SVL("Timed out waiting for OpenRouter sign-in.");
+      StrBuf message = StrBuf_Make(scratch, flow->ProviderName.Length + 40);
+      StrBuf_AppendCStr(&message, "Timed out waiting for ");
+      StrBuf_Append(&message, flow->ProviderName);
+      StrBuf_AppendCStr(&message, " sign-in.");
+      result.Message = StrBuf_View(&message);
       break;
     }
     if (wait != LoopbackWait::Request) {
@@ -215,7 +338,8 @@ static OAuthCodeResult ReceiveOAuthCallback(InteractiveRuntime* rt, Arena* scrat
       break;
     }
 
-    OAuthCallback callbackResult = OAuthCallback_Parse(scratch, request.Target, pkce->State);
+    OAuthCallback callbackResult = OAuthCallback_Parse(
+        scratch, request.Target, flow->CallbackPath, flow->State);
     if (callbackResult.Status == OAuthCallbackStatus::WrongPath) {
       LoopbackRequest_Respond(&request, 404, SVL("Not found."));
       ArenaRestore(scratch, mark);
@@ -236,24 +360,51 @@ static OAuthCodeResult ReceiveOAuthCallback(InteractiveRuntime* rt, Arena* scrat
           &request, 200,
           SVL("<!doctype html><meta charset=utf-8><title>Clanker</title>"
               "<p>Sign-in was cancelled. You can close this tab.</p>"));
-      StrBuf message = StrBuf_Make(scratch, callbackResult.Error.Length + 48);
-      StrBuf_AppendCStr(&message, "OpenRouter sign-in was denied: ");
+      StrBuf message = StrBuf_Make(
+          scratch, flow->ProviderName.Length + callbackResult.Error.Length + 48);
+      StrBuf_Append(&message, flow->ProviderName);
+      StrBuf_AppendCStr(&message, " sign-in was denied: ");
       StrBuf_Append(&message, callbackResult.Error);
       result.Message = StrBuf_View(&message);
       break;
     }
-    LoopbackRequest_Respond(
-        &request, 200,
-        SVL("<!doctype html><meta charset=utf-8><title>Clanker</title>"
-            "<p>Clanker is signed in to OpenRouter. You can close this tab.</p>"));
+    StrBuf page = StrBuf_Make(scratch, flow->ProviderName.Length + 128);
+    StrBuf_AppendCStr(&page,
+                      "<!doctype html><meta charset=utf-8><title>Clanker</title>"
+                      "<p>Clanker is signed in to ");
+    StrBuf_Append(&page, flow->ProviderName);
+    StrBuf_AppendCStr(&page, ". You can close this tab.</p>");
+    LoopbackRequest_Respond(&request, 200, StrBuf_View(&page));
     result.Status = OAuthCodeStatus::Received;
     result.Code = callbackResult.Code;
     break;
   }
   bool cancelled = RuntimeEndOperation(rt);
-  LoopbackServer_Close(&server);
   if (cancelled && result.Status != OAuthCodeStatus::Received)
     result.Status = OAuthCodeStatus::Cancelled;
+  return result;
+}
+
+static OAuthCodeResult ReceiveOpenRouterCallback(InteractiveRuntime* rt,
+                                                 Arena* scratch,
+                                                 const OAuthPkce* pkce,
+                                                 const AppCommandUx* ux) {
+  LoopbackServer server;
+  if (!LoopbackServer_Open(&server))
+    return OAuthCodeResult{OAuthCodeStatus::Unavailable, StrView{}, StrView{}};
+
+  StrBuf callback = StrBuf_Make(scratch, 48);
+  StrBuf_AppendCStr(&callback, "http://localhost:");
+  StrBuf_AppendU64(&callback, server.Port);
+  StrBuf_AppendCStr(&callback, OPENROUTER_OAUTH_CALLBACK_PATH);
+  OAuthBrowserFlow flow = {};
+  flow.ProviderName = SVL("OpenRouter");
+  flow.Url = OpenRouterOAuth_AuthorizeUrl(scratch, pkce, StrBuf_View(&callback));
+  flow.CallbackPath = SVL(OPENROUTER_OAUTH_CALLBACK_PATH);
+  flow.State = pkce->State;
+  flow.BrowserHint = SVL("Approve Clanker in your browser.");
+  OAuthCodeResult result = AwaitOAuthCallback(rt, scratch, &server, &flow, ux);
+  LoopbackServer_Close(&server);
   return result;
 }
 
@@ -283,18 +434,128 @@ static OAuthCodeResult ReadPastedOAuthCode(InteractiveRuntime* rt, Arena* scratc
   }
 }
 
+// ChatGPT's redirect URI is registered on a fixed localhost port. When the
+// browser cannot reach Clanker there (a remote session, or another sign-in
+// holding the port), its address bar still carries the code once it lands.
+static OAuthCodeResult ReadPastedChatGptCode(InteractiveRuntime* rt, Arena* scratch,
+                                             const OAuthPkce* pkce, StrView url,
+                                             bool portBusy, const AppCommandUx* ux) {
+  StrBuf notice = StrBuf_Make(scratch, url.Length + 384);
+  if (portBusy) {
+    StrBuf_AppendCStr(&notice, "Port ");
+    StrBuf_AppendU64(&notice, OPENAI_CODEX_OAUTH_CALLBACK_PORT);
+    StrBuf_AppendCStr(&notice,
+                      " is in use, perhaps by another ChatGPT sign-in, so "
+                      "Clanker cannot receive the browser redirect directly.\n");
+  }
+  StrBuf_AppendCStr(&notice,
+                    "Open this URL in a browser and sign in with your ChatGPT "
+                    "account. The browser then lands on a localhost page that "
+                    "may fail to load; paste that page's full address from the "
+                    "address bar:\n");
+  StrBuf_Append(&notice, url);
+  EmitCommandNotice(ux, StrBuf_View(&notice));
+
+  for (;;) {
+    StrView entered = {};
+    RuntimeInputResult entry =
+        RuntimeReadText(rt, scratch, SVL("Sign in to ChatGPT"),
+                        SVL("Redirect URL or authorization code"), StrView{},
+                        &entered);
+    if (entry != RuntimeInputResult::Confirmed)
+      return OAuthCodeResult{OAuthCodeStatus::Cancelled, StrView{}, StrView{}};
+    StrView code = {};
+    StrView error = {};
+    if (OpenAICodexOAuth_ParsePastedInput(scratch, entered, pkce->State, &code,
+                                          &error))
+      return OAuthCodeResult{OAuthCodeStatus::Received, code, StrView{}};
+    StrBuf message = StrBuf_Make(scratch, error.Length + 40);
+    StrBuf_AppendCStr(&message, "That did not work: ");
+    StrBuf_Append(&message, error);
+    StrBuf_AppendChar(&message, '.');
+    EmitCommandError(ux, StrBuf_View(&message));
+  }
+}
+
+static AppCommandHandlerResult RunChatGptLogin(InteractiveRuntime* rt,
+                                               const ProviderSpec* spec,
+                                               const AppCommandUx* ux) {
+  Arena scratch = ArenaCreate((usize)16 << 20);
+  OAuthPkce pkce = OAuthPkce_Create(&scratch);
+  StrView url = OpenAICodexOAuth_AuthorizeUrl(&scratch, &pkce);
+  OAuthCodeResult code = {OAuthCodeStatus::Unavailable, StrView{}, StrView{}};
+  bool portBusy = false;
+  if (!Browser_IsRemoteSession()) {
+    LoopbackServer server;
+    if (LoopbackServer_OpenPort(&server, OPENAI_CODEX_OAUTH_CALLBACK_PORT)) {
+      OAuthBrowserFlow flow = {};
+      flow.ProviderName = spec->Name;
+      flow.Url = url;
+      flow.CallbackPath = SVL(OPENAI_CODEX_OAUTH_CALLBACK_PATH);
+      flow.State = pkce.State;
+      flow.BrowserHint = SVL("Sign in with your ChatGPT account in your browser.");
+      code = AwaitOAuthCallback(rt, &scratch, &server, &flow, ux);
+      LoopbackServer_Close(&server);
+    } else {
+      portBusy = true;
+    }
+  }
+  if (code.Status == OAuthCodeStatus::Unavailable)
+    code = ReadPastedChatGptCode(rt, &scratch, &pkce, url, portBusy, ux);
+
+  AppCommandHandlerResult result = {AppCommandHandlerStatus::Success, StrView{}};
+  if (code.Status == OAuthCodeStatus::Cancelled) {
+    result = {AppCommandHandlerStatus::Cancelled, SVL("Authentication cancelled.")};
+  } else if (code.Status != OAuthCodeStatus::Received) {
+    result = RuntimeOwnedFailure(rt, code.Message);
+  } else {
+    volatile i32* abort =
+        RuntimeBeginOperation(rt, ux, SVL("Completing ChatGPT sign-in"));
+    OpenAICodexTokens tokens =
+        OpenAICodexOAuth_Exchange(&scratch, code.Code, pkce.Verifier, abort);
+    bool cancelled = RuntimeEndOperation(rt);
+
+    Credential credential = {};
+    credential.Kind = CredentialKind::OAuth;
+    credential.AccessToken = tokens.Access;
+    credential.RefreshToken = tokens.Refresh;
+    credential.AccountId = tokens.AccountId;
+    credential.ExpiresAtMs = tokens.ExpiresAtMs;
+    if (cancelled) {
+      result = {AppCommandHandlerStatus::Cancelled, SVL("Authentication cancelled.")};
+    } else if (!tokens.Ok) {
+      StrBuf message = StrBuf_Make(&scratch, tokens.Error.Length + 48);
+      StrBuf_AppendCStr(&message, "ChatGPT sign-in failed: ");
+      StrBuf_Append(&message, tokens.Error);
+      result = RuntimeOwnedFailure(rt, StrBuf_View(&message));
+    } else if (!AuthStore_Write(&scratch, rt->AuthPath, spec->Id, &credential)) {
+      StrBuf message = StrBuf_Make(&scratch, rt->AuthPath.Length + 48);
+      StrBuf_AppendCStr(&message, "Failed to save credentials to ");
+      StrBuf_Append(&message, rt->AuthPath);
+      StrBuf_AppendChar(&message, '.');
+      result = RuntimeOwnedFailure(rt, StrBuf_View(&message));
+    } else {
+      AppAuth_CacheToken(rt->Auth, spec->Id, tokens.Access, tokens.AccountId,
+                         tokens.ExpiresAtMs);
+    }
+  }
+  ArenaReleaseSecure(&scratch);
+  return result;
+}
+
 static AppCommandHandlerResult RunOAuthLogin(InteractiveRuntime* rt,
                                              const ProviderSpec* spec,
                                              const AppCommandUx* ux) {
   if (!spec || !spec->Endpoint)
     return AppCommandHandlerResult{AppCommandHandlerStatus::Failed,
                                    SVL("No provider is selected.")};
+  if (spec->SignIn == ProviderSignIn::ChatGpt) return RunChatGptLogin(rt, spec, ux);
 
   Arena scratch = ArenaCreate((usize)16 << 20);
   OAuthPkce pkce = OAuthPkce_Create(&scratch);
   OAuthCodeResult code = {OAuthCodeStatus::Unavailable, StrView{}, StrView{}};
   if (!Browser_IsRemoteSession())
-    code = ReceiveOAuthCallback(rt, &scratch, &pkce, ux);
+    code = ReceiveOpenRouterCallback(rt, &scratch, &pkce, ux);
   if (code.Status == OAuthCodeStatus::Unavailable)
     code = ReadPastedOAuthCode(rt, &scratch, &pkce, ux);
 

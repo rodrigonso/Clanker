@@ -82,7 +82,9 @@ The provider layer is a deliberate divergence: Clanker speaks only OpenAI's
 Responses API (`src/llm/responses*`), not pi's per-vendor protocols. A provider
 is a row in `src/app/provider_registry.cpp` pairing a `ProviderSpec` with a
 `ResponsesEndpoint`; adding a compatible vendor means adding a row, not writing
-wire code. Thinking blocks *are* replayed, as opaque encrypted reasoning items
+wire code. A backend whose Responses surface differs (ChatGPT's Codex backend)
+gets a `ResponsesDialect` in the endpoint rather than a separate client.
+Thinking blocks *are* replayed, as opaque encrypted reasoning items
 carried in `Content::Signature`, and `reasoning_effort` is passed through at
 full fidelity rather than clamped.
 

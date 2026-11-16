@@ -114,7 +114,9 @@ if(CLANKER_BUILD_CLI)
     src/llm/responses.cpp
     src/auth/store.cpp
     src/auth/resolve.cpp
+    src/auth/oauth.cpp
     src/auth/openrouter_oauth.cpp
+    src/auth/openai_codex_oauth.cpp
     src/tools/exec.cpp
     src/tools/search_regex.cpp
     src/tools/tool_select.cpp

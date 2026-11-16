@@ -22,6 +22,9 @@ enum class LoopbackWait : u8 { Request, Aborted, TimedOut, Failed };
 
 // Binds an OS-assigned port on 127.0.0.1 only.
 bool LoopbackServer_Open(LoopbackServer* server);
+// Binds a specific port on 127.0.0.1, for providers whose registered redirect
+// URI names a fixed port. Fails when another listener already holds it.
+bool LoopbackServer_OpenPort(LoopbackServer* server, u16 port);
 void LoopbackServer_Close(LoopbackServer* server);
 
 // Waits for the next well-formed GET request. Malformed or non-GET requests are

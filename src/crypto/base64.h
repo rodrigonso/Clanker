@@ -50,3 +50,36 @@ inline StrView Base64UrlEncode(Arena* arena, const byte* data, u32 len) {
       arena, data, len,
       "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_", false);
 }
+
+// Decodes URL-safe base64 as JWT segments carry it: padding is optional and
+// the standard alphabet's '+' and '/' are accepted too. Arena-allocated and
+// null-terminated; false on any character outside either alphabet.
+inline bool Base64UrlDecode(Arena* arena, StrView text, StrView* out) {
+  *out = {};
+  u32 length = text.Length;
+  while (length && text.Data[length - 1] == '=') length--;
+  if (length % 4 == 1) return false;
+  char* buf = (char*)ArenaAlloc(arena, length / 4 * 3 + 3, 1);
+  u32 o = 0;
+  u32 bits = 0;
+  u32 acc = 0;
+  for (u32 i = 0; i < length; i++) {
+    char c = text.Data[i];
+    u32 v = 0;
+    if (c >= 'A' && c <= 'Z') v = (u32)(c - 'A');
+    else if (c >= 'a' && c <= 'z') v = (u32)(c - 'a') + 26;
+    else if (c >= '0' && c <= '9') v = (u32)(c - '0') + 52;
+    else if (c == '-' || c == '+') v = 62;
+    else if (c == '_' || c == '/') v = 63;
+    else return false;
+    acc = (acc << 6) | v;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      buf[o++] = (char)((acc >> bits) & 0xFF);
+    }
+  }
+  buf[o] = '\0';
+  *out = StrView{buf, o};
+  return true;
+}

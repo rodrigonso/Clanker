@@ -76,7 +76,7 @@ cd ~/work/my-project
 clanker --permission-mode ask
 ```
 
-Run `/auth` to sign in to OpenRouter in your browser (or set
+Run `/auth` to sign in to OpenRouter or ChatGPT in your browser (or set
 `OPENROUTER_API_KEY`), then pick a model with `/model`.
 
 ### Options
@@ -176,8 +176,8 @@ src/
   llm/     data model, OpenAI Responses protocol
            (request build + SSE parse), retry policy, model registry
   net/     streaming HTTP + non-streaming fetch over libcurl
-  auth/    credential store (api keys) + resolution/caching + OpenRouter
-           OAuth PKCE
+  auth/    credential store (api keys, refreshable OAuth tokens) +
+           resolution/caching + OAuth PKCE for OpenRouter and ChatGPT
   session/ append-only v2 message tree, reducer, memory + JSONL repositories
   agent/   incremental AgentHarness, in-memory queues, hooks, events, compaction
   tools/   read/write/edit/ls/find/grep/shell/ask_user, direct/shell process
@@ -1261,8 +1261,10 @@ selectors such as `/auth` and `/model` require a TTY.
 
 Interactive commands:
 
-- `/auth` — sign in to OpenRouter in the browser, then choose a model.
-- `/model` — choose a live-discovered or manual OpenRouter model ID, then choose
+- `/auth` — choose OpenRouter or ChatGPT, sign in in the browser, then choose a
+  model.
+- `/model` — choose a live-discovered or manual model ID for the current
+  provider, then choose
   the effort and context tier when that model exposes those controls. Fixed
   context windows are displayed without an unnecessary prompt.
 - `/session` — inspect the current title, IDs, project, status, times, model,
@@ -1350,28 +1352,40 @@ in `~/.clanker/settings.json`; `/reload` applies edits made to the file.
 
 ## Providers
 
-Clanker supports one chat provider: OpenRouter. It speaks the Responses API shape
-(`POST <base>/responses`, SSE `response.*` events), while OpenRouter translates
-that protocol for the upstream model vendor.
+Clanker supports two chat providers. Both speak the Responses API shape
+(`POST <base>/responses`, SSE `response.*` events) through one client:
+OpenRouter translates that protocol for the upstream model vendor, and ChatGPT
+is OpenAI's Codex backend, reached with a ChatGPT Plus/Pro sign-in.
 
 | Provider | Default base URL | API key env | Base URL env |
 | --- | --- | --- | --- |
 | `openrouter` | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` | `OPENROUTER_BASE_URL` |
+| `openai-codex` | `https://chatgpt.com/backend-api` | — (sign-in only) | `OPENAI_CODEX_BASE_URL` |
 
 `openrouter/auto` is the bootstrap default. It is OpenRouter's stable automatic
-router, not a compiled model-availability table.
+router, not a compiled model-availability table. `gpt-6.1-sol` is the ChatGPT
+provider's default until a model is chosen.
 
 ```sh
 OPENROUTER_API_KEY=... \
   ./build/clanker -m anthropic/claude-sonnet-4.5 -p "summarize README.md"
 ```
 
-`/model` fetches OpenRouter's live `GET /api/v1/models` catalog. Models enter
-the picker only when the catalog advertises tool use; advertised modalities
-must also include text input and text output. Context windows, reasoning
+`/model` fetches the provider's live catalog: OpenRouter's
+`GET /api/v1/models`, or the Codex backend's `GET /codex/models`. OpenRouter
+models enter the picker only when the catalog advertises tool use; advertised
+modalities must also include text input and text output. ChatGPT models are
+those the backend lists as visible, in its order. Context windows, reasoning
 support, and reasoning-effort tiers come from that response. Clanker has no
 compiled model list and never infers capabilities from model IDs. If discovery
 is unavailable, manual model-ID entry remains available.
+
+The ChatGPT dialect differs from OpenRouter's only where the backend requires
+it: requests carry the `chatgpt-account-id` from the sign-in, always include
+instructions, send no output-token limit, and pass effort names through
+unchanged. Usage counts against the ChatGPT plan's limits rather than API
+billing. Whether a given plan permits use from a third-party client is
+governed by OpenAI's terms; check them before relying on it.
 
 Why Responses and not Chat Completions: the models Clanker targets reject
 `reasoning_effort` alongside function tools on `/v1/chat/completions`, and Chat
@@ -1382,15 +1396,14 @@ turns.
 
 Deliberate limits:
 
-- **No subscription OAuth.** Subscription tokens (ChatGPT, Claude Pro/Max) are
-  issued for other services. Chat uses an OpenRouter API key, which `/auth`
-  obtains through OpenRouter's OAuth flow. Auto permission reviews use a
+- **ChatGPT is the only subscription sign-in.** Claude Pro/Max tokens are
+  issued for a protocol Clanker does not speak. Auto permission reviews use a
   separate TypeSafe runtime environment key.
 - **Reasoning replay is model-scoped.** Encrypted reasoning and item IDs are
   only valid for the model that produced them, so a mid-session model switch
   drops prior reasoning and regenerates IDs rather than replaying stale ones.
-- **No direct chat vendor transports.** Model reach and routing are whatever the
-  current OpenRouter catalog and account expose.
+- **No other direct chat vendor transports.** Beyond ChatGPT, model reach and
+  routing are whatever the current OpenRouter catalog and account expose.
 
 ## Authentication
 
@@ -1398,17 +1411,30 @@ Chat credentials are stored in `~/.clanker/auth.json` (atomic writes, restricted
 perms). The resolved token is cached in the running app; storing a key, provider
 changes, and `/reload` invalidate or replace the cache.
 
-- **Sign in** — run `/auth` in the TUI. Clanker opens your browser to
+- **Sign in to OpenRouter** — run `/auth` in the TUI and choose OpenRouter.
+  Clanker opens your browser to
   OpenRouter, where you approve it; OpenRouter then mints an API key labeled
   `Clanker` on your account (OAuth PKCE), which Clanker stores. The redirect is
   received by a one-shot listener on `127.0.0.1`. Under SSH, or when no
   browser can be opened, Clanker prints the sign-in URL instead and you paste
   the code OpenRouter shows. Revoke the key from your OpenRouter key settings.
+- **Sign in to ChatGPT** — run `/auth` and choose ChatGPT. Clanker opens
+  `auth.openai.com` (OAuth PKCE, the same client the Codex CLI uses), and the
+  redirect returns to `http://localhost:1455/auth/callback`. That port is fixed
+  by the client registration; if it is busy (for example, the Codex CLI is
+  signing in) or no browser can be opened, paste the address you were
+  redirected to. Clanker stores an `oauth` entry — access token, refresh token,
+  expiry, and ChatGPT account id — and refreshes the access token
+  automatically shortly before it expires. Refreshes are serialized across
+  Clanker processes with a lock beside `auth.json`, since each refresh token
+  can be used only once. There is no environment-variable form.
 - **Environment** — set `OPENROUTER_API_KEY` for `-p`, CI, and other headless
   runs. A credential is always required.
 
-Resolution priority: stored api_key → env var. `--logout <provider>` removes
-chat credentials. TypeSafe permission reviews are separate: their
+Resolution priority: stored api_key → env var for OpenRouter; the stored
+sign-in for ChatGPT. `--logout <provider>` removes chat credentials.
+Builds that predate ChatGPT sign-in refuse to rewrite an `auth.json` holding an
+`oauth` entry rather than drop it. TypeSafe permission reviews are separate: their
 `TYPESAFE_API_KEY` is read from the runtime environment only, not provisioned
 through `/auth` or persisted in `auth.json`/`settings.json`.
 
@@ -1497,7 +1523,8 @@ This is the small clean core.
 Deliberately out of scope for now (the structure leaves seams for them):
 
 - Other vendors' native protocols (Anthropic Messages, Google Gemini) and the
-  subscription OAuth flows that depend on them.
+  subscription OAuth flows that depend on them. ChatGPT sign-in is supported
+  because its backend speaks Responses.
 - A bidirectional RPC mode. `-p` with `--mode text|json` is the non-interactive
   surface; there is no stdin-driven protocol yet.
 - TUI niceties: visual-row (vs logical-line) Up/Down, syntax highlighting,

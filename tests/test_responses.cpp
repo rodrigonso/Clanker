@@ -82,6 +82,12 @@ void TestUrls() {
   CHECK(StrView_EqCStr(
       Responses_Url(&arena, SVL("http://localhost:8000/v1"), "responses"),
       "http://localhost:8000/v1/responses"));
+  CHECK(StrView_EqCStr(
+      Responses_CodexUrl(&arena, SVL("https://chatgpt.com/backend-api"), "responses"),
+      "https://chatgpt.com/backend-api/codex/responses"));
+  CHECK(StrView_EqCStr(
+      Responses_CodexUrl(&arena, SVL("http://localhost:9000/codex"), "responses"),
+      "http://localhost:9000/codex/responses"));
 
   ResponsesEndpoint endpoint = {};
   endpoint.BaseUrl = SVL("https://example.test/api/");
@@ -139,6 +145,22 @@ void TestRequestBasics() {
   StrView bare = StrBuf_View(&bareBuf);
   CHECK_ALL(!Contains(bare, "\"reasoning\":{"),
             !Contains(bare, "max_output_tokens"));
+
+  // The ChatGPT backend refuses an output budget and a request without
+  // instructions, and takes its own effort names back verbatim.
+  options.Profile.Effort = ModelEffort::Ultra;
+  LlmContext unprompted = context;
+  unprompted.SystemPrompt = {};
+  StrBuf codexBuf = Responses_BuildRequest(&arena, &model, &unprompted, &options,
+                                           ResponsesDialect::ChatGptCodex);
+  StrView codex = StrBuf_View(&codexBuf);
+  CHECK_ALL(!Contains(codex, "max_output_tokens"),
+            Contains(codex, "\"instructions\":\"You are a helpful assistant.\""),
+            Contains(codex, "\"reasoning\":{\"effort\":\"ultra\""),
+            Contains(codex, "\"store\":false"));
+  StrBuf promptedBuf = Responses_BuildRequest(&arena, &model, &context, &options,
+                                              ResponsesDialect::ChatGptCodex);
+  CHECK(Contains(StrBuf_View(&promptedBuf), "\"instructions\":\"be brief\""));
   ArenaRelease(&arena);
 }
 

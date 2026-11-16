@@ -125,6 +125,10 @@ bool ParseRequestLine(StrView head, bool* isGet, StrView* target) {
 }  // namespace
 
 bool LoopbackServer_Open(LoopbackServer* server) {
+  return LoopbackServer_OpenPort(server, 0);
+}
+
+bool LoopbackServer_OpenPort(LoopbackServer* server, u16 port) {
   *server = LoopbackServer{};
 #if defined(_WIN32)
   WSADATA wsa;
@@ -144,11 +148,15 @@ bool LoopbackServer_Open(LoopbackServer* server) {
   if (s < 0) return false;
   int one = 1;
   setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+  // A fixed port is reused across sign-in attempts, so a previous attempt's
+  // TIME_WAIT connection must not block the bind. BSD sockets still refuse a
+  // second active listener on the same address.
+  if (port) setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
 #endif
   sockaddr_in addr = {};
   addr.sin_family = AF_INET;
   addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  addr.sin_port = 0;
+  addr.sin_port = htons(port);
   SockLen addrLength = (SockLen)sizeof(addr);
   if (bind(s, (sockaddr*)&addr, sizeof(addr)) != 0 || listen(s, 8) != 0 ||
       getsockname(s, (sockaddr*)&addr, &addrLength) != 0) {
