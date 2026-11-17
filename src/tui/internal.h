@@ -44,6 +44,8 @@ void PutNum(char* buf, u32 cap, u32* len, u64 v);
 void PutScaled(char* buf, u32 cap, u32* len, u64 v);
 
 StrView Truncate(StrView s, u32 maxBytes);
+// Keep the newest bytes instead, starting on a line boundary when one is near.
+StrView TruncateTail(StrView s, u32 maxBytes);
 u32 Utf8Count(StrView s);
 
 // ---- status row ----------------------------------------------------------

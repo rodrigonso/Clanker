@@ -329,6 +329,18 @@ StrView Truncate(StrView s, u32 maxBytes) {
   return StrView{s.Data, n};
 }
 
+StrView TruncateTail(StrView s, u32 maxBytes) {
+  if (s.Length <= maxBytes) return s;
+  u32 start = s.Length - maxBytes;
+  while (start < s.Length && Utf8IsContinuation(s.Data[start])) start++;
+  for (u32 i = start; i + 1 < s.Length; i++) {
+    if (s.Data[i] != '\n') continue;
+    start = i + 1;
+    break;
+  }
+  return StrView{s.Data + start, s.Length - start};
+}
+
 
 // Number of Unicode scalars in a UTF-8 string, so the copy confirmation counts
 // characters rather than bytes.
@@ -453,7 +465,7 @@ void ApplyDisplayEvent(Tui* t, const TuiDisplayEvent& ev) {
         LineModel_AddNotice(&t->Model, EntryKind::Info, SVL("Interrupted by user."));
       break;
     case TuiDisplayEventKind::ToolStart:
-      LineModel_AddTool(&t->Model, ev.ToolCallId, ev.ToolName, ev.ToolArgsJson);
+      LineModel_AddTool(&t->Model, ev.ToolCallId, ev.ToolName, ev.ToolArgsJson, ev.Timestamp);
       t->State = TuiState::Tool;
       SetTransientText(&t->StateTool, ev.ToolName);
       break;
@@ -461,7 +473,7 @@ void ApplyDisplayEvent(Tui* t, const TuiDisplayEvent& ev) {
       if (ev.ToolUpdateSlot < TUI_TOOL_UPDATE_SLOT_COUNT) {
         TuiToolUpdateSlot* slot = &t->ToolUpdates[ev.ToolUpdateSlot];
         LineModel_UpdateTool(&t->Model, slot->ToolCallId,
-                             Truncate(StrBuf_View(&slot->Payload), 1500));
+                             TruncateTail(StrBuf_View(&slot->Payload), 1500));
         slot->Queued = false;
         ReclaimToolUpdates(t);
       }
@@ -470,7 +482,7 @@ void ApplyDisplayEvent(Tui* t, const TuiDisplayEvent& ev) {
       {
         StrView payload = DisplayPayload(ev);
         if (!LineModel_FinishTool(&t->Model, ev.ToolCallId, payload, Truncate(payload, 1500),
-                                  ev.IsError))
+                                  ev.IsError, ev.Timestamp))
           LineModel_AddNotice(&t->Model, EntryKind::Error,
                               SVL("tool result did not match a pending call"));
       }
@@ -491,6 +503,9 @@ void ApplyDisplayEvent(Tui* t, const TuiDisplayEvent& ev) {
       break;
     case TuiDisplayEventKind::AgentStart:
     case TuiDisplayEventKind::AgentEnd:
+      // Overflowing watchers may drop transient tool ends; nothing still runs
+      // once the agent has stopped.
+      if (ev.Kind == TuiDisplayEventKind::AgentEnd) LineModel_SettleTools(&t->Model);
       t->State = t->AgentRunning ? TuiState::Thinking : TuiState::Idle;
       SetTransientText(&t->StateTool, {});
       break;
@@ -746,6 +761,7 @@ void PaintTranscriptNode(UiContext*, const UiNode* node, UiCanvas* canvas) {
           TranscriptHoverStyle(t, StyleDefault()));
     DisplayRowLayout layout =
         LineModel_LayoutDisplayRow(line, data->Layout.Cols);
+    layout.LiveGlyph = SV(kSpinner[t->Spinner % 10]);
     DisplayRowIterator iterator = {};
     DisplayRowRun run;
     while (LineModel_NextDisplayRowRun(&layout, &iterator, &run)) {
@@ -840,6 +856,13 @@ void ComposeAtSize(Tui* t, u16 cols, u16 rows, u64 nowMs) {
   }
 
   PumpDisplay(t, nowMs);
+  if (t->Model.LiveTools) {
+    ViewportAnchor anchor = CaptureViewportAnchor(t);
+    if (LineModel_TickTools(&t->Model, nowMs)) {
+      LineModel_Layout(&t->Model);
+      RestoreViewportAnchor(t, anchor);
+    }
+  }
   AdvanceSelectionTick(t, nowMs);
   if (t->State != TuiState::Idle || t->OperationActive) {
     if (t->SpinnerStartMs == 0 || nowMs < t->SpinnerStartMs)
@@ -2280,6 +2303,7 @@ void Tui_ToolStarted(Tui* t, StrView callId, StrView name, StrView argumentsJson
   display->ToolCallId = StrView_Dup(display->Mem, callId);
   display->ToolName = StrView_Dup(display->Mem, name);
   display->ToolArgsJson = StrView_Dup(display->Mem, argumentsJson);
+  display->Timestamp = MonotonicMillis();
   TuiPerf_ToolStarted(&t->Perf, name, MonotonicMicros());
   Wake(t);
   Mutex_Unlock(&t->Lock);
@@ -2291,7 +2315,7 @@ void Tui_ToolProgress(Tui* t, StrView callId, StrView preview) {
   TuiToolUpdateSlot* slot = AcquireToolUpdate(t, callId, &slotIndex);
   if (slot) {
     StrBuf_Clear(&slot->Payload);
-    Sanitize_Display(&slot->Payload, Truncate(preview, 1500));
+    Sanitize_Display(&slot->Payload, TruncateTail(preview, 1500));
     // Only queue once per slot: a fast tool would otherwise fill the display
     // queue with updates that all render the same latest preview.
     if (!slot->Queued) {
@@ -2312,6 +2336,7 @@ void Tui_ToolEnded(Tui* t, StrView callId, StrView preview, bool isError) {
   display->Payload = StrBuf_Make(display->Mem, preview.Length + 1);
   Sanitize_Display(&display->Payload, preview);
   display->IsError = isError;
+  display->Timestamp = MonotonicMillis();
   if (TuiToolUpdateSlot* slot = FindToolUpdate(t, callId)) slot->Active = false;
   ReclaimToolUpdates(t);
   TuiPerf_ToolEnded(&t->Perf, MonotonicMicros());

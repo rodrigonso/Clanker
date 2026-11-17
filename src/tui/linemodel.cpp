@@ -15,20 +15,25 @@ const u32 ICON_FIELD_CELLS = 2;
 const u32 MARKER_LEFT_PADDING = 1;
 
 // Bullet color scheme: orange for user messages and white for assistant
-// responses and tool calls. Tool calls use an outlined marker; failed tool
-// calls keep the outline but turn red.
+// responses. Tool calls show an outlined marker while pending (animated in
+// orange while running here), then a green check or a red cross.
 const u8 ACCENT_FG = 214;
 const u8 ASSISTANT_FG = 255;
-// Diff stats are the one non-error place red appears: it is paired with green
-// and reads as "lines removed", not as a failure. Errors still own bold 196.
+// Diff stats and diff lines are the one non-error place red appears: it is
+// paired with green and reads as "lines removed", not as a failure. Errors
+// still own bold 196. The same green marks a successful tool call.
 const u8 DIFF_ADD_FG = 71;
 const u8 DIFF_DEL_FG = 167;
+// A running call's expanded preview follows its output instead of growing.
+const u32 LIVE_TAIL_ROWS = 5;
 StrView FilledMarker(const LineModel* m) {
   return m->Rounded ? SVL("\xe2\x97\x8f") : SVL("\xe2\x97\xbc");
 }
 StrView OutlineMarker(const LineModel* m) {
   return m->Rounded ? SVL("\xe2\x97\x8b") : SVL("\xe2\x97\xbb");
 }
+const StrView CHECK_MARKER = SVL("\xe2\x9c\x93");
+const StrView CROSS_MARKER = SVL("\xe2\x9c\x97");
 
 StrView BufView(const StrBuf& buf) { return StrView{buf.Data, buf.Length}; }
 
@@ -68,10 +73,10 @@ StrView IconIndent(Arena* arena, StrView marker, u32 leftPadding = 0) {
 }
 
 void PushIcon(Arena* arena, Array<Span>* spans, StrView marker, Style style,
-              u32 leftPadding = 0) {
+              u32 leftPadding = 0, bool live = false) {
   if (leftPadding)
     Array_Push(spans, Span{Spaces(arena, leftPadding), StyleDefault(), true});
-  Array_Push(spans, Span{marker, style});
+  Array_Push(spans, Span{marker, style, false, live});
   u32 markerWidth = LineTextWidth(marker);
   u32 gap = (markerWidth < ICON_FIELD_CELLS ? ICON_FIELD_CELLS : markerWidth) - markerWidth + 1u;
   Array_Push(spans, Span{Spaces(arena, gap), style, true});
@@ -111,32 +116,65 @@ void WrapAndAppend(LineModel* m, SpanLine* line) {
   WrapSpanLine(&m->RowsMem, line, m->Width, &m->Lines);
 }
 
-void AppendPlainRows(Arena* rowsMem, Array<SpanLine>* out, u16 width, StrView text, Style style,
-                     StrView prefix, StrView continuation) {
-  if (text.Length == 0) return;
+void AppendLogicalRow(Arena* rowsMem, Array<SpanLine>* out, u16 width, StrView line,
+                      Style style, StrView prefix, StrView continuation) {
+  SpanLine logical;
+  InitRow(rowsMem, &logical, 2);
+  if (prefix.Length) Array_Push(&logical.Spans, Span{prefix, style, true});
+  if (line.Length) Array_Push(&logical.Spans, Span{line, style});
+  if (continuation.Length) {
+    logical.Continuation = Span{continuation, style, true};
+    logical.HasContinuation = true;
+  }
+  WrapSpanLine(rowsMem, &logical, width, out);
+}
+
+// Edit results open with a sentence the row header already conveys.
+StrView DiffBody(StrView text) {
+  if (!StrView_StartsWith(text, SVL("Successfully replaced "))) return text;
+  for (u32 i = 0; i + 1 < text.Length; i++) {
+    if (text.Data[i] == '\n' && text.Data[i + 1] == '\n')
+      return StrView{text.Data + i + 2, text.Length - i - 2};
+  }
+  return text;
+}
+
+// Diff_Make lines are "<+|-| ><lineNo> <text>"; the digit check keeps prose
+// that merely starts with '-' neutral, as CountDiffLines does.
+Style PreviewLineStyle(const LineModel* m, StrView line, bool diff, Style base) {
+  if (!diff || line.Length < 2 || line.Data[1] < '0' || line.Data[1] > '9') return base;
+  if (line.Data[0] == '+') return LStyle(m, DIFF_ADD_FG, ATTR_NONE);
+  if (line.Data[0] == '-') return LStyle(m, DIFF_DEL_FG, ATTR_NONE);
+  return base;
+}
+
+// Both the renderer and the expanded-preview budget size previews through
+// here, so the two always agree on the row count.
+void AppendToolPreviewRows(const LineModel* m, Arena* rowsMem, Array<SpanLine>* out,
+                           const Entry* entry, StrView indent) {
+  const ToolEntry& tool = entry->Tool;
+  StrView text = BufView(tool.Preview);
+  bool diff = tool.Done && !tool.Error && tool.View.Kind == ToolViewKind::Edit;
+  if (diff) text = DiffBody(text);
+  while (text.Length &&
+         (text.Data[text.Length - 1] == '\n' || text.Data[text.Length - 1] == '\r'))
+    text.Length--;
+  Style base = tool.Error ? LStyle(m, 196, ATTR_NONE) : LStyle(m, 244, ATTR_DIM);
+  u32 first = out->Count;
   u32 i = 0;
-  while (i <= text.Length) {
+  while (i < text.Length) {
     u32 start = i;
     while (i < text.Length && text.Data[i] != '\n') i++;
     StrView line{text.Data + start, i - start};
-    bool atEnd = i >= text.Length;
+    AppendLogicalRow(rowsMem, out, m->Width, line, PreviewLineStyle(m, line, diff, base),
+                     indent, indent);
     i++;
-
-    SpanLine logical;
-    InitRow(rowsMem, &logical, 2);
-    if (prefix.Length) Array_Push(&logical.Spans, Span{prefix, style, true});
-    if (line.Length) Array_Push(&logical.Spans, Span{line, style});
-    if (continuation.Length) {
-      logical.Continuation = Span{continuation, style, true};
-      logical.HasContinuation = true;
-    }
-    WrapSpanLine(rowsMem, &logical, width, out);
-    if (atEnd) break;
   }
-}
-
-void AppendPlain(LineModel* m, StrView text, Style style, StrView prefix, StrView continuation) {
-  AppendPlainRows(&m->RowsMem, &m->Lines, m->Width, text, style, prefix, continuation);
+  if (!tool.Done && out->Count - first > LIVE_TAIL_ROWS) {
+    memmove(out->Data + first, out->Data + out->Count - LIVE_TAIL_ROWS,
+            LIVE_TAIL_ROWS * sizeof(SpanLine));
+    out->Count = first + LIVE_TAIL_ROWS;
+  }
 }
 
 bool EntryVisible(const Entry* entry) {
@@ -236,31 +274,71 @@ void BuildAssistant(LineModel* m, const Entry* entry) {
   }
 }
 
+// Running calls tick in whole seconds; finished ones keep tenths below ten.
+StrView FormatDuration(Arena* arena, u64 ms, bool tenths) {
+  StrBuf b = StrBuf_Make(arena, 16);
+  u64 seconds = ms / 1000;
+  if (tenths && seconds < 10) {
+    StrBuf_AppendU64(&b, seconds);
+    StrBuf_AppendChar(&b, '.');
+    StrBuf_AppendU64(&b, (ms / 100) % 10);
+    StrBuf_AppendChar(&b, 's');
+  } else if (seconds < 60) {
+    StrBuf_AppendU64(&b, seconds);
+    StrBuf_AppendChar(&b, 's');
+  } else {
+    bool hours = seconds >= 3600;
+    u64 major = hours ? seconds / 3600 : seconds / 60;
+    u64 minor = hours ? (seconds / 60) % 60 : seconds % 60;
+    StrBuf_AppendU64(&b, major);
+    StrBuf_AppendChar(&b, hours ? 'h' : 'm');
+    if (minor < 10) StrBuf_AppendChar(&b, '0');
+    StrBuf_AppendU64(&b, minor);
+    StrBuf_AppendChar(&b, hours ? 'm' : 's');
+  }
+  return StrBuf_View(&b);
+}
+
+// Sub-second calls show no timer, so quick reads stay uncluttered.
+StrView ToolTimer(Arena* arena, const ToolEntry& tool) {
+  if (tool.Live)
+    return tool.ElapsedSeconds ? FormatDuration(arena, (u64)tool.ElapsedSeconds * 1000, false)
+                               : StrView{};
+  if (!tool.Done || !tool.StartMs || tool.EndMs < tool.StartMs + 1000) return StrView{};
+  return FormatDuration(arena, tool.EndMs - tool.StartMs, true);
+}
+
 void BuildTool(LineModel* m, const Entry* entry, bool expandPreview) {
+  const ToolEntry& tool = entry->Tool;
   StrView marker = OutlineMarker(m);
-  Style markerSt = entry->Tool.Error ? LStyle(m, 196, ATTR_BOLD)
-                                     : LStyle(m, ASSISTANT_FG, ATTR_NONE);
-  Style label = entry->Tool.Error ? LStyle(m, 196, ATTR_BOLD)
-                                  : LStyle(m, 252, ATTR_BOLD);
-  Style detail = entry->Tool.Error ? LStyle(m, 196, ATTR_NONE)
-                                   : LStyle(m, 252, ATTR_NONE);
+  Style markerSt = LStyle(m, ASSISTANT_FG, ATTR_NONE);
+  if (tool.Done && tool.Error) {
+    marker = CROSS_MARKER;
+    markerSt = LStyle(m, 196, ATTR_BOLD);
+  } else if (tool.Done) {
+    marker = CHECK_MARKER;
+    markerSt = LStyle(m, DIFF_ADD_FG, ATTR_NONE);
+  } else if (tool.Live) {
+    markerSt = LStyle(m, ACCENT_FG, ATTR_NONE);
+  }
+  Style label = tool.Error ? LStyle(m, 196, ATTR_BOLD) : LStyle(m, 252, ATTR_BOLD);
+  Style detail = tool.Error ? LStyle(m, 196, ATTR_NONE) : LStyle(m, 252, ATTR_NONE);
   StrView indent = IconIndent(&m->RowsMem, marker, MARKER_LEFT_PADDING);
 
   SpanLine logical;
   InitRow(&m->RowsMem, &logical, 7);
-  PushIcon(&m->RowsMem, &logical.Spans, marker, markerSt,
-           MARKER_LEFT_PADDING);
-  if (entry->Tool.View.Label.Length) {
-    Array_Push(&logical.Spans, Span{entry->Tool.View.Label, label});
-    if (entry->Tool.View.Detail.Length) Array_Push(&logical.Spans, Span{SVL(" "), detail});
+  PushIcon(&m->RowsMem, &logical.Spans, marker, markerSt, MARKER_LEFT_PADDING, tool.Live);
+  if (tool.View.Label.Length) {
+    Array_Push(&logical.Spans, Span{tool.View.Label, label});
+    if (tool.View.Detail.Length) Array_Push(&logical.Spans, Span{SVL(" "), detail});
   }
-  if (entry->Tool.View.Detail.Length)
-    Array_Push(&logical.Spans, Span{BufView(entry->Tool.View.Detail), detail});
-  if (entry->Tool.View.Outcome.Length) {
+  if (tool.View.Detail.Length)
+    Array_Push(&logical.Spans, Span{BufView(tool.View.Detail), detail});
+  if (tool.View.Outcome.Length) {
     Array_Push(&logical.Spans, Span{SVL("  "), detail});
-    StrView outcome = BufView(entry->Tool.View.Outcome);
-    u32 split = entry->Tool.View.OutcomeSplit;
-    if (!entry->Tool.Error && split != 0 && split < outcome.Length) {
+    StrView outcome = BufView(tool.View.Outcome);
+    u32 split = tool.View.OutcomeSplit;
+    if (!tool.Error && split != 0 && split < outcome.Length) {
       // Diff stat: "+N " in green, "-M" in red.
       Array_Push(&logical.Spans,
                  Span{StrView{outcome.Data, split},
@@ -272,20 +350,21 @@ void BuildTool(LineModel* m, const Entry* entry, bool expandPreview) {
     } else {
       Array_Push(&logical.Spans,
                  Span{outcome,
-                      entry->Tool.Error ? LStyle(m, 196, ATTR_NONE)
-                                        : LStyle(m, 244, ATTR_NONE)});
+                      tool.Error ? LStyle(m, 196, ATTR_NONE)
+                                 : LStyle(m, 244, ATTR_NONE)});
     }
+  }
+  StrView timer = ToolTimer(&m->RowsMem, tool);
+  if (timer.Length) {
+    logical.Right = Span{timer, LStyle(m, 244, ATTR_NONE)};
+    logical.HasRight = true;
   }
   logical.Continuation = Span{indent, StyleDefault(), true};
   logical.HasContinuation = true;
   WrapAndAppend(m, &logical);
 
-  if (expandPreview && entry->Tool.Done && entry->Tool.Preview.Length) {
-    AppendPlain(m, BufView(entry->Tool.Preview),
-                entry->Tool.Error ? LStyle(m, 196, ATTR_NONE)
-                                  : LStyle(m, 244, ATTR_DIM),
-                indent, indent);
-  }
+  if (expandPreview && tool.Preview.Length)
+    AppendToolPreviewRows(m, &m->RowsMem, &m->Lines, entry, indent);
 }
 
 void BuildPlainTurn(LineModel* m, const Entry* entry, StrView marker, Style markerStyle,
@@ -330,7 +409,7 @@ void BuildEntryRows(LineModel* m, const Entry* entry, bool showPreview) {
       BuildAssistant(m, entry);
       break;
     case EntryKind::Tool: {
-      bool hasPreview = entry->Tool.Done && entry->Tool.Preview.Length != 0;
+      bool hasPreview = entry->Tool.Preview.Length != 0;
       BuildTool(m, entry, showPreview);
       previewHidden = hasPreview && !showPreview;
       break;
@@ -374,8 +453,7 @@ u32 PreviewRowCount(LineModel* m, const Entry* entry) {
   Array<SpanLine> rows = Array_Make<SpanLine>(&m->LayoutMem, 8);
   StrView indent =
       IconIndent(&m->LayoutMem, OutlineMarker(m), MARKER_LEFT_PADDING);
-  AppendPlainRows(&m->LayoutMem, &rows, m->Width, BufView(entry->Tool.Preview),
-                  LStyle(m, 244, ATTR_DIM), indent, indent);
+  AppendToolPreviewRows(m, &m->LayoutMem, &rows, entry, indent);
   return rows.Count;
 }
 
@@ -533,9 +611,10 @@ void WriteFlatRange(LineModel* m, u64 start, u64 end, u32 firstEntry = NO_ENTRY)
 }
 
 bool PreviewShown(const LineModel* m, const Entry* entry) {
-  return entry->Kind == EntryKind::Tool && !entry->Collapsed &&
-         entry->Tool.Done && entry->Tool.Preview.Length &&
-         entry->Id >= m->ExpandedEntryId;
+  // A running call's tail is capped at LIVE_TAIL_ROWS, so only finished
+  // previews draw on the expanded-row budget.
+  return entry->Kind == EntryKind::Tool && !entry->Collapsed && entry->Tool.Preview.Length &&
+         (!entry->Tool.Done || entry->Id >= m->ExpandedEntryId);
 }
 
 void CacheIfDirty(LineModel* m, Entry* entry) {
@@ -544,7 +623,11 @@ void CacheIfDirty(LineModel* m, Entry* entry) {
 }
 
 void RemoveEntries(LineModel* m, u32 count) {
-  for (u32 i = 0; i < count; i++) m->LiveRowsBytes -= m->Entries.Data[i].RowsBytes;
+  for (u32 i = 0; i < count; i++) {
+    const Entry* entry = &m->Entries.Data[i];
+    m->LiveRowsBytes -= entry->RowsBytes;
+    if (entry->Kind == EntryKind::Tool && entry->Tool.Live) m->LiveTools--;
+  }
   m->Entries.Count -= count;
   memmove(m->Entries.Data, m->Entries.Data + count, m->Entries.Count * sizeof(Entry));
 }
@@ -720,7 +803,7 @@ void WrapSpanLine(Arena* a, const SpanLine* in, u16 width, Array<SpanLine>* out)
         StartWrappedRow(a, in, &current, first, showRight, rightWidth, width, &col, &limit);
       }
       if ((u32)col + wordWidth <= limit) {
-        Array_Push(&current.Spans, Span{token, span.St});
+        Array_Push(&current.Spans, Span{token, span.St, false, span.Live});
         col = (u16)(col + wordWidth);
       } else {
         u32 j = 0;
@@ -745,7 +828,8 @@ void WrapSpanLine(Arena* a, const SpanLine* in, u16 width, Array<SpanLine>* out)
             if ((u32)col + segmentWidth >= limit) break;
           }
           Array_Push(&current.Spans,
-                     Span{StrView{token.Data + segmentStart, j - segmentStart}, span.St});
+                     Span{StrView{token.Data + segmentStart, j - segmentStart}, span.St, false,
+                          span.Live});
           col = (u16)(col + segmentWidth);
           if (j < token.Length) {
             Array_Push(out, current);
@@ -818,13 +902,13 @@ bool LineModel_FitsAtWidth(LineModel* m, u16 width, u32 maxRows) {
     entry.PreviewRows = 0xffffffffu;
     Array_Push(&probe.Entries, entry);
   }
-  u64 expandedId = ExpandedEntryId(&probe);
+  probe.ExpandedEntryId = ExpandedEntryId(&probe);
   const Entry* previous = nullptr;
   for (u32 i = 0; i < probe.Entries.Count; i++) {
     const Entry* entry = &probe.Entries.Data[i];
     if (!EntryVisible(entry)) continue;
     if (NeedsSeparator(previous, entry)) AddBlank(&probe);
-    BuildEntryRows(&probe, entry, !entry->Collapsed && entry->Id >= expandedId);
+    BuildEntryRows(&probe, entry, PreviewShown(&probe, entry));
     previous = entry;
     if (probe.Lines.Count > maxRows) break;
   }
@@ -890,9 +974,10 @@ bool LineModel_NextDisplayRowRun(const DisplayRowLayout* layout, DisplayRowItera
       break;
     }
     Span span = line->Spans.Data[iterator->SpanIndex++];
+    StrView source = span.Live && layout->LiveGlyph.Length ? layout->LiveGlyph : span.Text;
     u16 width = 0;
     StrView text =
-        PrefixWithinCells(span.Text, (u16)(layout->LeftLimit - iterator->Column), &width);
+        PrefixWithinCells(source, (u16)(layout->LeftLimit - iterator->Column), &width);
     if (text.Length == 0) continue;
     *run = DisplayRowRun{text, span.St, iterator->Column, width};
     iterator->Column = (u16)(iterator->Column + width);
@@ -1302,7 +1387,8 @@ void LineModel_AddUser(LineModel* m, StrView text, u64 timestampMs) {
   AdvanceDisplayRevision(m);
 }
 
-void LineModel_AddTool(LineModel* m, StrView toolId, StrView name, StrView argsJson) {
+void LineModel_AddTool(LineModel* m, StrView toolId, StrView name, StrView argsJson,
+                       u64 startMs) {
   FFI(m->HasAssistant);
   Entry entry = {};
   entry.Id = m->NextEntryId++;
@@ -1312,6 +1398,9 @@ void LineModel_AddTool(LineModel* m, StrView toolId, StrView name, StrView argsJ
   entry.Collapsed = true;
   entry.Tool.Id = StrView_Dup(m->Mem, toolId);
   entry.Tool.Preview = StrBuf_Make(m->Mem, 256);
+  entry.Tool.StartMs = startMs;
+  entry.Tool.Live = startMs != 0;
+  if (entry.Tool.Live) m->LiveTools++;
   ToolView_Init(m->Mem, &entry.Tool.View, name, argsJson);
   Array_Push(&m->Entries, entry);
   InvalidateEntry(m, m->Entries.Count - 1);
@@ -1324,14 +1413,18 @@ bool LineModel_UpdateTool(LineModel* m, StrView toolId, StrView preview) {
     Entry* entry = &m->Entries.Data[i - 1];
     if (entry->Kind != EntryKind::Tool || entry->Tool.Done) continue;
     if (!StrView_Eq(entry->Tool.Id, toolId)) continue;
+    bool hadPreview = entry->Tool.Preview.Length != 0;
     StrBuf_Clear(&entry->Tool.Preview);
     StrBuf_Append(&entry->Tool.Preview, preview);
+    // A collapsed row changes only when its hidden-content mark appears.
+    if (!entry->Collapsed || hadPreview != (preview.Length != 0)) InvalidateEntry(m, i - 1);
     return true;
   }
   return false;
 }
 
-bool LineModel_FinishTool(LineModel* m, StrView toolId, StrView result, StrView preview, bool isError) {
+bool LineModel_FinishTool(LineModel* m, StrView toolId, StrView result, StrView preview,
+                          bool isError, u64 endMs) {
   for (u32 i = m->Entries.Count; i > 0; i--) {
     Entry* entry = &m->Entries.Data[i - 1];
     if (entry->Kind != EntryKind::Tool) continue;
@@ -1339,6 +1432,11 @@ bool LineModel_FinishTool(LineModel* m, StrView toolId, StrView result, StrView 
     if (entry->Tool.Done) return true;
     entry->Tool.Done = true;
     entry->Tool.Error = isError;
+    entry->Tool.EndMs = endMs;
+    if (entry->Tool.Live) {
+      entry->Tool.Live = false;
+      m->LiveTools--;
+    }
     InvalidateEntry(m, i - 1);
     entry->PreviewRows = 0xffffffffu;
     StrBuf_Clear(&entry->Tool.Preview);
@@ -1349,4 +1447,31 @@ bool LineModel_FinishTool(LineModel* m, StrView toolId, StrView result, StrView 
     return true;
   }
   return false;
+}
+
+bool LineModel_TickTools(LineModel* m, u64 nowMs) {
+  bool changed = false;
+  u32 remaining = m->LiveTools;
+  for (u32 i = m->Entries.Count; i > 0 && remaining; i--) {
+    Entry* entry = &m->Entries.Data[i - 1];
+    if (entry->Kind != EntryKind::Tool || !entry->Tool.Live) continue;
+    remaining--;
+    u64 elapsed = nowMs > entry->Tool.StartMs ? nowMs - entry->Tool.StartMs : 0;
+    u32 seconds = (u32)(elapsed / 1000);
+    if (seconds == entry->Tool.ElapsedSeconds) continue;
+    entry->Tool.ElapsedSeconds = seconds;
+    InvalidateEntry(m, i - 1);
+    changed = true;
+  }
+  return changed;
+}
+
+void LineModel_SettleTools(LineModel* m) {
+  for (u32 i = m->Entries.Count; i > 0 && m->LiveTools; i--) {
+    Entry* entry = &m->Entries.Data[i - 1];
+    if (entry->Kind != EntryKind::Tool || !entry->Tool.Live) continue;
+    entry->Tool.Live = false;
+    m->LiveTools--;
+    InvalidateEntry(m, i - 1);
+  }
 }

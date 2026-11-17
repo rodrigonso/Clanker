@@ -9,6 +9,9 @@ struct Span {
   StrView Text;
   Style St;
   bool KeepLeading;  // structural indentation; ordinary wrap-leading spaces are dropped
+  // A one-cell placeholder that paint replaces with DisplayRowLayout::LiveGlyph.
+  // Selection and copy keep the placeholder, so animation never invalidates them.
+  bool Live;
 };
 
 struct SpanLine {
@@ -29,6 +32,7 @@ struct SpanLine {
 // ranges retain every selected blank cell.
 struct DisplayRowLayout {
   const SpanLine* Line;
+  StrView LiveGlyph;  // set by paint only; must occupy exactly one cell
   u16 Columns;
   u16 LeftLimit;
   u16 HiddenColumn;
@@ -68,8 +72,13 @@ struct ToolEntry {
   StrView Id;
   ToolView View;
   StrBuf Preview;
+  // Monotonic milliseconds; zero for calls replayed from a session log.
+  u64 StartMs;
+  u64 EndMs;
+  u32 ElapsedSeconds;  // last running time shown, advanced by LineModel_TickTools
   bool Done;
   bool Error;
+  bool Live;  // running in this process: spinner and timer
 };
 
 struct Entry {
@@ -116,6 +125,7 @@ struct LineModel {
   usize LiveRowsBytes;
   u64 NextEntryId;
   u64 DisplayRevision;
+  u32 LiveTools;
   bool PreviewBudgetDirty;
   bool TrimPending;
   bool HasAssistant;
@@ -157,6 +167,14 @@ void LineModel_AppendAssistant(LineModel* m, StrView delta);
 void LineModel_EndAssistant(LineModel* m);
 void LineModel_AddNotice(LineModel* m, EntryKind kind, StrView text);  // Info or Error
 void LineModel_AddUser(LineModel* m, StrView text, u64 timestampMs);
-void LineModel_AddTool(LineModel* m, StrView toolId, StrView name, StrView argsJson);
+// A nonzero `startMs` marks the call live until it finishes or is settled.
+void LineModel_AddTool(LineModel* m, StrView toolId, StrView name, StrView argsJson,
+                       u64 startMs = 0);
+// Progress re-renders only an expanded row; a collapsed row keeps one line.
 bool LineModel_UpdateTool(LineModel* m, StrView toolId, StrView preview);
-bool LineModel_FinishTool(LineModel* m, StrView toolId, StrView result, StrView preview, bool isError);
+bool LineModel_FinishTool(LineModel* m, StrView toolId, StrView result, StrView preview,
+                          bool isError, u64 endMs = 0);
+// Re-render live rows whose whole-second timer changed. Returns true if any did.
+bool LineModel_TickTools(LineModel* m, u64 nowMs);
+// Stop the spinner and timer of calls whose end will never arrive.
+void LineModel_SettleTools(LineModel* m);

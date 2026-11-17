@@ -640,6 +640,16 @@ void TestToolUpdateOwnership(Arena* outer) {
   }
   CHECK_ALL(t.SessionMem.Used <= baseline + (128u << 10),
             t.SessionMem.Committed <= baseline + (192u << 10));
+  // Running output keeps its newest bytes, cut at a line boundary.
+  StrBuf longOutput = StrBuf_Make(&input, 2100);
+  StrBuf_Append(&longOutput, RepeatText(&input, SVL("line\n"), 400));
+  StrBuf_AppendCStr(&longOutput, "tail-line");
+  Tui_ToolProgress(&t, SVL("keeper"), StrBuf_View(&longOutput));
+  DrainDisplay(&t, 29000);
+  StrView tail = StrBuf_View(&t.Model.Entries.Data[0].Tool.Preview);
+  CHECK_ALL(t.Model.Entries.Data[0].Tool.Live, t.Model.Entries.Data[0].Tool.StartMs != 0,
+            tail.Length <= 1500, StrView_StartsWith(tail, SVL("line\n")),
+            StrView_EndsWith(tail, SVL("tail-line")));
   Tui_ToolEnded(&t, SVL("keeper"), SVL("finished"), false);
   DrainDisplay(&t, 30000);
   CHECK_ALL(t.ToolUpdateMem.Used == 0, t.ToolUpdateMem.Committed == 0,
@@ -1382,7 +1392,7 @@ void TestTui() {
 
   // The transcript captured the unlabeled assistant text and compact tool row.
   CHECK_ALL(!AnyRow(&a, &t, "assistant"), AnyRow(&a, &t, "Hello world"),
-            AnyRow(&a, &t, " \xe2\x97\x8b  Shell ls"),
+            AnyRow(&a, &t, " \xe2\x9c\x93  Shell ls"),
             !AnyRow(&a, &t, "hello-from-shell"), t.State == TuiState::Idle,
             t.Use.Output == 7);
 

@@ -250,8 +250,9 @@ so even const row/revision queries require that lock; they are not independent
 read-only operations.
 
 Each entry caches its wrapped rows, including owned span text. Layout formats
-only dirty entries and tools whose preview visibility changed. Progress on an
-unfinished tool does not invalidate rows, since previews appear on completion.
+only dirty entries and tools whose preview visibility changed. Progress on a
+collapsed unfinished tool invalidates its rows only when its hidden-content
+mark appears or disappears; an expanded one re-lays out to show its live tail.
 Mutations directly maintain the earliest dirty entry index: layout does not
 search history for dirty entries. Expanded-preview costs and their admission
 boundary are cached. That boundary is reconsidered only when expansion
@@ -296,6 +297,25 @@ bullet-style changes; expand-all may likewise update the whole retained suffix.
 A trial-width scrollbar probe leaves caches untouched
 and stops once it exceeds the viewport, rejecting histories with too many
 visible entries without formatting them.
+
+### Tool Rows
+
+Tool rows are collapsed by default; a click toggles one and Ctrl+O toggles all.
+The header marker shows state: an animated spinner while running, then a green
+`✓` or a red `✗`; a call that never reported an end keeps the outline bullet. The spinner is a
+paint-time substitution (`Span::Live`, `DisplayRowLayout::LiveGlyph`), so it
+animates without re-layout and selection hashing still sees the static bullet.
+Running calls show whole elapsed seconds in the right column; the model
+re-lays out a live row only when that count changes, and the TUI captures and
+restores the viewport anchor around that tick. Finished calls keep their
+duration when it reached one second. Agent end settles any call whose end event
+was dropped, so no row spins forever.
+
+Shell outcomes name the exit status and output size (`exit 0 · 12 lines`,
+`exit 2`, `timed out`, `cancelled`). Expanding a running call shows only the
+newest five lines of its output; progress keeps the newest 1500 bytes, cut at
+a line boundary. Expanded edit previews drop the summary sentence the header
+already conveys and colour `+`/`-` diff lines green and red.
 
 Session compaction uses `LineEdit_Clone` to deep-own the complete editor state
 in the replacement arena: text, cursor, selection anchor, sticky column,

@@ -69,16 +69,21 @@ bool Finish(LineModel* model, StrView id, StrView result, bool isError = false) 
   return LineModel_FinishTool(model, id, result, result, isError);
 }
 
-// Concatenated text of every span in `row` painted with foreground `fg`.
-// Wrapping can split one styled run across spans, so colour assertions compare
-// the joined text instead of individual span boundaries.
-StrView SpansWithFg(Arena* a, const SpanLine* row, u8 fg) {
+// Concatenated text of every span in `row` from index `from` on that is painted
+// with foreground `fg`. Wrapping can split one styled run across spans, so
+// colour assertions compare the joined text instead of individual span
+// boundaries.
+StrView SpansWithFg(Arena* a, const SpanLine* row, u8 fg, u32 from = 0) {
   StrBuf out = StrBuf_Make(a, 64);
-  for (u32 i = 0; i < row->Spans.Count; i++) {
+  for (u32 i = from; i < row->Spans.Count; i++) {
     if (row->Spans.Data[i].St.Fg == fg) StrBuf_Append(&out, row->Spans.Data[i].Text);
   }
   return StrBuf_View(&out);
 }
+
+// Spans 0-2 of a tool header are the left padding, the status marker and the
+// gap after it, which shares the marker's style.
+constexpr u32 TOOL_TEXT_SPAN = 3;
 
 }  // namespace
 
@@ -424,10 +429,10 @@ void TestLineModel() {
     CHECK(Finish(&tools, SVL("read-id"), SVL("alpha-preview\nbeta-preview\ngamma-preview")));
     const SpanLine* shellRow = FindRow(&a, &tools, "Shell echo hi");
     CHECK(shellRow != nullptr);
-    CHECK_ALL(TextEq(shellRow->Spans.Data[1].Text, SVL("\xe2\x97\x8b")),
-              shellRow->Spans.Data[1].St.Fg == 255,
+    CHECK_ALL(TextEq(shellRow->Spans.Data[1].Text, SVL("\xe2\x9c\x93")),
+              shellRow->Spans.Data[1].St.Fg == 71,
               shellRow->Spans.Data[1].St.Attr == ATTR_NONE,
-              AnyRowHas(&a, &tools, " \xe2\x97\x8b  Shell echo hi"),
+              AnyRowHas(&a, &tools, " \xe2\x9c\x93  Shell echo hi  exit 0 \xc2\xb7 1 line"),
               AnyRowHas(&a, &tools, "Read src/main.cpp L10:14"),
               AnyRowHas(&a, &tools, "3 lines read"),
               !AnyRowHas(&a, &tools, "alpha-preview"));
@@ -589,23 +594,52 @@ void TestLineModel() {
     if (statRow != nullptr) {
       // Wrapping may split a run into several spans, so compare the text
       // accumulated per colour rather than matching individual spans.
-      CHECK_ALL(TextEq(SpansWithFg(&a, statRow, 71), SVL("+2 ")),
-                TextEq(SpansWithFg(&a, statRow, 167), SVL("-1")));
+      CHECK_ALL(TextEq(SpansWithFg(&a, statRow, 71, TOOL_TEXT_SPAN), SVL("+2 ")),
+                TextEq(SpansWithFg(&a, statRow, 167, TOOL_TEXT_SPAN), SVL("-1")));
     }
 
     // A non-diff outcome carries no diff colouring at all.
     const SpanLine* plainOutcome = FindRow(&a, &summaries, "3 bytes written");
     CHECK(plainOutcome != nullptr);
     if (plainOutcome != nullptr) {
-      CHECK_ALL(SpansWithFg(&a, plainOutcome, 71).Length == 0,
-                SpansWithFg(&a, plainOutcome, 167).Length == 0);
+      CHECK_ALL(SpansWithFg(&a, plainOutcome, 71, TOOL_TEXT_SPAN).Length == 0,
+                SpansWithFg(&a, plainOutcome, 167, TOOL_TEXT_SPAN).Length == 0);
     }
 
     LineModel_AddTool(&summaries, SVL("error"), SVL("shell"), SVL("{\"command\":\"false\"}"));
     CHECK(Finish(&summaries, SVL("error"), SVL("Command exited with code 1"), true));
-    const SpanLine* failed = FindRow(&a, &summaries, "failed");
+    const SpanLine* failed = FindRow(&a, &summaries, "Shell false  exit 1");
     CHECK(failed != nullptr);
-    CHECK(failed->Spans.Data[1].St.Fg == 196);
+    if (failed != nullptr) {
+      CHECK_ALL(TextEq(failed->Spans.Data[1].Text, SVL("\xe2\x9c\x97")),
+                failed->Spans.Data[1].St.Fg == 196);
+    }
+
+    // Shell outcomes name the exit status and how much output there was.
+    struct ShellCase {
+      StrView Result;
+      bool IsError;
+      const char* Expected;
+    };
+    ShellCase shellCases[] = {
+        {SVL("a\nb\n"), false, "exit 0 \xc2\xb7 2 lines"},
+        {SVL("(no output)"), false, "exit 0 \xc2\xb7 no output"},
+        {SVL("x\ny\n\n[Showing lines 9-10 of 10 (50.0KB limit). Full output: o.log]"), false,
+         "exit 0 \xc2\xb7 10 lines"},
+        {SVL("partial\n\nCommand timed out after 5 seconds"), true, "timed out"},
+        {SVL("partial\n\nCommand cancelled"), true, "cancelled"},
+        {SVL("out\n\nCommand exited with code -2"), true, "exit -2"},
+        {SVL("failed to run command: missing"), true, "failed"},
+    };
+    bool shellMatch = true;
+    for (u32 i = 0; i < sizeof(shellCases) / sizeof(shellCases[0]); i++) {
+      LineModel_AddTool(&summaries, SVL("sh"), SVL("shell"), SVL("{\"command\":\"run\"}"));
+      bool finished = Finish(&summaries, SVL("sh"), shellCases[i].Result, shellCases[i].IsError);
+      const ToolEntry& tool = summaries.Entries.Data[summaries.Entries.Count - 1].Tool;
+      shellMatch = finished && TextEq(StrBuf_View(&tool.View.Outcome), SV(shellCases[i].Expected)) &&
+                   shellMatch;
+    }
+    CHECK(shellMatch);
     LineModel_Release(&summaries);
   }
 
@@ -616,7 +650,7 @@ void TestLineModel() {
     CHECK(LineModel_At(&noColor, 0)->Spans.Data[1].St.Fg == COL_DEFAULT);
     LineModel_AddTool(&noColor, SVL("id"), SVL("shell"), SVL("{\"command\":\"echo\"}"));
     CHECK(Finish(&noColor, SVL("id"), SVL("ok")));
-    const SpanLine* row = FindRow(&a, &noColor, " \xe2\x97\x8b  Shell echo");
+    const SpanLine* row = FindRow(&a, &noColor, " \xe2\x9c\x93  Shell echo");
     CHECK(row != nullptr);
     CHECK(row->Spans.Data[1].St.Fg == COL_DEFAULT);
 
@@ -642,10 +676,12 @@ void TestLineModel() {
     LineModel_AddUser(&bullets, SVL("hi"), 0);
     LineModel_AddTool(&bullets, SVL("sq"), SVL("shell"), SVL("{\"command\":\"echo\"}"));
     CHECK(Finish(&bullets, SVL("sq"), SVL("ok")));
+    LineModel_AddTool(&bullets, SVL("run"), SVL("shell"), SVL("{\"command\":\"sleep\"}"));
     CHECK_ALL(!bullets.Rounded,
               TextEq(ExtractRow(&a, LineModel_At(&bullets, 0), 40, 0, 6),
                      SVL(" \xe2\x97\xbc  hi")),
-              AnyRowHas(&a, &bullets, " \xe2\x97\xbb  Shell echo"),
+              AnyRowHas(&a, &bullets, " \xe2\x9c\x93  Shell echo"),
+              AnyRowHas(&a, &bullets, " \xe2\x97\xbb  Shell sleep"),
               !AnyRowHas(&a, &bullets, "\xe2\x97\x8f"),
               !AnyRowHas(&a, &bullets, "\xe2\x97\x8b"));
 
@@ -659,10 +695,102 @@ void TestLineModel() {
               LineModel_DisplayRevision(&bullets) != beforeRevision,
               TextEq(ExtractRow(&a, LineModel_At(&bullets, 0), 40, 0, 6),
                      SVL(" \xe2\x97\x8f  hi")),
-              AnyRowHas(&a, &bullets, " \xe2\x97\x8b  Shell echo"),
+              AnyRowHas(&a, &bullets, " \xe2\x9c\x93  Shell echo"),
+              AnyRowHas(&a, &bullets, " \xe2\x97\x8b  Shell sleep"),
               !AnyRowHas(&a, &bullets, "\xe2\x97\xbc"),
               !AnyRowHas(&a, &bullets, "\xe2\x97\xbb"));
     LineModel_Release(&bullets);
+  }
+
+  {
+    // Timed tools: a live spinner placeholder, whole seconds while running,
+    // tenths once finished, and nothing for sub-second calls.
+    LineModel timed;
+    LineModel_Init(&timed, &a, 60, 5000);
+    LineModel_AddTool(&timed, SVL("slow"), SVL("shell"), SVL("{\"command\":\"make\"}"), 1000);
+    LineModel_AddTool(&timed, SVL("fast"), SVL("read"), SVL("{\"path\":\"a.txt\"}"), 1000);
+    const SpanLine* slowRow = FindRow(&a, &timed, "Shell make");
+    CHECK_ALL(timed.LiveTools == 2, slowRow != nullptr);
+    if (slowRow != nullptr) {
+      CHECK_ALL(slowRow->Spans.Data[1].Live, slowRow->Spans.Data[1].St.Fg == 214,
+                !slowRow->HasRight);
+      DisplayRowLayout layout = LineModel_LayoutDisplayRow(slowRow, 60);
+      layout.LiveGlyph = SVL("\xe2\xa0\x8b");
+      DisplayRowIterator iterator = {};
+      DisplayRowRun run = {};
+      StrBuf painted = StrBuf_Make(&a, 64);
+      while (LineModel_NextDisplayRowRun(&layout, &iterator, &run))
+        StrBuf_Append(&painted, run.Text);
+      CHECK_ALL(StrView_StartsWith(StrBuf_View(&painted), SVL(" \xe2\xa0\x8b  Shell make")),
+                TextEq(ExtractRow(&a, slowRow, 60, 0, 14), SVL(" \xe2\x97\x8b  Shell make")));
+    }
+
+    // CHECK_ALL leaves argument order unspecified, so ordered ticks stay apart.
+    bool subSecondTick = LineModel_TickTools(&timed, 1900);
+    bool secondTick = LineModel_TickTools(&timed, 3500);
+    CHECK_ALL(!subSecondTick, secondTick);
+    slowRow = FindRow(&a, &timed, "Shell make");
+    CHECK_ALL(slowRow != nullptr, slowRow && slowRow->HasRight,
+              slowRow && TextEq(slowRow->Right.Text, SVL("2s")));
+    CHECK(!LineModel_TickTools(&timed, 3900));
+
+    CHECK(LineModel_FinishTool(&timed, SVL("slow"), SVL("ok"), SVL("ok"), false, 5240));
+    CHECK(LineModel_FinishTool(&timed, SVL("fast"), SVL("x"), SVL("x"), false, 1400));
+    slowRow = FindRow(&a, &timed, "Shell make");
+    const SpanLine* fastRow = FindRow(&a, &timed, "Read a.txt");
+    CHECK_ALL(timed.LiveTools == 0, slowRow != nullptr, fastRow != nullptr,
+              slowRow && !slowRow->Spans.Data[1].Live,
+              slowRow && TextEq(slowRow->Right.Text, SVL("4.2s")),
+              fastRow && !fastRow->HasRight);
+
+    // Agent end settles calls whose end event never arrived.
+    LineModel_AddTool(&timed, SVL("lost"), SVL("shell"), SVL("{\"command\":\"hang\"}"), 6000);
+    CHECK(timed.LiveTools == 1);
+    LineModel_SettleTools(&timed);
+    const SpanLine* lostRow = FindRow(&a, &timed, "Shell hang");
+    CHECK_ALL(timed.LiveTools == 0, lostRow != nullptr, lostRow && !lostRow->Spans.Data[1].Live);
+    CHECK(!LineModel_TickTools(&timed, 99000));
+    LineModel_Release(&timed);
+  }
+
+  {
+    // Running output stays hidden until the row is expanded, then shows only
+    // the newest lines.
+    LineModel tail;
+    LineModel_Init(&tail, &a, 60, 5000);
+    LineModel_AddTool(&tail, SVL("t"), SVL("shell"), SVL("{\"command\":\"build\"}"), 1);
+    u64 tailId = tail.Entries.Data[0].Id;
+    CHECK_ALL(LineModel_Count(&tail) == 1, !LineModel_At(&tail, 0)->HasHiddenContent);
+    CHECK(LineModel_UpdateTool(&tail, SVL("t"), SVL("l1\nl2\nl3\nl4\nl5\nl6\nl7\n")));
+    CHECK_ALL(LineModel_Count(&tail) == 1, LineModel_At(&tail, 0)->HasHiddenContent,
+              !AnyRowHas(&a, &tail, "l7"));
+    CHECK(LineModel_ToggleEntry(&tail, tailId));
+    CHECK_ALL(LineModel_Count(&tail) == 6, !AnyRowHas(&a, &tail, "l2"),
+              AnyRowHas(&a, &tail, "l3"), AnyRowHas(&a, &tail, "l7"));
+    CHECK(LineModel_UpdateTool(&tail, SVL("t"), SVL("l8\n")));
+    CHECK_ALL(LineModel_Count(&tail) == 2, AnyRowHas(&a, &tail, "l8"),
+              !AnyRowHas(&a, &tail, "l7"));
+    LineModel_Release(&tail);
+  }
+
+  {
+    // Expanded edit previews colour diff lines and drop the summary sentence.
+    LineModel diff;
+    LineModel_Init(&diff, &a, 60, 5000);
+    LineModel_AddTool(&diff, SVL("e"), SVL("edit"),
+                      SVL("{\"path\":\"h.cpp\",\"oldText\":\"a\",\"newText\":\"b\"}"));
+    CHECK(Finish(&diff, SVL("e"),
+                 SVL("Successfully replaced 1 block(s) in h.cpp.\n\n"
+                     " 1 ctx\n-2 gone\n+2 kept\n")));
+    CHECK(LineModel_ToggleEntry(&diff, diff.Entries.Data[0].Id));
+    const SpanLine* added = FindRow(&a, &diff, "+2 kept");
+    const SpanLine* removed = FindRow(&a, &diff, "-2 gone");
+    const SpanLine* context = FindRow(&a, &diff, " 1 ctx");
+    CHECK_ALL(LineModel_Count(&diff) == 4, !AnyRowHas(&a, &diff, "Successfully"),
+              added && TextEq(SpansWithFg(&a, added, 71, 1), SVL("+2 kept")),
+              removed && TextEq(SpansWithFg(&a, removed, 167, 1), SVL("-2 gone")),
+              context && SpansWithFg(&a, context, 244, 1).Length != 0);
+    LineModel_Release(&diff);
   }
 
   {

@@ -159,6 +159,69 @@ u32 CountGrepMatches(StrView text) {
   return count;
 }
 
+// The shell tool keeps only a tail of long output and names the full total
+// in a "[Showing lines A-B of C ...]" notice.
+u64 ShellNoticeTotal(StrView notice) {
+  if (!StrView_StartsWith(notice, SVL("[Showing lines "))) return 0;
+  for (u32 i = 0; i + 4 <= notice.Length; i++) {
+    if (memcmp(notice.Data + i, " of ", 4) != 0) continue;
+    u64 total = 0;
+    for (u32 j = i + 4; j < notice.Length && j < i + 4 + 19; j++) {
+      char c = notice.Data[j];
+      if (c < '0' || c > '9') break;
+      total = total * 10 + (u64)(c - '0');
+    }
+    return total;
+  }
+  return 0;
+}
+
+void AppendShellSuccess(StrBuf* out, StrView result) {
+  StrBuf_AppendCStr(out, "exit 0 \xc2\xb7 ");
+  StrView payload = PayloadBeforeNotice(result);
+  if (StrView_Eq(payload, SVL("(no output)"))) {
+    StrBuf_AppendCStr(out, "no output");
+    return;
+  }
+  u64 lines = CountLines(payload, false, false);
+  if (payload.Length + 2 < result.Length) {
+    u64 total = ShellNoticeTotal(
+        StrView{result.Data + payload.Length + 2, result.Length - payload.Length - 2});
+    if (total > lines) lines = total;
+  }
+  AppendCount(out, lines > 0xffffffffu ? 0xffffffffu : (u32)lines, "line", "lines");
+}
+
+// A failed shell call states its cause in the result's final paragraph.
+void AppendShellFailure(StrBuf* out, StrView result) {
+  StrView reason = result;
+  for (u32 i = result.Length; i >= 2; i--) {
+    if (result.Data[i - 2] != '\n' || result.Data[i - 1] != '\n') continue;
+    reason = StrView{result.Data + i, result.Length - i};
+    break;
+  }
+  StrView exited = SVL("Command exited with code ");
+  if (StrView_StartsWith(reason, exited)) {
+    u32 start = exited.Length;
+    u32 digits = start < reason.Length && reason.Data[start] == '-' ? start + 1 : start;
+    u32 end = digits;
+    while (end < reason.Length && end < digits + 20 && reason.Data[end] >= '0' &&
+           reason.Data[end] <= '9')
+      end++;
+    if (end > digits) {
+      StrBuf_AppendCStr(out, "exit ");
+      StrBuf_Append(out, StrView{reason.Data + start, end - start});
+      return;
+    }
+  }
+  if (StrView_StartsWith(reason, SVL("Command timed out")))
+    StrBuf_AppendCStr(out, "timed out");
+  else if (StrView_StartsWith(reason, SVL("Command cancelled")))
+    StrBuf_AppendCStr(out, "cancelled");
+  else
+    StrBuf_AppendCStr(out, "failed");
+}
+
 void InitUnknown(Arena* arena, Arena* scratch, ToolView* view, StrView name, StrView args) {
   view->Kind = ToolViewKind::Unknown;
   view->Marker = SVL(">");
@@ -294,12 +357,14 @@ void ToolView_Finish(ToolView* view, StrView result, bool isError) {
   StrBuf_Clear(&view->Outcome);
   view->OutcomeSplit = 0;
   if (isError) {
-    StrBuf_AppendCStr(&view->Outcome, "failed");
+    if (view->Kind == ToolViewKind::Shell) AppendShellFailure(&view->Outcome, result);
+    else StrBuf_AppendCStr(&view->Outcome, "failed");
     return;
   }
 
   switch (view->Kind) {
     case ToolViewKind::Shell:
+      AppendShellSuccess(&view->Outcome, result);
       break;
     case ToolViewKind::Read: {
       if (StrView_Contains(result, "Read image file [")) {
