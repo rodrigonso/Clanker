@@ -1,7 +1,16 @@
+#include <stdio.h>
 #include <string.h>
 
+#if defined(_WIN32)
+#include <direct.h>
+#else
+#include <unistd.h>
+#endif
+
+#include "app/model_cache.h"
 #include "app/provider_registry.h"
 #include "base/arena.h"
+#include "base/config_file.h"
 #include "check.h"
 #include "llm/responses.h"
 
@@ -215,6 +224,74 @@ static void TestCodexModelDiscovery() {
   ArenaRelease(&arena);
 }
 
+static void RemoveDir(const char* path) {
+#if defined(_WIN32)
+  _rmdir(path);
+#else
+  rmdir(path);
+#endif
+}
+
+static void TestModelCache() {
+  Arena arena = ArenaCreate();
+  const ProviderSpec* codex = ProviderRegistry_Find(SVL("openai-codex"));
+  StrView root = SVL("clanker_model_cache_test");
+  const char* cacheFile = "clanker_model_cache_test/models/openai-codex.json";
+  remove(cacheFile);
+
+  Model bare = ModelCache_CreateModel(&arena, root, codex, SVL("gpt-6.1-sol"));
+  CHECK_ALL(bare.ContextWindow == 0, bare.EffortMask == 0,
+            !ModelCache_Save(StrView{}, codex->Id, &bare, 1));
+
+  Model listed[2] = {codex->CreateModel(&arena, codex, SVL("gpt-6.1-sol")),
+                     codex->CreateModel(&arena, codex, SVL("gpt-tiered"))};
+  listed[0].Name = SVL("GPT-6.1 Sol");
+  listed[0].ContextWindow = 400000;
+  listed[0].Reasoning = true;
+  listed[0].EffortMask = MODEL_EFFORT_STANDARD_MASK;
+  listed[0].DefaultEffort = ModelEffort::Medium;
+  listed[1].ContextWindow = 200000;
+  listed[1].ContextWindowOptions[0] = 200000;
+  listed[1].ContextWindowOptions[1] = 1000000;
+  listed[1].ContextWindowOptionCount = 2;
+  CHECK(ModelCache_Save(root, codex->Id, listed, 2));
+
+  // A model created without a catalog fetch -- at startup, say -- carries what
+  // the last listing said; identity and endpoint still come from the registry.
+  Model sol = ModelCache_CreateModel(&arena, root, codex, SVL("gpt-6.1-sol"));
+  CHECK_ALL(StrView_EqCStr(sol.Name, "GPT-6.1 Sol"), sol.ContextWindow == 400000,
+            sol.Reasoning, sol.EffortMask == MODEL_EFFORT_STANDARD_MASK,
+            sol.DefaultEffort == ModelEffort::Medium,
+            StrView_EqCStr(sol.Provider, "openai-codex"),
+            StrView_EqCStr(sol.BaseUrl, "https://chatgpt.com/backend-api"));
+  Model tiered = ModelCache_CreateModel(&arena, root, codex, SVL("gpt-tiered"));
+  CHECK_ALL(StrView_EqCStr(tiered.Name, "gpt-tiered"),
+            tiered.ContextWindow == 200000, tiered.ContextWindowOptionCount == 2,
+            tiered.ContextWindowOptions[1] == 1000000, tiered.EffortMask == 0);
+  Model unlisted = ModelCache_CreateModel(&arena, root, codex, SVL("gpt-unlisted"));
+  CHECK(unlisted.ContextWindow == 0);
+
+  // Effort names from a newer build are skipped; inconsistent entries are not
+  // applied at all.
+  CHECK(ConfigFile_WriteAtomic(
+      &arena, SV(cacheFile),
+      SVL("{\"models\":["
+          "{\"id\":\"future\",\"contextWindow\":1000,\"efforts\":[\"high\",\"galactic\"]},"
+          "{\"id\":\"broken\",\"contextWindow\":1000,\"efforts\":[\"low\"],"
+          "\"defaultEffort\":\"high\"}]}")));
+  Model future = ModelCache_CreateModel(&arena, root, codex, SVL("future"));
+  CHECK_ALL(future.ContextWindow == 1000,
+            future.EffortMask == ModelEffort_Bit(ModelEffort::High));
+  Model broken = ModelCache_CreateModel(&arena, root, codex, SVL("broken"));
+  CHECK_ALL(broken.ContextWindow == 0, broken.EffortMask == 0,
+            broken.DefaultEffort == ModelEffort::None);
+
+  remove(cacheFile);
+  RemoveDir("clanker_model_cache_test/models");
+  RemoveDir("clanker_model_cache_test");
+  ArenaRelease(&arena);
+}
+
 void TestProviderRegistry() {
   CHECK_ALL(ProviderRegistry_Count() == 2,
             ProviderRegistry_At(ProviderRegistry_Count()) == nullptr,
@@ -296,4 +373,5 @@ void TestProviderRegistry() {
   TestModelDiscovery();
   TestCodexModelDiscovery();
   TestModelDiscoveryFailures();
+  TestModelCache();
 }

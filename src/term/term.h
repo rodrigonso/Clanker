@@ -26,6 +26,10 @@ struct Term {
 // True when both stdin and stdout are a real console/tty.
 bool Term_IsInteractive();
 
+// The OS accent colour (Windows Personalization > Colors, macOS Appearance) as
+// 24-bit RGB. False when the platform has none or it cannot be read.
+bool Term_SystemAccent(u8* r, u8* g, u8* b);
+
 // Enter raw mode + alternate screen + bracketed paste. Returns false (and does
 // nothing) if not interactive. Restoration is also armed via atexit.
 bool Term_Enter(Term* t);

@@ -1,5 +1,43 @@
 #include "term/cell.h"
 
+namespace {
+
+const u8 CUBE_LEVELS[6] = {0, 95, 135, 175, 215, 255};
+
+u32 AbsDiff(u32 a, u32 b) { return a > b ? a - b : b - a; }
+
+u32 NearestCubeLevel(u8 v) {
+  u32 best = 0;
+  for (u32 i = 1; i < 6; i++)
+    if (AbsDiff(v, CUBE_LEVELS[i]) < AbsDiff(v, CUBE_LEVELS[best])) best = i;
+  return best;
+}
+
+u32 Distance2(u8 r, u8 g, u8 b, u32 cr, u32 cg, u32 cb) {
+  i32 dr = (i32)r - (i32)cr;
+  i32 dg = (i32)g - (i32)cg;
+  i32 db = (i32)b - (i32)cb;
+  return (u32)(dr * dr + dg * dg + db * db);
+}
+
+}  // namespace
+
+u8 Color_NearestXterm256(u8 r, u8 g, u8 b) {
+  u32 ri = NearestCubeLevel(r);
+  u32 gi = NearestCubeLevel(g);
+  u32 bi = NearestCubeLevel(b);
+  u32 cubeDistance =
+      Distance2(r, g, b, CUBE_LEVELS[ri], CUBE_LEVELS[gi], CUBE_LEVELS[bi]);
+
+  // Grey ramp 232..255 runs from 8 to 238 in steps of 10.
+  u32 average = ((u32)r + g + b) / 3;
+  u32 step = average < 8 ? 0 : (average - 8 + 5) / 10;
+  if (step > 23) step = 23;
+  u32 grey = 8 + 10 * step;
+  if (Distance2(r, g, b, grey, grey, grey) < cubeDistance) return (u8)(232 + step);
+  return (u8)(16 + 36 * ri + 6 * gi + bi);
+}
+
 u32 CharWidth(u32 cp) {
   if (cp == 0) return 1;  // blank cell renders as a space
 

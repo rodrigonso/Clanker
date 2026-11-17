@@ -5,6 +5,7 @@
 
 #include "app/auth_flow.h"
 #include "app/event_pump.h"
+#include "app/model_cache.h"
 #include "app/permission_reviewer.h"
 #include "app/plain_select.h"
 #include "base/sysinfo.h"
@@ -251,8 +252,8 @@ SessionResult RuntimeSwitchToLog(InteractiveRuntime* rt,
             SessionStatus::InvalidState,
             SVL("the target session uses an unavailable provider"));
       }
-      targetModel = targetSpec->CreateModel(rt->Mem, targetSpec,
-                                            targetInfo->CurrentModel);
+      targetModel = ModelCache_CreateModel(rt->Mem, rt->AgentDirectory,
+                                           targetSpec, targetInfo->CurrentModel);
       targetProfile = Model_ResolveRequestPreference(
           &targetModel, rt->PreferredProfile);
       config.ModelInfo = targetModel;

@@ -1028,7 +1028,7 @@ clearing a key invalidates cached permission judgments without clearing grants.
 Masked key fields are never added to composer history, transcript/session
 messages, clipboard output, or command notices, and temporary input buffers are
 wiped after use. Keys must not be supplied inline in commands. Authentication
-and permission command arguments are omitted from history and queued-command
+and permission command arguments are omitted from history and command
 notices. Plain terminal entry disables echo and fails rather than accepting an
 unprotected secret.
 Oversized interactive lines are rejected and drained, never split into another
@@ -1238,6 +1238,10 @@ to clear an idle composer or interrupt an active turn · hover or **left click**
 a turn's first row to highlight or collapse/expand it · **Ctrl+O** expands all
 tools when any is collapsed, otherwise collapses all · **Ctrl+D** quits ·
 **Ctrl+L** repaints.
+A `Thinking…` row with elapsed seconds marks model waits in the transcript, and
+each run ends with a footer rule showing its duration, tool count, and token
+totals. Notices render as italic asides behind a dim grey dot. The user
+marker, spinners, and blockquote bars take the OS accent colour.
 Honors `NO_COLOR`. Bracketed paste inserts literal multi-line text and replaces
 a composer selection.
 
@@ -1303,8 +1307,10 @@ the complete displayed option labels without showing a query field. Use Up/Down
 to select, Enter to continue or run the command, Backspace to edit the hidden
 query (or go back when it is empty), or Escape to dismiss the current choice.
 
-Commands entered during a TUI turn run afterward; ordinary text still steers the
-active turn.
+Commands entered during a TUI turn are refused and stay in the composer; press
+Escape twice to interrupt, then send again. `/debug`, `/exit`, and `/clear` act
+immediately. Ordinary text steers the active turn and appears as a
+`↳ steer` turn.
 
 The selected provider/model, explicit effort/context preferences,
 `defaultProjectTrust` policy, permission mode and reviewer model, and the
@@ -1379,6 +1385,12 @@ those the backend lists as visible, in its order. Context windows, reasoning
 support, and reasoning-effort tiers come from that response. Clanker has no
 compiled model list and never infers capabilities from model IDs. If discovery
 is unavailable, manual model-ID entry remains available.
+
+Each successful listing is cached in `~/.clanker/models/<provider>.json`.
+Startup, resumed and switched sessions, and dreams read it, so the
+saved effort, the context bar, and auto-compaction apply without a network
+round trip. A model the cache has never seen starts without that metadata until
+`/model` lists it.
 
 The ChatGPT dialect differs from OpenRouter's only where the backend requires
 it: requests carry the `chatgpt-account-id` from the sign-in, always include

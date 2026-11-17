@@ -454,18 +454,30 @@ ScrollbarGeometry CalcScrollbarGeometry(u32 count, u16 paneH, u32 top) {
   return out;
 }
 
+void ResetRunStats(Tui* t, u64 startMs) {
+  t->RunStartMs = startMs;
+  t->RunResponses = 0;
+  t->RunStats = {};
+}
+
 void ApplyDisplayEvent(Tui* t, const TuiDisplayEvent& ev) {
   switch (ev.Kind) {
     case TuiDisplayEventKind::MessageEnd:
       if (t->Model.HasAssistant) LineModel_EndAssistant(&t->Model);
       t->Use = ev.Use;
+      t->RunResponses++;
+      t->RunStats.InputTokens += ev.Use.Input;
+      t->RunStats.OutputTokens += ev.Use.Output;
       if (ev.Stop == StopReason::Error)
         LineModel_AddNotice(&t->Model, EntryKind::Error, DisplayPayload(ev));
       else if (ev.Stop == StopReason::Aborted)
         LineModel_AddNotice(&t->Model, EntryKind::Info, SVL("Interrupted by user."));
+      // A steer can continue the run after a response that called no tools.
+      if (t->AgentRunning && t->State == TuiState::Streaming) t->State = TuiState::Thinking;
       break;
     case TuiDisplayEventKind::ToolStart:
       LineModel_AddTool(&t->Model, ev.ToolCallId, ev.ToolName, ev.ToolArgsJson, ev.Timestamp);
+      t->RunStats.Tools++;
       t->State = TuiState::Tool;
       SetTransientText(&t->StateTool, ev.ToolName);
       break;
@@ -486,12 +498,14 @@ void ApplyDisplayEvent(Tui* t, const TuiDisplayEvent& ev) {
           LineModel_AddNotice(&t->Model, EntryKind::Error,
                               SVL("tool result did not match a pending call"));
       }
+      // Parallel calls finish one at a time; the turn is still in its tools.
+      if (t->Model.LiveTools) break;
       t->State = TuiState::Thinking;
       SetTransientText(&t->StateTool, {});
       break;
     case TuiDisplayEventKind::User:
       if (t->Model.HasAssistant) LineModel_EndAssistant(&t->Model);
-      LineModel_AddUser(&t->Model, DisplayPayload(ev), ev.Timestamp);
+      LineModel_AddUser(&t->Model, DisplayPayload(ev), ev.Timestamp, ev.Steer);
       break;
     case TuiDisplayEventKind::Notice:
       if (t->Model.HasAssistant) LineModel_EndAssistant(&t->Model);
@@ -503,9 +517,22 @@ void ApplyDisplayEvent(Tui* t, const TuiDisplayEvent& ev) {
       break;
     case TuiDisplayEventKind::AgentStart:
     case TuiDisplayEventKind::AgentEnd:
-      // Overflowing watchers may drop transient tool ends; nothing still runs
-      // once the agent has stopped.
-      if (ev.Kind == TuiDisplayEventKind::AgentEnd) LineModel_SettleTools(&t->Model);
+      if (ev.Kind == TuiDisplayEventKind::AgentStart) {
+        ResetRunStats(t, ev.Timestamp);
+      } else {
+        // Overflowing watchers may drop transient tool ends; nothing still runs
+        // once the agent has stopped.
+        LineModel_SettleTools(&t->Model);
+        if (t->RunResponses) {
+          if (t->Model.HasAssistant) LineModel_EndAssistant(&t->Model);
+          TurnStats stats = t->RunStats;
+          stats.DurationMs = t->RunStartMs && ev.Timestamp > t->RunStartMs
+                                 ? ev.Timestamp - t->RunStartMs
+                                 : 0;
+          LineModel_AddFooter(&t->Model, stats);
+        }
+        ResetRunStats(t, 0);
+      }
       t->State = t->AgentRunning ? TuiState::Thinking : TuiState::Idle;
       SetTransientText(&t->StateTool, {});
       break;
@@ -812,6 +839,30 @@ UiLayoutStyle Positioned(u16 x, u16 y, u16 width, u16 height) {
   return layout;
 }
 
+// The gaps between a tool finishing and the next reply are usually brief, so
+// the row waits this long before it appears rather than flickering.
+constexpr u64 kThinkingDelayMs = 150;
+
+// While the agent works without visible output, the transcript says so.
+void UpdateThinkingRow(Tui* t, u64 nowMs) {
+  bool due = t->AgentRunning && t->State == TuiState::Thinking && !t->Model.HasAssistant &&
+             !t->Model.LiveTools && !t->OperationActive &&
+             t->ModalResult != TuiModalResult::Pending && !Tui_HasPendingDisplay(t);
+  ViewportAnchor anchor = CaptureViewportAnchor(t);
+  bool changed = false;
+  if (!due) {
+    t->ThinkingSinceMs = 0;
+    changed = LineModel_EndThinking(&t->Model);
+  } else {
+    if (!t->ThinkingSinceMs || nowMs < t->ThinkingSinceMs) t->ThinkingSinceMs = nowMs;
+    if (nowMs - t->ThinkingSinceMs >= kThinkingDelayMs)
+      changed = LineModel_SetThinking(&t->Model, t->ThinkingSinceMs, nowMs);
+  }
+  if (!changed) return;
+  LineModel_Layout(&t->Model);
+  RestoreViewportAnchor(t, anchor);
+}
+
 void ComposeAtSize(Tui* t, u16 cols, u16 rows, u64 nowMs) {
   bool sizeChanged = cols != t->Scr.Cols || rows != t->Scr.Rows;
   if (sizeChanged) {
@@ -856,6 +907,7 @@ void ComposeAtSize(Tui* t, u16 cols, u16 rows, u64 nowMs) {
   }
 
   PumpDisplay(t, nowMs);
+  UpdateThinkingRow(t, nowMs);
   if (t->Model.LiveTools) {
     ViewportAnchor anchor = CaptureViewportAnchor(t);
     if (LineModel_TickTools(&t->Model, nowMs)) {
@@ -1043,11 +1095,12 @@ void Compose(Tui* t) {
 }
 
 // ---- key handling (lock held) ----
-void QueueUserDisplayLocked(Tui* t, StrView line) {
+TuiDisplayEvent* QueueUserDisplayLocked(Tui* t, StrView line) {
   TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::User);
   SetDisplayPayload(display, line);
   display->Timestamp = NowMillis();
   t->Follow = true;
+  return display;
 }
 
 // Splits `/name arguments` the way AppCommand_Parse does, so the inline
@@ -1123,8 +1176,53 @@ static void RequestCancelLocked(Tui* t) {
     Atomic_StoreI32(&t->AbortFlag, 1);
 }
 
+static bool UserSubmissionPending(const Tui* t) {
+  for (u32 i = 0; i < t->QCount; i++) {
+    TuiSubmissionKind kind = t->Queue[(t->QHead + i) % 64].Kind;
+    if (kind == TuiSubmissionKind::Prompt || kind == TuiSubmissionKind::Command) return true;
+  }
+  return false;
+}
+
+// Nothing waits behind a running turn or a busy main loop: what cannot act now
+// is refused before the composer is consumed, so it is still there to resend.
+static bool RefuseSubmission(Tui* t, StrView input) {
+  if (!input.Length) return false;
+  StrView refusal = {};
+  StrView name = {};
+  if (IsSlashCommand(input)) {
+    StrView arguments = {};
+    name = CommandToken(input, &arguments);
+    TuiCommandInline action = InlineCommandFor(t, input).Action;
+    if (action == TuiCommandInline::Debug || action == TuiCommandInline::Stop) return false;
+    if (t->AgentRunning && action != TuiCommandInline::CancelTurn)
+      refusal = SVL(" can't run during a turn. Press Esc twice to interrupt, then send it again.");
+  } else if (t->AgentRunning) {
+    if (t->Agent.Steer) return false;
+    refusal = SVL("Can't send during a turn. Press Esc twice to interrupt, then send it again.");
+  }
+  if (!refusal.Length &&
+      ((t->OperationActive && !t->OperationYields) || UserSubmissionPending(t))) {
+    name = {};
+    refusal = SVL("Clanker is busy; send it again when it finishes.");
+  }
+  if (!refusal.Length) return false;
+  // Only the command name is echoed: arguments may be private.
+  TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::Notice);
+  display->Payload = StrBuf_Make(display->Mem, name.Length + refusal.Length + 2);
+  if (name.Length) {
+    StrBuf_AppendChar(&display->Payload, '/');
+    StrBuf_Append(&display->Payload, name);
+  }
+  StrBuf_Append(&display->Payload, refusal);
+  t->Follow = true;
+  Wake(t);
+  return true;
+}
+
 void DoSubmit(Tui* t) {
   StrView input = LineEdit_Text(&t->Edit);
+  if (RefuseSubmission(t, input)) return;
   StrView arguments = {};
   StrView name = CommandToken(input, &arguments);
   const TuiCommandSpec* command = name.Length ? FindCommand(t, name) : nullptr;
@@ -1174,17 +1272,16 @@ void DoSubmit(Tui* t) {
     if (cancelling) RequestCancelLocked(t);
     if (!QPush(t, TuiSubmission{TuiSubmissionKind::Command, line})) {
       TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::Error);
-      SetDisplayPayload(display, SVL("Submission queue is full; command was not queued."));
+      SetDisplayPayload(display, SVL("Submission queue is full; command was not sent."));
       t->Follow = true;
       Wake(t);
       return;
     }
-    if (t->AgentRunning) {
-      StrView prefix = cancelling ? SVL("Cancelling the current turn, then: ")
-                                  : SVL("Queued command: ");
+    if (cancelling) {
+      StrView prefix = SVL("Cancelling the current turn, then: ");
       TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::Notice);
       display->Payload =
-          StrBuf_Make(&t->SessionMem, publicLine.Length + prefix.Length + 1);
+          StrBuf_Make(display->Mem, publicLine.Length + prefix.Length + 1);
       StrBuf_Append(&display->Payload, prefix);
       StrBuf_Append(&display->Payload, publicLine);
       t->Follow = true;
@@ -1195,17 +1292,21 @@ void DoSubmit(Tui* t) {
   }
 
   if (t->AgentRunning && t->Agent.Steer) {
-    QueueUserDisplayLocked(t, line);
+    // The transcript only shows a steer the agent accepted.
     StrView error = {};
-    if (!t->Agent.Steer(t->Agent.User, line, &error)) {
+    if (t->Agent.Steer(t->Agent.User, line, &error)) {
+      QueueUserDisplayLocked(t, line)->Steer = true;
+    } else {
       TuiDisplayEvent* display =
           QueueDisplayEvent(t, TuiDisplayEventKind::Error);
       SetDisplayPayload(display, error);
+      t->Follow = true;
+      Wake(t);
     }
   } else {
     if (!QPush(t, TuiSubmission{TuiSubmissionKind::Prompt, line})) {
       TuiDisplayEvent* display = QueueDisplayEvent(t, TuiDisplayEventKind::Error);
-      SetDisplayPayload(display, SVL("Submission queue is full; prompt was not queued."));
+      SetDisplayPayload(display, SVL("Submission queue is full; prompt was not sent."));
       t->Follow = true;
       Wake(t);
       return;
@@ -1906,6 +2007,7 @@ void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts) {
   memset(t, 0, sizeof(*t));
   t->Mem = mem;
   t->Color = opts.Color;
+  t->Accent = opts.Accent ? opts.Accent : DEFAULT_ACCENT_FG;
   t->ModelName = StrView_Dup(mem, opts.ModelName);
   t->Profile = opts.Profile;
   SetPermissionMode(t, opts.Permission, opts.YoloAcknowledged);
@@ -1924,7 +2026,7 @@ void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts) {
   t->ToolUpdateMem = ArenaCreate();
   t->ToolUpdateUp = true;
   t->RevealMem = ArenaCreate();
-  LineModel_Init(&t->Model, &t->SessionMem, 80, 5000, opts.Color, opts.Rounded);
+  LineModel_Init(&t->Model, &t->SessionMem, 80, 5000, opts.Color, opts.Rounded, t->Accent);
   LineEdit_Init(&t->Edit, &t->SessionMem);
   t->InputUi.Edit = &t->Edit;
   ResetModalInput(t);
@@ -1967,7 +2069,7 @@ bool Tui_ClearSession(Tui* t) {
   LineModel_Release(&t->Model);
   ArenaRelease(&t->SessionMem);
   t->SessionMem = nextSession;
-  LineModel_Init(&t->Model, &t->SessionMem, width, cap, t->Color, rounded);
+  LineModel_Init(&t->Model, &t->SessionMem, width, cap, t->Color, rounded, t->Accent);
   LineEdit_Init(&t->Edit, &t->SessionMem);
   t->InputUi = UiTextInputState{&t->Edit, 0, false};
   ResetModalInput(t);
@@ -1992,12 +2094,15 @@ bool Tui_ClearSession(Tui* t) {
   t->ContextTokens = 0;
   t->Spinner = 0;
   t->SpinnerStartMs = 0;
-  t->QueuedCount = 0;
   t->CommandPaletteSelected = 0;
   t->CommandPaletteFirst = 0;
   t->CommandPaletteDismissed = false;
   t->OperationActive = false;
+  t->OperationYields = false;
   Atomic_StoreI32(&t->OperationAbortFlag, 0);
+  ResetRunStats(t, 0);
+  t->ThinkingSinceMs = 0;
+  t->Hydrated = {};
   t->ModalKind = TuiModalKind::None;
   t->ModalResult = TuiModalResult::None;
   t->ModalSelected = 0;
@@ -2187,10 +2292,11 @@ void Tui_SetPermissionMode(Tui* t, TuiPermissionMode mode,
   Mutex_Unlock(&t->Lock);
 }
 
-void Tui_BeginOperation(Tui* t, StrView label) {
+void Tui_BeginOperation(Tui* t, StrView label, bool yieldsToInput) {
   Mutex_Lock(&t->Lock);
   if (t->Stop || t->Quit) {
     t->OperationActive = false;
+    t->OperationYields = false;
     SetTransientText(&t->OperationLabel, {});
     SetTransientText(&t->OperationStatus, {});
     Atomic_StoreI32(&t->OperationAbortFlag, 1);
@@ -2198,6 +2304,7 @@ void Tui_BeginOperation(Tui* t, StrView label) {
     return;
   }
   t->OperationActive = true;
+  t->OperationYields = yieldsToInput;
   SetTransientText(&t->OperationLabel, label);
   SetTransientText(&t->OperationStatus, {});
   Atomic_StoreI32(&t->OperationAbortFlag, 0);
@@ -2218,6 +2325,7 @@ bool Tui_EndOperation(Tui* t) {
   Mutex_Lock(&t->Lock);
   bool cancelled = Atomic_LoadI32(&t->OperationAbortFlag) != 0 || t->Stop || t->Quit;
   t->OperationActive = false;
+  t->OperationYields = false;
   SetTransientText(&t->OperationLabel, {});
   SetTransientText(&t->OperationStatus, {});
   Wake(t);
@@ -2265,10 +2373,13 @@ void Tui_TurnStarted(Tui* t) {
   SetTransientText(&t->RetryStatus, {});
   t->LastEscapeMs = 0;
   t->EscapeArmed = false;
-  if (Tui_HasPendingDisplay(t))
-    QueueDisplayEvent(t, TuiDisplayEventKind::AgentStart);
-  else
+  u64 now = NowMillis();
+  if (Tui_HasPendingDisplay(t)) {
+    QueueDisplayEvent(t, TuiDisplayEventKind::AgentStart)->Timestamp = now;
+  } else {
     t->State = TuiState::Thinking;
+    ResetRunStats(t, now);
+  }
   t->Spinner = 0;
   t->SpinnerStartMs = 0;
   TuiPerf_TurnStarted(&t->Perf, MonotonicMicros());
@@ -2350,7 +2461,7 @@ void Tui_TurnEnded(Tui* t) {
   SetTransientText(&t->RetryStatus, {});
   t->LastEscapeMs = 0;
   t->EscapeArmed = false;
-  QueueDisplayEvent(t, TuiDisplayEventKind::AgentEnd);
+  QueueDisplayEvent(t, TuiDisplayEventKind::AgentEnd)->Timestamp = NowMillis();
   Wake(t);
   Mutex_Unlock(&t->Lock);
 }
@@ -2395,13 +2506,6 @@ void Tui_PermissionReviewEnded(Tui* t) {
   SetTransientText(&t->StateTool, {});
   if (t->State == TuiState::PermissionReview)
     t->State = t->AgentRunning ? TuiState::Thinking : TuiState::Idle;
-  Wake(t);
-  Mutex_Unlock(&t->Lock);
-}
-
-void Tui_SetQueuedCount(Tui* t, u32 count) {
-  Mutex_Lock(&t->Lock);
-  t->QueuedCount = count;
   Wake(t);
   Mutex_Unlock(&t->Lock);
 }

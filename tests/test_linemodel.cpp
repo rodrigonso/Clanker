@@ -499,14 +499,113 @@ void TestLineModel() {
   {
     LineModel simpleTurns;
     LineModel_Init(&simpleTurns, &a, 12, 5000);
-    LineModel_AddNotice(&simpleTurns, EntryKind::Info, SVL("info message wraps more"));
-    CHECK_ALL(RowStartsWith(&a, LineModel_At(&simpleTurns, 0), " \xe2\x97\x8f  "),
-              RowStartsWith(&a, LineModel_At(&simpleTurns, 1), "    "));
+    LineModel_AddNotice(&simpleTurns, EntryKind::Info, SVL("info message wraps\nnext"));
+    const SpanLine* nextLine = FindRow(&a, &simpleTurns, "next");
+    CHECK(nextLine != nullptr);
+    CHECK_ALL(RowStartsWith(&a, LineModel_At(&simpleTurns, 0), " \xe2\x97\x8f  info"),
+              RowStartsWith(&a, LineModel_At(&simpleTurns, 1), "    message"),
+              RowStartsWith(&a, nextLine, "    next"));
     LineModel_AddNotice(&simpleTurns, EntryKind::Error, SVL("error message wraps"));
     const SpanLine* error = FindRow(&a, &simpleTurns, "error");
     CHECK(error != nullptr);
     CHECK(RowStartsWith(&a, error, "!  "));
     LineModel_Release(&simpleTurns);
+  }
+
+  // The accent colours the user marker, the live markers and blockquote bars.
+  {
+    LineModel accented;
+    LineModel_Init(&accented, &a, 40, 5000, true, true, 33);
+    LineModel_AddUser(&accented, SVL("go"), 0);
+    const SpanLine* row = FindRow(&a, &accented, "go");
+    CHECK(row != nullptr && row->Spans.Data[1].St.Fg == 33);
+    LineModel_SetThinking(&accented, 1000, 1200);
+    row = FindRow(&a, &accented, "Thinking");
+    CHECK(row != nullptr && row->Spans.Data[1].Live && row->Spans.Data[1].St.Fg == 33);
+    LineModel_AddTool(&accented, SVL("t1"), SVL("read"), SVL("{\"path\":\"a.md\"}"), 1000);
+    row = FindRow(&a, &accented, "a.md");
+    CHECK(row != nullptr && row->Spans.Data[1].St.Fg == 33);
+    CHECK(Finish(&accented, SVL("t1"), SVL("ok")));
+    row = FindRow(&a, &accented, "a.md");
+    CHECK(row != nullptr && row->Spans.Data[1].St.Fg != 33);
+    LineModel_BeginAssistant(&accented);
+    LineModel_AppendAssistant(&accented, SVL("> quoted"));
+    LineModel_EndAssistant(&accented);
+    row = FindRow(&a, &accented, "quoted");
+    CHECK(row != nullptr && TextEq(SpansWithFg(&a, row, 33), SVL("\xe2\x94\x82 ")));
+    LineModel_Release(&accented);
+  }
+
+  // The thinking row is transient: it redraws only when its seconds change,
+  // and whatever the run shows next takes its place.
+  {
+    LineModel live;
+    LineModel_Init(&live, &a, 40, 5000);
+    LineModel_AddUser(&live, SVL("go"), 0);
+    u32 rows = LineModel_Count(&live);
+    CHECK(LineModel_SetThinking(&live, 1000, 1400));
+    const SpanLine* last = LineModel_At(&live, LineModel_Count(&live) - 1);
+    CHECK_ALL(live.Entries.Count == 2, live.Entries.Data[1].Kind == EntryKind::Thinking,
+              RowHas(&a, last, "Thinking\xe2\x80\xa6"), !last->HasRight,
+              !last->IsEntryStart);
+    CHECK(!LineModel_SetThinking(&live, 1000, 1900));
+    CHECK(LineModel_SetThinking(&live, 1000, 3100));
+    last = LineModel_At(&live, LineModel_Count(&live) - 1);
+    CHECK_ALL(live.Entries.Count == 2, live.Entries.Data[1].Thinking.ElapsedSeconds == 2,
+              last->HasRight, TextEq(last->Right.Text, SVL("2s")));
+    CHECK(LineModel_EndThinking(&live));
+    CHECK_ALL(live.Entries.Count == 1, LineModel_Count(&live) == rows,
+              !AnyRowHas(&a, &live, "Thinking"), !LineModel_EndThinking(&live));
+
+    LineModel_SetThinking(&live, 1000, 1200);
+    LineModel_AddTool(&live, SVL("t1"), SVL("read"), SVL("{\"path\":\"a.md\"}"));
+    CHECK_ALL(live.Entries.Count == 2, live.Entries.Data[1].Kind == EntryKind::Tool,
+              !AnyRowHas(&a, &live, "Thinking"));
+    LineModel_SetThinking(&live, 1000, 1200);
+    LineModel_BeginAssistant(&live);
+    LineModel_AppendAssistant(&live, SVL("answer"));
+    LineModel_EndAssistant(&live);
+    CHECK_ALL(live.Entries.Count == 3, live.Entries.Data[2].Kind == EntryKind::Assistant,
+              !AnyRowHas(&a, &live, "Thinking"));
+
+    // A steer is a user turn labelled as joining the running one.
+    LineModel_SetThinking(&live, 1000, 1200);
+    LineModel_AddUser(&live, SVL("also b"), 0, true);
+    CHECK_ALL(live.Entries.Count == 4, live.Entries.Data[3].Kind == EntryKind::User,
+              StrView_StartsWith(live.Entries.Data[3].Text.Timestamp,
+                                 SVL("\xe2\x86\xb3 steer \xc2\xb7 ")),
+              live.Entries.Data[3].Text.Timestamp.Length == 18);
+    LineModel_Release(&live);
+  }
+
+  // A run closes with a rule carrying its totals, one cell short of the edge.
+  {
+    LineModel footer;
+    LineModel_Init(&footer, &a, 60, 5000);
+    TurnStats stats = {};
+    stats.DurationMs = 3400;
+    stats.Tools = 2;
+    stats.InputTokens = 1234;
+    stats.OutputTokens = 842;
+    LineModel_AddFooter(&footer, stats);
+    const SpanLine* rule = LineModel_At(&footer, 0);
+    CHECK_ALL(LineModel_Count(&footer) == 1, !rule->IsEntryStart, RowWidth(rule) == 59,
+              RowStartsWith(&a, rule,
+                            " \xe2\x94\x80\xe2\x94\x80 3.4s \xc2\xb7 2 tools \xc2\xb7 "
+                            "\xe2\x86\x91" "1.2k \xe2\x86\x93" "842 \xe2\x94\x80"));
+    stats = {};
+    stats.DurationMs = 75000;
+    stats.Tools = 1;
+    stats.InputTokens = 12345;
+    stats.OutputTokens = 1250000;
+    LineModel_AddFooter(&footer, stats);
+    stats = {};
+    stats.DurationMs = 500;
+    LineModel_AddFooter(&footer, stats);
+    CHECK_ALL(AnyRowHas(&a, &footer,
+                        "1m15s \xc2\xb7 1 tool \xc2\xb7 \xe2\x86\x91" "12k \xe2\x86\x93" "1.3M"),
+              AnyRowHas(&a, &footer, "\xe2\x94\x80\xe2\x94\x80 0.5s \xe2\x94\x80"));
+    LineModel_Release(&footer);
   }
 
   {

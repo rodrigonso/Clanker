@@ -7,11 +7,48 @@
 #include <termios.h>
 #include <unistd.h>
 
+#if defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#endif
+
 static_assert(sizeof(struct termios) <= sizeof(((Term*)nullptr)->SavedTermios),
               "termios storage too small");
 static_assert(alignof(struct termios) <= 8, "termios storage misaligned");
 
 bool Term_IsInteractive() { return isatty(STDIN_FILENO) && isatty(STDOUT_FILENO); }
+
+bool Term_SystemAccent(u8* r, u8* g, u8* b) {
+#if defined(__APPLE__)
+  // macOS stores a named accent (-1 graphite, 0 red ... 6 pink), not a colour;
+  // these are the dark-appearance system colours for each. An absent key is
+  // Multicolor, whose accent is blue.
+  static const u8 ACCENTS[8][3] = {
+      {0x98, 0x98, 0x9d}, {0xff, 0x45, 0x3a}, {0xff, 0x9f, 0x0a}, {0xff, 0xd6, 0x0a},
+      {0x32, 0xd7, 0x4b}, {0x0a, 0x84, 0xff}, {0xbf, 0x5a, 0xf2}, {0xff, 0x37, 0x5f},
+  };
+  long accent = 4;
+  CFPropertyListRef value =
+      CFPreferencesCopyAppValue(CFSTR("AppleAccentColor"), kCFPreferencesAnyApplication);
+  if (value) {
+    if (CFGetTypeID(value) == CFNumberGetTypeID())
+      CFNumberGetValue((CFNumberRef)value, kCFNumberLongType, &accent);
+    else if (CFGetTypeID(value) == CFStringGetTypeID())
+      accent = CFStringGetIntValue((CFStringRef)value);
+    CFRelease(value);
+  }
+  if (accent < -1 || accent > 6) accent = 4;
+  const u8* rgb = ACCENTS[accent + 1];
+  *r = rgb[0];
+  *g = rgb[1];
+  *b = rgb[2];
+  return true;
+#else
+  (void)r;
+  (void)g;
+  (void)b;
+  return false;
+#endif
+}
 
 bool Term_Enter(Term* t) {
   memset(t, 0, sizeof(*t));

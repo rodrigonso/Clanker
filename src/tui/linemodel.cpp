@@ -14,10 +14,10 @@ const u32 NO_ENTRY = 0xffffffffu;
 const u32 ICON_FIELD_CELLS = 2;
 const u32 MARKER_LEFT_PADDING = 1;
 
-// Bullet color scheme: orange for user messages and white for assistant
-// responses. Tool calls show an outlined marker while pending (animated in
-// orange while running here), then a green check or a red cross.
-const u8 ACCENT_FG = 214;
+// Bullet color scheme: the system accent for user messages and white for
+// assistant responses. Tool calls show an outlined marker while pending
+// (animated in the accent while running here), then a green check or a red
+// cross.
 const u8 ASSISTANT_FG = 255;
 // Diff stats and diff lines are the one non-error place red appears: it is
 // paired with green and reads as "lines removed", not as a failure. Errors
@@ -34,6 +34,11 @@ StrView OutlineMarker(const LineModel* m) {
 }
 const StrView CHECK_MARKER = SVL("\xe2\x9c\x93");
 const StrView CROSS_MARKER = SVL("\xe2\x9c\x97");
+// Notices are the app talking, not a participant: a dot dimmer than the grey
+// text beside it, so it recedes behind the turn markers.
+const u8 NOTICE_FG = 242;
+const u8 MUTED_FG = 244;
+const u8 RULE_FG = 238;
 
 StrView BufView(const StrBuf& buf) { return StrView{buf.Data, buf.Length}; }
 
@@ -159,7 +164,7 @@ void AppendToolPreviewRows(const LineModel* m, Arena* rowsMem, Array<SpanLine>* 
   while (text.Length &&
          (text.Data[text.Length - 1] == '\n' || text.Data[text.Length - 1] == '\r'))
     text.Length--;
-  Style base = tool.Error ? LStyle(m, 196, ATTR_NONE) : LStyle(m, 244, ATTR_DIM);
+  Style base = tool.Error ? LStyle(m, 196, ATTR_NONE) : LStyle(m, MUTED_FG, ATTR_DIM);
   u32 first = out->Count;
   u32 i = 0;
   while (i < text.Length) {
@@ -217,7 +222,7 @@ void BuildUser(LineModel* m, const Entry* entry) {
     InitRow(&m->RowsMem, &logical, 3);
     if (firstLine) {
       PushIcon(&m->RowsMem, &logical.Spans, marker,
-               LStyle(m, ACCENT_FG, ATTR_BOLD), MARKER_LEFT_PADDING);
+               LStyle(m, m->Accent, ATTR_BOLD), MARKER_LEFT_PADDING);
     } else {
       Array_Push(&logical.Spans, Span{indent, StyleDefault(), true});
     }
@@ -226,7 +231,7 @@ void BuildUser(LineModel* m, const Entry* entry) {
     logical.HasContinuation = true;
     if (firstLine && entry->Text.Timestamp.Length) {
       logical.Right =
-          Span{entry->Text.Timestamp, LStyle(m, 244, ATTR_NONE)};
+          Span{entry->Text.Timestamp, LStyle(m, MUTED_FG, ATTR_NONE)};
       logical.HasRight = true;
     }
     WrapAndAppend(m, &logical);
@@ -245,7 +250,7 @@ void BuildAssistant(LineModel* m, const Entry* entry) {
   Array<SpanLine> logical = Array_Make<SpanLine>(&m->RowsMem, 8);
   u16 contentWidth = m->Width > indentWidth ? (u16)(m->Width - indentWidth) : (u16)1;
   Markdown_Render(&m->RowsMem, text, &logical,
-                  MarkdownOpts_Make(contentWidth, m->Color));
+                  MarkdownOpts_Make(contentWidth, m->Color, m->Accent));
   for (u32 i = 0; i < logical.Count; i++) {
     SpanLine prefixed;
     InitRow(&m->RowsMem, &prefixed, logical.Data[i].Spans.Count + 2);
@@ -319,7 +324,7 @@ void BuildTool(LineModel* m, const Entry* entry, bool expandPreview) {
     marker = CHECK_MARKER;
     markerSt = LStyle(m, DIFF_ADD_FG, ATTR_NONE);
   } else if (tool.Live) {
-    markerSt = LStyle(m, ACCENT_FG, ATTR_NONE);
+    markerSt = LStyle(m, m->Accent, ATTR_NONE);
   }
   Style label = tool.Error ? LStyle(m, 196, ATTR_BOLD) : LStyle(m, 252, ATTR_BOLD);
   Style detail = tool.Error ? LStyle(m, 196, ATTR_NONE) : LStyle(m, 252, ATTR_NONE);
@@ -351,12 +356,12 @@ void BuildTool(LineModel* m, const Entry* entry, bool expandPreview) {
       Array_Push(&logical.Spans,
                  Span{outcome,
                       tool.Error ? LStyle(m, 196, ATTR_NONE)
-                                 : LStyle(m, 244, ATTR_NONE)});
+                                 : LStyle(m, MUTED_FG, ATTR_NONE)});
     }
   }
   StrView timer = ToolTimer(&m->RowsMem, tool);
   if (timer.Length) {
-    logical.Right = Span{timer, LStyle(m, 244, ATTR_NONE)};
+    logical.Right = Span{timer, LStyle(m, MUTED_FG, ATTR_NONE)};
     logical.HasRight = true;
   }
   logical.Continuation = Span{indent, StyleDefault(), true};
@@ -397,6 +402,78 @@ void BuildPlainTurn(LineModel* m, const Entry* entry, StrView marker, Style mark
   }
 }
 
+void BuildThinking(LineModel* m, const Entry* entry) {
+  SpanLine logical;
+  InitRow(&m->RowsMem, &logical, 4);
+  PushIcon(&m->RowsMem, &logical.Spans, OutlineMarker(m), LStyle(m, m->Accent, ATTR_NONE),
+           MARKER_LEFT_PADDING, true);
+  Array_Push(&logical.Spans,
+             Span{SVL("Thinking\xe2\x80\xa6"), LStyle(m, MUTED_FG, ATTR_NONE)});
+  u32 seconds = entry->Thinking.ElapsedSeconds;
+  if (seconds) {
+    logical.Right = Span{FormatDuration(&m->RowsMem, (u64)seconds * 1000, false),
+                         LStyle(m, MUTED_FG, ATTR_NONE)};
+    logical.HasRight = true;
+  }
+  WrapAndAppend(m, &logical);
+}
+
+// pi's token abbreviation: 842, 1.2k, 12k, 1.2M, 12M.
+void AppendTokenCount(StrBuf* out, u64 n) {
+  if (n < 1000) {
+    StrBuf_AppendU64(out, n);
+    return;
+  }
+  bool millions = n >= 1000000;
+  u64 unit = millions ? 1000000 : 1000;
+  if (n < unit * 10) {
+    u64 tenths = (n + unit / 20) / (unit / 10);
+    StrBuf_AppendU64(out, tenths / 10);
+    StrBuf_AppendChar(out, '.');
+    StrBuf_AppendU64(out, tenths % 10);
+  } else {
+    StrBuf_AppendU64(out, (n + unit / 2) / unit);
+  }
+  StrBuf_AppendChar(out, millions ? 'M' : 'k');
+}
+
+void BuildFooter(LineModel* m, const Entry* entry) {
+  const TurnStats& stats = entry->Footer;
+  StrView duration = FormatDuration(&m->RowsMem, stats.DurationMs, true);
+  StrBuf label = StrBuf_Make(&m->RowsMem, 96);
+  StrBuf_Append(&label, duration);
+  if (stats.Tools) {
+    StrBuf_AppendCStr(&label, " \xc2\xb7 ");
+    StrBuf_AppendU64(&label, stats.Tools);
+    StrBuf_AppendCStr(&label, stats.Tools == 1 ? " tool" : " tools");
+  }
+  if (stats.InputTokens || stats.OutputTokens) {
+    StrBuf_AppendCStr(&label, " \xc2\xb7 \xe2\x86\x91");
+    AppendTokenCount(&label, stats.InputTokens);
+    StrBuf_AppendCStr(&label, " \xe2\x86\x93");
+    AppendTokenCount(&label, stats.OutputTokens);
+  }
+  StrView text = StrBuf_View(&label);
+  Style rule = LStyle(m, RULE_FG, ATTR_NONE);
+
+  SpanLine logical;
+  InitRow(&m->RowsMem, &logical, 4);
+  // The lead rule fills the icon field, so the label lines up with message text.
+  Array_Push(&logical.Spans, Span{Spaces(&m->RowsMem, MARKER_LEFT_PADDING), StyleDefault(), true});
+  Array_Push(&logical.Spans, Span{SVL("\xe2\x94\x80\xe2\x94\x80 "), rule, true});
+  Array_Push(&logical.Spans, Span{text, LStyle(m, MUTED_FG, ATTR_NONE)});
+  // One cell short of the edge, mirroring the left padding.
+  u32 used = MARKER_LEFT_PADDING + ICON_FIELD_CELLS + 1u + LineTextWidth(text) + 1u;
+  if (m->Width > used + 1u) {
+    u32 fill = m->Width - used - 1u;
+    StrBuf tail = StrBuf_Make(&m->RowsMem, 1 + fill * 3);
+    StrBuf_AppendChar(&tail, ' ');
+    for (u32 i = 0; i < fill; i++) StrBuf_AppendCStr(&tail, "\xe2\x94\x80");
+    Array_Push(&logical.Spans, Span{StrBuf_View(&tail), rule});
+  }
+  WrapAndAppend(m, &logical);
+}
+
 void BuildEntryRows(LineModel* m, const Entry* entry, bool showPreview) {
   if (!EntryVisible(entry)) return;
   u32 rowStart = m->Lines.Count;
@@ -415,13 +492,18 @@ void BuildEntryRows(LineModel* m, const Entry* entry, bool showPreview) {
       break;
     }
     case EntryKind::Info:
-      BuildPlainTurn(m, entry, FilledMarker(m),
-                     LStyle(m, ACCENT_FG, ATTR_BOLD),
-                     LStyle(m, 244, ATTR_NONE), MARKER_LEFT_PADDING);
+      BuildPlainTurn(m, entry, FilledMarker(m), LStyle(m, NOTICE_FG, ATTR_NONE),
+                     LStyle(m, MUTED_FG, ATTR_ITALIC), MARKER_LEFT_PADDING);
       break;
     case EntryKind::Error:
       BuildPlainTurn(m, entry, SVL("!"), LStyle(m, 196, ATTR_BOLD),
                      LStyle(m, 196, ATTR_BOLD));
+      break;
+    case EntryKind::Thinking:
+      BuildThinking(m, entry);
+      break;
+    case EntryKind::Footer:
+      BuildFooter(m, entry);
       break;
   }
 
@@ -434,11 +516,13 @@ void BuildEntryRows(LineModel* m, const Entry* entry, bool showPreview) {
   }
   for (u32 i = 0; i < rowCount; i++) m->Lines.Data[rowStart + i].EntryId = entry->Id;
   if (rowCount != 0) {
-    m->Lines.Data[rowStart].IsEntryStart = true;
+    // Footers and the thinking row are chrome, not turns to hover or toggle.
+    m->Lines.Data[rowStart].IsEntryStart =
+        entry->Kind != EntryKind::Footer && entry->Kind != EntryKind::Thinking;
     if (hidden) {
       m->Lines.Data[rowStart].HasHiddenContent = true;
       m->Lines.Data[rowStart].Hidden =
-          Span{SVL("\xe2\x80\xa6"), LStyle(m, 244, ATTR_DIM)};
+          Span{SVL("\xe2\x80\xa6"), LStyle(m, MUTED_FG, ATTR_DIM)};
     }
   }
 }
@@ -503,6 +587,7 @@ void CacheEntry(LineModel* m, Entry* entry, bool showPreview) {
   painter.Width = m->Width;
   painter.Color = m->Color;
   painter.Rounded = m->Rounded;
+  painter.Accent = m->Accent;
   painter.Lines = Array_Make<SpanLine>(&painter.RowsMem, 8);
   BuildEntryRows(&painter, entry, showPreview);
   m->LayoutMem = painter.RowsMem;
@@ -846,7 +931,7 @@ void WrapSpanLine(Arena* a, const SpanLine* in, u16 width, Array<SpanLine>* out)
 }  // namespace
 
 void LineModel_Init(LineModel* m, Arena* mem, u16 width, u32 cap,
-                    bool color, bool rounded) {
+                    bool color, bool rounded, u8 accent) {
   *m = {};
   m->Mem = mem;
   m->RowsMem = ArenaCreate(LINE_ROWS_RESERVE);
@@ -865,6 +950,7 @@ void LineModel_Init(LineModel* m, Arena* mem, u16 width, u32 cap,
   m->HasAssistant = false;
   m->Color = color;
   m->Rounded = rounded;
+  m->Accent = accent;
 }
 
 void LineModel_Release(LineModel* m) {
@@ -895,6 +981,7 @@ bool LineModel_FitsAtWidth(LineModel* m, u16 width, u32 maxRows) {
   probe.Cap = m->Cap;
   probe.Color = m->Color;
   probe.Rounded = m->Rounded;
+  probe.Accent = m->Accent;
   probe.Entries = Array_Make<Entry>(&probe.RowsMem, m->Entries.Count);
   probe.Lines = Array_Make<SpanLine>(&probe.RowsMem, 32);
   for (u32 i = 0; i < m->Entries.Count; i++) {
@@ -991,7 +1078,7 @@ bool LineModel_NextDisplayRowRun(const DisplayRowLayout* layout, DisplayRowItera
       Style style =
           line->Hidden.Text.Length
               ? line->Hidden.St
-              : StyleMake(244, COL_DEFAULT, ATTR_DIM);
+              : StyleMake(MUTED_FG, COL_DEFAULT, ATTR_DIM);
       *run = DisplayRowRun{text, style, layout->HiddenColumn, 1};
       return true;
     }
@@ -1331,6 +1418,7 @@ bool LineModel_ToggleAllTools(LineModel* m) {
 
 void LineModel_BeginAssistant(LineModel* m) {
   FFI(m->HasAssistant);
+  LineModel_EndThinking(m);
   Entry entry = {};
   entry.Id = m->NextEntryId++;
   FFI(entry.Id == 0);
@@ -1360,6 +1448,7 @@ void LineModel_EndAssistant(LineModel* m) {
 void LineModel_AddNotice(LineModel* m, EntryKind kind, StrView text) {
   FFI(kind != EntryKind::Info && kind != EntryKind::Error);
   FFI(m->HasAssistant);
+  LineModel_EndThinking(m);
   Entry entry = {};
   entry.Id = m->NextEntryId++;
   FFI(entry.Id == 0);
@@ -1372,24 +1461,96 @@ void LineModel_AddNotice(LineModel* m, EntryKind kind, StrView text) {
   AdvanceDisplayRevision(m);
 }
 
-void LineModel_AddUser(LineModel* m, StrView text, u64 timestampMs) {
+void LineModel_AddUser(LineModel* m, StrView text, u64 timestampMs, bool steered) {
   FFI(m->HasAssistant);
+  LineModel_EndThinking(m);
   Entry entry = {};
   entry.Id = m->NextEntryId++;
   FFI(entry.Id == 0);
   entry.Kind = EntryKind::User;
   entry.Text.Content = StrBuf_Make(m->Mem, text.Length + 1);
   StrBuf_Append(&entry.Text.Content, text);
-  entry.Text.Timestamp = FormatTimestamp(m->Mem, timestampMs);
+  StrView time = FormatTimestamp(m->Mem, timestampMs);
+  if (steered) {
+    StrView mark = SVL("\xe2\x86\xb3 steer");
+    StrBuf label = StrBuf_Make(m->Mem, mark.Length + time.Length + 4);
+    StrBuf_Append(&label, mark);
+    if (time.Length) {
+      StrBuf_AppendCStr(&label, " \xc2\xb7 ");
+      StrBuf_Append(&label, time);
+    }
+    time = StrBuf_View(&label);
+  }
+  entry.Text.Timestamp = time;
   Array_Push(&m->Entries, entry);
   InvalidateEntry(m, m->Entries.Count - 1);
   m->TrimPending = true;
   AdvanceDisplayRevision(m);
 }
 
+void LineModel_AddFooter(LineModel* m, TurnStats stats) {
+  FFI(m->HasAssistant);
+  LineModel_EndThinking(m);
+  Entry entry = {};
+  entry.Id = m->NextEntryId++;
+  FFI(entry.Id == 0);
+  entry.Kind = EntryKind::Footer;
+  entry.Footer = stats;
+  Array_Push(&m->Entries, entry);
+  InvalidateEntry(m, m->Entries.Count - 1);
+  m->TrimPending = true;
+  AdvanceDisplayRevision(m);
+}
+
+bool LineModel_SetThinking(LineModel* m, u64 startMs, u64 nowMs) {
+  FFI(m->HasAssistant);
+  u32 seconds = nowMs > startMs ? (u32)((nowMs - startMs) / 1000) : 0;
+  if (m->Entries.Count) {
+    u32 last = m->Entries.Count - 1;
+    Entry* tail = &m->Entries.Data[last];
+    if (tail->Kind == EntryKind::Thinking) {
+      if (tail->Thinking.ElapsedSeconds == seconds) return false;
+      tail->Thinking.ElapsedSeconds = seconds;
+      InvalidateEntry(m, last);
+      return true;
+    }
+  }
+  Entry entry = {};
+  entry.Id = m->NextEntryId++;
+  FFI(entry.Id == 0);
+  entry.Kind = EntryKind::Thinking;
+  entry.Thinking.ElapsedSeconds = seconds;
+  Array_Push(&m->Entries, entry);
+  InvalidateEntry(m, m->Entries.Count - 1);
+  AdvanceDisplayRevision(m);
+  return true;
+}
+
+// The thinking row is only ever last, so its rows end the layout and rewinding
+// RowsEnd to where it began is all the relayout needs.
+bool LineModel_EndThinking(LineModel* m) {
+  if (!m->Entries.Count) return false;
+  u32 index = m->Entries.Count - 1;
+  const Entry* entry = &m->Entries.Data[index];
+  if (entry->Kind != EntryKind::Thinking) return false;
+  m->LiveRowsBytes -= entry->RowsBytes;
+  if (entry->RowsBytes && entry->RowsMark + entry->RowsBytes == m->RowsMem.Used)
+    ArenaRestore(&m->RowsMem, entry->RowsMark);
+  if (index < m->LayoutEntries) {
+    m->RowsEnd = entry->RowStart;
+    m->LastVisibleEntry = entry->PreviousVisible;
+    m->LayoutEntries = index;
+  }
+  m->Entries.Count = index;
+  if (m->FirstDirtyEntry > index) m->FirstDirtyEntry = index;
+  AdvanceDisplayRevision(m);
+  return true;
+}
+
 void LineModel_AddTool(LineModel* m, StrView toolId, StrView name, StrView argsJson,
                        u64 startMs) {
   FFI(m->HasAssistant);
+  LineModel_EndThinking(m);
   Entry entry = {};
   entry.Id = m->NextEntryId++;
   FFI(entry.Id == 0);

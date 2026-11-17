@@ -1631,10 +1631,12 @@ void Markdown_Inline(Arena* a, StrView line, Style base, Array<Span>* out, bool 
 }
 
 void Markdown_Render(Arena* a, StrView md, Array<SpanLine>* out, MarkdownOpts opts) {
+  MarkdownPalette palette = kDarkPalette;
+  if (opts.Accent) palette.QuoteBorder = opts.Accent;
   MdCtx ctx = {};
   ctx.A = a;
   ctx.Out = out;
-  ctx.Pal = &kDarkPalette;
+  ctx.Pal = &palette;
   ctx.Base = StyleDefault();
   ctx.Width = opts.Width ? opts.Width : (u16)80;
   ctx.Color = opts.Color;

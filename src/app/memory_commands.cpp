@@ -263,8 +263,8 @@ AppCommandHandlerResult Watch(InteractiveRuntime* rt, const AppCommandUx* ux,
   u64 logBytes = 0;
   bool settled = false;
   Tui_ReplaceTranscript(tui, nullptr, 0, true);
-  volatile i32* abort =
-      RuntimeBeginOperation(rt, ux, SVL("Watching the dream (ctrl+c to return)"));
+  volatile i32* abort = RuntimeBeginOperation(
+      rt, ux, SVL("Watching the dream (ctrl+c to return)"), true);
   for (;;) {
     // Once the dream is over its log is final, and only the user ends the watch.
     if (!settled) {

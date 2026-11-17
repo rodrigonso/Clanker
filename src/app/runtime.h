@@ -163,8 +163,10 @@ AgentAskUser RuntimeAskUser(InteractiveRuntime* rt);
 
 // Long-running command work reports through these so the TUI can show a
 // cancellable operation and the plain REPL can fall back to printed notices.
+// `yieldsToInput` lets a submission through to end the operation; otherwise
+// the TUI refuses input until the operation is over.
 volatile i32* RuntimeBeginOperation(InteractiveRuntime* rt, const AppCommandUx* ux,
-                                    StrView label);
+                                    StrView label, bool yieldsToInput = false);
 void RuntimeSetOperationStatus(InteractiveRuntime* rt, const AppCommandUx* ux,
                                StrView status);
 bool RuntimeEndOperation(InteractiveRuntime* rt);

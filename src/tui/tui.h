@@ -90,6 +90,7 @@ struct TuiDisplayEvent {
   u64 Timestamp;
   u16 ToolUpdateSlot;
   bool IsError;
+  bool Steer;  // User: sent into a running turn
 };
 
 struct TuiDisplayBatch {
@@ -117,12 +118,12 @@ enum { TUI_TOOL_UPDATE_SLOT_COUNT = 64 };
 // What the TUI may do the moment a command is submitted, rather than leaving it
 // to the main loop, which sits inside the agent turn for its whole duration.
 // Actions name a TUI-local effect, not an app command, so the app decides which
-// of its commands map onto them.
+// of its commands map onto them. Every other command is refused mid-turn.
 enum class TuiCommandInline : u8 {
-  None,        // queue only
+  None,        // runs only between turns
   Debug,       // toggle the performance overlay
-  Stop,        // quit; nothing is queued
-  CancelTurn,  // cancel a running turn, then queue as usual
+  Stop,        // quit; nothing is submitted
+  CancelTurn,  // cancel a running turn, then run once it ends
 };
 
 struct TuiCommandSpec {
@@ -149,6 +150,17 @@ struct TuiSessionStrings {
   u32 ModalOptionCount;
 };
 
+// A run being rebuilt from the log, so a restored transcript gets the footers
+// the live one drew. It outlives one hydration call so history appended in
+// pieces closes its runs exactly where the whole would.
+struct TuiHydratedRun {
+  bool Open;
+  u64 StartMs;
+  u64 LastMs;
+  u32 Responses;
+  TurnStats Stats;
+};
+
 struct TuiOpts {
   StrView ModelName = {};
   ModelRequestProfile Profile = {};
@@ -156,6 +168,8 @@ struct TuiOpts {
   bool YoloAcknowledged = false;
   bool Color = true;
   bool Rounded = true;
+  // Palette index of the system accent; 0 keeps DEFAULT_ACCENT_FG.
+  u8 Accent = 0;
   const TuiCommandSpec* Commands = nullptr;
   u32 CommandCount = 0;
 };
@@ -197,8 +211,11 @@ struct Tui {
   bool ScreenUp;
   bool UiUp;
   bool Color;
+  u8 Accent;
 
-  // Main-thread submission queue. Commands are queued even during active turns.
+  // Main-thread submission handoff. Input is never queued behind a running turn
+  // or a busy main loop: text steers or is refused, and slash commands that
+  // cannot run inline are refused, so at most one user submission waits here.
   TuiSubmission Queue[64];
   u32 QHead, QTail, QCount;
 
@@ -230,14 +247,24 @@ struct Tui {
   bool YoloWarningActive;
   u32 YoloWarningVisibleMs;
   u64 YoloWarningLastFrameMs;
-  u32 QueuedCount;  // messages queued (steer/followUp/nextTurn) per last queue_update
   TuiCommandSpec* Commands;
   u32 CommandCount;
   u32 CommandPaletteSelected;
   u32 CommandPaletteFirst;
   bool CommandPaletteDismissed;
   bool OperationActive;
+  bool OperationYields;  // a submission ends the operation instead of being refused
   volatile i32 OperationAbortFlag;
+
+  // The agent run in progress, totalled into its footer when it ends. Wall
+  // clock, so a rebuilt transcript derives the same numbers from the log.
+  u64 RunStartMs;
+  u32 RunResponses;
+  TurnStats RunStats;
+  // When the thinking row became due; 0 while it is not. It waits briefly so
+  // the gaps between a tool and the next response do not flicker.
+  u64 ThinkingSinceMs;
+  TuiHydratedRun Hydrated;
 
   // Modal selection / text entry.
   TuiModalKind ModalKind;
@@ -329,11 +356,14 @@ void Tui_InitModel(Tui* t, Arena* mem, TuiOpts opts);
 // Clear conversation/UI state at an idle boundary without emitting a notice.
 // Returns false while the agent is active or shutdown is in progress.
 bool Tui_ClearSession(Tui* t);
-// `follow` scrolls to the end; otherwise the viewport stays where it was.
+// `follow` scrolls to the end; otherwise the viewport stays where it was. With
+// the agent idle, the last run is complete and gets its footer.
 void Tui_ReplaceTranscript(Tui* t, const Message* messages, u32 count,
                            bool follow = false);
 // Adds messages after the transcript already shown, as if they had been part
-// of the last Tui_ReplaceTranscript. Idle only: nothing may be streaming.
+// of the last Tui_ReplaceTranscript. Idle only: nothing may be streaming. The
+// last appended run is never known to have ended, so it has no footer. Start
+// from an empty Tui_ReplaceTranscript: a non-empty one closes its last run.
 void Tui_AppendTranscript(Tui* t, const Message* messages, u32 count);
 
 // SessionMem is a bump allocator, so transcript entries dropped by the
@@ -375,7 +405,9 @@ void Tui_SetModelProfile(Tui* t, StrView modelName,
                          ModelRequestProfile profile);
 void Tui_SetPermissionMode(Tui* t, TuiPermissionMode mode,
                           bool yoloAcknowledged);
-void Tui_BeginOperation(Tui* t, StrView label);
+// Input submitted while a yielding operation runs is handed to the main loop,
+// which ends the operation; otherwise input is refused until it finishes.
+void Tui_BeginOperation(Tui* t, StrView label, bool yieldsToInput = false);
 void Tui_SetOperationStatus(Tui* t, StrView status);
 // End the operation and atomically return whether cancellation was requested.
 bool Tui_EndOperation(Tui* t);
@@ -424,7 +456,6 @@ void Tui_RetryStarted(Tui* t, bool providerLevel, u32 delayMs, u32 attempt,
 void Tui_RetryEnded(Tui* t);
 void Tui_PermissionReviewStarted(Tui* t, StrView toolName);
 void Tui_PermissionReviewEnded(Tui* t);
-void Tui_SetQueuedCount(Tui* t, u32 count);
 // Context window occupancy, measured by the caller: Set replaces it with a
 // fresh measurement (0 = unknown), Add accounts for a message appended since.
 void Tui_SetContextTokens(Tui* t, u32 tokens);

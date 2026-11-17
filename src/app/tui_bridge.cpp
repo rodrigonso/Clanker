@@ -133,10 +133,6 @@ void TuiBridge_HarnessEvent(void* user, const AgentHarnessEvent* ev) {
     case AgentHarnessEventKind::TransientPermissionReviewEnd:
       Tui_PermissionReviewEnded(t);
       break;
-    case AgentHarnessEventKind::TransientQueueUpdate:
-      Tui_SetQueuedCount(t, ev->Queue.SteerCount + ev->Queue.FollowUpCount +
-                                ev->Queue.NextTurnCount);
-      break;
     case AgentHarnessEventKind::TransientEventsDropped:
       Tui_NoticeDroppedEvents(t, ev->Dropped.Count);
       break;

@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "app/browser.h"
+#include "app/model_cache.h"
 #include "app/settings.h"
 #include "auth/openai_codex_oauth.h"
 #include "auth/openrouter_oauth.h"
@@ -678,6 +679,7 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
   ProviderModelList models = {};
   if (live.Status == ProviderModelListStatus::Success) {
     models = live;
+    ModelCache_Save(rt->AgentDirectory, spec->Id, live.Models, live.Count);
   } else {
     StrBuf message = StrBuf_Make(&scratch, spec->Name.Length + live.Error.Length + 144);
     StrBuf_AppendCStr(&message, "Live model discovery ");
@@ -769,7 +771,8 @@ static RuntimeModelChoice ChooseModelForProvider(InteractiveRuntime* rt,
         }
         entered = StrView_Trim(entered);
         if (entered.Length) {
-          chosen = spec->CreateModel(rt->Mem, spec, entered);
+          chosen = ModelCache_CreateModel(rt->Mem, rt->AgentDirectory, spec,
+                                          entered);
           break;
         }
         EmitCommandError(ux, SVL("A model ID is required."));
@@ -1003,8 +1006,9 @@ AppCommandHandlerResult HandleAuthCommand(void* user, const AppCommandUx* ux) {
     if (model.Status != RuntimeChoiceStatus::Selected) {
       if (model.Status == RuntimeChoiceStatus::Failed && model.Message.Length)
         EmitCommandError(ux, model.Message);
-      Model fallback = provider.Spec->CreateModel(
-          rt->Mem, provider.Spec, provider.Spec->DefaultModel);
+      Model fallback = ModelCache_CreateModel(
+          rt->Mem, rt->AgentDirectory, provider.Spec,
+          provider.Spec->DefaultModel);
       bool persisted = false;
       if (!ActivateRuntimeSelection(rt, provider.Spec, fallback,
                                     ModelRequestProfile{}, ux, &persisted))

@@ -147,6 +147,7 @@ if(CLANKER_BUILD_CLI)
     src/app/hook_runner.cpp
     src/app/memory.cpp
     src/app/memory_commands.cpp
+    src/app/model_cache.cpp
     src/app/plain_select.cpp
     src/app/permission_reviewer.cpp
     src/app/project_trust.cpp
@@ -167,6 +168,9 @@ if(CLANKER_BUILD_CLI)
     target_link_libraries(clanker_cli PUBLIC ws2_32 crypt32 advapi32 shell32)
   else()
     target_sources(clanker_cli PRIVATE src/term/term_posix.cpp)
+    if(APPLE)
+      target_link_libraries(clanker_cli PUBLIC "-framework CoreFoundation")
+    endif()
   endif()
   add_executable(clanker src/app/main.cpp)
   clanker_target(clanker)

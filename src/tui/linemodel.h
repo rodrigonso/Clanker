@@ -60,12 +60,25 @@ struct DisplayRowRange {
   u16 End;
 };
 
-// Transcript entry kinds (drive layout + base styling).
-enum class EntryKind : u8 { User, Assistant, Tool, Info, Error };
+// Transcript entry kinds (drive layout + base styling). Thinking is transient:
+// at most one, always last, and replaced by whatever the agent shows next.
+enum class EntryKind : u8 { User, Assistant, Tool, Info, Error, Thinking, Footer };
 
 struct TextEntry {
   StrBuf Content;
-  StrView Timestamp;  // User only
+  StrView Timestamp;  // User only: the right-aligned label, steer mark included
+};
+
+struct ThinkingEntry {
+  u32 ElapsedSeconds;
+};
+
+// Totals for one finished agent run, drawn as the rule that closes it.
+struct TurnStats {
+  u64 DurationMs;
+  u64 InputTokens;  // uncached input, summed over the run's responses
+  u64 OutputTokens;
+  u32 Tools;
 };
 
 struct ToolEntry {
@@ -97,6 +110,8 @@ struct Entry {
   union {
     TextEntry Text;
     ToolEntry Tool;
+    ThinkingEntry Thinking;
+    TurnStats Footer;
   };
 };
 
@@ -131,10 +146,14 @@ struct LineModel {
   bool HasAssistant;
   bool Color;
   bool Rounded;
+  u8 Accent;  // palette index for the user marker, live markers and blockquote bars
 };
 
+// The accent when the OS offers none.
+const u8 DEFAULT_ACCENT_FG = 214;
+
 void LineModel_Init(LineModel* m, Arena* mem, u16 width, u32 cap,
-                    bool color = true, bool rounded = true);
+                    bool color = true, bool rounded = true, u8 accent = DEFAULT_ACCENT_FG);
 void LineModel_Release(LineModel* m);
 void LineModel_Layout(LineModel* m);
 void LineModel_SetWidth(LineModel* m, u16 width);  // re-wrap everything
@@ -166,7 +185,14 @@ void LineModel_BeginAssistant(LineModel* m);
 void LineModel_AppendAssistant(LineModel* m, StrView delta);
 void LineModel_EndAssistant(LineModel* m);
 void LineModel_AddNotice(LineModel* m, EntryKind kind, StrView text);  // Info or Error
-void LineModel_AddUser(LineModel* m, StrView text, u64 timestampMs);
+// `steered` marks a message sent into a turn that was already running.
+void LineModel_AddUser(LineModel* m, StrView text, u64 timestampMs, bool steered = false);
+void LineModel_AddFooter(LineModel* m, TurnStats stats);
+// Shows, or re-times, the trailing thinking row; true when its rows changed.
+// Every other append replaces the row, so it never needs removing first.
+bool LineModel_SetThinking(LineModel* m, u64 startMs, u64 nowMs);
+// Removes the thinking row; true when there was one.
+bool LineModel_EndThinking(LineModel* m);
 // A nonzero `startMs` marks the call live until it finishes or is settled.
 void LineModel_AddTool(LineModel* m, StrView toolId, StrView name, StrView argsJson,
                        u64 startMs = 0);

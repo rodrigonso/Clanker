@@ -181,10 +181,10 @@ AgentAskUser RuntimeAskUser(InteractiveRuntime* rt) {
 }
 
 volatile i32* RuntimeBeginOperation(InteractiveRuntime* rt, const AppCommandUx* ux,
-                                    StrView label) {
+                                    StrView label, bool yieldsToInput) {
   Atomic_StoreI32(&g_abort, 0);
   if (rt->TuiView) {
-    Tui_BeginOperation(rt->TuiView, label);
+    Tui_BeginOperation(rt->TuiView, label, yieldsToInput);
     return Tui_OperationAbort(rt->TuiView);
   }
   EmitCommandNotice(ux, label);

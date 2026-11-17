@@ -149,7 +149,7 @@ handle credentials must also securely release their scratch arenas. Secret
 values are never duplicated into session-backed modal results.
 
 Commands marked `TuiCommandSpec::PrivateArguments` retain only their command
-name in history and queued-command notices. This keeps mistakenly supplied
+name in history and command notices. This keeps mistakenly supplied
 inline credentials out of those surfaces while the dispatcher rejects them.
 Only dedicated masked dialogs accept API keys. Ordinary model/name fields use
 the same editor without masking; numeric settings validate before applying.
@@ -326,6 +326,42 @@ resets the editor and history. Both arena swaps retain every queued submission
 field, including permission mode, while copying its text and preserving FIFO
 order across a wrapped queue.
 
+### Run Footers, Thinking, and Notices
+
+Each agent run that produced a response closes with a rule carrying its totals:
+`── 3.4s · 2 tools · ↑1.2k ↓842 ────`. The duration is wall clock from run start
+to agent end, tools counts the calls started, and the arrows sum each
+response's uncached input and output tokens, abbreviated as pi does. A rebuilt
+transcript derives the same footers from message timestamps and usage: a run
+ends at the next prompt, and with the agent idle the last run is closed too. A
+steer is logged after the work it interrupted but stamped when it was typed, so
+a user message older than the message before it joins the open run rather than
+starting one. History appended in pieces (the dream watch) carries its open run
+across pieces and never closes the last one.
+
+While the agent waits on the model with nothing streaming, a `Thinking…` row
+with a spinner appears at the transcript tail after 150 ms, with whole elapsed
+seconds on the right. The status bar shows no thinking state. The row is a
+transient entry: anything the run adds next -- text, a tool, a notice, a user
+turn, the footer -- removes it first. Footers and the thinking row are not
+hover or click targets.
+
+Info notices are asides rather than turns: a `●` dimmer than the italic grey
+text beside it. Errors keep the bold red `!`.
+
+### Accent Colour
+
+The user marker, the running tool spinner, the thinking row's spinner, the
+status-bar spinner, and markdown blockquote bars share one accent: the OS accent
+colour, read once at startup by `Term_SystemAccent` and mapped to the nearest
+cube or grey-ramp palette entry (never the themed 0-15). On Windows it is entry
+3 of `Explorer\Accent\AccentPalette`, the same value as UISettings' `Accent`;
+DWM's `AccentColor` is not used because it goes stale when title bars do not
+show the accent. On macOS the named `AppleAccentColor` maps to the
+dark-appearance system colour, and Multicolor maps to blue. Without one, the
+accent is orange (214). `TuiOpts::Accent` carries it into the line model and,
+through `MarkdownOpts::Accent`, overrides the palette's `QuoteBorder`.
+
 ## Markdown
 
 `Markdown_Render` (`src/tui/markdown.{h,cpp}`) turns an assistant message into
@@ -405,10 +441,16 @@ stay plain text.
 
 Slash commands are pushed onto a 64-slot queue and executed by the main loop,
 which owns the runtime state they mutate. For the length of a turn that loop is
-inside the agent run, so a queued command does not execute until the turn ends;
-the composer reports it as `Queued command: ...` rather than appearing to do
-nothing. Ordinary prompt text does not queue -- it steers the live run directly
-from the input thread.
+inside the agent run, so nothing waits behind it: a command entered during a
+turn is refused with `/name can't run during a turn. Press Esc twice to
+interrupt, then send it again.` and stays in the composer. Ordinary prompt text
+steers the live run directly from the input thread and is shown as a user turn
+labelled `↳ steer · HH:MM`; without a steering hook it is refused the same way.
+The loop takes one submission at a time, so input sent before it has taken the
+last one, or during a blocking operation such as credential resolution or sign
+in, is refused with `Clanker is busy; send it again when it finishes.` An
+operation begun with `yieldsToInput` (the dream watch) accepts the submission
+instead and ends.
 
 Three commands would be useless under that rule, so `TuiCommandSpec::Inline`
 lets the catalog mark what the input thread may do immediately:
@@ -417,13 +459,14 @@ lets the catalog mark what the input thread may do immediately:
   nothing in a running turn can observe it and it never reaches the queue.
 - `/exit` cancels the running turn and stops, matching Ctrl+D rather than
   waiting for a turn it was meant to interrupt.
-- `/clear` cancels the running turn but still queues. The reset swaps the
-  session log, which cannot happen underneath a turn that is appending to it,
-  so only the cancellation is immediate; the loop performs the reset once the
-  turn unwinds.
+- `/clear` cancels the running turn and is then pushed, noted as `Cancelling
+  the current turn, then: /clear`. The reset swaps the session log, which
+  cannot happen underneath a turn that is appending to it, so only the
+  cancellation is immediate; the loop performs the reset once the turn unwinds.
 
-Argument forms the dispatcher would reject resolve to no inline action and are
-queued unchanged, so usage errors keep coming from the one place that owns the
+Argument forms the dispatcher would reject resolve to no inline action. During
+a turn they are refused like any other command; when idle they are pushed
+unchanged, so usage errors keep coming from the one place that owns the
 argument policy.
 
 ## Diagnostics

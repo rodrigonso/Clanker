@@ -10,6 +10,31 @@ bool Term_IsInteractive() {
   return GetConsoleMode(ho, &m) && GetConsoleMode(hi, &m);
 }
 
+bool Term_SystemAccent(u8* r, u8* g, u8* b) {
+  const wchar_t* key = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent";
+  // AccentPalette is the shade ramp behind UISettings; entry 3 is the accent
+  // itself. DWM's AccentColor goes stale when title bars do not use it.
+  BYTE palette[32];
+  DWORD size = sizeof(palette);
+  if (RegGetValueW(HKEY_CURRENT_USER, key, L"AccentPalette", RRF_RT_REG_BINARY, nullptr,
+                   palette, &size) == ERROR_SUCCESS &&
+      size >= 16) {
+    *r = palette[12];
+    *g = palette[13];
+    *b = palette[14];
+    return true;
+  }
+  DWORD abgr = 0;
+  size = sizeof(abgr);
+  if (RegGetValueW(HKEY_CURRENT_USER, key, L"AccentColorMenu", RRF_RT_REG_DWORD, nullptr,
+                   &abgr, &size) != ERROR_SUCCESS)
+    return false;
+  *r = (u8)(abgr & 0xff);
+  *g = (u8)((abgr >> 8) & 0xff);
+  *b = (u8)((abgr >> 16) & 0xff);
+  return true;
+}
+
 bool Term_Enter(Term* t) {
   memset(t, 0, sizeof(*t));
   if (!Term_IsInteractive()) return false;

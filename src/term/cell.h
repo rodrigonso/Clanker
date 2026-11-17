@@ -29,6 +29,11 @@ inline Style StyleMake(u8 fg, u8 bg, u8 attr) { return Style{fg, bg, attr}; }
 inline Style StyleDefault() { return Style{COL_DEFAULT, COL_DEFAULT, ATTR_NONE}; }
 inline bool StyleEq(Style a, Style b) { return a.Fg == b.Fg && a.Bg == b.Bg && a.Attr == b.Attr; }
 
+// Nearest palette index to a 24-bit colour, drawn from the colour cube and grey
+// ramp (16..255) only: terminals theme the first 16 entries, so they would not
+// keep the colour.
+u8 Color_NearestXterm256(u8 r, u8 g, u8 b);
+
 // Continuation marker occupying the second column of a wide (width-2) glyph.
 const u32 CELL_CONT = 0xFFFFFFFFu;
 

@@ -86,7 +86,7 @@ void PutContextBar(char* buf, u32 cap, u32* len, u32 tokens, u32 window,
     Put(buf, cap, len, "\xe2\x94\x80");
 }
 
-// ---- queue ----
+// ---- status row ----
 
 void FormatStatus(Tui* t, char* left, u32 leftCap, u32* ll, char* right,
                   u32 rightCap, u32* rl, u16 cols, TuiStatusBar* bar) {
@@ -100,6 +100,7 @@ void FormatStatus(Tui* t, char* left, u32 leftCap, u32* ll, char* right,
     Put(left, leftCap, ll, t->CopyNoticeChars == 1 ? " char" : " chars");
   } else if (t->OperationActive) {
     Put(left, leftCap, ll, kSpinner[t->Spinner % 10]);
+    bar->SpinnerEnd = *ll;
     Put(left, leftCap, ll, " ");
     for (u32 i = 0; i < t->OperationLabel.Text.Length && *ll < leftCap - 1; i++)
       left[(*ll)++] = t->OperationLabel.Text.Data[i];
@@ -110,8 +111,10 @@ void FormatStatus(Tui* t, char* left, u32 leftCap, u32* ll, char* right,
     }
   } else if (t->State == TuiState::Idle) {
     Put(left, leftCap, ll, "ready");
-  } else {
+  } else if (t->State != TuiState::Thinking) {
+    // Thinking has its own row at the foot of the transcript.
     Put(left, leftCap, ll, kSpinner[t->Spinner % 10]);
+    bar->SpinnerEnd = *ll;
     Put(left, leftCap, ll, " ");
     if (t->State == TuiState::Tool) {
       Put(left, leftCap, ll, "running ");
@@ -126,10 +129,8 @@ void FormatStatus(Tui* t, char* left, u32 leftCap, u32* ll, char* right,
       for (u32 i = 0; i < t->StateTool.Text.Length && *ll < leftCap - 1; i++)
         left[(*ll)++] = t->StateTool.Text.Data[i];
       Put(left, leftCap, ll, " permission");
-    } else if (t->State == TuiState::Streaming) {
-      Put(left, leftCap, ll, "responding");
     } else {
-      Put(left, leftCap, ll, "thinking");
+      Put(left, leftCap, ll, "responding");
     }
   }
 
@@ -225,7 +226,14 @@ void BuildStatusComponents(Tui* t, u16 statusY, u16 cols) {
   leftProps.Layout.Height = Ui_Fill();
   leftProps.StyleValue =
       t->CopyNoticeActive ? TuiSt(t, COPY_NOTICE_FG, ATTR_NONE) : style;
-  Ui_Text(&t->Ui, Ui_Key(SVL("left")), StrView{left, leftLength}, leftProps);
+  UiTextSpan leftSpans[2];
+  u32 leftCount = 0;
+  if (bar.SpinnerEnd)
+    leftSpans[leftCount++] =
+        UiTextSpan{StrView{left, bar.SpinnerEnd}, TuiSt(t, t->Accent, ATTR_NONE)};
+  leftSpans[leftCount++] = UiTextSpan{
+      StrView{left + bar.SpinnerEnd, leftLength - bar.SpinnerEnd}, leftProps.StyleValue};
+  Ui_StyledText(&t->Ui, Ui_Key(SVL("left")), leftSpans, leftCount, leftProps);
   UiTextProps rightProps = {};
   rightProps.Layout.Width = Ui_Content();
   rightProps.Layout.Height = Ui_Fill();

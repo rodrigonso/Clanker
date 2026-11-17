@@ -12,6 +12,7 @@
 #include "app/event_pump.h"
 #include "app/hook_extension.h"
 #include "app/memory.h"
+#include "app/model_cache.h"
 #include "app/permission_reviewer.h"
 #include "app/plain_select.h"
 #include "app/project_trust.h"
@@ -238,6 +239,9 @@ static void RunTuiRepl(InteractiveRuntime* rt) {
   opts.YoloAcknowledged = rt->YoloAcknowledged;
   opts.Color = (getenv("NO_COLOR") == nullptr);
   opts.Rounded = rt->Rounded;
+  u8 accentR = 0, accentG = 0, accentB = 0;
+  if (opts.Color && Term_SystemAccent(&accentR, &accentG, &accentB))
+    opts.Accent = Color_NearestXterm256(accentR, accentG, accentB);
   u32 catalogCount = 0;
   opts.Commands = RuntimeCommandCatalog(rt, rt->Mem, &catalogCount);
   opts.CommandCount = catalogCount;
@@ -707,7 +711,8 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  Model model = selected.Spec->CreateModel(&arena, selected.Spec, selected.ModelId);
+  Model model = ModelCache_CreateModel(&arena, agentDirectory, selected.Spec,
+                                       selected.ModelId);
   bool unsupportedProfilePreference = false;
   ModelRequestProfile preference = Model_NormalizeRequestPreference(
       &model, selected.Settings.Profile, &unsupportedProfilePreference);
@@ -909,8 +914,9 @@ int main(int argc, char** argv) {
           return 1;
         }
         selected.Spec = restored;
-        model = restored->CreateModel(
-            &arena, restored, modelOverride ? SV(modelOverride) : state.Model);
+        model = ModelCache_CreateModel(
+            &arena, agentDirectory, restored,
+            modelOverride ? SV(modelOverride) : state.Model);
         profile = Model_ResolveRequestPreference(&model, preference);
         harness.Config.ModelInfo = model;
         harness.Config.ProviderImpl = restored->CreateProvider(&arena, restored);

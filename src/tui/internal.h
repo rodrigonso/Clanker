@@ -57,6 +57,7 @@ struct TuiStatusBar {
   u32 FillEnd;
   u32 End;
   u8 FillFg;
+  u32 SpinnerEnd;  // bytes of the left text taken by a leading spinner glyph
 };
 
 void FormatStatus(Tui* t, char* left, u32 leftCap, u32* ll, char* right,
@@ -78,6 +79,8 @@ void AdvanceCopyNotice(Tui* t, u64 nowMs);
 // ---- display pipeline ----------------------------------------------------
 
 TuiDisplayEvent* QueueDisplayEvent(Tui* t, TuiDisplayEventKind kind);
+// Starts the live run totals over; `startMs` is wall clock, 0 when no run is live.
+void ResetRunStats(Tui* t, u64 startMs);
 void SetDisplayPayload(TuiDisplayEvent* ev, StrView text);
 void QueueText(Tui* t, StrView text);
 void ResetDisplay(Tui* t);
@@ -101,7 +104,6 @@ void ResetCommandPalette(Tui* t);
 // the copying amortized no matter how large the scrollback cap is.
 constexpr usize TUI_SESSION_COMPACT_FLOOR = (usize)2 << 20;
 
-void HydrateTranscriptLocked(Tui* t, const Message* messages, u32 count);
 void ClearSessionScopedStringsLocked(Tui* t);
 bool SessionArenaSwapSafeLocked(const Tui* t);
 void RebuildTranscriptLocked(Tui* t, const Message* messages, u32 count,

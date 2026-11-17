@@ -97,6 +97,9 @@ full fidelity rather than clamped.
   `.clanker/hooks.json` per project. All config writes go through
   `ConfigFile_WriteAtomic`, which writes a sibling temp file and removes it on
   every failure path -- use it instead of writing config in place.
+- Model catalogs: `~/.clanker/models/<provider>.json` caches the last
+  successful live listing. Create models through `ModelCache_CreateModel`, not
+  `spec->CreateModel`, so they carry the cached context window and effort tiers.
 - Memory wikis: `~/.clanker/memory/<repo-key>/` with `pages/`, `journal.jsonl`,
   and `.dream/`, keyed by the git common directory so every worktree of a
   repository shares one. The journal is append-only and written by Clanker;

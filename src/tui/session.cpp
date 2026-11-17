@@ -32,8 +32,18 @@ static StrView HydrationText(Arena* scratch, const Message* message) {
   return StrBuf_View(&text);
 }
 
-void HydrateTranscriptLocked(Tui* t, const Message* messages,
-                                    u32 count) {
+static void CloseHydratedRun(Tui* t, TuiHydratedRun* run) {
+  if (run->Open && run->Responses) {
+    TurnStats stats = run->Stats;
+    stats.DurationMs =
+        run->StartMs && run->LastMs > run->StartMs ? run->LastMs - run->StartMs : 0;
+    LineModel_AddFooter(&t->Model, stats);
+  }
+  *run = {};
+}
+
+static void HydrateMessages(Tui* t, const Message* messages, u32 count) {
+  TuiHydratedRun* run = &t->Hydrated;
   Arena scratch = ArenaCreate();
   for (u32 i = 0; i < count; i++) {
     ArenaReset(&scratch);
@@ -41,8 +51,27 @@ void HydrateTranscriptLocked(Tui* t, const Message* messages,
     const Message* message = &messages[i];
     if (message->Kind == Role::User) {
       if (t->Model.HasAssistant) LineModel_EndAssistant(&t->Model);
-      LineModel_AddUser(&t->Model, HydrationText(&scratch, message), message->Timestamp);
+      // A steer is stamped when it was typed but logged after whatever the
+      // agent was doing at the time, so it is the one message older than the
+      // message before it.
+      bool steered = run->Open && message->Timestamp < run->LastMs;
+      if (!steered) {
+        CloseHydratedRun(t, run);
+        run->Open = true;
+        run->StartMs = message->Timestamp;
+        run->LastMs = message->Timestamp;
+      }
+      LineModel_AddUser(&t->Model, HydrationText(&scratch, message), message->Timestamp,
+                        steered);
     } else if (message->Kind == Role::Assistant) {
+      if (!run->Open) {
+        run->Open = true;
+        run->StartMs = message->Timestamp;
+      }
+      if (message->Timestamp > run->LastMs) run->LastMs = message->Timestamp;
+      run->Responses++;
+      run->Stats.InputTokens += message->Use.Input;
+      run->Stats.OutputTokens += message->Use.Output;
       bool hasText = false;
       for (u32 c = 0; c < message->Content.Count; c++)
         if (message->Content.Data[c].Kind == ContentKind::Text &&
@@ -58,9 +87,11 @@ void HydrateTranscriptLocked(Tui* t, const Message* messages,
       }
       for (u32 c = 0; c < message->Content.Count; c++) {
         const Content* content = &message->Content.Data[c];
-        if (content->Kind == ContentKind::ToolCall)
+        if (content->Kind == ContentKind::ToolCall) {
           LineModel_AddTool(&t->Model, content->ToolId, content->ToolName,
                             content->ToolArgsJson);
+          run->Stats.Tools++;
+        }
       }
       if (message->Stop == StopReason::Error)
         LineModel_AddNotice(&t->Model, EntryKind::Error,
@@ -69,6 +100,7 @@ void HydrateTranscriptLocked(Tui* t, const Message* messages,
         LineModel_AddNotice(&t->Model, EntryKind::Info,
                             SVL("Interrupted by user."));
     } else if (message->Kind == Role::ToolResult) {
+      if (message->Timestamp > run->LastMs) run->LastMs = message->Timestamp;
       StrView result = HydrationText(&scratch, message);
       if (!LineModel_FinishTool(&t->Model, message->ToolCallId, result,
                                 Truncate(result, 1500), message->IsError))
@@ -76,7 +108,6 @@ void HydrateTranscriptLocked(Tui* t, const Message* messages,
                             SVL("tool result did not match a pending call"));
     }
   }
-  LineModel_Layout(&t->Model);
   ArenaRelease(&scratch);
 }
 
@@ -141,7 +172,7 @@ void RebuildTranscriptLocked(Tui* t, const Message* messages, u32 count,
     ArenaRelease(&old);
     ClearSessionScopedStringsLocked(t);
   }
-  LineModel_Init(&t->Model, &t->SessionMem, width, cap, t->Color, rounded);
+  LineModel_Init(&t->Model, &t->SessionMem, width, cap, t->Color, rounded, t->Accent);
   if (swap) {
     t->InputUi.Edit = &t->Edit;
     memset(t->Queue, 0, sizeof(t->Queue));
@@ -154,7 +185,23 @@ void RebuildTranscriptLocked(Tui* t, const Message* messages, u32 count,
   t->Use = {};
   SetTransientText(&t->StateTool, {});
   t->State = t->AgentRunning ? TuiState::Thinking : TuiState::Idle;
-  HydrateTranscriptLocked(t, messages, count);
+  t->ThinkingSinceMs = 0;
+  t->Hydrated = {};
+  HydrateMessages(t, messages, count);
+  // A running agent's last run is still live: its totals carry on from the log,
+  // since the display events that would have counted them were just dropped.
+  if (!t->AgentRunning) {
+    CloseHydratedRun(t, &t->Hydrated);
+    ResetRunStats(t, 0);
+  } else if (t->Hydrated.Open) {
+    t->RunStartMs = t->Hydrated.StartMs;
+    t->RunResponses = t->Hydrated.Responses;
+    t->RunStats = t->Hydrated.Stats;
+  } else {
+    ResetRunStats(t, NowMillis());
+  }
+  t->Hydrated = {};
+  LineModel_Layout(&t->Model);
   // The live set, for deciding when the next compaction is worth its copy.
   if (swap) t->SessionMemBaseline = t->SessionMem.Used;
 }
@@ -175,7 +222,9 @@ void Tui_ReplaceTranscript(Tui* t, const Message* messages, u32 count, bool foll
 void Tui_AppendTranscript(Tui* t, const Message* messages, u32 count) {
   if (!t || !messages || !count) return;
   Mutex_Lock(&t->Lock);
-  HydrateTranscriptLocked(t, messages, count);
+  // Appended history arrives in pieces, so its last run is never known to end.
+  HydrateMessages(t, messages, count);
+  LineModel_Layout(&t->Model);
   Wake(t);
   Mutex_Unlock(&t->Lock);
 }

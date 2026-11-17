@@ -49,12 +49,15 @@ struct MarkdownOpts {
   // LineModel_FitsAtWidth re-renders at a trial width.
   u16 Width;
   bool Color;
+  // Palette index for the blockquote bar; 0 keeps the palette's QuoteBorder.
+  u8 Accent;
 };
 
-inline MarkdownOpts MarkdownOpts_Make(u16 width, bool color) {
+inline MarkdownOpts MarkdownOpts_Make(u16 width, bool color, u8 accent = 0) {
   MarkdownOpts opts;
   opts.Width = width ? width : 80;
   opts.Color = color;
+  opts.Accent = accent;
   return opts;
 }
 

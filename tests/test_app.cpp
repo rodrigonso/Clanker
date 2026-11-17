@@ -1164,13 +1164,15 @@ void TestEventPumpTranscriptLifecycle() {
   CHECK(SessionResult_IsOk(
       StartHarnessEventPump(&harness, sink, &tui, &pump)));
   // Hydration has completed when Start returns, and its arena is already gone.
+  // The idle transcript closes its run with a footer.
   CHECK_ALL(pump.Started, arena.Used == baseline,
-            tui.Model.Entries.Count == 2);
-  if (tui.Model.Entries.Count == 2) {
+            tui.Model.Entries.Count == 3);
+  if (tui.Model.Entries.Count == 3) {
     CHECK(StrView_EqCStr(
         StrBuf_View(&tui.Model.Entries.Data[0].Text.Content), "saved prompt"));
     CHECK(StrView_EqCStr(
         StrBuf_View(&tui.Model.Entries.Data[1].Text.Content), "saved reply"));
+    CHECK(tui.Model.Entries.Data[2].Kind == EntryKind::Footer);
   }
 
   if (pump.Started) {
@@ -1193,7 +1195,7 @@ void TestEventPumpTranscriptLifecycle() {
     }
     CHECK(recovered);
     StopHarnessEventPump(&pump);
-    CHECK_ALL(arena.Used == baseline, tui.Model.Entries.Count == 2,
+    CHECK_ALL(arena.Used == baseline, tui.Model.Entries.Count == 3,
               pump.CompletionMem.Base == nullptr);
   }
 
@@ -1206,7 +1208,7 @@ void TestEventPumpTranscriptLifecycle() {
   for (u32 i = 0; i < 3; i++) {
     Tui_CommandNotice(&tui, SVL("old session"));
     CHECK(RuntimeRestartWatch(&rt, nullptr));
-    CHECK_ALL(arena.Used == baseline, tui.Model.Entries.Count == 2,
+    CHECK_ALL(arena.Used == baseline, tui.Model.Entries.Count == 3,
               StrView_EqCStr(LineEdit_Text(&tui.Edit), "draft"));
     StopHarnessEventPump(&pump);
   }

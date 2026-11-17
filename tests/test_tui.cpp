@@ -320,7 +320,9 @@ bool SessionUiCleared(const Tui* t, usize usedBefore) {
          DisplayStorageIdle(t) && t->Use.Input == 0 && t->Use.Output == 0 &&
          t->ContextTokens == 0 &&
          t->State == TuiState::Idle && t->StateTool.Text.Length == 0 &&
-         t->QueuedCount == 0 && t->Follow && t->Top == 0 && t->LastTop == 0 &&
+         t->RunStartMs == 0 && t->RunResponses == 0 && t->RunStats.Tools == 0 &&
+         t->ThinkingSinceMs == 0 && !t->OperationYields && !t->Hydrated.Open &&
+         t->Follow && t->Top == 0 && t->LastTop == 0 &&
          t->LastPaneH == 0 && t->HoveredEntryId == 0 && t->PressedEntryId == 0 &&
          !t->HasMouse && !t->InputUi.Dragging && t->Ui.Captured == 0 &&
          t->Ui.Active == 0 && !t->OperationActive &&
@@ -742,11 +744,14 @@ void TestHydrationPayloadOwnership(Arena* outer) {
       Array_Push(&messages, result);
     }
     Tui_ReplaceTranscript(&t, messages.Data, messages.Count);
-    CHECK_ALL(DisplayStorageIdle(&t), t.Model.Entries.Count == 9,
+    // The user prompt, eight tool rows, and the footer closing the run.
+    CHECK_ALL(DisplayStorageIdle(&t), t.Model.Entries.Count == 10,
               t.Model.Entries.Data[0].Kind == EntryKind::User,
               StrView_Eq(StrBuf_View(&t.Model.Entries.Data[0].Text.Content),
-                         StrBuf_View(&expected)));
-    for (u32 i = 1; i < t.Model.Entries.Count; i++) {
+                         StrBuf_View(&expected)),
+              t.Model.Entries.Data[9].Kind == EntryKind::Footer,
+              t.Model.Entries.Data[9].Footer.Tools == 8);
+    for (u32 i = 1; i < 9; i++) {
       ToolEntry& tool = t.Model.Entries.Data[i].Tool;
       CHECK_ALL(t.Model.Entries.Data[i].Kind == EntryKind::Tool, tool.Done, !tool.Error,
                 StrView_Eq(StrBuf_View(&tool.View.Detail), SVL("owned.txt")),
@@ -765,11 +770,11 @@ void TestHydrationPayloadOwnership(Arena* outer) {
   ArenaRelease(&input);
 }
 
-// A transcript shown in pieces, with a tool call and its result in different
-// pieces, matches the same transcript shown at once.
+// A transcript shown in pieces, with a tool call and its result and a run
+// boundary in different pieces, matches the same transcript shown at once.
 void TestTranscriptAppend(Arena* outer) {
   Arena input = ArenaCreate();
-  Array<Message> messages = Array_Make<Message>(&input, 4);
+  Array<Message> messages = Array_Make<Message>(&input, 6);
   Array_Push(&messages, Message_User(&input, SVL("look at the wiki")));
   Message call = Message_AssistantEmpty(&input);
   Array_Push(&call.Content, Content_Text(SVL("Reading it.")));
@@ -781,24 +786,98 @@ void TestTranscriptAppend(Arena* outer) {
   Message done = Message_AssistantEmpty(&input);
   Array_Push(&done.Content, Content_Text(SVL("Done.")));
   Array_Push(&messages, done);
+  Array_Push(&messages, Message_User(&input, SVL("thanks")));
+  Message reply = Message_AssistantEmpty(&input);
+  Array_Push(&reply.Content, Content_Text(SVL("Sure.")));
+  Array_Push(&messages, reply);
+  for (u32 i = 0; i < messages.Count; i++) messages.Data[i].Timestamp = 1000 * (i + 1);
 
   u64 hashes[2] = {};
   for (u32 split = 0; split < 2; split++) {
     Tui t;
     InitHeadlessTui(&t, outer, true);
+    Tui_ReplaceTranscript(&t, nullptr, 0);
     if (split) {
-      Tui_ReplaceTranscript(&t, messages.Data, 2);
-      Tui_AppendTranscript(&t, messages.Data + 2, messages.Count - 2);
+      Tui_AppendTranscript(&t, messages.Data, 2);
+      Tui_AppendTranscript(&t, messages.Data + 2, 2);
+      Tui_AppendTranscript(&t, messages.Data + 4, messages.Count - 4);
     } else {
-      Tui_ReplaceTranscript(&t, messages.Data, messages.Count);
+      Tui_AppendTranscript(&t, messages.Data, messages.Count);
     }
-    CHECK_ALL(t.Model.Entries.Count == 4, t.Model.Entries.Data[2].Kind == EntryKind::Tool,
-              t.Model.Entries.Data[2].Tool.Done);
+    // The first run closes when the next prompt arrives; the last never does.
+    CHECK_ALL(t.Model.Entries.Count == 7, t.Model.Entries.Data[2].Kind == EntryKind::Tool,
+              t.Model.Entries.Data[2].Tool.Done,
+              t.Model.Entries.Data[4].Kind == EntryKind::Footer,
+              t.Model.Entries.Data[4].Footer.DurationMs == 3000,
+              t.Model.Entries.Data[4].Footer.Tools == 1,
+              t.Model.Entries.Data[6].Kind == EntryKind::Assistant);
     Tui_ComposeFrame(&t, 40, 20);
     hashes[split] = FrameHash(&t);
     Tui_Stop(&t);
   }
   CHECK(hashes[0] == hashes[1]);
+
+  // Shown whole while idle, the last run is complete too. TestTui's frame is
+  // already near the stack limit, so further fixtures live in the arena.
+  Tui* whole = ArenaPushStruct(&input, Tui);
+  InitHeadlessTui(whole, outer, true);
+  Tui_ReplaceTranscript(whole, messages.Data, messages.Count);
+  CHECK_ALL(whole->Model.Entries.Count == 8,
+            whole->Model.Entries.Data[7].Kind == EntryKind::Footer,
+            whole->Model.Entries.Data[7].Footer.DurationMs == 1000);
+  Tui_Stop(whole);
+  ArenaRelease(&input);
+}
+
+// A steer is logged after the work it interrupted but stamped when it was
+// typed, which is how a restored transcript tells it from a new prompt.
+void TestHydratedRuns(Arena* outer) {
+  Arena input = ArenaCreate();
+  Array<Message> messages = Array_Make<Message>(&input, 5);
+  Message prompt = Message_User(&input, SVL("fix it"));
+  prompt.Timestamp = 10000;
+  Array_Push(&messages, prompt);
+  Message call = Message_AssistantEmpty(&input);
+  Array_Push(&call.Content,
+             Content_ToolCall(SVL("call-1"), SVL("read"), SVL("{\"path\":\"a.md\"}")));
+  call.Timestamp = 12000;
+  call.Use.Input = 1200;
+  call.Use.Output = 40;
+  Array_Push(&messages, call);
+  Message result =
+      Message_ToolResult(&input, SVL("call-1"), SVL("read"), SVL("body"), false);
+  result.Timestamp = 14000;
+  Array_Push(&messages, result);
+  Message steer = Message_User(&input, SVL("use b.md instead"));
+  steer.Timestamp = 13000;
+  Array_Push(&messages, steer);
+  Message done = Message_AssistantEmpty(&input);
+  Array_Push(&done.Content, Content_Text(SVL("Done.")));
+  done.Timestamp = 15500;
+  done.Use.Input = 300;
+  done.Use.Output = 802;
+  Array_Push(&messages, done);
+
+  Tui* t = ArenaPushStruct(&input, Tui);
+  InitHeadlessTui(t, outer, true);
+  Tui_ReplaceTranscript(t, messages.Data, messages.Count);
+  const Entry* entries = t->Model.Entries.Data;
+  StrView steerLabel = entries[2].Text.Timestamp;
+  CHECK_ALL(t->Model.Entries.Count == 5, entries[2].Kind == EntryKind::User,
+            StrView_StartsWith(steerLabel, SVL("\xe2\x86\xb3 steer \xc2\xb7 ")),
+            !StrView_StartsWith(entries[0].Text.Timestamp, SVL("\xe2\x86\xb3")),
+            entries[4].Kind == EntryKind::Footer, entries[4].Footer.DurationMs == 5500,
+            entries[4].Footer.Tools == 1, entries[4].Footer.InputTokens == 1500,
+            entries[4].Footer.OutputTokens == 842);
+  CHECK(AnyRow(&input, t, "5.5s \xc2\xb7 1 tool \xc2\xb7 \xe2\x86\x91" "1.5k \xe2\x86\x93" "842"));
+
+  // Rebuilt mid-run, the open run keeps counting instead of closing early.
+  t->AgentRunning = true;
+  Tui_ReplaceTranscript(t, messages.Data, messages.Count);
+  CHECK_ALL(t->Model.Entries.Count == 4, t->RunStartMs == 10000, t->RunResponses == 2,
+            t->RunStats.Tools == 1, t->RunStats.OutputTokens == 842);
+  t->AgentRunning = false;
+  Tui_Stop(t);
   ArenaRelease(&input);
 }
 
@@ -868,8 +947,9 @@ void TestSessionMemoryCompaction(Arena* outer) {
   CHECK(Tui_CompactSessionMemory(&t, transcript.Data, transcript.Count));
 
   // The dead weight is gone and the live set is intact.
+  u32 rebuiltEntries = transcript.Count + transcript.Count / 2;  // a footer per run
   CHECK(t.SessionMem.Used < after / 2);
-  CHECK(t.Model.Entries.Count == transcript.Count);
+  CHECK(t.Model.Entries.Count == rebuiltEntries);
   CHECK(StrView_EqCStr(LineEdit_Text(&t.Edit), "draft prompt"));
 
   // Compaction released the arena those strings pointed into, so every one of
@@ -880,7 +960,7 @@ void TestSessionMemoryCompaction(Arena* outer) {
 
   // Still usable afterwards: the swap rebuilt every pointer into the arena.
   runTurn(320);
-  CHECK(t.Model.Entries.Count > transcript.Count);
+  CHECK(t.Model.Entries.Count > rebuiltEntries);
 
   // An open modal is displaying SessionMem strings, so the arena must not move.
   StrView options[2] = {SVL("one"), SVL("two")};
@@ -904,7 +984,7 @@ void TestSessionMemoryCompaction(Arena* outer) {
   usize beforeReplace = t.SessionMem.Used;
   Tui_ReplaceTranscript(&t, transcript.Data, transcript.Count);
   CHECK(t.SessionMem.Used >= beforeReplace);
-  CHECK(t.Model.Entries.Count == transcript.Count);
+  CHECK(t.Model.Entries.Count == rebuiltEntries);
 
   ArenaRelease(&scratch);
   Tui_Stop(&t);
@@ -1077,17 +1157,28 @@ static void TestPrivateCommandArguments() {
   Tui_InitModel(&t, &arena, opts);
   t.AgentRunning = true;
   Feed(&t, "/auth SYNTHETIC_INLINE_SECRET\r");
-  Feed(&t, "/permissions key SYNTHETIC_INLINE_SECRET\r");
-  CHECK_ALL(t.Edit.History.Count == 2,
-            StrView_Eq(t.Edit.History.Data[0], SVL("/auth")),
-            StrView_Eq(t.Edit.History.Data[1], SVL("/permissions")));
   DrainDisplay(&t);
-  CHECK_ALL(!AnyRow(&arena, &t, "SYNTHETIC_INLINE_SECRET"),
-            AnyRow(&arena, &t, "Queued command: /auth"),
-            AnyRow(&arena, &t, "Queued command: /permissions"));
+  CHECK_ALL(t.QCount == 0, t.Edit.History.Count == 0,
+            StrView_Eq(LineEdit_Text(&t.Edit), SVL("/auth SYNTHETIC_INLINE_SECRET")),
+            !AnyRow(&arena, &t, "SYNTHETIC_INLINE_SECRET"),
+            AnyRow(&arena, &t, "/auth can't run during a turn."));
+  t.AgentRunning = false;
+  Feed(&t, "\r");
+  // One submission waits for the main loop at a time; the next is refused.
+  Feed(&t, "/permissions key SYNTHETIC_INLINE_SECRET\r");
+  DrainDisplay(&t);
+  CHECK_ALL(t.QCount == 1, t.Edit.History.Count == 1,
+            StrView_Eq(t.Edit.History.Data[0], SVL("/auth")),
+            StrView_Eq(LineEdit_Text(&t.Edit),
+                       SVL("/permissions key SYNTHETIC_INLINE_SECRET")),
+            !AnyRow(&arena, &t, "SYNTHETIC_INLINE_SECRET"),
+            AnyRow(&arena, &t, "Clanker is busy; send it again when it finishes."));
   TuiSubmission submission = {};
   CHECK(Tui_WaitForSubmit(&t, &submission));
   CHECK(StrView_Eq(submission.Text, SVL("/auth SYNTHETIC_INLINE_SECRET")));
+  Feed(&t, "\r");
+  CHECK_ALL(t.Edit.History.Count == 2,
+            StrView_Eq(t.Edit.History.Data[1], SVL("/permissions")));
   CHECK(Tui_WaitForSubmit(&t, &submission));
   CHECK(StrView_Eq(submission.Text, SVL("/permissions key SYNTHETIC_INLINE_SECRET")));
   Tui_Stop(&t);
@@ -1110,6 +1201,7 @@ void TestTui() {
   TestTransientStatusOwnership(&a);
   TestHydrationPayloadOwnership(&a);
   TestTranscriptAppend(&a);
+  TestHydratedRuns(&a);
   TuiOpts o;
   o.ModelName = SVL("test-model");
   o.Color = true;
@@ -1136,20 +1228,20 @@ void TestTui() {
     LineModel_AddNotice(&tf.Model, EntryKind::Info, SVL("fixture transcript"));
     Feed(&tf, "hello");
     Tui_ComposeFrame(&tf, 20, 12);
-    CHECK(FrameHash(&tf) == 17011884229875471407ull);
+    CHECK(FrameHash(&tf) == 11143496485752303402ull);
 
     LineEdit_Clear(&tf.Edit);
     Feed(&tf, "/");
     Tui_ComposeFrame(&tf, 20, 12);
-    CHECK(FrameHash(&tf) == 12635317618319930390ull);
+    CHECK(FrameHash(&tf) == 5748049940212970579ull);
 
     StrView options[] = {SVL("first"), SVL("second"), SVL("third")};
     CHECK(Tui_BeginSelection(&tf, SVL("Choose"), options, 3, 1));
     Tui_ComposeFrame(&tf, 20, 12);
-    CHECK(FrameHash(&tf) == 12204567153565103577ull);
+    CHECK(FrameHash(&tf) == 12589213866748186804ull);
 
     Tui_ComposeFrame(&tf, 28, 15);
-    CHECK(FrameHash(&tf) == 17708961903760271098ull);
+    CHECK(FrameHash(&tf) == 10101816087097716199ull);
     Tui_Stop(&tf);
     ArenaRelease(&af);
   }
@@ -1161,7 +1253,7 @@ void TestTui() {
     LineModel_AddNotice(&tf.Model, EntryKind::Info, SVL("fixture transcript"));
     Feed(&tf, "hello");
     Tui_ComposeFrame(&tf, 20, 12);
-    CHECK(FrameHash(&tf) == 13420198605997514494ull);
+    CHECK(FrameHash(&tf) == 5758976035938607895ull);
     Tui_Stop(&tf);
     ArenaRelease(&af);
   }
@@ -1207,7 +1299,7 @@ void TestTui() {
     CHECK(Tui_UpdateDebugOverlay(&ot, TuiToggleAction::Toggle));
     SeedPerf(&ot);
     Tui_ComposeFrame(&ot, 60, 24, 1000);
-    CHECK(FrameHash(&ot) == 3627595641934507782ull);
+    CHECK(FrameHash(&ot) == 16153633079681490555ull);
 
     CHECK_ALL(ScreenContains(&ot, "debug"),
               ScreenContains(&ot, "58.8"),     // 1e7 / 17000us, in tenths
@@ -1280,10 +1372,34 @@ void TestTui() {
 
     DrainDisplay(&ts);
     CHECK(ts.State == TuiState::Thinking);
-    Tui_ComposeFrame(&ts, 60, 12);
+    // Thinking belongs to the transcript, not the status bar, and waits out
+    // brief gaps before it appears.
+    Tui_ComposeFrame(&ts, 60, 12, 5000);
     u16 statusRow = (u16)(ts.Scr.Rows - 1);
-    CHECK_ALL(ScreenRowContains(&ts, statusRow, "thinking"),
-              !ScreenRowContains(&ts, statusRow, "ready"));
+    CHECK_ALL(!ScreenRowContains(&ts, statusRow, "thinking"),
+              !ScreenRowContains(&ts, statusRow, "ready"),
+              !AnyRow(&as, &ts, "Thinking"));
+    Tui_ComposeFrame(&ts, 60, 12, 5200);
+    CHECK(AnyRow(&as, &ts, "Thinking\xe2\x80\xa6"));
+    Tui_ComposeFrame(&ts, 60, 12, 7300);
+    const Entry* thinking = &ts.Model.Entries.Data[ts.Model.Entries.Count - 1];
+    CHECK_ALL(thinking->Kind == EntryKind::Thinking, thinking->Thinking.ElapsedSeconds == 2);
+
+    // The reply replaces the row, and the run closes with a footer.
+    Tui_AppendAssistantText(&ts, SVL("done"));
+    DrainDisplay(&ts);
+    CHECK_ALL(!AnyRow(&as, &ts, "Thinking"), AnyRow(&as, &ts, "done"));
+    Usage use = {};
+    use.Input = 1200;
+    use.Output = 345;
+    Tui_AssistantMessageEnded(&ts, StopReason::Stop, use, {});
+    Tui_TurnEnded(&ts);
+    DrainDisplay(&ts);
+    const Entry* footer = &ts.Model.Entries.Data[ts.Model.Entries.Count - 1];
+    CHECK_ALL(ts.State == TuiState::Idle, footer->Kind == EntryKind::Footer,
+              footer->Footer.InputTokens == 1200, footer->Footer.OutputTokens == 345,
+              footer->Footer.Tools == 0,
+              AnyRow(&as, &ts, "\xe2\x86\x91" "1.2k \xe2\x86\x93" "345"));
 
     Tui_Stop(&ts);
     ArenaRelease(&as);
@@ -1401,15 +1517,15 @@ void TestTui() {
   CHECK(LineModel_IsEntryCollapsed(&t.Model, toolEntryId));
 
   // Hover maps screen rows through the last rendered viewport. Separator and
-  // non-transcript rows are not interactive.
-  Tui_ComposeFrame(&t, 80, 9);
+  // footer rows are not interactive.
+  Tui_ComposeFrame(&t, 80, 11);
   Feed(&t, "\x1b[<35;50;1M");  // assistant row; x does not limit the button
   CHECK(t.HoveredEntryId == assistantEntryId);
   Feed(&t, "\x1b[<35;2;2M");  // separator
   CHECK(t.HoveredEntryId == 0);
   Feed(&t, "\x1b[<35;2;3M");  // tool summary
   CHECK(t.HoveredEntryId == toolEntryId);
-  Feed(&t, "\x1b[<35;2;4M");  // below transcript pane
+  Feed(&t, "\x1b[<35;2;5M");  // run footer
   CHECK(t.HoveredEntryId == 0);
 
   // Press/release on the same logical turn toggles it. Releasing on another
@@ -1417,7 +1533,7 @@ void TestTui() {
   Feed(&t, "\x1b[<0;2;3M\x1b[<0;2;3m");
   CHECK(!LineModel_IsEntryCollapsed(&t.Model, toolEntryId));
   CHECK(AnyRow(&a, &t, "hello-from-shell"));
-  Tui_ComposeFrame(&t, 80, 10);
+  Tui_ComposeFrame(&t, 80, 12);
   Feed(&t, "\x1b[<35;2;4M");  // expanded preview row is content, not a button
   CHECK(t.HoveredEntryId == 0);
   Feed(&t, "\x1b[<0;2;4M\x1b[<0;2;4m");
@@ -1625,9 +1741,10 @@ void TestTui() {
     ArenaRelease(&as);
   }
 
-  // Submit routing: commands always queue for the main thread, with a notice when
-  // queued behind an active turn. Ordinary text steers an active turn or waits
-  // for application preflight before an idle prompt is rendered.
+  // Submit routing: ordinary text steers an active turn, marked as a steer, or
+  // waits for application preflight before an idle prompt is rendered. Nothing
+  // waits behind a turn or a busy loop: what cannot run now is refused and
+  // stays in the composer.
   {
     Arena a2 = ArenaCreate();
     ScriptProvider script = {};
@@ -1646,21 +1763,31 @@ void TestTui() {
     Feed(&t2, "steer me\r");
     CHECK_ALL(harness.Queues.Steering.Count == 1, t2.QCount == 0);
     DrainDisplay(&t2);
+    StrView steerLabel = t2.Model.Entries.Data[t2.Model.Entries.Count - 1].Text.Timestamp;
     CHECK_ALL(!AnyRow(&a2, &t2, "you"), AnyRow(&a2, &t2, "steer me"),
-              t2.Model.Entries.Data[t2.Model.Entries.Count - 1].Text.Timestamp.Length == 5);
+              StrView_StartsWith(steerLabel, SVL("\xe2\x86\xb3 steer \xc2\xb7 ")),
+              steerLabel.Length == 18);
 
     u32 entriesAfterSteer = t2.Model.Entries.Count;
     Feed(&t2, "  /model  \r");
-    CHECK_ALL(t2.QCount == 1, harness.Queues.Steering.Count == 1);
+    CHECK_ALL(t2.QCount == 0, harness.Queues.Steering.Count == 1,
+              StrView_Eq(LineEdit_Text(&t2.Edit), SVL("  /model  ")));
     DrainDisplay(&t2);
     CHECK_ALL(t2.Model.Entries.Count == entriesAfterSteer + 1,
-              AnyRow(&a2, &t2, "Queued command:"), AnyRow(&a2, &t2, "/model"));
+              AnyRow(&a2, &t2, "/model can't run during a turn."));
+    LineEdit_Clear(&t2.Edit);
+
+    TuiAgentHooks hooks = t2.Agent;
+    t2.Agent.Steer = nullptr;
+    Feed(&t2, "too late\r");
+    CHECK_ALL(t2.QCount == 0, harness.Queues.Steering.Count == 1,
+              StrView_Eq(LineEdit_Text(&t2.Edit), SVL("too late")));
+    DrainDisplay(&t2);
+    CHECK(AnyRow(&a2, &t2, "Can't send during a turn."));
+    t2.Agent = hooks;
+    LineEdit_Clear(&t2.Edit);
 
     TuiSubmission submission = {};
-    CHECK(Tui_WaitForSubmit(&t2, &submission));
-    CHECK_ALL(submission.Kind == TuiSubmissionKind::Command,
-              StrView_Eq(submission.Text, SVL("  /model  ")));
-
     t2.AgentRunning = false;  // between turns
     Feed(&t2, "next prompt\r");
     CHECK_ALL(t2.QCount == 1, harness.Queues.Steering.Count == 1);
@@ -1684,12 +1811,19 @@ void TestTui() {
     CHECK_ALL(t2.Model.Entries.Count == entriesAfterPrompt,
               !AnyRow(&a2, &t2, "/unknown"));
 
-    for (u32 i = 0; i < 64; i++) Feed(&t2, "queued prompt\r");
-    CHECK(t2.QCount == 64);
-    Feed(&t2, "/exit\r");
-    CHECK(t2.QCount == 64);
+    // An operation refuses input unless it yields to it.
+    Tui_BeginOperation(&t2, SVL("busy"));
+    Feed(&t2, "while busy\r");
+    CHECK_ALL(t2.QCount == 0, StrView_Eq(LineEdit_Text(&t2.Edit), SVL("while busy")));
     DrainDisplay(&t2);
-    CHECK(AnyRow(&a2, &t2, "Submission queue is full"));
+    CHECK(AnyRow(&a2, &t2, "Clanker is busy; send it again when it finishes."));
+    Tui_EndOperation(&t2);
+    Tui_BeginOperation(&t2, SVL("watching"), true);
+    Feed(&t2, "\r");
+    CHECK_ALL(t2.QCount == 1, LineEdit_Empty(&t2.Edit));
+    CHECK(Tui_WaitForSubmit(&t2, &submission));
+    CHECK(StrView_Eq(submission.Text, SVL("while busy")));
+    Tui_EndOperation(&t2);
 
     Tui_Stop(&t2);
     CHECK(SessionResult_IsOk(AgentHarness_Close(&harness)));
@@ -1699,7 +1833,8 @@ void TestTui() {
 
   // Commands the catalog marks inline act on the input thread instead of
   // waiting for the main loop, which is inside the agent run for the whole
-  // turn. Argument forms the dispatcher would reject stay queued.
+  // turn. Every other command, including argument forms the dispatcher would
+  // reject, is refused until the turn ends.
   {
     Arena ai = ArenaCreate();
     ScriptProvider script = {};
@@ -1739,12 +1874,14 @@ void TestTui() {
     CHECK_ALL(ti.Perf.Visible, ti.QCount == 0);
     Feed(&ti, "/debug off\r");
 
-    // An argument the dispatcher rejects is left for it to report.
+    // An argument the dispatcher rejects cannot run inline, so it waits for the
+    // turn like any other command.
     Feed(&ti, "/debug sideways\r");
-    CHECK_ALL(!ti.Perf.Visible, ti.QCount == 1);
-    TuiSubmission rejected = {};
-    CHECK(Tui_WaitForSubmit(&ti, &rejected));
-    CHECK(StrView_Eq(rejected.Text, SVL("/debug sideways")));
+    CHECK_ALL(!ti.Perf.Visible, ti.QCount == 0,
+              StrView_Eq(LineEdit_Text(&ti.Edit), SVL("/debug sideways")));
+    DrainDisplay(&ti);
+    CHECK(AnyRow(&ai, &ti, "/debug can't run during a turn."));
+    LineEdit_Clear(&ti.Edit);
 
     // /clear cancels the turn from here, but the reset itself still queues:
     // it swaps the session log, which cannot happen under a live turn.
@@ -1773,19 +1910,19 @@ void TestTui() {
     CHECK(ti.Model.Entries.Count == entriesBeforeIdleClear);
     CHECK(Tui_WaitForSubmit(&ti, &cleared));
 
-    // A command with no inline action keeps the old queue-and-notice path.
+    // A command with no inline action is refused mid-turn rather than queued.
     ti.AgentRunning = true;
     Feed(&ti, "/model\r");
-    CHECK(ti.QCount == 1);
+    CHECK_ALL(ti.QCount == 0, StrView_Eq(LineEdit_Text(&ti.Edit), SVL("/model")));
     DrainDisplay(&ti);
-    CHECK(AnyRow(&ai, &ti, "Queued command:"));
-    CHECK(Tui_WaitForSubmit(&ti, &cleared));
+    CHECK(AnyRow(&ai, &ti, "/model can't run during a turn."));
+    LineEdit_Clear(&ti.Edit);
 
     // /exit cancels the turn holding the loop and stops without queueing.
     harness.Running = true;
-    Feed(&ti, "/exit now\r");  // argument policy is None; dispatcher's problem
-    CHECK_ALL(ti.QCount == 1, !ti.Quit);
-    CHECK(Tui_WaitForSubmit(&ti, &cleared));
+    Feed(&ti, "/exit now\r");  // argument policy is None; refused like /model
+    CHECK_ALL(ti.QCount == 0, !ti.Quit);
+    LineEdit_Clear(&ti.Edit);
     Feed(&ti, "/quit\t");
     CHECK_ALL(StrView_Eq(LineEdit_Text(&ti.Edit), SVL("/exit ")),
               Atomic_LoadI32(&harness.AbortFlag) == 0, ti.QCount == 0,
@@ -1888,8 +2025,10 @@ void TestTui() {
     // An unmodified Enter still submits.
     Feed(&tn, "\x1b[13u");
     CHECK_ALL(tn.QCount == 1, LineEdit_Empty(&tn.Edit));
+    TuiSubmission submitted = {};
+    CHECK(Tui_WaitForSubmit(&tn, &submitted));
     Feed(&tn, "again\r");
-    CHECK_ALL(tn.QCount == 2, LineEdit_Empty(&tn.Edit));
+    CHECK_ALL(tn.QCount == 1, LineEdit_Empty(&tn.Edit));
 
     // Ctrl+Alt+D must stay inert rather than aliasing onto Ctrl+D and quitting.
     Feed(&tn, "\x1b[100;7u");
@@ -2175,10 +2314,12 @@ void TestTui() {
 
     CHECK(tq.Model.Entries.Count == 0);
     DrainDisplay(&tq);
-    CHECK_ALL(tq.Model.Entries.Count == 3,
+    CHECK_ALL(tq.Model.Entries.Count == 4,
               tq.Model.Entries.Data[0].Kind == EntryKind::Assistant,
               tq.Model.Entries.Data[1].Kind == EntryKind::Tool,
-              tq.Model.Entries.Data[2].Kind == EntryKind::Assistant);
+              tq.Model.Entries.Data[2].Kind == EntryKind::Assistant,
+              tq.Model.Entries.Data[3].Kind == EntryKind::Footer,
+              tq.Model.Entries.Data[3].Footer.Tools == 1);
     CHECK_ALL(AnyRow(&aq, &tq, "first response"), AnyRow(&aq, &tq, "echo original"),
               AnyRow(&aq, &tq, "second response"),
               StrView_Eq(StrBuf_View(&tq.Model.Entries.Data[1].Tool.Preview),
@@ -2784,6 +2925,14 @@ void TestTui() {
               ts.CopyNoticeExpiryMs == 0,
               ScreenRowContains(&ts, statusY, "ready"),
               !ScreenRowContains(&ts, statusY, "copied"));
+
+    // A running state leads with a spinner in the accent; its label stays grey.
+    ts.State = TuiState::Streaming;
+    Tui_ComposeFrame(&ts, 20, 12, 101600);
+    CHECK_ALL(ScreenRowContains(&ts, statusY, "responding"),
+              Screen_BackAt(&ts.Scr, 1, statusY).St.Fg == DEFAULT_ACCENT_FG,
+              Screen_BackAt(&ts.Scr, 3, statusY).St.Fg == 244);
+    ts.State = TuiState::Idle;
     Tui_Stop(&ts);
     ArenaRelease(&as);
   }
@@ -3359,7 +3508,11 @@ void TestTui() {
     resetTui.Use.Output = 7;
     resetTui.ContextTokens = 500;
     Tui_PermissionReviewStarted(&resetTui, SVL("old tool"));
-    resetTui.QueuedCount = 3;
+    resetTui.RunStartMs = 9;
+    resetTui.RunResponses = 2;
+    resetTui.RunStats.Tools = 3;
+    resetTui.ThinkingSinceMs = 5;
+    resetTui.Hydrated.Open = true;
     resetTui.Top = 4;
     resetTui.LastTop = 3;
     resetTui.LastPaneH = 10;
@@ -3367,7 +3520,7 @@ void TestTui() {
     resetTui.HoveredEntryId = 4;
     resetTui.PressedEntryId = 4;
     resetTui.HasMouse = true;
-    Tui_BeginOperation(&resetTui, SVL("old operation"));
+    Tui_BeginOperation(&resetTui, SVL("old operation"), true);
     StrView options[] = {SVL("one"), SVL("two")};
     CHECK(Tui_BeginSelection(&resetTui, SVL("old modal"), options, 2));
     usize usedBeforeClear = resetTui.SessionMem.Used;

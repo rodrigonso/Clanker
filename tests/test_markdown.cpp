@@ -333,6 +333,17 @@ void TestQuotes(Arena* a) {
     CHECK_ALL(found, (st.Attr & ATTR_ITALIC) != 0, st.Fg == Pal().Quote);
     CHECK(SpanHas(&out.Data[0].Spans, "\xe2\x94\x82 ", 0, Pal().QuoteBorder));
   }
+  // An accent recolours every bar, nested ones included, but not the text.
+  {
+    Array<SpanLine> out = Array_Make<SpanLine>(a, 4);
+    Markdown_Render(a, SVL("> > deep"), &out, MarkdownOpts_Make(80, true, 33));
+    bool found = false;
+    Style st = StyleOf(&out, "deep", &found);
+    CHECK_ALL(out.Count == 1, found, st.Fg == Pal().Quote,
+              out.Data[0].Spans.Count >= 2,
+              out.Data[0].Spans.Data[0].St.Fg == 33,
+              out.Data[0].Spans.Data[1].St.Fg == 33);
+  }
   // The bar is re-applied on wrapped rows too.
   {
     Array<SpanLine> out = Render(a, "> quoted");

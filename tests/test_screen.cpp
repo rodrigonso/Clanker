@@ -27,6 +27,14 @@ void TestScreen() {
   Term_AppendOSC52(&osc52, StrView{binary, sizeof(binary)});
   CHECK(StrView_Eq(StrBuf_View(&osc52), SVL("before:\x1b]52;c;AP8QZg==\x07")));
 
+  // Accent colours map into the cube or grey ramp, never the themed 0..15.
+  CHECK_ALL(Color_NearestXterm256(0x00, 0x78, 0xd4) == 32,
+            Color_NearestXterm256(0x10, 0x89, 0x3e) == 29,
+            Color_NearestXterm256(0xff, 0xaf, 0x00) == 214,
+            Color_NearestXterm256(0x98, 0x98, 0x9d) == 247,
+            Color_NearestXterm256(0x00, 0x00, 0x00) == 16,
+            Color_NearestXterm256(0xff, 0xff, 0xff) == 231);
+
   Cap cap;
   cap.B = StrBuf_Make(&a, 256);
 

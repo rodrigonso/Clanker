@@ -5,6 +5,7 @@
 
 #include "app/auth_flow.h"
 #include "app/event_pump.h"
+#include "app/model_cache.h"
 #include "app/permission_reviewer.h"
 #include "app/project_trust.h"
 #include "app/runtime.h"
@@ -1042,7 +1043,8 @@ int Dream_RunCommandLine(Arena* arena, const DreamCommandLine* options) {
   run.Location = location;
   run.Sources = &sessions;
   run.Sessions = &sessions;
-  run.ModelInfo = selected.Spec->CreateModel(arena, selected.Spec, modelId);
+  run.ModelInfo = ModelCache_CreateModel(arena, options->AgentDirectory,
+                                         selected.Spec, modelId);
   run.Profile = Model_ResolveRequestPreference(&run.ModelInfo, selected.Settings.Profile);
   run.ProviderImpl = selected.Spec->CreateProvider(arena, selected.Spec);
   run.AuthUser = &auth;
